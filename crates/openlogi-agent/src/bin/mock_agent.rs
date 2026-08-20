@@ -48,9 +48,9 @@ use openlogi_core::device::{
 use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, TunableTorque, WriteError,
+    DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HapticWaveform,
+    LITRA_GLOW_PRODUCT_ID, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, TunableTorque, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -222,6 +222,9 @@ struct DeviceSettings {
     dpi: Option<DpiState>,
     smartshift: Option<SmartShiftStatus>,
     lighting: bool,
+    /// Whether the scripted device advertises HID++ `0x19b0`, so a client of
+    /// `play_haptic` meets both answers without hardware.
+    haptics: bool,
 }
 
 impl DeviceSettings {
@@ -230,6 +233,7 @@ impl DeviceSettings {
             dpi: None,
             smartshift: None,
             lighting: false,
+            haptics: false,
         }
     }
 }
@@ -286,6 +290,7 @@ impl State {
                     tunable_torque: Some(MOCK_TORQUE),
                 }),
                 lighting: false,
+                haptics: true,
             },
         );
         settings.insert(OFFLINE_SLOT, DeviceSettings::unsupported());
@@ -295,6 +300,7 @@ impl State {
                 dpi: None,
                 smartshift: None,
                 lighting: true,
+                haptics: false,
             },
         );
         settings.insert(
@@ -306,6 +312,7 @@ impl State {
                 }),
                 smartshift: None,
                 lighting: false,
+                haptics: false,
             },
         );
         Ok(Self {
@@ -743,6 +750,31 @@ impl Agent for MockAgent {
     }
 
     async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
+
+    // No hardware, so nothing to buzz — but the call still resolves a device
+    // and honours the capability flag, so a client's error handling is
+    // exercised against the mock exactly as it would be against real hardware.
+    async fn play_haptic(
+        self,
+        _: Context,
+        route: Option<DeviceRoute>,
+        waveform: HapticWaveform,
+    ) -> Result<(), WriteError> {
+        let state = self.state.lock().await;
+        // `None` means "the active device"; the mock's stand-in for that is
+        // the online mouse, the only scripted device with a haptic engine.
+        let route = route.unwrap_or_else(|| DeviceRoute::Bolt {
+            receiver_uid: RECEIVER_UID.to_string(),
+            slot: MOUSE_SLOT,
+        });
+        if !state.settings_for(&route)?.haptics {
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x19b0,
+            });
+        }
+        info!(%route, ?waveform, "play_haptic");
+        Ok(())
+    }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;

@@ -11,7 +11,7 @@ use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, WriteError};
 use std::sync::Arc;
 
 use crate::observable::ObservableState;
@@ -768,4 +768,86 @@ fn app_switch_republishes_capture_plans() {
     );
     orch.set_current_app(Some("com.example.editor".into()));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+}
+
+/// A device that advertises HID++ `0x19b0`, ready to be buzzed.
+fn haptic_dev(key: &str, slot: u8, online: bool) -> AgentDevice {
+    let mut device = dev(key, slot, online);
+    device.capabilities = Some(Capabilities {
+        haptic_feedback: true,
+        ..Capabilities::default()
+    });
+    device
+}
+
+fn bolt(slot: u8) -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: "AA00".to_string(),
+        slot,
+    }
+}
+
+/// An orchestrator whose only device is `device`, with the runtime rebuilt so
+/// the active-device pick is real rather than left at its initial value.
+fn orchestrator_with(device: AgentDevice) -> Orchestrator {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![device];
+    orch.rebuild();
+    orch
+}
+
+#[test]
+fn haptic_route_falls_back_to_the_active_device() {
+    let orch = orchestrator_with(haptic_dev("mouse", 1, true));
+
+    assert_eq!(orch.haptic_route(None).ok(), Some(bolt(1)));
+    // An explicit route for the same device resolves to the same place.
+    assert_eq!(orch.haptic_route(Some(&bolt(1))).ok(), Some(bolt(1)));
+}
+
+#[test]
+fn haptic_route_rejects_a_device_with_no_haptic_engine() {
+    // `dev` leaves capabilities unprobed (`None`), which must read as "no
+    // haptics" rather than optimistically buzzing a device that cannot.
+    let orch = orchestrator_with(dev("mouse", 1, true));
+
+    assert!(
+        matches!(
+            orch.haptic_route(None),
+            Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x19b0
+            })
+        ),
+        "a device without 0x19b0 must be refused by feature, not by liveness"
+    );
+}
+
+#[test]
+fn haptic_route_rejects_an_offline_device() {
+    let orch = orchestrator_with(haptic_dev("mouse", 1, false));
+
+    // Asleep is not "unsupported" — the caller may usefully retry later, so
+    // the capability answer must not shadow the liveness one.
+    for requested in [Some(bolt(1)), None] {
+        assert!(
+            matches!(
+                orch.haptic_route(requested.as_ref()),
+                Err(WriteError::DeviceNotFound)
+            ),
+            "an offline device is not found, whether named or resolved: {requested:?}"
+        );
+    }
+}
+
+#[test]
+fn haptic_route_rejects_a_route_no_device_claims() {
+    let orch = orchestrator_with(haptic_dev("mouse", 1, true));
+
+    assert!(
+        matches!(
+            orch.haptic_route(Some(&bolt(7))),
+            Err(WriteError::DeviceNotFound)
+        ),
+        "a route matching no device must not fall back to the active one"
+    );
 }

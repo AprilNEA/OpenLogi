@@ -35,9 +35,9 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HapticWaveform, HidppFeatureErrorKind,
+    HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -82,7 +82,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 23);
+    assert_eq!(PROTOCOL_VERSION, 24);
 }
 
 #[test]
@@ -169,6 +169,33 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(
+        &AgentRequest::PlayHaptic {
+            route: None,
+            waveform: HapticWaveform::SubtleCollision,
+        },
+        "190000",
+    );
+    assert_wire(
+        &AgentRequest::PlayHaptic {
+            route: Some(DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            }),
+            waveform: HapticWaveform::DampStateChange,
+        },
+        "1901000846303044434146450101",
+    );
+}
+
+/// The waveform vocabulary is append-only for the same reason every other
+/// wire enum is: serde encodes the declaration index, so inserting a variant
+/// ahead of these two would silently turn every hover tick into some other
+/// pulse across an agent/client version skew.
+#[test]
+fn haptic_waveforms() {
+    assert_wire(&HapticWaveform::SubtleCollision, "00");
+    assert_wire(&HapticWaveform::DampStateChange, "01");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to

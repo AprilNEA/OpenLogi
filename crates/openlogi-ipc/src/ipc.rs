@@ -16,8 +16,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HapticWaveform, LightCommand, PairingError, PasskeyMethod,
+    ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -52,7 +52,9 @@ pub use succession::Identity;
 ///      [`RingObservation`]).
 /// v22: DPI scalar values use the validated [`Dpi`] type end to end.
 /// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
-pub const PROTOCOL_VERSION: u32 = 23;
+/// v24: [`Agent::play_haptic`] appended — haptics are addressable on their own,
+///      not only as a side effect of an Actions Ring interaction.
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -480,4 +482,34 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Play one haptic waveform on a device, outside any Actions Ring session.
+    ///
+    /// `route` names the device; `None` means "whichever device the agent
+    /// currently considers active", so a caller that just wants to buzz the
+    /// mouse in front of the user does not have to enumerate first.
+    ///
+    /// **`Ok(())` means accepted, not played.** The waveform is queued on the
+    /// same single-flight worker the Actions Ring uses, and that worker is
+    /// latest-wins: a request that arrives while another is mid-flight
+    /// replaces any still-unplayed one. This is deliberate. HID++ is a single
+    /// in-flight transaction per channel, shared with the input-capture path,
+    /// so a caller free to queue buzzes faster than the receiver drains them
+    /// would time out every unrelated write (DPI, SmartShift) on that receiver
+    /// for seconds. A stale buzz is worthless as feedback anyway — dropping it
+    /// beats delivering it late at the cost of everything else.
+    ///
+    /// The errors are therefore the ones knowable *before* any I/O:
+    /// [`WriteError::DeviceNotFound`] when `route` matches no online device
+    /// (or `None` and nothing is active), and [`WriteError::FeatureUnsupported`]
+    /// when the device does not advertise HID++ `0x19b0`. A failure during the
+    /// play itself is logged by the agent and not reported here.
+    ///
+    /// Not gated on the per-device Actions Ring haptics setting: that toggle
+    /// scopes hover/activation feedback for the ring, and silently swallowing
+    /// an explicit API call under an unrelated preference would be worse than
+    /// surprising.
+    async fn play_haptic(
+        route: Option<DeviceRoute>,
+        waveform: HapticWaveform,
+    ) -> Result<(), WriteError>;
 }

@@ -286,7 +286,29 @@ impl Agent for AgentServer {
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
     }
+
+    async fn play_haptic(
+        self,
+        _: Context,
+        route: Option<DeviceRoute>,
+        waveform: HapticWaveform,
+    ) -> Result<(), WriteError> {
+        // Resolving here rather than in the player keeps the two failures the
+        // caller can act on — no such device, no haptic engine — synchronous,
+        // while the play itself stays fire-and-forget (see the trait docs).
+        let resolved = self
+            .orchestrator
+            .lock()
+            .await
+            .haptic_route(route.as_ref())?;
+        self.ring_haptics.play_external(resolved, waveform);
+        Ok(())
+    }
 }
+
+/// One queued buzz: the device to play it on, the waveform, and the short
+/// interaction name that identifies it in the logs.
+type HapticRequest = (DeviceRoute, HapticWaveform, &'static str);
 
 /// Coalescing Actions Ring haptic player: at most one waveform is in flight,
 /// and while it plays only the newest queued request survives (latest wins).
@@ -299,8 +321,13 @@ impl Agent for AgentServer {
 /// is strictly better than queueing them.
 #[derive(Clone)]
 pub struct RingHapticPlayer {
-    tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
+    tx: tokio::sync::watch::Sender<Option<HapticRequest>>,
     pending_arm: Arc<std::sync::Mutex<Option<DeviceRoute>>>,
+    /// Arming state for out-of-band plays. Ring sessions arm on invocation
+    /// instead, so they never consult it — but the worker still records a
+    /// ring arm's outcome here, because an armed engine is armed whoever
+    /// asked for it.
+    external_arm: Arc<std::sync::Mutex<ArmTracker>>,
 }
 
 /// How long every attempt at one buzz may take together.
@@ -320,18 +347,88 @@ const PLAY_BUDGET: Duration = Duration::from_secs(2);
 /// attempts at the write path's budget put 10 s in front of the first buzz.
 const ARM_BUDGET: Duration = Duration::from_secs(1);
 
+/// How long an out-of-band play trusts a previous arming check on the same
+/// device.
+///
+/// Arming costs an HID++ round-trip, so doing it per call would double the
+/// traffic of an app buzzing steadily; skipping it entirely lets a device that
+/// lost the state to a power transition go silently dead, since `play` is
+/// accepted either way. Re-checking once a minute splits the difference — a
+/// burst pays for one check, and a sleep/wake is never brief enough to slip
+/// through the window unnoticed.
+const EXTERNAL_ARM_INTERVAL: Duration = Duration::from_mins(1);
+
+/// What is known about one route's firmware arming state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArmState {
+    /// An arming check is queued or running. Another play must not queue a
+    /// second one, but nothing is proven yet.
+    InFlight,
+    /// An arming check completed successfully at this instant.
+    Armed(Instant),
+}
+
+/// Tracks whether an out-of-band play needs to arm the firmware first.
+///
+/// Freshness has to follow the arm's *completion*, not its queueing.
+/// [`arm_firmware_haptics`] is best-effort within [`ARM_BUDGET`] and returns
+/// having armed nothing when the channel is slow or the write fails; recording
+/// the attempt as success would then suppress every retry for
+/// [`EXTERNAL_ARM_INTERVAL`], leaving a whole minute in which plays are
+/// accepted and the device — the one case arming exists for — stays silent.
+///
+/// One entry suffices: the worker is single-flight, so only the most recently
+/// armed route can be relied on.
+struct ArmTracker {
+    entry: Option<(DeviceRoute, ArmState)>,
+}
+
+impl ArmTracker {
+    const fn new() -> Self {
+        Self { entry: None }
+    }
+
+    /// Whether a play on `route` should queue an arming check, marking one
+    /// in flight when it says yes so concurrent callers queue only one.
+    fn should_arm(&mut self, route: &DeviceRoute, now: Instant) -> bool {
+        let fresh = match self.entry.as_ref() {
+            Some((armed, ArmState::InFlight)) => armed == route,
+            Some((armed, ArmState::Armed(at))) => {
+                armed == route && now.duration_since(*at) < EXTERNAL_ARM_INTERVAL
+            }
+            None => false,
+        };
+        if !fresh {
+            self.entry = Some((route.clone(), ArmState::InFlight));
+        }
+        !fresh
+    }
+
+    /// Record how an arming check ended. A failure drops the entry rather than
+    /// starting a freshness window, so the very next play tries again.
+    fn record(&mut self, route: &DeviceRoute, armed: bool, now: Instant) {
+        if armed {
+            self.entry = Some((route.clone(), ArmState::Armed(now)));
+        } else if self.entry.as_ref().is_some_and(|(known, _)| known == route) {
+            self.entry = None;
+        }
+    }
+}
+
 /// Re-assert the firmware haptic engine before the session's first buzz,
-/// within [`ARM_BUDGET`].
+/// within [`ARM_BUDGET`]. Returns whether the engine is known to be armed.
 ///
 /// Best-effort by design: a device that never lost the state plays fine
 /// without this, so a silent channel must cost the session a bounded delay
-/// rather than its whole haptic budget.
-async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
+/// rather than its whole haptic budget. The `false` return is what keeps that
+/// bounded delay from being mistaken for a successful check — see
+/// [`ArmTracker`].
+async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) -> bool {
     let budget = Budget::starting_at(Instant::now(), ARM_BUDGET);
     for attempt in 1..=2u8 {
         let Some(remaining) = budget.remaining(Instant::now()) else {
             warn!("firmware haptic check ran out of time — leaving it to the buzz");
-            return;
+            return false;
         };
         match tokio::time::timeout(
             remaining,
@@ -345,9 +442,9 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
         {
             Ok(Ok(true)) => {
                 info!("firmware haptics were disarmed — re-enabled");
-                return;
+                return true;
             }
-            Ok(Ok(false)) => return,
+            Ok(Ok(false)) => return true,
             Ok(Err(error)) => {
                 if attempt == 2 {
                     warn!(%error, "could not verify firmware haptic state");
@@ -357,6 +454,7 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
             Err(_elapsed) => {}
         }
     }
+    false
 }
 
 /// Play one waveform, retrying within [`PLAY_BUDGET`]. Returns whether it played.
@@ -368,7 +466,7 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
 /// single-flight.
 async fn play_within_budget(
     shared: &SharedRuntime,
-    rx: &tokio::sync::watch::Receiver<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
+    rx: &tokio::sync::watch::Receiver<Option<HapticRequest>>,
     route: &DeviceRoute,
     waveform: HapticWaveform,
     interaction: &'static str,
@@ -439,24 +537,35 @@ impl Budget {
 impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
     pub fn spawn(shared: SharedRuntime) -> Self {
-        let (tx, mut rx) = tokio::sync::watch::channel::<
-            Option<(DeviceRoute, HapticWaveform, &'static str)>,
-        >(None);
+        let (tx, mut rx) = tokio::sync::watch::channel::<Option<HapticRequest>>(None);
         let pending_arm = Arc::new(std::sync::Mutex::new(None::<DeviceRoute>));
         let worker_arm = Arc::clone(&pending_arm);
+        let external_arm = Arc::new(std::sync::Mutex::new(ArmTracker::new()));
+        let worker_external_arm = Arc::clone(&external_arm);
         tokio::spawn(async move {
             let mut consecutive_failures = 0u32;
             let mut cooldown_until: Option<Instant> = None;
             while rx.changed().await.is_ok() {
+                // Take the request first. `play_external` queues its arm
+                // *before* sending the play, so whatever is pending after this
+                // read is guaranteed to include the arm belonging to the
+                // request just taken — reading the other way round let a play
+                // overtake its own arm.
+                let request = rx.borrow_and_update().clone();
+                // Drain every queued arm, not just one: an arm that lands while
+                // another is in flight would otherwise sit in the slot until
+                // some later request happened to wake the worker, and its play
+                // would go out against a device nothing had armed.
+                //
                 // Firmware arming is sequenced through this worker so it is
                 // guaranteed to complete before the session's first buzz —
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine.
-                let arm_route = worker_arm
+                while let Some(route) = worker_arm
                     .lock()
                     .ok()
-                    .and_then(|mut pending| pending.take());
-                if let Some(route) = arm_route {
+                    .and_then(|mut pending| pending.take())
+                {
                     // A new session starts the breaker over. Both counters are
                     // worker-lifetime state, so without this a session that
                     // ended two failures deep makes the next session's first
@@ -464,9 +573,11 @@ impl RingHapticPlayer {
                     // tail of one ring silences the opening of the next.
                     consecutive_failures = 0;
                     cooldown_until = None;
-                    arm_firmware_haptics(&shared, &route).await;
+                    let armed = arm_firmware_haptics(&shared, &route).await;
+                    if let Ok(mut tracker) = worker_external_arm.lock() {
+                        tracker.record(&route, armed, Instant::now());
+                    }
                 }
-                let request = rx.borrow_and_update().clone();
                 let Some((route, waveform, interaction)) = request else {
                     continue;
                 };
@@ -495,7 +606,11 @@ impl RingHapticPlayer {
                 }
             }
         });
-        Self { tx, pending_arm }
+        Self {
+            tx,
+            pending_arm,
+            external_arm,
+        }
     }
 
     /// Queue a firmware arming check to run before the session's first buzz.
@@ -522,6 +637,27 @@ impl RingHapticPlayer {
             return;
         };
         let _ = self.tx.send(Some((route, waveform, interaction)));
+    }
+
+    /// Queue `waveform` for a caller outside the Actions Ring, re-arming the
+    /// firmware first when this route's last check has aged out.
+    ///
+    /// Deliberately shares the ring's worker rather than playing directly:
+    /// single-flight and latest-wins are what keep a caller from saturating a
+    /// receiver's one in-flight HID++ transaction and timing out unrelated
+    /// writes. The cost is that a superseded buzz is dropped, which is the
+    /// right trade for feedback.
+    pub fn play_external(&self, route: DeviceRoute, waveform: HapticWaveform) {
+        // A poisoned lock must not cost the caller their buzz; the play still
+        // goes through, just without the repair check in front.
+        let needs_arm = self
+            .external_arm
+            .lock()
+            .is_ok_and(|mut tracker| tracker.should_arm(&route, Instant::now()));
+        if needs_arm {
+            self.arm(Some(route.clone()));
+        }
+        self.play(Some(route), waveform, "api");
     }
 }
 
@@ -562,7 +698,12 @@ pub async fn run(server: AgentServer) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
-    use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
+    use super::{
+        ARM_BUDGET, ArmTracker, Budget, EXTERNAL_ARM_INTERVAL, HapticRequest, PLAY_BUDGET,
+        RingHapticPlayer,
+    };
+    use openlogi_hid::{DeviceRoute, HapticWaveform};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// Attempts share one allowance, so the second gets what the first left —
@@ -597,5 +738,144 @@ mod tests {
     fn the_budgets_stay_within_a_ring_session() {
         assert!(ARM_BUDGET < PLAY_BUDGET);
         assert!(ARM_BUDGET + PLAY_BUDGET < Duration::from_secs(15));
+    }
+
+    /// A player with no worker behind it, so a test can inspect exactly what
+    /// `play_external` leaves for one to find.
+    fn idle_player() -> (
+        RingHapticPlayer,
+        tokio::sync::watch::Receiver<Option<HapticRequest>>,
+    ) {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let player = RingHapticPlayer {
+            tx,
+            pending_arm: Arc::new(std::sync::Mutex::new(None)),
+            external_arm: Arc::new(std::sync::Mutex::new(ArmTracker::new())),
+        };
+        (player, rx)
+    }
+
+    /// The worker takes the request from the cell and *then* drains pending
+    /// arms, which is only sound because the arm is queued first. Reverse the
+    /// two here and a play can be served against a device nothing armed.
+    #[test]
+    fn play_external_queues_its_arm_before_publishing_the_play() {
+        let (player, rx) = idle_player();
+
+        player.play_external(route(1), HapticWaveform::SubtleCollision);
+
+        assert!(
+            player.pending_arm.lock().unwrap().is_some(),
+            "the arm must already be pending once the play is visible"
+        );
+        assert!(rx.borrow().is_some(), "the play is published");
+    }
+
+    /// A second play inside the freshness window must not re-queue an arm —
+    /// otherwise every buzz pays for a round-trip the first one already made.
+    #[test]
+    fn a_play_with_an_arm_in_flight_does_not_queue_another() {
+        let (player, _rx) = idle_player();
+
+        player.play_external(route(1), HapticWaveform::SubtleCollision);
+        player.pending_arm.lock().unwrap().take();
+        player.play_external(route(1), HapticWaveform::DampStateChange);
+
+        assert!(
+            player.pending_arm.lock().unwrap().is_none(),
+            "an arm already in flight must not be queued again"
+        );
+    }
+
+    fn route(slot: u8) -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: "AA00".to_string(),
+            slot,
+        }
+    }
+
+    #[test]
+    fn a_first_play_arms_and_a_second_does_not_queue_a_duplicate() {
+        let mut tracker = ArmTracker::new();
+        let now = Instant::now();
+        let device = route(1);
+
+        assert!(tracker.should_arm(&device, now), "nothing is known yet");
+        assert!(
+            !tracker.should_arm(&device, now),
+            "an arm already in flight must not be queued twice"
+        );
+    }
+
+    /// The regression this type exists for: arming is best-effort within
+    /// `ARM_BUDGET` and can return having armed nothing. Recording that as a
+    /// success would suppress every retry for a whole minute, during which
+    /// plays are accepted and the device stays silent — precisely the failure
+    /// arming exists to repair.
+    #[test]
+    fn a_failed_arm_does_not_start_a_freshness_window() {
+        let mut tracker = ArmTracker::new();
+        let now = Instant::now();
+        let device = route(1);
+
+        assert!(tracker.should_arm(&device, now));
+        tracker.record(&device, false, now + ARM_BUDGET);
+
+        assert!(
+            tracker.should_arm(&device, now + ARM_BUDGET),
+            "a failed arm must leave the next play free to try again"
+        );
+    }
+
+    #[test]
+    fn a_successful_arm_holds_for_the_interval_and_then_lapses() {
+        let mut tracker = ArmTracker::new();
+        let now = Instant::now();
+        let device = route(1);
+
+        assert!(tracker.should_arm(&device, now));
+        tracker.record(&device, true, now);
+
+        assert!(
+            !tracker.should_arm(&device, now + EXTERNAL_ARM_INTERVAL / 2),
+            "a completed arm is trusted inside the window"
+        );
+        assert!(
+            tracker.should_arm(&device, now + EXTERNAL_ARM_INTERVAL),
+            "and re-checked once it lapses"
+        );
+    }
+
+    /// One entry, because the worker is single-flight — so arming one device
+    /// says nothing about another, and must not silence its check.
+    #[test]
+    fn arming_one_device_does_not_vouch_for_another() {
+        let mut tracker = ArmTracker::new();
+        let now = Instant::now();
+
+        assert!(tracker.should_arm(&route(1), now));
+        tracker.record(&route(1), true, now);
+
+        assert!(
+            tracker.should_arm(&route(2), now),
+            "a different device has its own firmware state"
+        );
+    }
+
+    /// A ring session arms through the same worker. Its failure must not
+    /// clobber a *different* route's good record.
+    #[test]
+    fn a_failed_arm_elsewhere_leaves_a_good_record_alone() {
+        let mut tracker = ArmTracker::new();
+        let now = Instant::now();
+
+        assert!(tracker.should_arm(&route(1), now));
+        tracker.record(&route(1), true, now);
+        tracker.record(&route(2), false, now);
+
+        assert!(
+            !tracker.should_arm(&route(1), now),
+            "slot 1 was armed and nothing since has disproved it"
+        );
     }
 }

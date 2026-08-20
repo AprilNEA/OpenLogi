@@ -23,7 +23,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::DeviceStableId;
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    KEYBOARD_KEY_CIDS, WriteError,
 };
 use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
@@ -654,6 +654,37 @@ impl Orchestrator {
         })
     }
 
+    /// Resolve the device an out-of-band haptic play should target, or say why
+    /// it cannot be played.
+    ///
+    /// `requested` names a device explicitly; `None` falls back to the active
+    /// device — the same one the Actions Ring would buzz — so a caller with no
+    /// inventory of its own can still ask for feedback on "the mouse".
+    ///
+    /// Both failure modes are worth distinguishing to the caller: a device that
+    /// is gone or asleep may come back, whereas one without `0x19b0` never
+    /// grows a haptic engine and the caller should stop asking.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError::DeviceNotFound`] when nothing online matches, and
+    /// [`WriteError::FeatureUnsupported`] when the match has no haptic engine.
+    pub fn haptic_route(&self, requested: Option<&DeviceRoute>) -> Result<DeviceRoute, WriteError> {
+        let device = match requested {
+            Some(route) => self
+                .devices
+                .iter()
+                .find(|device| device.route.as_ref() == Some(route)),
+            None => self.active_device(),
+        };
+        buzzable(device)
+    }
+
+    fn active_device(&self) -> Option<&AgentDevice> {
+        let key = self.current_key()?;
+        self.devices.iter().find(|device| device.config_key == key)
+    }
+
     /// Where enumeration stands, for the IPC `status` poll.
     #[must_use]
     pub fn inventory_health(&self) -> InventoryHealth {
@@ -802,6 +833,29 @@ fn configured_wheel_mode(
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
 /// model key is derived from it.
+/// The shared tail of both haptic-route selectors: a device can be buzzed only
+/// if it was found, is online, has a haptic engine, and has a route to reach.
+///
+/// The order matters. Offline is reported as "not found" rather than
+/// "unsupported" because the two mean different things to a caller: a sleeping
+/// device is worth retrying, a device without `0x19b0` never is.
+fn buzzable(device: Option<&AgentDevice>) -> Result<DeviceRoute, WriteError> {
+    let device = device
+        .filter(|device| device.online)
+        .ok_or(WriteError::DeviceNotFound)?;
+    if !device
+        .capabilities
+        .is_some_and(|capabilities| capabilities.haptic_feedback)
+    {
+        // 0x19b0 — the same feature ID `Capabilities` derives the flag from,
+        // reported back so the caller can name what is missing.
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x19b0,
+        });
+    }
+    device.route.clone().ok_or(WriteError::DeviceNotFound)
+}
+
 fn build_devices(
     inventories: &[DeviceInventory],
     standalone: &[StandaloneDevice],
