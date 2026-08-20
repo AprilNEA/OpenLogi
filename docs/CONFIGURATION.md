@@ -34,7 +34,7 @@ be copied manually to the generated physical keys.
 
 ## Shape
 
-`schema_version` is required and currently `4`. `selected_device` is an
+`schema_version` is required and currently `5`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -52,6 +52,10 @@ Common device fields are:
 
 - `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity, scroll inversion,
   and scroll resolution
+- `horizontal_scroll_sensitivity`, from `20` (1×) through `100` (5×), and
+  `invert_horizontal_scroll` for native horizontal-wheel events on macOS.
+  Per-device attribution currently requires a directly connected mouse;
+  receiver events do not expose the paired slot to the macOS event tap.
 - `bindings`: a button maps either to one action or to a gesture-direction map
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or

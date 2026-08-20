@@ -25,9 +25,9 @@ use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
-    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, WheelMode,
+    AppSettings, Appearance, AssetSourcePreference, CameraControls, HorizontalScrollSensitivity,
+    Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, WheelMode,
 };
 
 use crate::binding::{
@@ -39,6 +39,8 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v5 adds per-device host-side native horizontal-scroll speed and inversion.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer
@@ -58,7 +60,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -718,6 +720,45 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .invert_scroll = invert;
+    }
+
+    /// Native horizontal-scroll sensitivity for `device_key`. The default is
+    /// 20 (1×) for an unconfigured or absent device.
+    #[must_use]
+    pub fn horizontal_scroll_sensitivity(&self, device_key: &str) -> HorizontalScrollSensitivity {
+        self.devices
+            .get(device_key)
+            .map_or(HorizontalScrollSensitivity::DEFAULT, |device| {
+                device.horizontal_scroll_sensitivity
+            })
+    }
+
+    /// Set the host-side native horizontal-scroll sensitivity for `device_key`.
+    pub fn set_horizontal_scroll_sensitivity(
+        &mut self,
+        device_key: &str,
+        sensitivity: HorizontalScrollSensitivity,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .horizontal_scroll_sensitivity = sensitivity;
+    }
+
+    /// Whether native horizontal scrolling is reversed for `device_key`.
+    #[must_use]
+    pub fn invert_horizontal_scroll(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|device| device.invert_horizontal_scroll)
+    }
+
+    /// Set whether native horizontal scrolling is reversed for `device_key`.
+    pub fn set_invert_horizontal_scroll(&mut self, device_key: &str, invert: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .invert_horizontal_scroll = invert;
     }
 
     /// The configured wheel resolution for `device_key`, or `None` when

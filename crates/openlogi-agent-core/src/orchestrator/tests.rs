@@ -2,11 +2,11 @@
 
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets,
+    any_device_needs_capture_rearm, build_devices, configured_wheel_mode,
+    horizontal_scroll_adjustments, host_switch_links, pick_current, plan_reapply, reapply_targets,
 };
 use openlogi_core::binding::{Action, ButtonId};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, HorizontalScrollSensitivity, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
@@ -38,6 +38,24 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         kind: openlogi_core::device::DeviceKind::Mouse,
         light_capabilities: None,
         online,
+    }
+}
+
+fn direct_dev(key: &str, product_id: u16) -> AgentDevice {
+    AgentDevice {
+        config_key: key.to_string(),
+        model_key: key.to_string(),
+        route: Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id,
+        }),
+        slot: DIRECT_DEVICE_INDEX,
+        serial: None,
+        unit_id: [1, 0, 0, 0],
+        capabilities: None,
+        kind: DeviceKind::Mouse,
+        light_capabilities: None,
+        online: true,
     }
 }
 
@@ -270,6 +288,57 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
     });
 
     assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+}
+
+#[test]
+fn horizontal_scroll_adjustments_are_direct_per_device_and_fail_closed_on_conflict() {
+    let mut config = Config::default();
+    config.set_horizontal_scroll_sensitivity(
+        "anywhere",
+        HorizontalScrollSensitivity::from_rounded(60.0),
+    );
+    config.set_invert_horizontal_scroll("anywhere", true);
+    let anywhere = direct_dev("anywhere", 0xb01f);
+    let receiver_mouse = dev("receiver", 1, true);
+
+    assert_eq!(
+        horizontal_scroll_adjustments(&config, &[anywhere, receiver_mouse]),
+        std::collections::BTreeMap::from([((0x046d, 0xb01f), -300)])
+    );
+
+    // Identical direct devices cannot be distinguished by CGEvent's sender id.
+    // An identical policy is safe to share; a conflict leaves both native.
+    config.set_horizontal_scroll_sensitivity(
+        "other",
+        HorizontalScrollSensitivity::from_rounded(60.0),
+    );
+    config.set_invert_horizontal_scroll("other", true);
+    assert_eq!(
+        horizontal_scroll_adjustments(
+            &config,
+            &[direct_dev("anywhere", 0xb01f), direct_dev("other", 0xb01f)]
+        ),
+        std::collections::BTreeMap::from([((0x046d, 0xb01f), -300)])
+    );
+    config.set_horizontal_scroll_sensitivity("other", HorizontalScrollSensitivity::DEFAULT);
+    config.set_invert_horizontal_scroll("other", false);
+    assert!(
+        horizontal_scroll_adjustments(
+            &config,
+            &[direct_dev("anywhere", 0xb01f), direct_dev("other", 0xb01f)]
+        )
+        .is_empty()
+    );
+
+    // Disabling management restores native behavior even when settings remain.
+    config.set_device_enabled("anywhere", false);
+    assert!(horizontal_scroll_adjustments(&config, &[direct_dev("anywhere", 0xb01f)]).is_empty());
+
+    // Default-only devices do not add a transform to the callback's hot path.
+    assert!(
+        horizontal_scroll_adjustments(&Config::default(), &[direct_dev("plain", 0xb034)])
+            .is_empty()
+    );
 }
 
 #[test]

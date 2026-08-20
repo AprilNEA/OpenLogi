@@ -378,12 +378,6 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             })
         }
         CGEventType::ScrollWheel => {
-            // axis 1 = vertical scroll; axis 2 = horizontal scroll. Read the
-            // pixel-precise delta in preference to the coarse line delta (a hi-res
-            // wheel reports its motion in the pixel field with the line field at 0,
-            // so reading only the line field would look like "no scroll").
-            let dy = usable_scroll_delta(event, VERTICAL);
-            let dx = usable_scroll_delta(event, HORIZONTAL);
             // Device identity is the reliable signal: a free-spinning Logitech
             // wheel sets the CGEvent phase, so phase alone misclassifies it as a
             // trackpad. Fall back to the phase heuristic only for a sender-less
@@ -394,6 +388,12 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             let sender = event_sender_id(event);
             let device_info = sender.map(sender_device_info);
             let from_trackpad = device_info.as_ref().map_or(phase, |info| info.is_trackpad);
+            // axis 1 = vertical scroll; axis 2 = horizontal scroll. Read the
+            // pixel-precise delta in preference to the coarse line delta (a hi-res
+            // wheel reports its motion in the pixel field with the line field at 0,
+            // so reading only the line field would look like "no scroll").
+            let dy = usable_scroll_delta(event, VERTICAL);
+            let dx = usable_scroll_delta(event, HORIZONTAL);
             #[allow(
                 clippy::cast_possible_truncation,
                 reason = "scroll deltas are small fractional values that fit comfortably in f32"
@@ -483,6 +483,34 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
         return fixed;
     }
     event.get_integer_value_field(axis.line) as f64
+}
+
+/// Scale every delta representation attached to one scroll axis in place.
+/// Applications choose independently between line, fixed-point, and point
+/// deltas, so changing only the preferred representation would be inconsistent.
+fn scale_scroll_axis(event: &CGEvent, axis: ScrollAxisFields, scale_percent: i16) {
+    let line = event.get_integer_value_field(axis.line);
+    let fixed = event.get_double_value_field(axis.fixed);
+    let point = event.get_double_value_field(axis.point);
+    event.set_integer_value_field(axis.line, scale_integer_delta(line, scale_percent));
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the percentage is a small integer represented exactly in f64"
+    )]
+    let precise_scale = f64::from(scale_percent) / 100.0;
+    event.set_double_value_field(axis.fixed, fixed * precise_scale);
+    event.set_double_value_field(axis.point, point * precise_scale);
+}
+
+/// Scale a coarse line delta and round to the nearest whole tick, with halves
+/// away from zero. Saturating arithmetic keeps a malformed event fail-safe.
+fn scale_integer_delta(delta: i64, scale_percent: i16) -> i64 {
+    let product = delta.saturating_mul(i64::from(scale_percent));
+    if product >= 0 {
+        product.saturating_add(50) / 100
+    } else {
+        product.saturating_sub(50) / 100
+    }
 }
 
 /// Create the event tap and run loop on a dedicated thread.
@@ -587,6 +615,12 @@ fn run_tap_callback(
         match cb(hook_event) {
             EventDisposition::PassThrough => CallbackResult::Keep,
             EventDisposition::Suppress => CallbackResult::Drop,
+            EventDisposition::AdjustHorizontalScroll { scale_percent } => {
+                if matches!(etype, CGEventType::ScrollWheel) {
+                    scale_scroll_axis(event, HORIZONTAL, scale_percent);
+                }
+                CallbackResult::Keep
+            }
         }
     }));
     if let Ok(disposition) = result {
@@ -1042,5 +1076,64 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
+    }
+
+    #[test]
+    fn scroll_axis_scale_updates_line_fixed_and_point_deltas() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+        event.set_type(CGEventType::ScrollWheel);
+        event.set_integer_value_field(HORIZONTAL.line, -2);
+        event.set_double_value_field(HORIZONTAL.fixed, -1.25);
+        event.set_double_value_field(HORIZONTAL.point, -4.0);
+
+        scale_scroll_axis(&event, HORIZONTAL, -300);
+
+        assert_eq!(event.get_integer_value_field(HORIZONTAL.line), 6);
+        let fixed = event.get_double_value_field(HORIZONTAL.fixed);
+        assert!((fixed - 3.75).abs() < f64::EPSILON, "fixed delta: {fixed}");
+        let point = event.get_double_value_field(HORIZONTAL.point);
+        assert!((point - 12.0).abs() < f64::EPSILON, "point delta: {point}");
+    }
+
+    #[test]
+    fn tap_callback_adjusts_only_horizontal_scroll_fields() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+        event.set_type(CGEventType::ScrollWheel);
+        event.set_integer_value_field(VERTICAL.line, 2);
+        event.set_integer_value_field(HORIZONTAL.line, -1);
+        event.set_integer_value_field(SCROLL_PHASE, 1);
+        event.set_integer_value_field(SCROLL_COUNT, 7);
+        event.set_integer_value_field(MOMENTUM_PHASE, 2);
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, 42);
+
+        let result = run_tap_callback(
+            &|_| EventDisposition::AdjustHorizontalScroll {
+                scale_percent: -300,
+            },
+            CGEventType::ScrollWheel,
+            &event,
+        );
+
+        assert!(matches!(result, CallbackResult::Keep));
+        assert_eq!(event.get_integer_value_field(VERTICAL.line), 2);
+        assert_eq!(event.get_integer_value_field(HORIZONTAL.line), 3);
+        assert_eq!(event.get_integer_value_field(SCROLL_PHASE), 1);
+        assert_eq!(event.get_integer_value_field(SCROLL_COUNT), 7);
+        assert_eq!(event.get_integer_value_field(MOMENTUM_PHASE), 2);
+        assert_eq!(
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            42
+        );
+    }
+
+    #[test]
+    fn integer_scroll_scaling_rounds_halves_away_from_zero() {
+        assert_eq!(scale_integer_delta(1, 150), 2);
+        assert_eq!(scale_integer_delta(-1, 150), -2);
+        assert_eq!(scale_integer_delta(1, -150), -2);
     }
 }

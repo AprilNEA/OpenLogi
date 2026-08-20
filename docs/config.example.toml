@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 4
+schema_version = 5
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -20,6 +20,10 @@ dpi_presets = [800, 1600, 3200]
 thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
+
+[devices."direct:046d:b01f:unit:e4f84cf5"]
+horizontal_scroll_sensitivity = 60 # 20 = 1×; 60 = 3×; 100 = 5×
+invert_horizontal_scroll = true
 
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"

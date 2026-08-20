@@ -367,6 +367,57 @@ fn default_invert_scroll_is_omitted_from_toml() {
 }
 
 #[test]
+fn horizontal_scroll_settings_roundtrip_per_device() {
+    let mut cfg = Config::default();
+    assert_eq!(
+        cfg.horizontal_scroll_sensitivity("mouse"),
+        HorizontalScrollSensitivity::DEFAULT
+    );
+    assert!(!cfg.invert_horizontal_scroll("mouse"));
+
+    let sensitivity = HorizontalScrollSensitivity::try_new(60).expect("valid 3× setting");
+    cfg.set_horizontal_scroll_sensitivity("mouse", sensitivity);
+    cfg.set_invert_horizontal_scroll("mouse", true);
+    let restored = write_and_read(&cfg);
+
+    assert_eq!(restored.horizontal_scroll_sensitivity("mouse"), sensitivity);
+    assert!(restored.invert_horizontal_scroll("mouse"));
+}
+
+#[test]
+fn default_horizontal_scroll_settings_are_omitted_from_toml() {
+    let mut cfg = Config::default();
+    cfg.set_binding("mouse", ButtonId::Back, Binding::Single(Action::Copy));
+    cfg.set_horizontal_scroll_sensitivity("mouse", HorizontalScrollSensitivity::DEFAULT);
+    cfg.set_invert_horizontal_scroll("mouse", false);
+
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("horizontal_scroll_sensitivity"), "{body}");
+    assert!(!body.contains("invert_horizontal_scroll"), "{body}");
+}
+
+#[test]
+fn v4_config_loads_with_native_horizontal_scroll_defaults() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 4\n[devices.mouse]\ninvert_scroll = true\n",
+    )
+    .expect("write v4 config");
+
+    let cfg = Config::load_from_path(&path).expect("load v4 config");
+
+    assert_eq!(cfg.schema_version, SCHEMA_VERSION);
+    assert_eq!(
+        cfg.horizontal_scroll_sensitivity("mouse"),
+        HorizontalScrollSensitivity::DEFAULT
+    );
+    assert!(!cfg.invert_horizontal_scroll("mouse"));
+    assert!(cfg.invert_scroll("mouse"));
+}
+
+#[test]
 fn scroll_resolution_roundtrips_all_three_states() {
     let mut cfg = Config::default();
     assert_eq!(cfg.scroll_resolution("mouse"), None);
@@ -469,7 +520,7 @@ fn human_readable_toml_layout() {
     // The key only contains [A-Za-z0-9_], so TOML emits it as a bare-word
     // table key (no surrounding quotes). The test asserts the observable
     // structure rather than locking in a specific quoting.
-    assert!(body.contains("schema_version = 4"), "got: {body}");
+    assert!(body.contains("schema_version = 5"), "got: {body}");
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     // A `Single` binding serializes byte-identically to the pre-v2 bare
     // `Action`, so the leaf line is unchanged.
@@ -875,7 +926,7 @@ Click = \"Paste\"
     // Saving self-heals to the current shape: stamped version + merged table,
     // legacy field names gone.
     let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(body.contains("schema_version = 4"), "got: {body}");
+    assert!(body.contains("schema_version = 5"), "got: {body}");
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     assert!(!body.contains("button_bindings"), "got: {body}");
     assert!(!body.contains("gesture_bindings"), "got: {body}");
@@ -996,7 +1047,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivty = 14\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivty = 14\n",
     )
     .expect("write typo");
     assert_matches!(
@@ -1006,7 +1057,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
 
     fs::write(
         &path,
-        r#"schema_version = 4
+        r#"schema_version = 5
 [devices.mouse.identity]
 display_name = "Mouse"
 kind = "mouse"
@@ -1021,11 +1072,11 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 
     fs::write(
         &path,
-        "schema_version = 4\n[devices.mouse]\ngesture_owner = \"Off\"\n",
+        "schema_version = 5\n[devices.mouse]\ngesture_owner = \"Off\"\n",
     )
     .expect("write obsolete field");
     assert_matches!(
-        Config::load_from_path(&path).expect_err("v4 legacy field must fail"),
+        Config::load_from_path(&path).expect_err("current-schema legacy field must fail"),
         ConfigError::ObsoleteField { .. }
     );
 }
@@ -1033,12 +1084,14 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 #[test]
 fn persisted_numeric_contracts_reject_unsafe_values() {
     for body in [
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = 0\n",
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = 101\n",
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
-        "schema_version = 4\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
-        "schema_version = 4\n[devices.mouse]\ndpi = 65536\n",
-        "schema_version = 4\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 0\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 101\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
+        "schema_version = 5\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
+        "schema_version = 5\n[devices.mouse]\nhorizontal_scroll_sensitivity = 19\n",
+        "schema_version = 5\n[devices.mouse]\nhorizontal_scroll_sensitivity = 101\n",
+        "schema_version = 5\n[devices.mouse]\ndpi = 65536\n",
+        "schema_version = 5\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
     ] {
         assert!(toml::from_str::<Config>(body).is_err(), "accepted: {body}");
     }

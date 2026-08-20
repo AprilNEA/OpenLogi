@@ -93,6 +93,10 @@ pub struct HookMaps {
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
     /// instead — it never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Signed Axis 2 scale percentages keyed by the direct device's exact
+    /// `(vendor_id, product_id)`. Receiver-paired devices are absent because a
+    /// macOS CGEvent identifies the receiver, not its pairing slot.
+    pub horizontal_scroll: BTreeMap<(u32, u32), i16>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -368,6 +372,24 @@ fn handle_moved(
     EventDisposition::PassThrough
 }
 
+/// Resolve a macOS Axis 2 transform without ever blocking the active HID tap.
+/// Unknown devices, trackpads, vertical-only events, and a contended config
+/// lock all fail open.
+#[cfg(target_os = "macos")]
+fn horizontal_scroll_scale(
+    delta_x: f32,
+    from_trackpad: bool,
+    device: Option<&EventDevice>,
+    hooks: &SharedHookMaps,
+) -> Option<i16> {
+    if delta_x == 0.0 || from_trackpad {
+        return None;
+    }
+    let device = device?;
+    let key = (device.vendor_id?, device.product_id?);
+    hooks.try_read().ok()?.horizontal_scroll.get(&key).copied()
+}
+
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
@@ -406,10 +428,21 @@ pub fn start(
                     EventDisposition::PassThrough
                 }
                 MouseEvent::Scroll {
-                    delta_x, delta_y, ..
+                    delta_x,
+                    delta_y,
+                    from_trackpad,
+                    device,
                 } => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(scale_percent) =
+                        horizontal_scroll_scale(delta_x, from_trackpad, device.as_ref(), &hooks)
+                    {
+                        return EventDisposition::AdjustHorizontalScroll { scale_percent };
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    let _ = (delta_x, delta_y);
+                    let _ = (delta_x, delta_y, from_trackpad, device);
+                    #[cfg(target_os = "windows")]
+                    let _ = (from_trackpad, device);
                     #[cfg(target_os = "windows")]
                     if delta_y == 0.0
                         && let Some((button, action)) = hooks
@@ -796,6 +829,7 @@ mod tests {
                 (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
             ]),
             gestures: BTreeMap::new(),
+            horizontal_scroll: BTreeMap::new(),
         };
         assert_eq!(
             rebound_thumbwheel_action(&maps, 1.0),
@@ -822,9 +856,46 @@ mod tests {
                 ),
             ]),
             gestures: BTreeMap::new(),
+            horizontal_scroll: BTreeMap::new(),
         };
         assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
         assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn horizontal_scroll_adjustment_requires_exact_device_and_mouse_axis() {
+        let hooks = Arc::new(RwLock::new(HookMaps {
+            horizontal_scroll: BTreeMap::from([((0x046d, 0xb01f), -300)]),
+            ..HookMaps::default()
+        }));
+        let anywhere = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb01f),
+            product_name: Some("MX Anywhere 2".into()),
+        };
+        assert_eq!(
+            horizontal_scroll_scale(1.0, false, Some(&anywhere), &hooks),
+            Some(-300)
+        );
+        assert_eq!(
+            horizontal_scroll_scale(0.0, false, Some(&anywhere), &hooks),
+            None
+        );
+        assert_eq!(
+            horizontal_scroll_scale(1.0, true, Some(&anywhere), &hooks),
+            None
+        );
+
+        let other = EventDevice {
+            product_id: Some(0xb034),
+            ..anywhere
+        };
+        assert_eq!(
+            horizontal_scroll_scale(1.0, false, Some(&other), &hooks),
+            None
+        );
+        assert_eq!(horizontal_scroll_scale(1.0, false, None, &hooks), None);
     }
 
     #[test]
