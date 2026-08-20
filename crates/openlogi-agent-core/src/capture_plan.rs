@@ -64,7 +64,7 @@ pub(crate) fn hidpp_side_gesture_maps_for(
     config_key: &str,
     app: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(target_os = "macos") || !config.app_settings.capture_mouse_events {
         return BTreeMap::new();
     }
     oshook_gestures_for(config, Some(config_key), app)
@@ -347,5 +347,23 @@ mod tests {
             assert!(plan.side_gesture_bindings.is_empty());
             assert!(plan.divert_gesture_buttons.is_empty());
         }
+    }
+
+    #[test]
+    fn mouse_capture_opt_out_keeps_side_gesture_buttons_native() {
+        let mut cfg = Config::default();
+        cfg.app_settings.capture_mouse_events = false;
+        cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(plan.side_gesture_bindings.is_empty());
+        assert!(plan.divert_gesture_buttons.is_empty());
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Forward),
+            "capture opt-out must leave Forward entirely native"
+        );
     }
 }
