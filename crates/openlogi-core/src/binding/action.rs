@@ -348,3 +348,30 @@ macro_rules! derive_action_core {
 }
 
 for_each_unit_action!(derive_action_core);
+
+impl Action {
+    /// Whether holding the bound button should keep re-firing this action.
+    ///
+    /// Only actions whose effect is a small increment worth applying many times
+    /// in a row qualify. Toggles ([`MuteVolume`](Action::MuteVolume),
+    /// [`PlayPause`](Action::PlayPause)) and one-shot navigation
+    /// ([`NextTrack`](Action::NextTrack), tab and desktop switches) are excluded
+    /// on purpose: repeating those on a long press would be surprising rather
+    /// than useful.
+    ///
+    /// Deliberately an explicit list rather than a [`category`](Action::category)
+    /// test — `Category::Media` holds both `VolumeUp` (repeatable) and
+    /// `PlayPause` (not), so the category is the wrong granularity.
+    #[must_use]
+    pub fn is_repeatable(&self) -> bool {
+        matches!(
+            self,
+            Action::VolumeUp
+                | Action::VolumeDown
+                | Action::ScrollUp
+                | Action::ScrollDown
+                | Action::HorizontalScrollLeft
+                | Action::HorizontalScrollRight
+        )
+    }
+}

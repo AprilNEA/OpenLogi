@@ -392,6 +392,68 @@ fn category_media_variants() {
     assert_eq!(Action::MuteVolume.category(), Category::Media);
 }
 
+// ── Repeat-on-hold classification ─────────────────────────────────────────
+
+#[test]
+fn repeatable_actions_are_the_increment_style_ones() {
+    for action in [
+        Action::VolumeUp,
+        Action::VolumeDown,
+        Action::ScrollUp,
+        Action::ScrollDown,
+        Action::HorizontalScrollLeft,
+        Action::HorizontalScrollRight,
+    ] {
+        assert!(action.is_repeatable(), "{action:?} should repeat on hold");
+    }
+}
+
+#[test]
+fn toggles_and_one_shots_never_repeat() {
+    // `MuteVolume` and `PlayPause` share `Category::Media` with `VolumeUp`,
+    // which is exactly why `is_repeatable` cannot be derived from the
+    // category.
+    for action in [
+        Action::MuteVolume,
+        Action::PlayPause,
+        Action::NextTrack,
+        Action::PrevTrack,
+        Action::NextTab,
+        Action::PrevTab,
+        Action::NextDesktop,
+        Action::PreviousDesktop,
+        Action::LeftClick,
+        Action::Copy,
+        Action::None,
+    ] {
+        assert!(
+            !action.is_repeatable(),
+            "{action:?} must not repeat on hold"
+        );
+    }
+}
+
+#[test]
+fn every_repeatable_action_is_in_the_catalog() {
+    // A repeatable action the picker cannot offer would be dead config.
+    for action in Action::catalog() {
+        if action.is_repeatable() {
+            assert!(
+                matches!(
+                    action,
+                    Action::VolumeUp
+                        | Action::VolumeDown
+                        | Action::ScrollUp
+                        | Action::ScrollDown
+                        | Action::HorizontalScrollLeft
+                        | Action::HorizontalScrollRight
+                ),
+                "unexpected repeatable action in catalog: {action:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn category_mouse_variants() {
     assert_eq!(Action::LeftClick.category(), Category::Mouse);

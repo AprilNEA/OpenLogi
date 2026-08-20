@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,7 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
-use crate::hook_runtime::ActionDispatcher;
+use crate::hook_runtime::{ActionDispatcher, RepeatCmd, spawn_repeater};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
@@ -162,6 +163,35 @@ fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
     }
 }
 
+/// Whether an input tagged with `input_epoch` comes from the session the
+/// manager currently tracks *and still runs* for its device — the only inputs
+/// that may dispatch.
+///
+/// A dead or draining session's queued input must never dispatch: a press
+/// captured just before a teardown has no release edge coming (that session
+/// was the only source of release edges), so acting on it could start a
+/// repeat cycle nothing can end. A stale epoch is a superseded session's
+/// leftover; a taken stop sender means the session was deliberately stopped
+/// and is merely draining. Either way the input is dropped, so the guarantee
+/// does not rest on the order the select loop happens to poll its branches in.
+fn session_input_live(session: Option<&RunningSession>, input_epoch: u64) -> bool {
+    session.is_some_and(|session| session.epoch == input_epoch && session.stop.is_some())
+}
+
+/// Whether a captured button reports both edges on `plan`'s session, so a hold
+/// started on its press is guaranteed a release to end it.
+///
+/// Only the plain-diverted buttons in the plan's divert set do — their `0x1b04`
+/// divertedButtonsEvent carries the complete held set, so leaving it is an
+/// explicit release. The DPI/ModeShift and thumb-wheel captures are
+/// rising-edge only, so starting a repeat on their press would leave it firing
+/// with no release to stop it.
+fn reports_hold_edges(plan: &DeviceCapturePlan, button: ButtonId) -> bool {
+    plan.divert_buttons
+        .iter()
+        .any(|&(_, diverted)| diverted == button)
+}
+
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
@@ -171,10 +201,16 @@ async fn manage(
     receiver_access: ReceiverAccess,
     dispatcher: ActionDispatcher,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
+    // Inputs are tagged with the epoch of the session that captured them, so a
+    // dead session's queued events can be told apart from the live session's
+    // (see `session_input_live`).
+    let (tx, mut rx) = mpsc::unbounded_channel::<(String, u64, CapturedInput)>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators: HashMap<String, WheelAccumulators> = HashMap::new();
+    // Hold-to-repeat for the buttons the sessions divert. Lives for the whole
+    // manage loop so a session restart mid-hold cannot orphan a running cycle.
+    let repeat = spawn_repeater(dispatcher.clone());
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -191,14 +227,20 @@ async fn manage(
 
     loop {
         tokio::select! {
-            Some((key, input)) = rx.recv() => {
-                dispatch(
-                    &key,
-                    input,
-                    &mut accumulators,
-                    &capture_plans,
-                    &dispatcher,
-                );
+            Some((key, input_epoch, input)) = rx.recv() => {
+                // Only the tracked, still-running session's inputs dispatch — a
+                // dead session's queued press could start a repeat cycle whose
+                // release will never arrive (see `session_input_live`).
+                if session_input_live(sessions.get(&key), input_epoch) {
+                    dispatch(
+                        &key,
+                        input,
+                        &mut accumulators,
+                        &capture_plans,
+                        &dispatcher,
+                        &repeat,
+                    );
+                }
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release every capture
@@ -244,6 +286,12 @@ async fn manage(
                     });
                     if !keep && let Some(stop) = session.stop.take() {
                         let _ = stop.send(());
+                        // That session was the only source of release edges for
+                        // its device, so no release is coming for anything still
+                        // held: end every cycle it started. Its queued input is
+                        // just as stale — the taken stop sender is what makes
+                        // `session_input_live` drop it.
+                        let _ = repeat.send(RepeatCmd::StopDevice(key.clone()));
                     }
                 }
                 accumulators.retain(|key, _| want.contains_key(key));
@@ -289,6 +337,11 @@ async fn manage(
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
                     }
+                    // A session that died mid-hold (device disconnect, HID++
+                    // error) takes the release edge with it — end whatever it
+                    // left repeating. A deliberately stopped session already got
+                    // its StopDevice; a second one is a no-op.
+                    let _ = repeat.send(RepeatCmd::StopDevice(key.clone()));
                     sessions.remove(&key);
                 }
             }
@@ -310,19 +363,20 @@ fn spawn_session(
     rearm_generation: u64,
     epoch: u64,
     lease: Arc<SessionReceiverLease>,
-    inputs: &mpsc::UnboundedSender<(String, CapturedInput)>,
+    inputs: &mpsc::UnboundedSender<(String, u64, CapturedInput)>,
     done: &mpsc::UnboundedSender<(String, u64)>,
     capture_channel: &CaptureChannel,
 ) -> RunningSession {
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
-    // against the right plan.
+    // against the right plan, and with its epoch so the manager can drop
+    // whatever a dead session had queued (see `session_input_live`).
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<CapturedInput>();
     let forward = inputs.clone();
     let forward_key = key.clone();
     tokio::spawn(async move {
         while let Some(input) = session_rx.recv().await {
-            let _ = forward.send((forward_key.clone(), input));
+            let _ = forward.send((forward_key.clone(), epoch, input));
         }
     });
     let done = done.clone();
@@ -390,6 +444,7 @@ fn dispatch(
     accumulators: &mut HashMap<String, WheelAccumulators>,
     capture_plans: &SharedCapturePlans,
     dispatcher: &ActionDispatcher,
+    repeat: &Sender<RepeatCmd>,
 ) {
     let Ok(plans) = capture_plans.read() else {
         return;
@@ -415,9 +470,30 @@ fn dispatch(
             if let Some(action) = plan.bindings.get(&button) {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
                 dispatcher.dispatch(action, Some(key));
+                // Increment-style actions keep firing until the release
+                // arrives. Only this path can do that: the OS hook sees the
+                // thumb buttons as a press/release pulse regardless of hold
+                // length, while the `0x1b04` divert reports the true release.
+                // Gated on the release edge existing — the DPI/ModeShift and
+                // thumb-wheel captures are rising-edge only, and starting a
+                // cycle off them would leave it firing with nothing to stop it.
+                if action.is_repeatable() && reports_hold_edges(plan, button) {
+                    let _ = repeat.send(RepeatCmd::Start(
+                        (Some(key.to_owned()), button),
+                        action.clone(),
+                    ));
+                }
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
+        }
+        CapturedInput::ButtonReleased(button) => {
+            // Unconditional, but keyed to this device's hold: a stop for a
+            // button that is not repeating is a no-op, so a binding that
+            // changed mid-hold still ends the cycle its own press started —
+            // while the same button held on another device keeps repeating.
+            debug!(key, ?button, "HID++ button released");
+            let _ = repeat.send(RepeatCmd::Stop((Some(key.to_owned()), button)));
         }
         CapturedInput::Scroll(rotation) => {
             // Positive rotation is "up"; each direction has its own binding.
@@ -519,7 +595,86 @@ fn advance(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    fn session(epoch: u64, stop: Option<oneshot::Sender<()>>) -> RunningSession {
+        RunningSession {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "cafe".into(),
+                slot: 2,
+            },
+            spec: CaptureSpec::default(),
+            rearm_generation: 0,
+            stop,
+            epoch,
+        }
+    }
+
+    #[test]
+    fn input_queued_before_a_teardown_never_dispatches() {
+        // The press that arrives a moment before its session is stopped: its
+        // release can never follow, so dispatching it would start a repeat
+        // nothing could end. A deliberate stop takes the stop sender, and that
+        // alone must make the session's remaining input dead.
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        assert!(
+            session_input_live(Some(&session(7, Some(stop_tx))), 7),
+            "the tracked, still-running session's input dispatches"
+        );
+        assert!(
+            !session_input_live(Some(&session(7, None)), 7),
+            "a draining session's queued input must be unreachable, not merely late"
+        );
+    }
+
+    #[test]
+    fn a_superseded_sessions_input_never_dispatches() {
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        assert!(
+            !session_input_live(Some(&session(8, Some(stop_tx))), 7),
+            "a stale epoch belongs to a session already superseded"
+        );
+        assert!(
+            !session_input_live(None, 7),
+            "input from a device with no tracked session is dropped"
+        );
+    }
+
+    /// Only the plain-diverted buttons report both edges, so they are the only
+    /// ones whose press is guaranteed a matching release. Starting a repeat off
+    /// any other capture would leave it firing forever.
+    #[test]
+    fn only_the_plans_diverted_buttons_report_both_edges() {
+        let plan = DeviceCapturePlan {
+            config_key: "lift".into(),
+            route: DeviceRoute::Bolt {
+                receiver_uid: "cafe".into(),
+                slot: 1,
+            },
+            bindings: BTreeMap::new(),
+            gesture_bindings: BTreeMap::new(),
+            divert_buttons: vec![(0x0053, ButtonId::Back), (0x0056, ButtonId::Forward)],
+            thumbwheel_bindings_nondefault: false,
+            thumbwheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
+            rearm_generation: 0,
+        };
+        assert!(reports_hold_edges(&plan, ButtonId::Back));
+        assert!(reports_hold_edges(&plan, ButtonId::Forward));
+        for button in [
+            ButtonId::DpiToggle,
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+            ButtonId::GestureButton,
+        ] {
+            assert!(
+                !reports_hold_edges(&plan, button),
+                "{button:?} is rising-edge only — it must not start a repeat"
+            );
+        }
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {

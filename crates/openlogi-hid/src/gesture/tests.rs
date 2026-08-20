@@ -452,6 +452,11 @@ fn a_plain_diverted_gesture_button_presses_without_gesturing() {
         rx.try_recv(),
         Ok(CapturedInput::ButtonPressed(ButtonId::GestureButton, None))
     );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonReleased(ButtonId::GestureButton)),
+        "a plain-diverted button reports its release edge"
+    );
     assert!(
         rx.try_recv().is_err(),
         "a plain-diverted gesture button must not also emit a gesture click"
@@ -474,10 +479,120 @@ fn a_plain_diverted_haptic_panel_presses_as_its_own_button() {
         rx.try_recv(),
         Ok(CapturedInput::ButtonPressed(ButtonId::HapticPanel, None))
     );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonReleased(ButtonId::HapticPanel)),
+        "the panel's release edge is reported like any plain-diverted button"
+    );
     assert!(
         rx.try_recv().is_err(),
         "a plain-diverted panel must not also emit a gesture click"
     );
+}
+
+/// The thumb-side members of [`DIVERTABLE_STANDARD_BUTTONS`], so the tests
+/// exercise the wire CIDs the sessions actually divert.
+const BACK_BUTTON: (u16, ButtonId) = DIVERTABLE_STANDARD_BUTTONS[1];
+const FORWARD_BUTTON: (u16, ButtonId) = DIVERTABLE_STANDARD_BUTTONS[2];
+
+#[test]
+fn a_diverted_button_emits_both_edges_exactly_once() {
+    // The release edge is what lets a consumer time the hold (hold-to-repeat).
+    // Repeat frames while the button stays down must not re-emit — the device
+    // sends one report per change, but a resend must stay harmless.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let (cid, button) = FORWARD_BUTTON;
+    let buttons = [FORWARD_BUTTON];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+    let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
+
+    handle_reprog(&mut acc, down, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, down, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, up, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, up, &[], &[], &buttons, &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(button, None))
+    );
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonReleased(button)));
+    assert!(
+        rx.try_recv().is_err(),
+        "each edge fires once, however many frames repeat it"
+    );
+}
+
+#[test]
+fn edge_tracking_keeps_the_two_thumb_buttons_independent() {
+    // Both diverted at once: one going down must not mask the other's edges,
+    // and the frame that holds both is a single press for each.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let (back, _) = BACK_BUTTON;
+    let (fwd, _) = FORWARD_BUTTON;
+    let buttons = [BACK_BUTTON, FORWARD_BUTTON];
+
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([back, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &tx,
+    );
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([back, fwd, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &tx,
+    );
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([fwd, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &tx,
+    );
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::Back, None))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::Forward, None))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonReleased(ButtonId::Back)),
+        "back leaving the held set is its release, with forward still down"
+    );
+    assert!(rx.try_recv().is_err(), "forward is still held");
+}
+
+#[test]
+fn an_undiverted_button_emits_nothing_even_if_the_device_reports_it() {
+    // Nothing is opted in, so a frame naming the thumb button must stay silent —
+    // otherwise a stray report would fire an action the user never bound to this
+    // path.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let (cid, _) = FORWARD_BUTTON;
+
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &[],
+        &tx,
+    );
+
+    assert!(rx.try_recv().is_err(), "diversion is opt-in per button");
 }
 
 #[test]

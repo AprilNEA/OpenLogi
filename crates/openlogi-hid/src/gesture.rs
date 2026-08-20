@@ -69,6 +69,15 @@ pub enum CapturedInput {
     /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
     /// (click bound, rotation rebound, or sensitivity changed).
     Scroll(i16),
+    /// A plain-diverted button was released.
+    ///
+    /// Emitted only for the buttons in the session's `divert_buttons` set —
+    /// the `0x1b04` divertedButtonsEvent carries the complete set of held
+    /// CIDs, so one leaving the set is a release. The DPI/ModeShift and
+    /// thumb-wheel captures are rising-edge only and never produce this.
+    /// Pairs with [`CapturedInput::ButtonPressed`] so a consumer can time the
+    /// hold — what drives hold-to-repeat for increment-style actions.
+    ButtonReleased(ButtonId),
 }
 
 /// Why a capture session could not start (or had to stop).
@@ -669,6 +678,11 @@ fn handle_reprog(
             }
             acc.dpi_down = dpi_down;
 
+            // Diverted standard buttons report both edges: the event carries
+            // the *complete* set of currently-held CIDs, so a CID that was in
+            // the last set and is missing now is a release — the device sends
+            // one report per change, not one per poll. The release is what
+            // lets a consumer time the hold (hold-to-repeat).
             for &(cid, button) in button_cids {
                 let down = cids.contains(&cid);
                 let was_down = acc.buttons_down.contains(&cid);
@@ -677,6 +691,7 @@ fn handle_reprog(
                     acc.buttons_down.push(cid);
                 } else if !down && was_down {
                     acc.buttons_down.retain(|&c| c != cid);
+                    let _ = sink.send(CapturedInput::ButtonReleased(button));
                 }
             }
         }
