@@ -98,6 +98,18 @@ pub enum HostSwitchError {
     },
 }
 
+impl HostSwitchError {
+    /// Whether the error indicates the device has departed (analytics-mode
+    /// keyboards disconnect before software can probe them). Validation
+    /// errors like [`HostSlotEmpty`](Self::HostSlotEmpty) are NOT departure.
+    fn is_device_unreachable(&self) -> bool {
+        matches!(
+            self,
+            Self::Hid(_) | Self::KeyboardNotFound | Self::TimedOut { .. }
+        ) || matches!(self, Self::Hidpp(msg) if msg.contains("DeviceNotFound"))
+    }
+}
+
 /// Capture host switch keys on `keyboard` until one is pressed or `shutdown`
 /// resolves. Controls are restored before a requested host is returned.
 pub async fn run_host_switch_session(
@@ -196,14 +208,15 @@ pub async fn switch_linked_hosts(
         .await
     {
         Ok(change) => Some(change),
-        Err(error) => {
-            // The keyboard may have departed between opening the channel and
-            // probing the device (analytics-mode race). Switch the targets
-            // through their own channels and treat the keyboard as gone.
+        Err(error) if error.is_device_unreachable() => {
+            // The keyboard departed between opening the channel and probing
+            // the device (analytics-mode race). Switch the targets through
+            // their own channels and treat the keyboard as gone.
             debug!(%error, route = %keyboard, host, "keyboard unreachable; switching targets only");
             switch_targets_directly(targets, host, channel_pool).await;
             return Ok(true);
         }
+        Err(error) => return Err(error),
     };
     for target in targets {
         match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
