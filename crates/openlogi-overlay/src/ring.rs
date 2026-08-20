@@ -216,7 +216,7 @@ impl Render for RingView {
     }
 }
 
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
 )]

@@ -23,10 +23,8 @@
     unsafe_code,
     reason = "AVFoundation / CoreMedia / CoreVideo capture FFI"
 )]
-#![allow(
+#![expect(
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
     reason = "pixel dimensions and FourCC constants are bounded and copied verbatim"
 )]
 

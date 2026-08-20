@@ -18,8 +18,7 @@
     unsafe_code,
     reason = "Media Foundation COM (device activation + IMFSourceReader sample loop)"
 )]
-#![allow(
-    clippy::cast_possible_truncation,
+#![expect(
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     reason = "pixel dimensions and strides are bounded and copied verbatim"

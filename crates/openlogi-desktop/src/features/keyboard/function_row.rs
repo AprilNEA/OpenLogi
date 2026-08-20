@@ -10,12 +10,19 @@
 //! [`AppState::commit_keyboard_binding`]. The panel lists the same action
 //! catalog the mouse picker uses, plus a Power User section.
 
-#![allow(
+#![expect(
     clippy::cast_precision_loss,
-    clippy::float_cmp,
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
     reason = "GPUI builders take owned Copy palette/slots; layout math uses small f32 counts"
+)]
+// Not `expect`: the only float_cmp sites are `assert_eq!` on layout px in the
+// tests below, and rustc does not credit an expectation with a lint raised
+// inside a macro expansion — it would suppress the warning and then report
+// itself unfulfilled, which `-D warnings` turns into an unfixable error.
+#![allow(
+    clippy::float_cmp,
+    reason = "callout layout px are computed by the same code path in test and product, so equality is exact"
 )]
 
 use std::rc::Rc;
@@ -159,7 +166,7 @@ impl FunctionRowView {
         self.select_key(next_selection_after_click(self.selected_key, idx), cx);
     }
 
-    #[allow(dead_code, reason = "public accessor for the selection state")]
+    #[expect(dead_code, reason = "public accessor for the selection state")]
     pub(crate) fn selected_key(&self) -> Option<usize> {
         self.selected_key
     }

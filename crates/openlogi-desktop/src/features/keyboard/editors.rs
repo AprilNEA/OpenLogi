@@ -8,14 +8,11 @@
 //!
 //! [`menu_card`]: crate::features::mouse::picker::menu_card
 
-#![allow(
+#![expect(
     clippy::needless_pass_by_value,
-    clippy::redundant_closure,
     clippy::redundant_closure_for_method_calls,
     reason = "GPUI builders take owned Copy palette values; entity.update wants closures"
 )]
-
-use std::rc::Rc;
 
 use gpui::{
     AnyElement, BorrowAppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement,
@@ -33,7 +30,7 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 use openlogi_core::config::KeyTrigger;
 
 use super::function_row::FunctionRowView;
-use crate::features::mouse::picker::{PickFn, divider, menu_card, menu_row, scroll_list, title};
+use crate::features::mouse::picker::{divider, menu_card, menu_row, scroll_list, title};
 use crate::state::AppState;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -323,11 +320,6 @@ fn step_preview(step: &WorkflowStep, pal: Palette) -> AnyElement {
 
 fn key_combo_preview(combo: &KeyCombo) -> String {
     combo.rendered_label()
-}
-
-#[allow(dead_code, reason = "kept for parity with the mouse picker")]
-fn _silence_pickfn() -> PickFn {
-    Rc::new(|_a: Action, _w: &mut gpui::Window, _cx: &mut gpui::App| {})
 }
 
 #[cfg(test)]

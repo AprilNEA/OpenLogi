@@ -60,7 +60,7 @@ pub struct Carousel {
     on_select: Option<SelectHandler>,
 }
 
-#[allow(
+#[expect(
     dead_code,
     reason = "complete, reusable carousel API — not every builder option is exercised by the current device-list call site"
 )]

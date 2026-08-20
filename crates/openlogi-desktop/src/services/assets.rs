@@ -104,10 +104,6 @@ fn open_in_file_manager(path: &Path) {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAsset {
-    #[allow(
-        dead_code,
-        reason = "depot label will be surfaced in the carousel tooltip (P0.4+)"
-    )]
     pub depot: String,
     pub display_name: String,
     /// The registry's curated device type for this model, normalized from the

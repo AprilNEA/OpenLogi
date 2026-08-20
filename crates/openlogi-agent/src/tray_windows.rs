@@ -23,10 +23,9 @@
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
-#![allow(
+#![expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
     reason = "win32 message plumbing round-trips ids through WPARAM/LPARAM by design"
 )]
 

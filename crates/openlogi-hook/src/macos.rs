@@ -1,5 +1,5 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "the event tap is built on Core Graphics / Core Foundation C APIs"
 )]
@@ -394,7 +394,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             let sender = event_sender_id(event);
             let device_info = sender.map(sender_device_info);
             let from_trackpad = device_info.as_ref().map_or(phase, |info| info.is_trackpad);
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 reason = "scroll deltas are small fractional values that fit comfortably in f32"
             )]
@@ -414,7 +414,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
         | CGEventType::OtherMouseDragged => {
             let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
             let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 reason = "per-event pointer deltas are small integers, far within i32"
             )]
@@ -469,7 +469,7 @@ const MOMENTUM_PHASE: CGEventField = 123; // kCGScrollWheelEventMomentumPhase
 /// fixed-point, then the integer line — the order the reference tools use, so a
 /// hi-res wheel (which reports in the pixel field with the line field at 0) is
 /// not mistaken for "no scroll".
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "scroll line deltas are small integers, exact in f64"
 )]
@@ -725,7 +725,7 @@ fn spawn_lifecycle_watchdog(
 }
 
 /// Body of the background hook thread.
-#[allow(
+#[expect(
     clippy::needless_pass_by_value,
     reason = "rl_tx must be owned: dropping it signals the parent's recv() to return Err on failure paths"
 )]
@@ -892,12 +892,6 @@ fn disable_tap(tap: &CGEventTap) {
 /// `min_usec_latency`) so `CGGetEventTapList` writes into the right offsets.
 #[repr(C)]
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "events_of_interest and the latency floats are unread but must \
-              exist so the struct keeps CoreGraphics' exact 48-byte stride; \
-              CGGetEventTapList writes whole records into the buffer"
-)]
 struct CGEventTapInformation {
     event_tap_id: u32,
     tap_point: u32,

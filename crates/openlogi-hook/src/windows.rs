@@ -1,10 +1,10 @@
 //! Windows `WH_MOUSE_LL` + `WH_KEYBOARD_LL` implementation of the OS-level
 //! input hook.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "the low-level input hook is built on the Win32 C API"
 )]
-#![allow(
+#![expect(
     clippy::borrow_as_ptr,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,

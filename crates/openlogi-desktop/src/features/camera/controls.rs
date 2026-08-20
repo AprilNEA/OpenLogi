@@ -11,10 +11,9 @@
 //! Streaming / Video call) plus user-saved customs, applied to the hardware in
 //! a single batched device-open.
 
-#![allow(
+#![expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
     reason = "UVC control values are small integers; slider math goes through f32"
 )]
 
@@ -79,7 +78,7 @@ pub struct CameraControlsPanel {
     uid: Option<String>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
-    #[allow(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
 }
 
@@ -88,7 +87,7 @@ struct ControlSlider {
     label: SharedString,
     range: ControlRange,
     state: Entity<SliderState>,
-    #[allow(dead_code, reason = "held to keep the slider subscription alive")]
+    #[expect(dead_code, reason = "held to keep the slider subscription alive")]
     sub: Subscription,
 }
 

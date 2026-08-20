@@ -18,7 +18,7 @@ const STUB: f32 = 10.;
 /// view (the right half of the window is reserved for the DPI / gesture
 /// column) but the routing logic is kept so labels can move later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
+#[expect(
     dead_code,
     reason = "Right variant kept for future right-side labelling"
 )]

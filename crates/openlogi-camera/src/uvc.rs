@@ -16,9 +16,8 @@
 //! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
 //! block in this backend and hands the descriptor up as a plain `&[u8]`.
 
-#![allow(
+#![expect(
     clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     reason = "UVC payloads are bounded 16-bit values copied verbatim"
 )]

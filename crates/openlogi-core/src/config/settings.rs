@@ -54,7 +54,7 @@ pub enum AssetSourcePreference {
 /// compatible — old config files just keep the default for the new field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "independent on/off user preferences, not a state machine"
 )]
@@ -367,7 +367,7 @@ impl LightSettings {
     }
 }
 
-#[allow(
+#[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
 )]

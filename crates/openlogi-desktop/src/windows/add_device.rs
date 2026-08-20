@@ -156,9 +156,8 @@ fn start_search(cx: &mut App) {
 /// Standalone Add Device window root view.
 pub struct AddDeviceView {
     focus_handle: FocusHandle,
-    #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
-    #[allow(dead_code, reason = "held to keep the PairingUi observer alive")]
+    #[expect(dead_code, reason = "held to keep the PairingUi observer alive")]
     state_obs: Subscription,
 }
 

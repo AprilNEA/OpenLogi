@@ -135,7 +135,7 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "mask coords are < 8192 px — well within f32 mantissa"
     )]
@@ -149,7 +149,7 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
                 while x < w && cells[(y * w + x) as usize] == 1 {
                     x += 1;
                 }
-                #[allow(
+                #[expect(
                     clippy::cast_precision_loss,
                     reason = "mask coords are < 8192 px — well within f32 mantissa"
                 )]
@@ -178,7 +178,7 @@ impl GlowGeometry {
     /// crosses a row boundary is split so every segment stays on one row.
     /// `None` if the stored dimensions are out of range or the runs don't cover
     /// exactly `width * height`.
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "mask coords are < 8192 px — well within f32 mantissa"
     )]
