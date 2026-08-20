@@ -19,6 +19,7 @@ export_languages:
   - sv-SE
   - el
   - ru
+  - uk
   - ja
   - zh-CN
   - zh-HK
@@ -47,6 +48,7 @@ files:
         el: "el"
         ja: "ja"
         ru: "ru"
+        uk: "uk"
         zh-CN: "zh-CN"
         zh-HK: "zh-HK"
         zh-TW: "zh-TW"
