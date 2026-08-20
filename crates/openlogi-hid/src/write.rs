@@ -39,7 +39,6 @@ pub(crate) use haptic::clear_haptic_feature_cache_for;
 pub use haptic::{
     clear_haptic_feature_cache, ensure_haptics_armed_on, play_haptic, play_haptic_on,
 };
-pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
@@ -62,6 +61,11 @@ pub use smartshift::{
 // types with no HID++ I/O, so it lives in `openlogi_core::hid::light`;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::light::commands_for_light_settings;
+
+// `HapticWaveform` likewise: it crosses the IPC wire, so it is defined in
+// `openlogi_core::hid::haptic` rather than taken from the `hidpp` fork, and
+// `haptic::play_haptic*` map it to the firmware ID on the way out.
+pub use openlogi_core::hid::HapticWaveform;
 
 pub(crate) use error::classify_hidpp_error;
 
