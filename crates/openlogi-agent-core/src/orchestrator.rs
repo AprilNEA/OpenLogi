@@ -26,6 +26,7 @@ use openlogi_hid::{
     KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
@@ -80,6 +81,9 @@ pub struct SharedRuntime {
     /// dispatch, keyed by the device the events arrive on. Carries each
     /// device's effective thumb-wheel sensitivity.
     pub capture_plans: SharedCapturePlans,
+    /// Wakes the capture manager when a published plan needs immediate
+    /// reconciliation; periodic polling remains the failure-recovery path.
+    pub capture_plan_changed: Arc<Notify>,
     pub capture_channel: CaptureChannel,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
@@ -196,6 +200,7 @@ impl Orchestrator {
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
+            capture_plan_changed: Arc::new(Notify::new()),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
             channel_pool: ChannelPool::default(),
@@ -351,6 +356,7 @@ impl Orchestrator {
             self.capture_plans_for(),
             "capture_plans",
         );
+        self.shared.capture_plan_changed.notify_one();
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,

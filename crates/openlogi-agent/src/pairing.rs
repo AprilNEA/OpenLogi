@@ -303,6 +303,7 @@ mod tests {
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
+            capture_plan_changed: Arc::new(tokio::sync::Notify::new()),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
             channel_pool: openlogi_hid::ChannelPool::default(),

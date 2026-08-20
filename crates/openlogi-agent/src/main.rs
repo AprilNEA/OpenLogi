@@ -150,6 +150,7 @@ fn spawn_hidpp_watchers(
 ) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
+        Arc::clone(&shared.capture_plan_changed),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
@@ -216,18 +217,11 @@ fn start_hook(
     )
 }
 
-async fn set_hook_availability(
-    orchestrator: &Mutex<Orchestrator>,
-    side_gesture: &SharedSideGesture,
-    available: bool,
-) {
+async fn set_hook_availability(orchestrator: &Mutex<Orchestrator>, available: bool) {
     orchestrator
         .lock()
         .await
         .set_os_mouse_hook_available(available);
-    if !available {
-        side_gesture.interrupt();
-    }
 }
 
 async fn begin_action_ring(
@@ -416,8 +410,8 @@ async fn run(
             Some(granted) = accessibility_rx.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
-                    // Restore native controls before dropping their movement hook.
-                    set_hook_availability(&orchestrator, &side_gesture, false).await;
+                    // Begin restoring native controls before dropping their movement hook.
+                    set_hook_availability(&orchestrator, false).await;
                     hook = None;
                 }
                 if granted && hook.is_none() {
@@ -428,7 +422,7 @@ async fn run(
                         &event_monitor,
                         &side_gesture,
                     );
-                    set_hook_availability(&orchestrator, &side_gesture, hook.is_some()).await;
+                    set_hook_availability(&orchestrator, hook.is_some()).await;
                 }
                 // One publish for every path above: revoked, installed, kept,
                 // or never installed because capture is off.

@@ -32,8 +32,8 @@ pub struct DeviceCapturePlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// macOS Back/Forward gesture maps whose button lifecycle is captured over
-    /// HID++ while the OS hook supplies pointer movement.
+    /// macOS Back/Forward gesture maps used to resolve device-owned HID++
+    /// edges. These remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Standard buttons whose binding leaves the default — divert over
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
@@ -88,19 +88,19 @@ pub fn plan_for_device(
     // press. macOS Back/Forward are the exception below: HID++ owns their
     // button edges because Bluetooth-direct CGEvents may be unattributed.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
-    let side_gesture_bindings = if os_mouse_hook_available {
-        hidpp_side_gesture_maps_for(config, config_key, app)
-    } else {
-        BTreeMap::new()
-    };
+    let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the watcher
     // derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
-    let divert_gesture_buttons = DIVERTABLE_STANDARD_BUTTONS
-        .into_iter()
-        .filter(|(_, button)| side_gesture_bindings.contains_key(button))
-        .collect::<Vec<_>>();
+    let divert_gesture_buttons = if os_mouse_hook_available {
+        DIVERTABLE_STANDARD_BUTTONS
+            .into_iter()
+            .filter(|(_, button)| side_gesture_bindings.contains_key(button))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
@@ -417,7 +417,14 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, false);
-        assert!(plan.side_gesture_bindings.is_empty());
         assert!(plan.divert_gesture_buttons.is_empty());
+        if cfg!(target_os = "macos") {
+            assert!(
+                plan.side_gesture_bindings.contains_key(&ButtonId::Forward),
+                "a draining session must retain its dispatch map until disarm completes"
+            );
+        } else {
+            assert!(plan.side_gesture_bindings.is_empty());
+        }
     }
 }
