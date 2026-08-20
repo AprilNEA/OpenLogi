@@ -121,6 +121,12 @@ ptr_as_ptr = "warn"
 tests_outside_test_module = "warn"
 undocumented_unsafe_blocks = "warn"
 
+[profile.dev]
+debug = "limited"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
