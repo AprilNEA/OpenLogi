@@ -40,8 +40,9 @@ two systemic problems, both now fixed.
 Related: the seven file-wide `cast_*` blankets were narrowed to the functions
 that need them, and most of their sites turned out not to need a suppression at
 all — `cast_signed`/`cast_unsigned`, `&raw const`/`&raw mut`, `to_le_bytes`, or
-a shared conversion helper. `capture_linux` keeps its blanket because
-`v4l2-sys-mit` runs bindgen and cannot be cross-linted from macOS.
+a shared conversion helper. Linux CI showed `capture_linux`'s file-level
+blanket was two-thirds dead (`cast_possible_truncation` /
+`cast_possible_wrap`); the remaining `cast_sign_loss` sits on `clamp_u8`.
 
 Supersedes the "`openlogi-hidpp` stays out on purpose (vendored)" note in the
 shared-lint-set entry below: the hard-fork ruling retired that, and the crate
