@@ -89,7 +89,7 @@ everything else (the CLI, tests); set
 `OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-desktop` binary instead.
 
 Packaged local dev bundles (`cargo run` and
-`cargo run -p xtask -- macos bundle`) use `.dev` bundle identifiers and the
+`cargo run -p xtask -- macos bundle`) use `-dev` bundle identifiers and the
 `openlogi-dev` XDG profile (`~/.config/openlogi-dev`,
 `~/.local/share/openlogi-dev`, and its own `agent.sock`). That keeps the dev
 GUI and agent from sharing the installed production app's Accessibility grant,
@@ -124,7 +124,7 @@ The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=
 were set), which is the profile the dev app bundle already uses — so it meets the
 dev GUI on the dev socket, and an installed *release* build, which is on the
 production profile, keeps running untouched. (A locally built bundle installed
-into `/Applications` carries `.dev` identifiers and therefore shares the dev
+into `/Applications` carries `-dev` identifiers and therefore shares the dev
 profile: it and the mock contend for the same lock, and whichever starts second
 exits.) `OPENLOGI_DEV_AGENT=0` keeps the runner from building and embedding
 the real agent for the GUI to auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1`

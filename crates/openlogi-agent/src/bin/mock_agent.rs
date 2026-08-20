@@ -154,9 +154,9 @@ fn main() -> ExitCode {
 
 /// Claim the `openlogi-dev` profile unless the caller picked one.
 ///
-/// A bare `cargo run` binary has no `.dev` bundle to be recognized by, so
+/// A bare `cargo run` binary has no `-dev` bundle to be recognized by, so
 /// without this the mock would resolve the *production* socket, lock and config
-/// while the dev GUI (which does run from a `.dev` bundle) waits on the dev
+/// while the dev GUI (which does run from a `-dev` bundle) waits on the dev
 /// socket — the two would never meet, and the mock would sit on the installed
 /// app's paths instead.
 fn default_to_dev_profile() {

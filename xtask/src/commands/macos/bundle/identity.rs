@@ -282,7 +282,7 @@ mod tests {
 
     /// The checked-in dev plists are the only identity the dev bundle gets:
     /// `.cargo/run-macos.sh` copies them verbatim and never calls [`stamp`], so
-    /// a literal here that drifts from the `.dev` suffixing silently gives the
+    /// a literal here that drifts from the `-dev` suffixing silently gives the
     /// dev build a different identity than the one packaging derives — and TCC
     /// keys grants off exactly that.
     #[test]

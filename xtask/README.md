@@ -30,7 +30,7 @@ written explicitly and read back:
 | channel | app | agent helper | overlay helper |
 |---|---|---|---|
 | `production` | `org.openlogi.openlogi` / OpenLogi | `org.openlogi.agent` / OpenLogi Agent | `org.openlogi.overlay` / OpenLogi Overlay |
-| `dev` | the same, suffixed `.dev` / ` Dev` | | |
+| `dev` | the same, suffixed `-dev` / ` Dev` | | |
 
 `macos bundle` defaults to `--channel dev`, so a local build can never claim the
 installed app's grants, and signs the result with `OPENLOGI_LOCAL_CODESIGN_IDENTITY`
