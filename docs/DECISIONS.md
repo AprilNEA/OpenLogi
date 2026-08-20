@@ -28,6 +28,14 @@ two systemic problems, both now fixed.
   lib and test targets, and one raised inside a macro expansion (rustc does not
   credit an expectation with those, so it both suppresses the warning and
   reports itself unfulfilled). Each such site carries a comment saying which.
+- **Both rules are now machine-checked.** `allow_attributes` and
+  `allow_attributes_without_reason` join the lint table, costing three
+  annotated exceptions and nothing else — the sweep had already left the tree
+  compliant. One blind spot to remember: `allow_attributes` only sees outer
+  `#[allow]`, so a module-wide `#![allow(…)]` — precisely the shape that rotted
+  in `openlogi-assets` — still passes it. Adding them also disproved the
+  first-pass rule that a `cfg_attr`-wrapped suppression always needs `allow`:
+  two of the four turned out to work fine as `expect`.
 
 Related: the seven file-wide `cast_*` blankets were narrowed to the functions
 that need them, and most of their sites turned out not to need a suppression at

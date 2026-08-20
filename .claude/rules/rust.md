@@ -28,8 +28,9 @@ reason = "…")]` plus a `// SAFETY:` comment), `clippy::pedantic` at warn,
 `unwrap_used`/`expect_used` at warn, plus the shared lint set —
 `assertions_on_result_states`, `cast_possible_truncation`, `cast_possible_wrap`,
 `cast_sign_loss`, `error_impl_error`, `exit`, `or_fun_call`, `ptr_as_ptr`,
-`tests_outside_test_module`, `undocumented_unsafe_blocks`. Any lint suppression carries
-a `reason`. What that changes day to day:
+`tests_outside_test_module`, `undocumented_unsafe_blocks`. `allow_attributes` and
+`allow_attributes_without_reason` machine-check the suppression rules below. What that
+changes day to day:
 
 - Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
 - `assert!(r.is_ok())` / `assert!(r.is_err())` are rejected — unwrap the `Result` (in a
@@ -54,18 +55,21 @@ a `reason`. What that changes day to day:
 `#[allow]` goes quiet the day it stops suppressing anything, so suppressions rot in
 place — an audit in 2026-08 found 20 dead ones, including three module-wide `dead_code`
 blankets that had been inert since their modules went `pub`. `#[expect]` reports itself
-unfulfilled instead, which `-D warnings` turns into a failure. **Default to `expect`.**
+unfulfilled instead, which `-D warnings` turns into a failure. `allow_attributes`
+enforces this — but only for outer `#[allow]`; a module-wide `#![allow(…)]`, the shape
+that rots worst, is invisible to it and is on you.
 
-Three cases where `expect` is wrong and `allow` is correct — each needs a comment saying
-which one applies, or the next reader will "fix" it back:
+Three cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
+an `#[expect(clippy::allow_attributes, reason = "see above")]` and a comment saying which
+case applies — riding the same `cfg_attr` predicate when there is one:
 
 - **The lint fires only under some `cfg`.** `platform::os_version` returns `Some(…)` on
   macOS (so `unnecessary_wraps` fires) and `None` elsewhere (so it does not). An
   `expect` there is green on macOS and red on the other two lanes.
 - **Fulfilment differs between a crate's targets.** A `dead_code` suppression on a
   helper that only the tests call is fulfilled in the `--lib` build and unfulfilled in
-  the `--test` build; `--all-targets` compiles both, so one of them always warns. These
-  are usually `cfg_attr`-wrapped already.
+  the `--test` build; `--all-targets` compiles both, so one of them always warns. Being
+  `cfg_attr`-wrapped is *not* itself a reason to reach for `allow` — check.
 - **The lint is raised inside a macro expansion.** rustc does not credit an expectation
   with such a lint: it suppresses the warning *and* reports itself unfulfilled. A
   `float_cmp` on floats compared inside `assert_eq!` is the case in this tree.

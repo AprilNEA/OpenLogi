@@ -112,6 +112,12 @@ unwrap_used = "warn"
 expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
+# Machine-checks the suppression policy in .claude/rules/rust.md: every
+# suppression states a reason, and reaches for `expect` unless it cannot work.
+# Blind spot worth knowing: `allow_attributes` only sees outer `#[allow]`, so a
+# module-wide `#![allow(…)]` — the shape that rots worst — still needs review.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 # Shared lint set, kept in sync with
 # https://gist.github.com/AprilNEA/cdf81f76840fcb883a32503ee7caa539.
 # `cast_*` and `ptr_as_ptr` are pedantic members already; they are listed
