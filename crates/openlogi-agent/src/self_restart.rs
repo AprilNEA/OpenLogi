@@ -7,10 +7,10 @@
 //! IPC protocol on a version bump, sitting on its connecting screen with no way
 //! forward. Watching our own executable and replacing the process image once it
 //! changes keeps "the running agent is the installed binary" true within a few
-//! ticks, with no launchd or GUI involvement. On macOS the replacement is a
-//! short delayed relaunch rather than an in-thread `exec`: the agent owns an
-//! AppKit status item, and the new AppKit process must start from the normal
-//! process main thread or the menu-bar item can render as an empty slot.
+//! ticks, with no launchd or GUI involvement. On macOS restarts use a short
+//! delayed relaunch rather than an in-thread `exec`: the agent owns an AppKit
+//! status item, and the new AppKit process must start from the normal process
+//! main thread or the menu-bar item can render as an empty slot.
 //!
 //! Limitation: the path is resolved once via `current_exe`, which returns the
 //! fully-resolved target (`/proc/self/exe` on Linux). Installs that update by
@@ -132,15 +132,29 @@ fn restart(path: &Path) {
         path = %path.display(),
         "executable changed on disk — relaunching as the new macOS agent"
     );
-    match schedule_macos_relaunch(path) {
-        #[expect(
-            clippy::exit,
-            reason = "the successor is already scheduled and waits on this process releasing the singleton lock and IPC socket; this watcher thread cannot return a status to `main`, which is parked in the AppKit run loop"
-        )]
-        Ok(()) => std::process::exit(0),
+    if let Err(e) = schedule_macos_relaunch_and_exit(path) {
+        warn!(error = %e, "could not schedule updated agent relaunch — keeping the current image and retrying");
+    }
+}
+
+/// Relaunch the macOS agent after Input Monitoring is granted.
+///
+/// macOS does not apply a new Input Monitoring grant to the running process.
+/// The successor starts only after this process exits and releases its
+/// singleton lock and IPC socket. If the relaunch cannot be scheduled, the
+/// current process stays alive so the user can restart it manually.
+#[cfg(target_os = "macos")]
+pub fn relaunch_after_input_monitoring_grant() {
+    let path = match std::env::current_exe() {
+        Ok(path) => path,
         Err(e) => {
-            warn!(error = %e, "could not schedule updated agent relaunch — keeping the current image and retrying");
+            warn!(error = %e, "could not resolve own executable after Input Monitoring was granted — restart the agent manually");
+            return;
         }
+    };
+    info!("Input Monitoring granted — relaunching the macOS agent");
+    if let Err(e) = schedule_macos_relaunch_and_exit(&path) {
+        warn!(error = %e, "could not schedule agent relaunch after Input Monitoring was granted — restart the agent manually");
     }
 }
 
@@ -162,6 +176,16 @@ fn schedule_macos_relaunch(path: &Path) -> std::io::Result<()> {
             .args(std::env::args_os().skip(1));
     }
     command.spawn().map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_macos_relaunch_and_exit(path: &Path) -> std::io::Result<()> {
+    schedule_macos_relaunch(path)?;
+    #[expect(
+        clippy::exit,
+        reason = "the delayed successor is already scheduled and waits for this process to release the singleton lock and IPC socket"
+    )]
+    std::process::exit(0)
 }
 
 /// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
