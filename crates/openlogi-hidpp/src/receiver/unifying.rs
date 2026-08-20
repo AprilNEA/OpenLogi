@@ -372,11 +372,6 @@ pub enum Event {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use super::{DeviceConnection, DeviceKind, Event, decode_notification};
     use crate::protocol::v10::{Message, MessageHeader};

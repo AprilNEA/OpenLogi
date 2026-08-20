@@ -317,7 +317,6 @@ fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use gpui::{
         Context, PlatformInput, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,

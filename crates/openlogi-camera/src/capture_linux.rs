@@ -495,7 +495,6 @@ pub fn camera_authorization() -> CameraAuthorization {
 pub fn request_camera_access() {}
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

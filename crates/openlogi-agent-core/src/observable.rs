@@ -214,10 +214,6 @@ impl ObservableState {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "unwrap is idiomatic in tests; `has_changed` can only fail once the sender is dropped, and these tests hold it"
-)]
 mod tests {
     use super::ObservableState;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};

@@ -191,7 +191,6 @@ impl Index {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use std::collections::HashMap;

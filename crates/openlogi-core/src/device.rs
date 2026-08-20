@@ -422,11 +422,6 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "range fixture construction is intentionally asserted in tests"
-    )]
-
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
         DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,

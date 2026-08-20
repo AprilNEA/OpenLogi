@@ -474,7 +474,6 @@ fn suffix_candidates(model: &DeviceModelInfo) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use openlogi_assets::DeviceEntry;

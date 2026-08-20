@@ -222,7 +222,6 @@ pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::*;
 

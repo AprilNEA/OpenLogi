@@ -511,11 +511,6 @@ fn light_command_status(status: LightCommandStatus, pal: Palette) -> impl IntoEl
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "range fixture construction is intentionally asserted in tests"
-    )]
-
     use super::{format_light_value, midpoint};
     use openlogi_core::device::{LightValueRange, LightValueUnit};
 

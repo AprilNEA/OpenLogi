@@ -1,5 +1,4 @@
 //! Unit tests for `RgbEffects` payload parsing and event decoding.
-#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use super::event::{RgbEffectsEvent, decode_event};
 use super::types::{

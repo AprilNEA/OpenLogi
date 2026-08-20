@@ -106,11 +106,6 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "panic helpers are idiomatic in tests"
-)]
 mod tests {
 
     /// The catalog this binary translates against lives in `openlogi-ui` and is

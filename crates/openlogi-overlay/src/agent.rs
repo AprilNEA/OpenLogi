@@ -378,11 +378,6 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "panic helpers are idiomatic in tests"
-)]
 mod tests {
     use super::*;
 

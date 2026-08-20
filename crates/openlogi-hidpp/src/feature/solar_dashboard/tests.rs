@@ -1,6 +1,5 @@
 //! Unit tests for `SolarKeyboardDashboard` event decoding, using the spec's
 //! worked examples (battery 96%, light 0 / 319 lux).
-#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use super::LedId;
 use super::event::{SolarEvent, SolarStatus, decode_event};

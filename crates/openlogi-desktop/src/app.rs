@@ -580,11 +580,6 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "capability fixture construction is intentionally asserted in tests"
-    )]
-
     use super::home::connection_icon_path;
     use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
     use openlogi_core::device::{

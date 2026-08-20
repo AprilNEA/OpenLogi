@@ -1,5 +1,4 @@
 //! Unit tests for `ColorLedEffects` payload parsing and event decoding.
-#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use std::assert_matches;
 

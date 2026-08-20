@@ -1,0 +1,8 @@
+# `unwrap_used`/`expect_used` are workspace-wide warnings so production code has
+# to state its panics. In tests a panic *is* the failure report, so the lints only
+# bought ~100 copies of the same `#[allow(…, reason = "idiomatic in tests")]`.
+# Clippy silences both inside `#[cfg(test)]` modules and `#[test]` functions when
+# these are set; a free helper in a `tests/` integration file still needs a local
+# suppression, because clippy sees neither marker there.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

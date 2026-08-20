@@ -514,7 +514,6 @@ pub(super) fn quoted_identity(line: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::*;
 

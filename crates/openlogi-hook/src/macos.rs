@@ -1014,7 +1014,6 @@ pub(crate) fn stop(inner: HookInner) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
