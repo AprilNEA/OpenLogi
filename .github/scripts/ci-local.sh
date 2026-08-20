@@ -342,11 +342,14 @@ run_named() {
   case "$1" in
     rustfmt|fmt) job_fmt ;;
     clippy) job_clippy ;;
-    msrv|MSRV|"MSRV (cargo check"*) job_msrv ;;
+    msrv|MSRV|\
+    "MSRV (cargo check, macos-latest)"|"MSRV (cargo check, ubuntu-latest)"|\
+    "MSRV (cargo check, <os>)"|"MSRV (cargo check"*) job_msrv ;;
     rustdoc|docs|"rustdoc (non-GUI crates)") job_docs ;;
     tests) job_tests ;;
     test-linux|"tests (linux)") job_test_linux ;;
-    test-macos|"tests (macos"*) job_test_macos ;;
+    test-macos|"tests (macos)"|"tests (macos, arm64)"|"tests (macos, x86_64)"|\
+    "tests (macos, <arch>)"|"tests (macos"*) job_test_macos ;;
     cargo-deny|deny) job_deny ;;
     clippy-windows|"clippy (windows)") job_clippy_windows ;;
     i18n) job_i18n ;;
