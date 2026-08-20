@@ -167,23 +167,44 @@ pub async fn run_host_switch_session(
 
 /// Move reachable targets to `host`, then move the keyboard last.
 ///
-/// Returns whether the keyboard actually changed hosts.
+/// Returns whether the keyboard actually changed hosts (or had already
+/// departed — analytics-only keyboards leave before this function runs).
 pub async fn switch_linked_hosts(
     keyboard: &DeviceRoute,
     targets: &[DeviceRoute],
     host: u8,
     channel_pool: &ChannelPool,
 ) -> Result<bool, HostSwitchError> {
-    let channel = open_channel(channel_pool, keyboard, "opening keyboard channel")
-        .await?
-        .ok_or(HostSwitchError::KeyboardNotFound)?;
+    let channel = match open_channel(channel_pool, keyboard, "opening keyboard channel").await? {
+        Some(ch) => ch,
+        None => {
+            // Analytics-only keyboards depart before this function runs.
+            // Switch every target directly and report the keyboard as
+            // already-switched.
+            debug!(route = %keyboard, host, "keyboard already departed; switching targets only");
+            switch_targets_directly(targets, host, channel_pool).await;
+            return Ok(true);
+        }
+    };
     // Validate the keyboard's own move before touching anything: preparation is
     // read-only, but it is the step that rejects an unpaired host slot, and
     // discovering that *after* the mice have moved would strand them on a host
     // the keyboard never reaches. Applying it still happens last, because once
     // the keyboard leaves this host its channel can no longer command a mouse
     // sharing the same receiver.
-    let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
+    let keyboard_change = match prepare_host_change_on(&channel, keyboard.device_index(), host)
+        .await
+    {
+        Ok(change) => Some(change),
+        Err(error) => {
+            // The keyboard may have departed between opening the channel and
+            // probing the device (analytics-mode race). Switch the targets
+            // through their own channels and treat the keyboard as gone.
+            debug!(%error, route = %keyboard, host, "keyboard unreachable; switching targets only");
+            switch_targets_directly(targets, host, channel_pool).await;
+            return Ok(true);
+        }
+    };
     for target in targets {
         match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
             Ok(change) => {
@@ -196,11 +217,48 @@ pub async fn switch_linked_hosts(
             }
         }
     }
-    let changed = apply_host_change(keyboard_change).await?;
-    if changed {
-        debug!(host, route = %keyboard, "keyboard host switched");
+    if let Some(change) = keyboard_change {
+        let changed = apply_host_change(change).await?;
+        if changed {
+            debug!(host, route = %keyboard, "keyboard host switched");
+        }
+        Ok(changed)
+    } else {
+        Ok(true)
     }
-    Ok(changed)
+}
+
+/// Switch targets through their own dedicated channels, without relying on
+/// the keyboard's channel. Used when the keyboard has already departed
+/// (analytics-only Easy-Switch).
+async fn switch_targets_directly(
+    targets: &[DeviceRoute],
+    host: u8,
+    channel_pool: &ChannelPool,
+) {
+    for target in targets {
+        let channel = match open_channel(channel_pool, target, "opening target channel").await {
+            Ok(Some(ch)) => ch,
+            Ok(None) => {
+                debug!(route = %target, host, "target not reachable for direct switch");
+                continue;
+            }
+            Err(error) => {
+                debug!(%error, route = %target, host, "target channel open failed");
+                continue;
+            }
+        };
+        match prepare_host_change_on(&channel, target.device_index(), host).await {
+            Ok(change) => {
+                if let Err(error) = apply_host_change(change).await {
+                    debug!(%error, route = %target, host, "direct target host switch failed");
+                }
+            }
+            Err(error) => {
+                debug!(%error, route = %target, host, "direct target host switch preparation failed");
+            }
+        }
+    }
 }
 
 async fn arm_host_controls(
