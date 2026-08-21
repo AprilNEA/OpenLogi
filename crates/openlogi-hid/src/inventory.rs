@@ -16,6 +16,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
+use crate::backend::BackendError;
 use crate::channel::route::{DeviceRoute, is_receiver_pid};
 use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 use ledger::NodeLedger;
@@ -115,7 +116,7 @@ const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 pub enum InventoryError {
     /// Underlying HID backend error.
     #[error("HID transport error")]
-    Hid(#[from] async_hid::HidError),
+    Hid(#[from] BackendError),
     /// More than one indistinguishable standalone raw-HID node was found.
     #[error("multiple indistinguishable standalone raw HID devices found")]
     AmbiguousRawDevice,

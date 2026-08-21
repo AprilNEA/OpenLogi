@@ -50,9 +50,9 @@ pub enum PasskeyMethod {
 
 /// Errors raised by pairing operations.
 ///
-/// Pure data — no `hidpp`/`async-hid` types — but not itself a wire type:
+/// Pure data — no `hidpp` or HID-backend types — but not itself a wire type:
 /// the agent maps it to `openlogi_ipc::PairingFailure`, which crosses
-/// the IPC boundary. The conversion from `async_hid::HidError` lives in
+/// the IPC boundary. The conversion from `openlogi_hid::BackendError` lives in
 /// `openlogi_hid::pairing`, which this crate must never depend on.
 #[derive(Clone, Debug, Error)]
 pub enum PairingError {

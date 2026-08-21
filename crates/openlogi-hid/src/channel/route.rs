@@ -19,6 +19,7 @@ pub use openlogi_core::hid::route::{
     UNIFYING_PIDS, is_receiver_pid, receiver_display_name, speaks_unifying_protocol,
 };
 
+use crate::backend::BackendError;
 use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 /// Enumerate HID++ candidates and open the channel that reaches `route`.
@@ -29,7 +30,7 @@ use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 /// is currently connected.
 pub(crate) async fn open_route_channel(
     route: &DeviceRoute,
-) -> Result<Option<Arc<HidppChannel>>, async_hid::HidError> {
+) -> Result<Option<Arc<HidppChannel>>, BackendError> {
     if matches!(route, DeviceRoute::RawHid { .. }) {
         return Ok(None);
     }

@@ -17,7 +17,8 @@ use tracing::debug;
 use crate::LOGITECH_VENDOR_ID;
 use crate::channel::route::DeviceRoute;
 
-use super::{WriteError, classify_hid_error};
+use super::WriteError;
+use crate::backend::BackendError;
 
 // LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
 // `openlogi_core::hid::light`; re-exported here unchanged so this module's
@@ -256,7 +257,7 @@ pub async fn apply(
         .map_err(|_| WriteError::RequestTimedOut {
             operation: super::HidppOperation::Light,
         })?
-        .map_err(|e| classify_hid_error(&e))?;
+        .map_err(BackendError::from)?;
     debug!(route = %route, "applied raw Litra command");
     Ok(())
 }

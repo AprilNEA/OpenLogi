@@ -33,7 +33,6 @@ pub use diagnostics::{
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
 };
-pub(crate) use error::classify_hid_error;
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{set_fn_lock, set_fn_lock_on};
 pub(crate) use haptic::clear_haptic_feature_cache_for;
@@ -93,10 +92,7 @@ where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
-    match open_route_channel(route)
-        .await
-        .map_err(|e| classify_hid_error(&e))?
-    {
+    match open_route_channel(route).await? {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
     }

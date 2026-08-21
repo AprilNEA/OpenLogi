@@ -12,6 +12,7 @@
 
 mod channel;
 
+pub mod backend;
 pub mod backlight;
 pub mod inventory;
 pub mod pairing;
@@ -26,6 +27,7 @@ pub mod write;
 /// `crate::smartshift::X` keeps resolving for existing callers.
 pub use openlogi_core::hid::smartshift;
 
+pub use backend::BackendError;
 pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use channel::route::{
     BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, LOGITECH_VENDOR_ID,

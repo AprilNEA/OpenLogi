@@ -348,14 +348,14 @@ mod tests {
     use std::assert_matches;
 
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
-    use openlogi_hid::InventoryError;
+    use openlogi_hid::{BackendError, InventoryError};
 
     use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
 
     /// A transport-level enumerate failure — what the watcher's `Err` arm now
     /// sees (a partial per-node read is replayed by the hid ledger as `Ok`).
     fn enumerate_failed() -> InventoryError {
-        InventoryError::Hid(async_hid::HidError::Disconnected)
+        InventoryError::Hid(BackendError::Disconnected)
     }
 
     #[test]

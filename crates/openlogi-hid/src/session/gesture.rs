@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::SharedChannel;
+use crate::backend::BackendError;
 use crate::channel::route::{DeviceRoute, open_route_channel};
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel};
@@ -76,7 +77,7 @@ pub enum CapturedInput {
 pub enum GestureError {
     /// HID transport-level failure while enumerating or opening the device.
     #[error("HID transport error")]
-    Hid(#[from] async_hid::HidError),
+    Hid(#[from] BackendError),
     /// No connected device matched the capture route.
     #[error("no connected device matched the capture route")]
     DeviceNotFound,

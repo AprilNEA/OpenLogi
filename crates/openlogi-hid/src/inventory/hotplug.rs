@@ -16,7 +16,9 @@ pub enum HotplugEvent {
 
 /// Subscribe to OS HID hotplug events through the shared process-wide backend.
 pub fn watch_hotplug() -> Result<impl Stream<Item = HotplugEvent> + Send + Unpin, InventoryError> {
-    let stream = hid_backend().watch().map_err(InventoryError::Hid)?;
+    let stream = hid_backend()
+        .watch()
+        .map_err(|error| InventoryError::Hid(error.into()))?;
     Ok(stream.map(|event| match event {
         async_hid::DeviceEvent::Connected(_) => HotplugEvent::Connected,
         async_hid::DeviceEvent::Disconnected(_) => HotplugEvent::Disconnected,

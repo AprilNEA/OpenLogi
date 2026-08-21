@@ -28,7 +28,27 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
-use crate::write::{WriteError, classify_hid_error, matches_litra};
+use crate::backend::BackendError;
+use crate::write::{WriteError, matches_litra};
+
+/// Collapses `async-hid`'s error taxonomy into the backend-agnostic
+/// [`BackendError`] every caller above this module sees.
+///
+/// Lives here rather than beside [`BackendError`] because it is this backend's
+/// business: `async_hid` must stay unnameable outside `channel::transport`.
+/// `Disconnected` and `NotConnected` fold together — one means the device
+/// vanished after opening and the other that it was already gone, a
+/// distinction nothing above the transport acts on.
+impl From<async_hid::HidError> for BackendError {
+    fn from(error: async_hid::HidError) -> Self {
+        match error {
+            async_hid::HidError::Disconnected | async_hid::HidError::NotConnected => {
+                Self::Disconnected
+            }
+            other => Self::Backend(other.to_string()),
+        }
+    }
+}
 
 /// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
 ///
@@ -132,7 +152,7 @@ pub(crate) fn hid_backend() -> &'static HidBackend {
     &HID_BACKEND
 }
 
-pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError> {
+pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, BackendError> {
     let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
 
     // One-time visibility into what the OS actually reports for Logitech nodes,
@@ -171,8 +191,7 @@ pub(crate) fn device_identity(info: &DeviceInfo) -> String {
         )
 }
 
-pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
-{
+pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, BackendError> {
     Ok(enumerate_devices()
         .await?
         .into_iter()
@@ -270,12 +289,8 @@ pub(crate) async fn open_route_writer(
     route: &crate::channel::route::DeviceRoute,
 ) -> Result<Option<DeviceWriter>, WriteError> {
     let candidates = match route {
-        crate::channel::route::DeviceRoute::Direct { .. } => enumerate_hidpp_devices()
-            .await
-            .map_err(|e| classify_hid_error(&e))?,
-        crate::channel::route::DeviceRoute::RawHid { .. } => enumerate_devices()
-            .await
-            .map_err(|e| classify_hid_error(&e))?,
+        crate::channel::route::DeviceRoute::Direct { .. } => enumerate_hidpp_devices().await?,
+        crate::channel::route::DeviceRoute::RawHid { .. } => enumerate_devices().await?,
         _ => return Ok(None),
     };
     let mut matched = None;
@@ -302,7 +317,7 @@ pub(crate) async fn open_route_writer(
         };
         if is_match {
             if matches!(route, crate::channel::route::DeviceRoute::Direct { .. }) {
-                let (_reader, writer) = dev.open().await.map_err(|e| classify_hid_error(&e))?;
+                let (_reader, writer) = dev.open().await.map_err(BackendError::from)?;
                 return Ok(Some(writer));
             }
             if matched.is_some() {
@@ -314,7 +329,7 @@ pub(crate) async fn open_route_writer(
     }
     match matched {
         Some(dev) => {
-            let (_reader, writer) = dev.open().await.map_err(|e| classify_hid_error(&e))?;
+            let (_reader, writer) = dev.open().await.map_err(BackendError::from)?;
             Ok(Some(writer))
         }
         None => Ok(None),
@@ -361,7 +376,7 @@ fn configure_channel_sw_ids(channel: &mut HidppChannel) {
 
 pub(crate) async fn open_hidpp_channel(
     dev: async_hid::Device,
-) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {
+) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, BackendError> {
     // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we can
     // keep using `dev` (which `to_device_info` would consume).
     let info: DeviceInfo = (*dev).clone();

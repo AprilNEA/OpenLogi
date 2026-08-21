@@ -1,10 +1,12 @@
 use hidpp::protocol::v20::{ErrorType, Hidpp20Error};
 
+use crate::backend::BackendError;
+
 // WriteError, HidppOperation, and HidppFeatureErrorKind are pure IPC wire
-// data with no HID++/async-hid I/O, so they live in
+// data with no HID++/backend I/O, so they live in
 // `openlogi_core::hid::error`; re-exported here unchanged so this module's
 // own API surface doesn't churn. The conversions below stay here because
-// they name `hidpp`/`async_hid` types, which `openlogi-core` must never
+// they name `hidpp` and backend types, which `openlogi-core` must never
 // depend on.
 pub use openlogi_core::hid::{HidppFeatureErrorKind, HidppOperation, WriteError};
 
@@ -44,14 +46,15 @@ pub(crate) fn classify_hidpp_error(
     }
 }
 
-/// Converts an `async_hid` transport error into [`WriteError`].
+/// Carries a backend failure across the IPC boundary as text.
 ///
-/// `async_hid::HidError` isn't `Serialize`, so its message is carried as
-/// text; the typed error is never matched on (only constructed + displayed).
-/// A plain function rather than a `From` impl: with `WriteError` now defined
-/// in `openlogi-core`, `impl From<async_hid::HidError> for WriteError` here
-/// would implement a foreign trait for a foreign type and violate the
-/// orphan rule.
-pub(crate) fn classify_hid_error(error: &async_hid::HidError) -> WriteError {
-    WriteError::Hid(error.to_string())
+/// [`WriteError`] is `Serialize` and [`BackendError`] is not, so the message
+/// is the payload; the typed error is never matched on downstream. This is a
+/// `From` impl rather than a named helper because [`BackendError`] is local to
+/// this crate — the orphan rule only blocked it while the source type was
+/// `async_hid::HidError`, foreign like [`WriteError`] itself.
+impl From<BackendError> for WriteError {
+    fn from(error: BackendError) -> Self {
+        Self::Hid(error.to_string())
+    }
 }

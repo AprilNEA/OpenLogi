@@ -34,10 +34,11 @@ use tracing::{debug, trace};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // Click / PasskeyMethod / ReceiverSelector / PairingError are pure data with
-// no HID++/async-hid I/O, so they live in `openlogi_core::hid::pairing`;
+// no HID++/backend I/O, so they live in `openlogi_core::hid::pairing`;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
+use crate::backend::BackendError;
 use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 mod notification;
@@ -171,27 +172,23 @@ pub enum PairingCommand {
     Cancel,
 }
 
-/// Converts an `async_hid` transport error into [`PairingError`].
+/// Carries a backend failure across the IPC boundary as text.
 ///
-/// A plain function rather than a `From` impl: with `PairingError` defined
-/// in `openlogi-core`, `impl From<async_hid::HidError> for PairingError`
-/// here would implement a foreign trait for a foreign type and violate the
-/// orphan rule.
-fn classify_hid_error(error: &async_hid::HidError) -> PairingError {
-    PairingError::Hid(error.to_string())
+/// [`PairingError`] is `Serialize` and [`BackendError`] is not, so the message
+/// is the payload. A `From` impl is legal here because [`BackendError`] is
+/// local to this crate — the orphan rule only blocked it while the source type
+/// was `async_hid::HidError`, foreign like [`PairingError`] itself.
+impl From<BackendError> for PairingError {
+    fn from(error: BackendError) -> Self {
+        Self::Hid(error.to_string())
+    }
 }
 
 /// Lists supported pairing-capable receivers connected to the host.
 pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
     let mut out = Vec::new();
-    for dev in enumerate_hidpp_devices()
-        .await
-        .map_err(|e| classify_hid_error(&e))?
-    {
-        let Some((_, channel)) = open_hidpp_channel(dev)
-            .await
-            .map_err(|e| classify_hid_error(&e))?
-        else {
+    for dev in enumerate_hidpp_devices().await? {
+        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {
@@ -222,14 +219,8 @@ async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
 async fn open_receiver(
     target: &ReceiverSelector,
 ) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
-    for dev in enumerate_hidpp_devices()
-        .await
-        .map_err(|e| classify_hid_error(&e))?
-    {
-        let Some((_, channel)) = open_hidpp_channel(dev)
-            .await
-            .map_err(|e| classify_hid_error(&e))?
-        else {
+    for dev in enumerate_hidpp_devices().await? {
+        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {

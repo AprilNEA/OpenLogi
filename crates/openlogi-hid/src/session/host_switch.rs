@@ -27,6 +27,7 @@ use tracing::{debug, info};
 
 use crate::{
     ChannelPool, DeviceRoute,
+    backend::BackendError,
     reprog_controls::{self, ReprogControlsV4},
 };
 
@@ -70,7 +71,7 @@ struct ArmedControl {
 pub enum HostSwitchError {
     /// HID transport-level failure.
     #[error("HID transport error")]
-    Hid(#[from] async_hid::HidError),
+    Hid(#[from] BackendError),
     /// The configured keyboard is not currently reachable.
     #[error("configured keyboard is not connected")]
     KeyboardNotFound,
