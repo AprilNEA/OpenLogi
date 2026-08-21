@@ -105,6 +105,10 @@ if command -v udevadm >/dev/null 2>&1; then
   sudo udevadm trigger --subsystem-match=hidraw
   sudo udevadm trigger --subsystem-match=input
   sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
+  # trigger only queues the events. Without settle the script can return before
+  # udev has applied the uaccess ACLs, so the next thing the user does — start
+  # the agent — still hits EACCES on a correctly configured system.
+  sudo udevadm settle 2>/dev/null || true
 fi
 
 # ── systemd user unit ─────────────────────────────────────────────────────────
