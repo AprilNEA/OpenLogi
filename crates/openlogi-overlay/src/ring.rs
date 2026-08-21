@@ -92,7 +92,9 @@ impl RingView {
 
     /// The ring session this view is showing, if any.
     pub(crate) fn current_session(&self) -> Option<u64> {
-        self.invocation.as_ref().map(|invocation| invocation.session_id)
+        self.invocation
+            .as_ref()
+            .map(|invocation| invocation.session_id)
     }
 
     pub(crate) fn install(&mut self, invocation: ActionRingInvocation, cx: &mut Context<Self>) {

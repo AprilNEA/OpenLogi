@@ -60,13 +60,7 @@ fn main() -> Result<()> {
         cx.spawn(async move |cx| {
             while let Some(observed) = invocations.recv().await {
                 if let Some(warm_window) = warm_window.as_ref() {
-                    handle_warm_observation(
-                        cx,
-                        warm_window,
-                        observed,
-                        &commands,
-                        &live_session,
-                    );
+                    handle_warm_observation(cx, warm_window, observed, &commands, &live_session);
                 } else {
                     handle_cold_observation(cx, observed, &commands, &live_session);
                 }
@@ -76,7 +70,6 @@ fn main() -> Result<()> {
     });
     Ok(())
 }
-
 
 /// Pre-create the Actions Ring native window once. Windows, macOS and X11 can
 /// reuse it; unsupported backends keep the existing create/destroy path.
@@ -207,9 +200,7 @@ fn handle_cold_observation(
             cx.new(|_| RingView::new(invocation, commands, Arc::clone(&live_session)))
         }) {
             Ok(handle) => {
-                let _ = handle.update(cx, |_, window, _| {
-                    platform::apply_circular_shape(window)
-                });
+                let _ = handle.update(cx, |_, window, _| platform::apply_circular_shape(window));
                 live_session.set(session_id);
                 for previous in previous_windows {
                     let _ = previous.update(cx, |_, window, _| window.remove_window());
