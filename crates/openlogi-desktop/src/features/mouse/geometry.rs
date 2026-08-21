@@ -230,9 +230,18 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         }
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
         "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
-        "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
+        // Two names for one control: the MX Master line calls it ModeShift, a
+        // model whose only extra button *is* the DPI switch names it directly.
+        "SLOT_NAME_MODESHIFT_BUTTON" | "SLOT_NAME_DPI_BUTTON" => {
+            Some(MouseControlId::Button(ButtonId::DpiToggle))
+        }
         "SLOT_NAME_THUMBWHEEL" => Some(MouseControlId::ThumbwheelRotation),
         "SLOT_NAME_GESTURE_BUTTON" => Some(MouseControlId::Button(ButtonId::GestureButton)),
+        // Deliberately unmapped: a model with no gesture button also ships a
+        // marker per swipe direction (`SLOT_NAME_GESTURE_*_BUTTON`), all marking
+        // the control its `SLOT_NAME_DPI_BUTTON` already covers. Mapping them
+        // would stack five duplicate hotspots — this builder does not dedupe —
+        // and the picker renders directions from the binding's gesture map.
         // The MX Master 4 Haptic Sense Panel. Logi names the slot after its
         // Options+ default assignment (the radial Actions Ring menu), but the
         // marker is the panel itself.
@@ -283,6 +292,37 @@ mod tests {
             assert_eq!(
                 map_slot_name(name),
                 Some(MouseControlId::Button(ButtonId::WheelTiltRight))
+            );
+        }
+    }
+
+    #[test]
+    fn both_dpi_slot_names_resolve_to_the_dpi_toggle() {
+        // Missing either name leaves that button with no hotspot at all.
+        for name in ["SLOT_NAME_MODESHIFT_BUTTON", "SLOT_NAME_DPI_BUTTON"] {
+            assert_eq!(
+                map_slot_name(name),
+                Some(MouseControlId::Button(ButtonId::DpiToggle)),
+                "{name} must resolve to the DPI toggle"
+            );
+        }
+    }
+
+    #[test]
+    fn per_direction_gesture_slots_do_not_become_hotspots() {
+        // They mark the control the DPI marker covers, and the builder does not
+        // dedupe, so mapping them would stack duplicate hotspots.
+        for name in [
+            "SLOT_NAME_GESTURE_UP_BUTTON",
+            "SLOT_NAME_GESTURE_DOWN_BUTTON",
+            "SLOT_NAME_GESTURE_LEFT_BUTTON",
+            "SLOT_NAME_GESTURE_RIGHT_BUTTON",
+            "SLOT_NAME_GESTURE_CLICK_BUTTON",
+        ] {
+            assert_eq!(
+                map_slot_name(name),
+                None,
+                "{name} must not become a hotspot"
             );
         }
     }
