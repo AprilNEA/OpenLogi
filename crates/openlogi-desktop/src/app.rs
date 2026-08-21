@@ -172,11 +172,10 @@ pub struct AppView {
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
-    #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Re-renders the root when the device list changes so the empty state
     /// swaps to the device UI (and back) on hot-plug, without a restart.
-    #[allow(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
     accessibility_dismissed: bool,
     /// Which section of the device-detail screen is showing.
@@ -404,7 +403,7 @@ fn app_title_bar(pal: Palette) -> impl IntoElement {
 }
 
 impl Render for AppView {
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
@@ -580,11 +579,6 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "capability fixture construction is intentionally asserted in tests"
-    )]
-
     use super::home::connection_icon_path;
     use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
     use openlogi_core::device::{

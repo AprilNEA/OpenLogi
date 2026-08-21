@@ -34,3 +34,17 @@ language = "system"
 types = ["rust"]
 pass_filenames = false
 stages = ["pre-push"]
+
+# A broken intra-doc link is neither a compile error nor a clippy lint, so rustdoc
+# is the only step that catches one — and deleting or renaming an item silently
+# orphans every link to it. Mirrors CI's `rustdoc (non-GUI crates)` job: the GPUI
+# crates are excluded because documenting them drags in the graphics toolchain.
+# `sh -c` because RUSTDOCFLAGS is an env var and hook entries are not shell strings.
+[[repos.hooks]]
+id = "cargo-rustdoc"
+name = "cargo doc"
+entry = "sh -c 'RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --document-private-items --exclude openlogi-ui --exclude openlogi-desktop --exclude openlogi-overlay --exclude openlogi-agent'"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+stages = ["pre-push"]

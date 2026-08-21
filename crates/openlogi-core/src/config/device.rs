@@ -234,7 +234,7 @@ fn default_true() -> bool {
 }
 
 /// `skip_serializing_if` helper for `bool` fields whose default is `true`.
-#[allow(
+#[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
 )]
@@ -244,7 +244,7 @@ fn is_true(b: &bool) -> bool {
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
 /// `false`: keeps an unset toggle out of `config.toml` entirely.
-#[allow(
+#[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
 )]

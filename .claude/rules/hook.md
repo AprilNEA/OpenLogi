@@ -10,7 +10,7 @@ paths:
   run-loop slice — a stopped watcher after grant once froze all input on the machine.
   Don't restructure it casually, and don't migrate the tap to `objc2-core-graphics`.
   The `NSWorkspace` read and the Accessibility-trust check/prompt are the parts that
-  did move to the objc2 framework crates — see `platform/AGENTS.md` for the rule that
+  did move to the objc2 framework crates — see `.claude/rules/objc-ffi.md` for the rule that
   every TCC call uses a typed binding rather than a hand-written `extern` block.
 - The tap callback must never block and never panic: use `try_read`/`try_lock` only,
   queue bound actions off-thread, wrap the user callback in `catch_unwind`, and keep

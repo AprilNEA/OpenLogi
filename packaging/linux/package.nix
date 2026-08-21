@@ -56,6 +56,9 @@ let
       (src + "/packaging/linux/desktop")
       (src + "/packaging/linux/systemd")
       (src + "/packaging/linux/udev")
+      # xtask's packaged-bins test include_str!s this; omitting it fails
+      # `cargo test --workspace` inside the Nix sandbox.
+      (src + "/packaging/linux/nfpm.yaml")
       (src + "/xtask")
     ];
   };

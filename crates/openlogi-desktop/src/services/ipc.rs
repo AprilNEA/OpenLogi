@@ -586,7 +586,7 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
 
 /// Reply to a read command that the agent is unreachable; writes are
 /// fire-and-forget so they have nothing to reply to.
-#[allow(
+#[expect(
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]

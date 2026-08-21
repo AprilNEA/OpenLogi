@@ -108,7 +108,6 @@ impl AssetSource for ActionIcons {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AssetSource as _;
     use openlogi_core::binding::ActionRingIcon;
 
     use super::*;

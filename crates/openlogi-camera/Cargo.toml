@@ -12,6 +12,7 @@ categories = ["hardware-support"]
 
 [dependencies]
 serde = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # AVFoundation (AVCaptureDevice enumeration + AVCaptureSession capture) on the
@@ -27,7 +28,7 @@ tracing = { workspace = true }
 # so nothing here declares its own `extern "C"` block.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-block2 = "0.6"
+block2 = { workspace = true }
 objc2-core-foundation = { workspace = true, features = [
     "std",
     "CFDictionary",

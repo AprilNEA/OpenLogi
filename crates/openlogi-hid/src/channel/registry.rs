@@ -150,8 +150,7 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
     fn any_current(&self, predicate: impl FnMut(&DeviceRoute, &Channel) -> bool) -> bool {
         self.state
             .read()
-            .ok()
-            .is_some_and(|state| state.any_current(predicate))
+            .is_ok_and(|state| state.any_current(predicate))
     }
 }
 

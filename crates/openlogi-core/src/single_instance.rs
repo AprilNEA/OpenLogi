@@ -24,10 +24,6 @@ use crate::paths::{self, PathsError};
 /// releases the underlying file lock at the same time). The `_handle` field
 /// is intentionally unused — the value is alive only for its `Drop` side
 /// effect of closing the fd.
-#[allow(
-    dead_code,
-    reason = "the File is held only so the OS keeps the lock — not read again"
-)]
 pub struct InstanceGuard {
     _handle: File,
 }

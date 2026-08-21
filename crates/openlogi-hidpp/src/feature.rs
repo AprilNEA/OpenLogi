@@ -4,7 +4,7 @@ use std::{any::Any, sync::Arc};
 
 use crate::{
     channel::{HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard},
-    event::EventEmitter,
+    emitter::EventEmitter,
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
@@ -297,11 +297,6 @@ bitflags::bitflags! {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use super::event_payload;
     use crate::{

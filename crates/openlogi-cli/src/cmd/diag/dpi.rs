@@ -111,7 +111,6 @@ fn summarize_dpi(capabilities: &openlogi_hid::DpiCapabilities) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod summarize_dpi_tests {
     use openlogi_hid::DpiCapabilities;
 

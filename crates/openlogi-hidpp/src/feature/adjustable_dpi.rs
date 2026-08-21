@@ -109,7 +109,6 @@ fn parse_dpi_list_payload(bytes: &[u8]) -> Result<Vec<u16>, Hidpp20Error> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use std::assert_matches;
 

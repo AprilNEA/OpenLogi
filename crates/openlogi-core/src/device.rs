@@ -95,7 +95,7 @@ impl DeviceKind {
 /// actually announced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
 )]
@@ -295,7 +295,7 @@ impl DeviceModelInfo {
 /// device firmware exposes. The shape is dictated by HID++ feature 0x0003;
 /// a state machine doesn't fit since a single device can announce multiple
 /// transports simultaneously.
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
@@ -422,11 +422,6 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "range fixture construction is intentionally asserted in tests"
-    )]
-
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
         DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,

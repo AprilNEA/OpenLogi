@@ -3,11 +3,6 @@
 //! stored as plain `f32` tuples so this module stays purely data and doesn't
 //! drag in `gpui` types.
 
-#![allow(
-    dead_code,
-    reason = "scaffolding consumed by UI.md phases 3–6 (carousel, popover, hotspots)"
-)]
-
 use openlogi_core::binding::ButtonId;
 
 /// One visual target in the mouse diagram.

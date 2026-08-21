@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Mutex, MutexGuard, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -16,18 +16,13 @@ use futures::{FutureExt, channel::oneshot, select};
 use rand::Rng;
 use tracing::trace;
 
-use crate::nibble::U4;
+use crate::{nibble::U4, sync::lock};
 
 mod error;
 mod message;
 mod raw;
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 pub(crate) mod tests;
 
 pub use error::ChannelError;
@@ -52,17 +47,6 @@ const MAX_RAW_REPORT_LENGTH: usize = 64;
 pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
-
-/// Locks `mutex`, treating poisoning as unrecoverable: a panicking holder
-/// leaves the channel's shared queues in an inconsistent state, so
-/// continuing would operate on corrupt data.
-#[expect(
-    clippy::expect_used,
-    reason = "mutex poisoning is unrecoverable here — see doc comment"
-)]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().expect("mutex poisoned")
-}
 
 /// Removes a HID++ message listener when dropped.
 pub struct MessageListenerGuard {

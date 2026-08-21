@@ -19,7 +19,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use super::{RECEIVER_DEVICE_INDEX, ReceiverError};
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
+    emitter::EventEmitter,
     protocol::v10::{self, Hidpp10Error},
 };
 

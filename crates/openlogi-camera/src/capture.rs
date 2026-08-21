@@ -23,13 +23,6 @@
     unsafe_code,
     reason = "AVFoundation / CoreMedia / CoreVideo capture FFI"
 )]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    reason = "pixel dimensions and FourCC constants are bounded and copied verbatim"
-)]
-
 use std::ffi::{CString, c_void};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -159,11 +152,16 @@ define_class!(
                         }
                     }
                     if let Ok(mut slot) = LATEST.lock() {
-                        *slot = Some(Arc::new(Frame {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "CoreVideo reports sensor-sized dimensions, divided down again by `step`"
+                        )]
+                        let frame = Frame {
                             width: out_w as u32,
                             height: out_h as u32,
                             bgra,
-                        }));
+                        };
+                        *slot = Some(Arc::new(frame));
                         FRAME_GEN.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -302,7 +300,7 @@ fn device_with_unique_id(unique_id: &str) -> Option<Retained<AnyObject>> {
 }
 
 /// A running capture session. Frames flow to the delegate on a background
-/// dispatch queue and land in [`latest`]; dropping the session stops it. The
+/// dispatch queue and land in [`LATEST`]; dropping the session stops it. The
 /// `Retained` fields keep the output + delegate alive for the session's life
 /// (the session references them, but we hold owning handles for clarity).
 struct Session {
@@ -321,7 +319,7 @@ impl Drop for Session {
 }
 
 /// Authorize, wire up, and start a capture session on `unique_id`. Frames begin
-/// arriving in [`latest`] shortly after this returns.
+/// arriving in [`LATEST`] shortly after this returns.
 fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError> {
     ensure_access()?;
     let device = device_with_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
