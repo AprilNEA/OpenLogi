@@ -43,16 +43,17 @@ pub use channel::route::{
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel};
 pub use hidpp::feature::FeatureType;
 pub use hidpp::feature::device_information::DeviceEntityType;
-pub use inventory::hotplug::watch_hotplug;
-pub use inventory::standalone::enumerate_standalone;
-pub use inventory::{Enumerator, InventoryError, enumerate};
+// `host` supplies this machine's backend to the entry points that need one;
+// the types and the backend-taking originals stay reachable by module path.
+pub use host::{enumerate, enumerate_standalone, list_pairing_receivers, watch_hotplug};
+pub use inventory::{Enumerator, InventoryError};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
-    PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
+    PasskeyMethod, ReceiverFamily, ReceiverSelector, run_pairing, unpair,
 };
 pub use session::gesture::{
     CaptureChannel, CaptureStop, CapturedInput, GestureError, run_capture_session,
-    run_capture_session_with_registry, run_capture_session_with_stop_reason,
+    run_capture_session_with_stop_reason,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
@@ -67,11 +68,11 @@ pub use smartshift::{
 // backend; the channel-addressed `_on` half needs none and comes straight from
 // `write`.
 pub use host::{
-    apply_litra, dump_features, dump_firmware_entities, dump_reprog_controls, get_backlight, get_dpi, get_dpi_info,
-    get_scroll_wheel_mode, get_smartshift_status, play_haptic, read_battery_raw,
-    set_backlight_enabled, set_dpi, set_fn_lock, set_keyboard_color, set_keyboard_color_with,
-    set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_smartshift,
-    set_smartshift_sensitivity, toggle_smartshift,
+    apply_litra, dump_features, dump_firmware_entities, dump_reprog_controls, get_backlight,
+    get_dpi, get_dpi_info, get_scroll_wheel_mode, get_smartshift_status, play_haptic,
+    read_battery_raw, set_backlight_enabled, set_dpi, set_fn_lock, set_keyboard_color,
+    set_keyboard_color_with, set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode,
+    set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
 };
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,

@@ -38,7 +38,7 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
-use crate::channel::transport::native_backend;
+use crate::backend::HidBackend;
 
 mod notification;
 mod registers;
@@ -172,9 +172,10 @@ pub enum PairingCommand {
 }
 
 /// Lists supported pairing-capable receivers connected to the host.
-pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
+pub async fn list_pairing_receivers(
+    backend: &dyn HidBackend,
+) -> Result<Vec<PairingReceiver>, PairingError> {
     let mut out = Vec::new();
-    let backend = native_backend();
     for node in backend.enumerate_hidpp().await? {
         let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
@@ -205,9 +206,9 @@ async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
 
 /// Opens the channel for the receiver named by `target`.
 async fn open_receiver(
+    backend: &dyn HidBackend,
     target: &ReceiverSelector,
 ) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
-    let backend = native_backend();
     for node in backend.enumerate_hidpp().await? {
         let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
@@ -244,11 +245,12 @@ const DISCOVERY_TIMEOUT: u8 = 30;
 /// sender to forward the user's device pick / cancel, and read events to drive
 /// the UI.
 pub async fn run_pairing(
+    backend: &dyn HidBackend,
     target: ReceiverSelector,
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let (channel, family) = match open_receiver(&target).await {
+    let (channel, family) = match open_receiver(backend, &target).await {
         Ok(receiver) => receiver,
         Err(e) => {
             let _ = events.send(PairingEvent::Failed(e.clone()));
@@ -467,8 +469,12 @@ async fn cancel(channel: &HidppChannel, phase: PairingPhase) {
 }
 
 /// Removes the device on `slot` from the receiver named by `target`.
-pub async fn unpair(target: ReceiverSelector, slot: u8) -> Result<(), PairingError> {
-    let (channel, family) = open_receiver(&target).await?;
+pub async fn unpair(
+    backend: &dyn HidBackend,
+    target: ReceiverSelector,
+    slot: u8,
+) -> Result<(), PairingError> {
+    let (channel, family) = open_receiver(backend, &target).await?;
     match family {
         ReceiverFamily::Bolt => {
             let mut payload = [0u8; 16];

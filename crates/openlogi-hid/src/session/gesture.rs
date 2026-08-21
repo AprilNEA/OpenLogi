@@ -27,9 +27,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::SharedChannel;
-use crate::backend::BackendError;
+use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
-use crate::channel::transport::native_backend;
+
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel};
 
@@ -174,14 +174,14 @@ pub struct CaptureSpec {
 /// dropped), after restoring every diverted control. Setup errors are returned;
 /// failures to restore on the way out are logged, not propagated.
 pub async fn run_capture_session(
+    backend: &dyn HidBackend,
     route: DeviceRoute,
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let backend = native_backend();
-    let chan = open_route_channel(&*backend, &route)
+    let chan = open_route_channel(backend, &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
@@ -307,6 +307,7 @@ pub async fn run_capture_session(
 
 /// Reason-aware capture: maps stop reasons onto a unit oneshot shutdown.
 pub async fn run_capture_session_with_stop_reason(
+    backend: &dyn HidBackend,
     route: DeviceRoute,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
@@ -329,28 +330,7 @@ pub async fn run_capture_session_with_stop_reason(
             .collect(),
         divert_buttons: Vec::new(),
     };
-    run_capture_session(route, spec, sink, rx, channel_slot).await
-}
-
-/// Registry-aware capture: currently opens via route (inventory channel reuse TBD).
-pub async fn run_capture_session_with_registry(
-    route: DeviceRoute,
-    capture_thumbwheel: bool,
-    divert_gesture_button: bool,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<CaptureStop>,
-    channel_slot: CaptureChannel,
-    _registry: &crate::ChannelRegistry,
-) -> Result<(), GestureError> {
-    run_capture_session_with_stop_reason(
-        route,
-        capture_thumbwheel,
-        divert_gesture_button,
-        sink,
-        shutdown,
-        channel_slot,
-    )
-    .await
+    run_capture_session(backend, route, spec, sink, rx, channel_slot).await
 }
 
 /// The set of controls a session has diverted, kept so they can be handed back

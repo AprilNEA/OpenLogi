@@ -1,13 +1,11 @@
 //! OS HID hotplug events.
 
-use futures_lite::Stream;
-
-pub use crate::backend::HotplugEvent;
+pub use crate::backend::{HotplugEvent, HotplugStream};
 
 use super::InventoryError;
-use crate::channel::transport::native_backend;
+use crate::backend::HidBackend;
 
 /// Subscribe to OS HID hotplug events through the shared process-wide backend.
-pub fn watch_hotplug() -> Result<impl Stream<Item = HotplugEvent> + Send + Unpin, InventoryError> {
-    Ok(native_backend().watch()?)
+pub fn watch_hotplug(backend: &dyn HidBackend) -> Result<HotplugStream, InventoryError> {
+    Ok(backend.watch()?)
 }

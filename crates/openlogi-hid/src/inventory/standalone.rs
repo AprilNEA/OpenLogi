@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
 
 use super::InventoryError;
-use crate::channel::transport::native_backend;
+use crate::backend::HidBackend;
 use crate::write::{LitraModel, matches_litra};
 
 /// Enumerate recognized standalone devices without probing them as HID++.
@@ -13,8 +13,10 @@ use crate::write::{LitraModel, matches_litra};
 /// The returned descriptors are intentionally separate from receiver
 /// inventories. A raw device has no HID++ pairing slot and must be routed by
 /// its full HID identity tuple.
-pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryError> {
-    let devices = native_backend().enumerate().await?;
+pub async fn enumerate_standalone(
+    backend: &dyn HidBackend,
+) -> Result<Vec<StandaloneDevice>, InventoryError> {
+    let devices = backend.enumerate().await?;
     let devices: Vec<_> = devices
         .into_iter()
         .filter_map(|device| {

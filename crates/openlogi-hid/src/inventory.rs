@@ -17,7 +17,6 @@ use tracing::{debug, warn};
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, is_receiver_pid};
-use crate::channel::transport::native_backend;
 use ledger::NodeLedger;
 
 mod cache;
@@ -30,7 +29,7 @@ mod probe;
 pub(crate) mod standalone;
 
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
-use persist::{FileProbeCacheStore, ProbeCacheSnapshot, ProbeCacheStore};
+use persist::{ProbeCacheSnapshot, ProbeCacheStore};
 use probe::{NodeProbe, probe_one};
 
 /// How long to wait for device-arrival event bursts before assuming the
@@ -127,8 +126,8 @@ pub enum InventoryError {
 /// device every ~2s. One-shot callers use the [`enumerate`] free function, which
 /// runs against a fresh (empty) cache.
 pub struct Enumerator {
-    /// The HID stack this enumerator walks. Defaults to the host's; tests and
-    /// non-native hosts supply their own through [`Enumerator::with_backend`].
+    /// The HID stack this enumerator walks. `openlogi-hid` supplies this
+    /// host's; tests and other hosts supply their own.
     backend: Arc<dyn HidBackend>,
     cache: HashMap<CacheKey, Cached>,
     /// Consecutive ticks each cached device has been missing, for grace-period
@@ -154,12 +153,6 @@ pub struct Enumerator {
     /// Whether the persistable cache content changed since the last save —
     /// fresh full probes and evictions, not per-tick battery refreshes.
     cache_dirty: bool,
-}
-
-impl Default for Enumerator {
-    fn default() -> Self {
-        Self::with_backend(native_backend())
-    }
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -288,7 +281,9 @@ fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
 ///
 /// We merge the two so an MX Master that's been asleep still shows up with
 /// its codename and kind even before you click it.
-pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
+pub async fn enumerate(
+    backend: Arc<dyn HidBackend>,
+) -> Result<Vec<DeviceInventory>, InventoryError> {
     // The polling [`Enumerator`] keeps a per-node ledger across ticks, so a
     // transient probe miss replays the node's last good inventory. A one-shot
     // caller (CLI `list` / `diag`) builds a fresh `Enumerator` whose ledger is
@@ -304,7 +299,7 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
     // the expected stable Unifying offline drain has settled. A failed/timed-out
     // probe must keep using the full retry budget so the next attempt can reopen
     // the channel and recover.
-    let mut enumerator = Enumerator::default();
+    let mut enumerator = Enumerator::with_backend(backend);
     let mut previous_inventories: Option<Vec<DeviceInventory>> = None;
     let mut attempt = 1u8;
     loop {
@@ -406,8 +401,8 @@ fn append_live_cached_channels(
 }
 
 impl Enumerator {
-    /// Build an enumerator that walks `backend` instead of the host's HID
-    /// stack — a scripted device tree in tests, or another host's stack.
+    /// An enumerator that walks `backend` — this host's HID stack, a scripted
+    /// device tree in tests, or another host's.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn HidBackend>) -> Self {
         Self {
@@ -423,29 +418,12 @@ impl Enumerator {
         }
     }
 
-    /// Build a persistent enumerator that publishes its already-open channels
-    /// into `registry` after each settled inventory tick.
+    /// Publish this enumerator's already-open channels into `registry` after
+    /// each settled inventory tick.
     #[must_use]
-    pub fn with_registry(registry: ChannelRegistry) -> Self {
-        Self {
-            registry: Some(registry),
-            ..Self::default()
-        }
-    }
-
-    /// Warm-start this enumerator's immutable probe cache from (and write it
-    /// back to) the on-disk cache under the app data dir, so a device fully
-    /// probed once keeps its identity across restarts. Falls back to
-    /// memory-only when no data dir is resolvable.
-    ///
-    /// A modifier rather than a constructor: persistence is orthogonal to the
-    /// channel registry, so the agent's enumerator carries both.
-    #[must_use]
-    pub fn persisted(self) -> Self {
-        match FileProbeCacheStore::in_data_dir() {
-            Some(store) => self.with_probe_cache(Arc::new(store)),
-            None => self,
-        }
+    pub fn with_registry(mut self, registry: ChannelRegistry) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     /// Warm-start this enumerator's immutable probe cache from `store`, and

@@ -192,7 +192,7 @@ impl Orchestrator {
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
-            channel_pool: ChannelPool::default(),
+            channel_pool: openlogi_hid::host::channel_pool(),
             keyboard_spec: Arc::new(RwLock::new(None)),
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),

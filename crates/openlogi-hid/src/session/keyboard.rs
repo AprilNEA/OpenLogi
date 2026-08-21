@@ -31,8 +31,9 @@ use tracing::{debug, info, warn};
 use super::gesture::{CaptureChannel, CapturedInput, GestureError, enumerate_controls, restore};
 use crate::ChannelRegistry;
 use crate::SharedChannel;
+use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
-use crate::channel::transport::native_backend;
+
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
 /// The divertable keyboard F-row controls OpenLogi models, as
@@ -60,14 +61,14 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 /// device doesn't expose (or can't divert) are skipped with a debug log, so a
 /// partially-supported keyboard degrades per key rather than failing whole.
 pub async fn run_keyboard_capture_session(
+    backend: &dyn HidBackend,
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let backend = native_backend();
-    let chan = open_route_channel(&*backend, &route)
+    let chan = open_route_channel(backend, &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());

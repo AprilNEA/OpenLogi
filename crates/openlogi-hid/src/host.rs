@@ -9,16 +9,34 @@
 //! Channel-addressed operations (the `_on` family) need no backend and are not
 //! wrapped: they act on a channel the caller already holds.
 
-use openlogi_core::hid::{LightCommand, WriteError};
+use std::sync::Arc;
 
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+
+use crate::backend::{HidBackend, HotplugStream};
 use crate::backlight::BacklightState;
+use crate::channel::ChannelPool;
 use crate::channel::route::DeviceRoute;
 use crate::channel::transport::native_backend;
+use crate::inventory::persist::FileProbeCacheStore;
+use crate::inventory::{Enumerator, InventoryError};
+use crate::pairing::PairingReceiver;
 use crate::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
 use crate::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, HapticWaveform, LightingMethod, LitraModel,
-    FirmwareEntity, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
+    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
+
+/// This host's HID stack.
+///
+/// Public because the entry points with a wide parameter list — a capture
+/// session, a pairing flow — are clearer passed a backend than wrapped again;
+/// an agent that drives them names its backend once and hands it down.
+#[must_use]
+pub fn backend() -> Arc<dyn HidBackend> {
+    native_backend()
+}
 
 /// Read the sensor DPI of the device `route` reaches.
 pub async fn get_dpi(route: &DeviceRoute) -> Result<Dpi, WriteError> {
@@ -163,4 +181,53 @@ pub async fn dump_reprog_controls(
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await
+}
+
+/// An enumerator over this host's HID stack, with a memory-only probe cache.
+///
+/// One-shot callers (the CLI) want exactly this: nothing to warm-start from and
+/// nothing left behind.
+#[must_use]
+pub fn enumerator() -> Enumerator {
+    Enumerator::with_backend(native_backend())
+}
+
+/// An enumerator over this host's HID stack whose probe cache is the on-disk
+/// one, so a device fully probed once keeps its identity across restarts.
+///
+/// Falls back to memory-only when no data dir resolves — a warm start is an
+/// optimization, never a requirement.
+#[must_use]
+pub fn persisted_enumerator() -> Enumerator {
+    let enumerator = enumerator();
+    match FileProbeCacheStore::in_data_dir() {
+        Some(store) => enumerator.with_probe_cache(Arc::new(store)),
+        None => enumerator,
+    }
+}
+
+/// A channel pool over this host's HID stack.
+#[must_use]
+pub fn channel_pool() -> ChannelPool {
+    ChannelPool::with_backend(native_backend())
+}
+
+/// Enumerate this host's recognized standalone devices.
+pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryError> {
+    crate::inventory::standalone::enumerate_standalone(&*native_backend()).await
+}
+
+/// Subscribe to this host's HID hotplug events.
+pub fn watch_hotplug() -> Result<HotplugStream, InventoryError> {
+    crate::inventory::hotplug::watch_hotplug(&*native_backend())
+}
+
+/// Enumerate the HID++ receivers and paired devices on this host, once.
+pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
+    crate::inventory::enumerate(native_backend()).await
+}
+
+/// List the pairing-capable receivers connected to this host.
+pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
+    crate::pairing::list_pairing_receivers(&*native_backend()).await
 }

@@ -253,12 +253,10 @@ fn spawn_inner(
             // is reused instead of being re-handshaked every poll.
             // Warm-start from the persisted probe cache too, so devices keep
             // their identity across agent restarts without a fresh interview.
-            let mut enumerator = registry
-                .map_or_else(
-                    openlogi_hid::Enumerator::default,
-                    openlogi_hid::Enumerator::with_registry,
-                )
-                .persisted();
+            let mut enumerator = openlogi_hid::host::persisted_enumerator();
+            if let Some(registry) = registry {
+                enumerator = enumerator.with_registry(registry);
+            }
             let mut state = WatchState::default();
             let mut last_tick = SystemTime::now();
             // `block_on` installs runtime context so a backend that registers an

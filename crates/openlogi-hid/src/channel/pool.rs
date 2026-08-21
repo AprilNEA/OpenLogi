@@ -7,21 +7,14 @@ use tokio::sync::Mutex;
 
 use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
-use crate::channel::transport::native_backend;
 
 /// Reuses one open HID++ channel for routes on the same receiver.
 #[derive(Clone)]
 pub struct ChannelPool {
-    /// The HID stack routes are opened through. Defaults to the host's; tests
-    /// and non-native hosts supply their own via [`ChannelPool::with_backend`].
+    /// The HID stack routes are opened through. `openlogi-hid` supplies this
+    /// host's; tests and other hosts supply their own.
     backend: Arc<dyn HidBackend>,
     entries: Arc<Mutex<Vec<PoolEntry>>>,
-}
-
-impl Default for ChannelPool {
-    fn default() -> Self {
-        Self::with_backend(native_backend())
-    }
 }
 
 struct PoolEntry {
@@ -30,8 +23,7 @@ struct PoolEntry {
 }
 
 impl ChannelPool {
-    /// Build a pool that opens through `backend` instead of the host's HID
-    /// stack.
+    /// A pool that opens through `backend`.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn HidBackend>) -> Self {
         Self {

@@ -45,7 +45,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
     // A system whose devices never persist (direct-only, or Unifying) must not
     // rewrite probe-cache.json on every refresh pass: the file's content
     // wouldn't change.
-    let mut e = Enumerator::default();
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
     let unifying = CacheKey::UnifyingSlot {
         receiver_uid: "DA2699E1".into(),
         slot: 1,
@@ -77,7 +77,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
 
 #[test]
 fn cache_entry_survives_grace_then_evicts() {
-    let mut e = Enumerator::default();
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
     let key = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
@@ -101,7 +101,7 @@ fn cache_entry_survives_grace_then_evicts() {
 
 #[test]
 fn being_seen_resets_the_miss_counter() {
-    let mut e = Enumerator::default();
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
     let key = CacheKey::Bolt { unit_id: [9; 4] };
     e.cache.insert(key.clone(), cache_entry(0));
     let nobody = HashSet::new();
