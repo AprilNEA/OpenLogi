@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Tag to build (blank = the workspace version)"
+        description: "Tag to build and advertise (blank = build this ref)"
         type: string
         default: ""
       publish:
@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pick.outputs.version }}
+      ref: ${{ steps.pick.outputs.ref }}
       publish: ${{ steps.pick.outputs.publish }}
     steps:
       - uses: actions/checkout@v6
@@ -58,16 +59,24 @@ jobs:
           REQUESTED: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # `ref` is what gets built and `version` is what the build calls
+          # itself; they must never disagree, or a signed repository ends up
+          # advertising a release identity its binaries were not built from.
           if [ -n "${TAG}" ]; then
             version="${TAG}"
+            ref="${TAG}"
           elif [ -n "${REQUESTED}" ]; then
             version="${REQUESTED}"
+            ref="${REQUESTED}"
           else
-            # A dispatch with no tag is a rehearsal of the current tree.
+            # A dispatch with no tag is a rehearsal of whatever ref it ran on,
+            # so the workspace version is the honest label for it.
             version="v$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            ref="${GITHUB_REF}"
           fi
-          echo "building ${version}"
+          echo "building ${ref} as ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
           # A release always publishes; a dispatch only when asked.
           if [ "${{ github.event_name }}" = "release" ] || [ "${{ inputs.publish }}" = "true" ]; then
@@ -90,6 +99,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Install flatpak
         run: |
@@ -157,6 +168,8 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Check for the signing key
         id: gpg
