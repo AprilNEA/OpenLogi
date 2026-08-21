@@ -23,7 +23,7 @@ tracing = { workspace = true }
 
 # Only for the Logitech vendor ID — `openlogi-core` is pure types, no I/O.
 [target.'cfg(target_os = "linux")'.dependencies]
-openlogi-core = { version = "0.7.4", path = "../openlogi-core" }
+openlogi-core = { version = "0.7.5", path = "../openlogi-core" }
 
 [lints]
 workspace = true
