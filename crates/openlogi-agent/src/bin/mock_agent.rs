@@ -429,10 +429,7 @@ fn standalone_light() -> StandaloneDevice {
             zones: false,
         }),
         driver_id: "litra".to_string(),
-        // Must stay `Some` until #571 is fixed: `registry_model_id` is
-        // `skip_serializing_if`, which truncates the bincode stream when it is
-        // `None` and makes the whole snapshot undecodable. `8c900` is also the
-        // real registry id for a Litra Glow, so the asset lookup resolves.
+        // `8c900` is the real registry id for a Litra Glow, so the asset lookup resolves.
         registry_model_id: Some("8c900".to_string()),
     }
 }
@@ -629,6 +626,7 @@ fn agent_status() -> AgentStatus {
         // The "-mock" marker shows up anywhere the GUI displays the agent
         // version, so a mock session can't be mistaken for a live one.
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
+        input_monitoring_granted: true,
     }
 }
 

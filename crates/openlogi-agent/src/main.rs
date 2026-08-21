@@ -425,6 +425,7 @@ async fn run(
     let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
     let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
     let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
+    let mut input_monitoring_rx = watchers::input_monitoring::spawn(Duration::from_millis(1200));
 
     let (mut sigterm, mut sigint) = shutdown_signals();
 
@@ -507,6 +508,9 @@ async fn run(
             // through the same door, so the event tap goes with us (#807).
             Some(()) = uninstalled.recv() => {
                 release_hook_and_exit(hook.take(), "the app was uninstalled")
+            }
+            Some(granted) = input_monitoring_rx.recv() => {
+                observable.set_input_monitoring_granted(granted);
             }
             else => break,
         }

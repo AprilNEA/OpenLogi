@@ -52,7 +52,9 @@ pub use succession::Identity;
 ///      [`RingObservation`]).
 /// v22: DPI scalar values use the validated [`Dpi`] type end to end.
 /// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
-pub const PROTOCOL_VERSION: u32 = 23;
+/// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
+/// v25: `AgentStatus::input_monitoring_granted` appended.
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -91,6 +93,10 @@ pub enum InventoryHealth {
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "AgentStatus is a serialized health DTO; bools keep the IPC shape explicit"
+)]
 pub struct AgentStatus {
     pub accessibility_granted: bool,
     pub hook_installed: bool,
@@ -99,6 +105,8 @@ pub struct AgentStatus {
     pub inventory: InventoryHealth,
     pub protocol_version: u32,
     pub agent_version: String,
+    /// Whether the agent process holds Input Monitoring (HID) access.
+    pub input_monitoring_granted: bool,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
