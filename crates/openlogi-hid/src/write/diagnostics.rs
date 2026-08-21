@@ -1,13 +1,17 @@
 use std::sync::Arc;
 
 use hidpp::{
+    channel::HidppChannel,
     device::Device,
     feature::CreatableFeature,
     feature::FeatureType,
     feature::battery_status::BatteryStatusFeature,
-    feature::device_information::{DeviceEntityType, DeviceInformationFeature},
+    feature::device_information::{
+        DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
+    },
     feature::feature_set::FeatureSetFeature,
     feature::unified_battery::UnifiedBatteryFeature,
+    protocol::v20::Hidpp20Error,
 };
 
 use crate::channel::route::DeviceRoute;
@@ -184,27 +188,82 @@ pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError>
     .await
 }
 
-/// Snapshot of one firmware entity a device reports through HID++ `0x0003`
-/// function 1. Returned by [`dump_firmware_entities`] so a device report can
-/// name the exact firmware it is running.
-#[derive(Debug, Clone)]
-pub struct FirmwareEntityEntry {
-    /// Index of the entity in the device's own table.
-    pub index: u8,
+/// Firmware fields for one entity whose record the device answered and this
+/// parser decoded.
+///
+/// Owned, constructible data converted from `hidpp`'s
+/// `DeviceEntityFirmwareInfo`, the same way [`ReprogControlEntry`] is
+/// converted from `CidInfo`: consumers get the structured record and decide
+/// how to render it, rather than being handed a pre-formatted string with the
+/// rest of the fields dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwareEntityInfo {
     /// What the entity is: main application, bootloader, radio stack, and so
-    /// on. `None` when the entity's record could not be parsed.
-    pub kind: Option<DeviceEntityType>,
-    /// Version string built from the entity's prefix, number, revision and
-    /// build, e.g. `MPM17.00_B0008`. `None` when the record could not be
-    /// parsed.
-    pub version: Option<String>,
-    /// USB or wireless product ID the entity runs under. A bootloader entity
-    /// reports the PID the device enumerates as while in DFU mode.
-    pub transport_pid: Option<u16>,
+    /// on.
+    pub kind: DeviceEntityType,
+    /// Three-letter prefix of the firmware name, e.g. `MPM`.
+    pub prefix: String,
+    /// Firmware number, BCD-decoded by the protocol layer.
+    pub number: u8,
+    /// Firmware revision, BCD-decoded by the protocol layer.
+    pub revision: u8,
+    /// Firmware build, BCD-decoded by the protocol layer.
+    pub build: u16,
     /// Whether this is the entity currently running.
     pub active: bool,
-    /// Why the entity's record could not be read, when it could not.
-    pub error: Option<String>,
+    /// USB or wireless product ID the entity runs under. A bootloader entity
+    /// reports the PID the device enumerates as while in DFU mode; only the
+    /// active entity is required to report a real value, so an inactive one
+    /// may be zero.
+    pub transport_pid: u16,
+    /// Optional extra versioning bytes. Device-specific and usually all zero,
+    /// carried verbatim because a device that does populate them is exactly
+    /// the device a report is being collected for.
+    pub extra_version: [u8; 5],
+}
+
+impl From<DeviceEntityFirmwareInfo> for FirmwareEntityInfo {
+    fn from(info: DeviceEntityFirmwareInfo) -> Self {
+        Self {
+            kind: info.entity_type,
+            prefix: info.firmware_prefix,
+            number: info.firmware_number,
+            revision: info.revision,
+            build: info.build,
+            active: info.active,
+            transport_pid: info.transport_pid,
+            extra_version: info.extra_version,
+        }
+    }
+}
+
+/// One firmware entity a device reports through HID++ `0x0003` function 1.
+/// Returned by [`dump_firmware_entities`] so a device report can name the
+/// exact firmware it is running.
+///
+/// There are two states and only two: the device answered with a record that
+/// decoded, or it did not. An enum makes "a version with no kind" and "an
+/// error alongside a version" unrepresentable rather than merely unreachable.
+#[derive(Debug, Clone)]
+pub enum FirmwareEntity {
+    /// The entity's record was read and decoded.
+    Readable {
+        /// Index of the entity in the device's own table.
+        index: u8,
+        /// The decoded firmware record.
+        info: FirmwareEntityInfo,
+    },
+    /// The device declared the entity, but its record could not be read.
+    ///
+    /// Reported rather than dropped: omitting the row would claim the device
+    /// has fewer firmware images than it says it has, and a device that cannot
+    /// describe one of its own images is what a bug report needs to say.
+    Unreadable {
+        /// Index of the entity in the device's own table.
+        index: u8,
+        /// Why the record could not be read.
+        error: WriteError,
+    },
 }
 
 /// Read every firmware entity the device on `route` reports.
@@ -214,51 +273,69 @@ pub struct FirmwareEntityEntry {
 /// them so a bug report names the firmware that produced the behaviour rather
 /// than just the model.
 ///
-/// A single unreadable entity does not fail the call. The device declares how
-/// many entities it has, and one of them refusing to parse is itself worth
-/// seeing, so the entry carries the error and the rest are still returned.
+/// A single entity the *device* declined or answered unparseably does not fail
+/// the call — see [`FirmwareEntity::Unreadable`]. A channel failure does: the
+/// route is gone, not the entity.
 pub async fn dump_firmware_entities(
     route: &DeviceRoute,
-) -> Result<Vec<FirmwareEntityEntry>, WriteError> {
+) -> Result<Vec<FirmwareEntity>, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<DeviceInformationFeature>(&mut device).await?;
-        let info = feature.get_device_info().await.map_err(|e| {
-            classify_hidpp_error(
-                e,
-                HidppOperation::DumpFeatures,
-                DeviceInformationFeature::ID,
-            )
-        })?;
-
-        let mut entries = Vec::with_capacity(usize::from(info.entity_count));
-        for entity in 0..info.entity_count {
-            entries.push(match feature.get_fw_info(entity).await {
-                Ok(fw) => FirmwareEntityEntry {
-                    index: entity,
-                    kind: Some(fw.entity_type),
-                    version: Some(format!(
-                        "{}{:02}.{:02}_B{:04}",
-                        fw.firmware_prefix, fw.firmware_number, fw.revision, fw.build
-                    )),
-                    transport_pid: Some(fw.transport_pid),
-                    active: fw.active,
-                    error: None,
-                },
-                Err(e) => FirmwareEntityEntry {
-                    index: entity,
-                    kind: None,
-                    version: None,
-                    transport_pid: None,
-                    active: false,
-                    error: Some(format!("{e:?}")),
-                },
-            });
-        }
-        Ok(entries)
+        dump_firmware_entities_on_channel(&channel, index).await
     })
     .await
+}
+
+/// [`dump_firmware_entities`] against an already-open channel, the shape the
+/// tests drive a scripted device through.
+pub(crate) async fn dump_firmware_entities_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Vec<FirmwareEntity>, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<DeviceInformationFeature>(&mut device).await?;
+    let info = feature.get_device_info().await.map_err(|e| {
+        classify_hidpp_error(
+            e,
+            HidppOperation::DumpFeatures,
+            DeviceInformationFeature::ID,
+        )
+    })?;
+
+    let mut entries = Vec::with_capacity(usize::from(info.entity_count));
+    for entity in 0..info.entity_count {
+        match feature.get_fw_info(entity).await {
+            Ok(fw) => entries.push(FirmwareEntity::Readable {
+                index: entity,
+                info: fw.into(),
+            }),
+            // The device answered about *this* entity and the answer was no:
+            // it refused the read, or it sent a record this parser cannot
+            // decode (a G502's radio stack reports a build field that is not
+            // valid BCD). The rest of the table is still worth reading.
+            Err(e @ (Hidpp20Error::Feature(_) | Hidpp20Error::UnsupportedResponse)) => {
+                entries.push(FirmwareEntity::Unreadable {
+                    index: entity,
+                    error: classify_hidpp_error(
+                        e,
+                        HidppOperation::DumpFeatures,
+                        DeviceInformationFeature::ID,
+                    ),
+                });
+            }
+            // A channel failure says nothing about the entity — the route
+            // disappeared. Carrying on would spend a timeout per remaining
+            // entity and then print malformed-firmware rows for a disconnect.
+            Err(e) => {
+                return Err(classify_hidpp_error(
+                    e,
+                    HidppOperation::DumpFeatures,
+                    DeviceInformationFeature::ID,
+                ));
+            }
+        }
+    }
+    Ok(entries)
 }
