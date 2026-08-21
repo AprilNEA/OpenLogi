@@ -363,13 +363,12 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
         // carries richer information, preserve it — but only when the device
         // in this slot hasn't changed. A different device kind signals a
         // re-pairing, in which case the stale identity must not be retained.
-        if let Some(existing) = config.device_identity(config_key) {
-            if !identity_is_resolved(&identity)
-                && identity_is_resolved(existing)
-                && existing.kind == identity.kind
-            {
-                continue;
-            }
+        if let Some(existing) = config.device_identity(config_key)
+            && !identity_is_resolved(&identity)
+            && identity_is_resolved(existing)
+            && existing.kind == identity.kind
+        {
+            continue;
         }
 
         if config.device_identity(config_key) != Some(&identity) {

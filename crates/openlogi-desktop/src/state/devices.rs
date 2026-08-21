@@ -132,10 +132,7 @@ pub(super) fn build_device_list(
                             // Normal resolution failed (e.g. model_ids are all
                             // zero on HID++ 1.0 devices). Fall back to WPID-based
                             // suffix matching against the asset registry.
-                            cache.resolve_by_wpid(
-                                paired.wpid,
-                                paired.codename.as_deref(),
-                            )
+                            cache.resolve_by_wpid(paired.wpid, paired.codename.as_deref())
                         });
                     (
                         model.config_key(),
@@ -159,8 +156,7 @@ pub(super) fn build_device_list(
                         || format!("slot{}", paired.slot),
                         |w| format!("wpid{w:04x}"),
                     );
-                    let asset =
-                        cache.resolve_by_wpid(paired.wpid, paired.codename.as_deref());
+                    let asset = cache.resolve_by_wpid(paired.wpid, paired.codename.as_deref());
                     (key, asset, None, paired.codename.clone(), None, [0u8; 4])
                 };
             let stable_id = DeviceStableId::from_parts(

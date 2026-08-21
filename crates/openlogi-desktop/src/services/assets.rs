@@ -245,12 +245,16 @@ impl AssetResolver {
         }
 
         // Fall back to codename ↔ displayName when the wpid lookup misses.
-        if let Some(name) = codename {
-            if let Some((depot, entry)) = index.find_by_display_name(name) {
-                debug!(depot, codename = name, "asset matched via codename for HID++ 1.0 device");
-                let model_id = &entry.model_id;
-                return self.load_standalone_files(depot, entry, model_id);
-            }
+        if let Some(name) = codename
+            && let Some((depot, entry)) = index.find_by_display_name(name)
+        {
+            debug!(
+                depot,
+                codename = name,
+                "asset matched via codename for HID++ 1.0 device"
+            );
+            let model_id = &entry.model_id;
+            return self.load_standalone_files(depot, entry, model_id);
         }
 
         None
