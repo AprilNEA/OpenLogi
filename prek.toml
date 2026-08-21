@@ -48,3 +48,31 @@ language = "system"
 types = ["rust"]
 pass_filenames = false
 stages = ["pre-push"]
+
+# Shell scripts: shellcheck lints, shfmt formats. Both are in the devenv shell
+# and in CI's `shell` job.
+#
+# shfmt's formatting options live in `.editorconfig`, and it discards that file
+# entirely the moment a printer flag (`-i`, `-ci`, `-bn`, …) appears on the
+# command line — so this entry, the CI job and the local runner all invoke it
+# bare. Its `[[shell]]` section matches by shebang as well as by extension,
+# which is what covers the extensionless `.agents/*` scripts.
+#
+# `types = ["shell"]` matches the same way. `.envrc` is excluded to keep this
+# set identical to the one CI checks (`shfmt -f` over tracked files): direnv
+# sources it, it carries no shebang, and shfmt does not consider it a script.
+[[repos.hooks]]
+id = "shellcheck"
+name = "shellcheck"
+entry = "shellcheck"
+language = "system"
+types = ["shell"]
+exclude = "^\\.envrc$"
+
+[[repos.hooks]]
+id = "shfmt"
+name = "shfmt"
+entry = "shfmt --write"
+language = "system"
+types = ["shell"]
+exclude = "^\\.envrc$"

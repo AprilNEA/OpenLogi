@@ -47,6 +47,9 @@ in
       cmake
       sccache
       prek
+      # The `shell` CI job and the prek hooks of the same name.
+      shellcheck
+      shfmt
     ]
     # create-dmg is macOS-only (meta.platforms = darwin); an unconditional entry
     # breaks evaluation of the shell on Linux.
