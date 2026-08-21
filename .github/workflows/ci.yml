@@ -1,6 +1,6 @@
 name: CI
 
-# Reproduce every job locally: `.github/scripts/ci-local.sh`
+# Reproduce every job locally: `cargo xtask ci`
 # Job → command map: `.claude/rules/ci.md`
 # Changing a `run:` here without updating those two is a bug.
 

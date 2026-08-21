@@ -7,7 +7,8 @@ use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 
 use crate::SharedChannel;
-use crate::channel::scripted::ScriptedRawHidChannel;
+use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
+use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_reports};
 use crate::write::smartshift::{
@@ -18,6 +19,7 @@ use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
+use hidpp::feature::device_information::DeviceEntityType;
 
 const TEST_THRESHOLD: SmartShiftThreshold = match SmartShiftThreshold::try_new(10) {
     Ok(value) => value,
@@ -612,4 +614,167 @@ fn per_key_v2_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     let payload_len = response.len() - 4;
     response[4..].copy_from_slice(&payload[..payload_len]);
     Some(response)
+}
+
+/// Feature index the scripted mouse reports for `0x0003 DeviceInformation`.
+const DEVICE_INFO_INDEX: u8 = 0x03;
+/// `ErrorType::Busy`, the refusal the scripted mouse answers entity 3 with.
+const BUSY: u8 = 0x08;
+/// How many firmware entities the scripted mouse declares.
+const ENTITY_COUNT: u8 = 4;
+
+/// A wired G502 LIGHTSPEED, plus one invented entity.
+///
+/// Entities 0..=2 are what the real mouse reports: a bootloader, the running
+/// main application, and a Softdevice radio stack whose build field is not
+/// valid BCD, so this parser cannot decode it. Entity 3 is added to cover the
+/// other entity-local failure — firmware that refuses the read outright rather
+/// than answering with a record that will not parse.
+fn mouse_with_an_unparseable_radio_stack(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    let long = match (request[2], request[3] >> 4) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x0003) * DEVICE_INFO_INDEX;
+            false
+        }
+        // getDeviceInfo: the declared entity count, everything else zero.
+        (DEVICE_INFO_INDEX, 0x00) => {
+            payload[0] = ENTITY_COUNT;
+            false
+        }
+        // getFwInfo, one entity per index.
+        (DEVICE_INFO_INDEX, 0x01) => {
+            match request[4] {
+                // Bootloader BOT92.00_B0008, dormant, DFU-mode PID.
+                0 => payload[..11].copy_from_slice(&[
+                    0x01, b'B', b'O', b'T', 0x92, 0x00, 0x00, 0x08, 0x00, 0xaa, 0xef,
+                ]),
+                // MainApplication MPM17.00_B0008, the running image.
+                1 => payload[..11].copy_from_slice(&[
+                    0x00, b'M', b'P', b'M', 0x17, 0x00, 0x00, 0x08, 0x01, 0xc0, 0x8d,
+                ]),
+                // Softdevice whose build reads 0x00a9 — not packed BCD, so
+                // get_fw_info answers UnsupportedResponse.
+                2 => payload[..11].copy_from_slice(&[
+                    0x05, b'R', b'Q', b'M', 0x00, 0x00, 0x00, 0xa9, 0x00, 0x00, 0x00,
+                ]),
+                _ => return Some(feature_error(request, BUSY)),
+            }
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// True for the `getFwInfo` request addressing `entity`.
+fn is_fw_info_for(request: &[u8], entity: u8) -> bool {
+    request.len() >= 7
+        && request[2] == DEVICE_INFO_INDEX
+        && request[3] >> 4 == 1
+        && request[4] == entity
+}
+
+async fn scripted_device_info_channel(channel: ScriptedRawHidChannel) -> Arc<HidppChannel> {
+    Arc::new(
+        HidppChannel::from_raw_channel(channel)
+            .await
+            .expect("scripted HID++ channel must open"),
+    )
+}
+
+#[tokio::test]
+async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
+    // Both entity-local shapes: a record that will not decode (entity 2) and a
+    // read the firmware refuses (entity 3). Neither says anything about the
+    // route, so the remaining entities are still read and the declared count
+    // still matches what the device claimed.
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(mouse_with_an_unparseable_radio_stack);
+    let channel = scripted_device_info_channel(raw).await;
+
+    let entities = dump_firmware_entities_on_channel(&channel, 1)
+        .await
+        .expect("an entity the device cannot describe is a row, not a failed dump");
+
+    assert_eq!(entities.len(), usize::from(ENTITY_COUNT));
+    let FirmwareEntity::Readable { info, .. } = &entities[1] else {
+        panic!("entity 1 parses: {:?}", entities[1]);
+    };
+    assert_eq!(info.kind, DeviceEntityType::MainApplication);
+    assert_eq!(info.prefix, "MPM");
+    assert_eq!((info.number, info.revision, info.build), (17, 0, 8));
+    assert_eq!(info.transport_pid, 0xc08d);
+    assert!(info.active);
+
+    assert!(
+        matches!(
+            entities[2],
+            FirmwareEntity::Unreadable {
+                index: 2,
+                error: WriteError::UnsupportedResponse { .. }
+            }
+        ),
+        "a record that will not decode is reported, not dropped: {:?}",
+        entities[2]
+    );
+    assert!(
+        matches!(
+            entities[3],
+            FirmwareEntity::Unreadable {
+                index: 3,
+                error: WriteError::HidppFeature {
+                    kind: HidppFeatureErrorKind::Busy,
+                    ..
+                }
+            }
+        ),
+        "a refused read is reported, not dropped: {:?}",
+        entities[3]
+    );
+
+    let written = handle.written_reports();
+    assert!(
+        written.iter().any(|report| is_fw_info_for(report, 3)),
+        "every declared entity is asked about"
+    );
+}
+
+#[tokio::test]
+async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
+    // The node goes away while entity 1 is being read. Continuing would spend
+    // a timeout per remaining entity and then print malformed-firmware rows
+    // for what is really a disconnect, so the whole dump fails instead.
+    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
+        mouse_with_an_unparseable_radio_stack,
+        |request| is_fw_info_for(request, 1),
+    );
+    let channel = scripted_device_info_channel(raw).await;
+
+    let error = dump_firmware_entities_on_channel(&channel, 1)
+        .await
+        .expect_err("a dead route is not an entity-local failure");
+    assert!(matches!(error, WriteError::Hidpp(_)), "got {error:?}");
+
+    let written = handle.written_reports();
+    assert!(
+        !written.iter().any(|report| is_fw_info_for(report, 2)),
+        "the dump stops at the failure rather than timing out per entity"
+    );
 }

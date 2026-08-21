@@ -177,12 +177,12 @@ machine can reproduce — including MSRV, cargo-deny, and the Windows cross-lint
 the host-OS gate does not run:
 
 ```sh
-.github/scripts/ci-local.sh
-.github/scripts/ci-local.sh --list           # job → command table
+cargo xtask ci
+cargo xtask ci --list                        # job → command table
 devenv tasks run openlogi:ci                 # same, from devenv
 ```
 
-The script sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
 OS are reported as skipped; a skip is not a pass. The full job map (and which
 diff requires which job) is [`.claude/rules/ci.md`](../.claude/rules/ci.md).
 
@@ -202,7 +202,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
 
 Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
 pipeline: Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell lint
-(shellcheck + shfmt) are separate CI jobs. Reproduce those with `ci-local.sh` or the commands in `.claude/rules/ci.md`.
+(shellcheck + shfmt) are separate CI jobs. Reproduce those with `cargo xtask ci` or the commands in
+`.claude/rules/ci.md`.
 
 ## Packaging the macOS DMG
 

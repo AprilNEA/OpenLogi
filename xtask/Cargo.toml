@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
@@ -28,6 +29,7 @@ strum = { version = "0.27", features = ["derive"] }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
+toml.workspace = true
 which = "8.0.4"
 xshell = "0.2.7"
 

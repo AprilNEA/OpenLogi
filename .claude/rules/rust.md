@@ -132,6 +132,6 @@ naming that trait's methods.
 ## Reproducing CI
 
 `openlogi:check` is the host-OS gate, not the pipeline. To run a `ci.yml` job
-locally: `.github/scripts/ci-local.sh --list` and `.claude/rules/ci.md`. Host
+locally: `cargo xtask ci --list` and `.claude/rules/ci.md`. Host
 clippy on macOS does not compile linux cfg; MSRV needs `RUSTUP_TOOLCHAIN`;
 cargo-deny is its own job.
