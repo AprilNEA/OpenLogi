@@ -37,7 +37,7 @@ Usage:
   .github/scripts/ci-local.sh --dry-run    print commands, do not run them
   .github/scripts/ci-local.sh rustfmt docs named jobs (CI name: or job id)
 
-Jobs: rustfmt clippy msrv rustdoc tests cargo-deny clippy-windows
+Jobs: rustfmt shell clippy msrv rustdoc tests cargo-deny clippy-windows
 Also:  i18n wire   (focused suites that fail the macOS test job)
 EOF
 }
@@ -103,6 +103,35 @@ run_cmd() {
 
 job_fmt() {
   run_cmd "rustfmt" cargo fmt --all -- --check
+}
+
+job_shell() {
+  printf '\n==> shell\n'
+  note "shellcheck + shfmt -d over every tracked shell script"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    pass_job "shell (dry-run)"
+    return 0
+  fi
+  if ! command -v shellcheck >/dev/null 2>&1 || ! command -v shfmt >/dev/null 2>&1; then
+    skip_job "shell" "needs shellcheck and shfmt (both are in the devenv shell)"
+    return 0
+  fi
+  # shfmt decides what counts as a shell script — by extension, and by shebang
+  # for the extensionless ones. Listing once keeps both tools on one file set.
+  local list status
+  list="$(mktemp)"
+  git ls-files -z | xargs -0 shfmt -f >"$list"
+  status=0
+  xargs shellcheck <"$list" || status=1
+  # No printer flags: they would make shfmt ignore .editorconfig, where this
+  # repo's formatting options live.
+  xargs shfmt -d <"$list" || status=1
+  rm -f "$list"
+  if [ "$status" -eq 0 ]; then
+    pass_job "shell"
+  else
+    fail_job "shell"
+  fi
 }
 
 job_clippy() {
@@ -297,6 +326,11 @@ print_list() {
 CI job (ci.yml)              Local command                                      This host
 ---------------------------  -------------------------------------------------  ---------
 rustfmt                      cargo fmt --all -- --check                         any
+shell                        git ls-files -z | xargs -0 shfmt -f > LIST         any
+                               xargs shellcheck < LIST
+                               xargs shfmt -d < LIST
+                             Formatting options come from .editorconfig; a
+                             printer flag would make shfmt ignore it.
 clippy                       cargo clippy --workspace --all-targets -- -D warnings
                              CI runs this on ubuntu-latest (linux cfg). Host
                              clippy on macOS/Windows is a different compilation.
@@ -341,6 +375,7 @@ EOF
 run_named() {
   case "$1" in
     rustfmt | fmt) job_fmt ;;
+    shell) job_shell ;;
     clippy) job_clippy ;;
     msrv | MSRV | \
       "MSRV (cargo check, macos-latest)" | "MSRV (cargo check, ubuntu-latest)" | \
@@ -373,6 +408,7 @@ run_named() {
 
 run_default() {
   job_fmt
+  job_shell
   job_clippy
   job_msrv
   job_docs

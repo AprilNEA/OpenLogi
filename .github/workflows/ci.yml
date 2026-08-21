@@ -36,6 +36,26 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # The shell equivalent of `rustfmt` + `clippy`. The file set is every tracked
+  # file shfmt recognises as a shell script, so a new script is covered the day
+  # it lands — including the extensionless `.agents/*` ones, which it detects by
+  # shebang. shfmt's formatting options come from `.editorconfig`; passing it a
+  # printer flag here would silently discard that file.
+  shell:
+    name: shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: shellcheck,shfmt
+      - name: List tracked shell scripts
+        run: git ls-files -z | xargs -0 shfmt -f | tee "${RUNNER_TEMP}/shell-scripts"
+      - name: shellcheck
+        run: xargs shellcheck < "${RUNNER_TEMP}/shell-scripts"
+      - name: shfmt
+        run: xargs shfmt -d < "${RUNNER_TEMP}/shell-scripts"
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

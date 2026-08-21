@@ -201,8 +201,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
 ```
 
 Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
-pipeline: Linux clippy, Windows clippy, MSRV, and cargo-deny are separate CI
-jobs. Reproduce those with `ci-local.sh` or the commands in `.claude/rules/ci.md`.
+pipeline: Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell lint
+(shellcheck + shfmt) are separate CI jobs. Reproduce those with `ci-local.sh` or the commands in `.claude/rules/ci.md`.
 
 ## Packaging the macOS DMG
 
