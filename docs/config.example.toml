@@ -65,6 +65,9 @@ fn_lock = false
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+# POP Keys' dedicated emoji row (separate from KeyEmoji, its "open emoji
+# panel" key) binds the same way.
+KeyEmojiSmiley = "LockScreen"
 
 # Global function-key remapping, independent of a device.
 [keyboard.bindings]

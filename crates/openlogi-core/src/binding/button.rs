@@ -64,9 +64,24 @@ pub enum ButtonId {
     /// (Logi metadata slot `ASSIGNMENT_NAME_SHOW_RADIAL_MENU`, HID++ CID
     /// `0x01a0`). A separate physical control from [`ButtonId::GestureButton`];
     /// captured over HID++ like it, and eligible as the gesture owner.
-    /// Declared last: the TOML config and any serialized form encode the
-    /// variant identifier / index, so new buttons are append-only.
+    /// The TOML config and any serialized form encode the variant
+    /// identifier / index, so new buttons are appended after this one.
     HapticPanel,
+    /// Keyboard "Smiling face with heart-shaped eyes" emoji control (CID
+    /// `0x0104`) — one of the five dedicated emoji keys on the POP Keys
+    /// series, distinct from the F-row keys above. Named with the shared
+    /// `KeyEmoji*` prefix so future dedicated emoji keys slot in beside it.
+    KeyEmojiHeartEyes,
+    /// Keyboard "Loudly crying face" emoji control (CID `0x0105`) — one of
+    /// the five dedicated emoji keys on the POP Keys series.
+    KeyEmojiCrying,
+    /// Keyboard "Emoji Smiley" control (CID `0x0106`) — one of the five
+    /// dedicated emoji keys on the POP Keys series. Distinct from
+    /// [`ButtonId::KeyEmoji`] (CID `0x0108`, the emoji-panel opener).
+    KeyEmojiSmiley,
+    /// Keyboard "Emoji smiley with tears" control (CID `0x0107`) — one of
+    /// the five dedicated emoji keys on the POP Keys series.
+    KeyEmojiTears,
 }
 
 impl ButtonId {
@@ -91,9 +106,13 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 13] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
+        ButtonId::KeyEmojiHeartEyes,
+        ButtonId::KeyEmojiCrying,
+        ButtonId::KeyEmojiSmiley,
+        ButtonId::KeyEmojiTears,
         ButtonId::KeyEmoji,
         ButtonId::KeyScreenCapture,
         ButtonId::KeyMicMute,
@@ -152,6 +171,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::KeyEmojiHeartEyes => "Smiley Heart Eyes Key",
+            ButtonId::KeyEmojiCrying => "Loudly Crying Face Key",
+            ButtonId::KeyEmojiSmiley => "Smiley Key",
+            ButtonId::KeyEmojiTears => "Smiley With Tears Key",
         }
     }
 }
