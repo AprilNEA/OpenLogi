@@ -86,23 +86,46 @@ xtask/
         jobs.rs              # one row of facts per ci.yml job + host gating
         jobs/
           steps.rs           # what each job runs
+          tests.rs
         list.rs              # renders --list from those rows (comfy-table)
+        list/
+          tests.rs
       macos.rs               # macOS domain entry
       macos/
         bundle.rs
+        bundle/
+          identity.rs
+          identity/tests.rs
+          tests.rs
+        dev_bundle.rs
+        dev_bundle/
+          processes.rs
+          signing.rs
+          tests.rs
         dmg.rs
       linux.rs               # Linux domain entry
       linux/
         package.rs
+        package/tests.rs
       release.rs             # release metadata entry
       release/
         changelog.rs
+        changelog/tests.rs
         latest_json.rs
+        latest_json/tests.rs
     support/
       mod.rs
       fs.rs                  # shared filesystem/process guards only
       manifest.rs            # the root Cargo.toml's [workspace.package]
 ```
+
+Unit tests are a sibling file throughout this crate: `foo.rs` declares
+`#[cfg(test)] mod tests;` and the tests live in `foo/tests.rs`. That keeps a
+module's source to what it does, and the `#[cfg(test)]` on the declaration is
+what carries the `clippy.toml` unwrap/expect exemption into the file — a test
+helper outside any `#[test]` fn still gets it. Note that `include_str!` in such
+a file resolves relative to `foo/`, one level deeper than the module it came
+from.
 
 Keep command modules aligned with the CLI hierarchy. A platform action belongs
 under its platform (`macos bundle`, `linux package`); release metadata belongs
