@@ -4,6 +4,7 @@ use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryStatus};
 
 use super::features::{BatteryProbe, ProbedFeatures, probe_features, read_battery};
+use crate::backend::NodeId;
 
 /// How many `enumerate` ticks a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
@@ -31,7 +32,7 @@ pub(super) enum CacheKey {
     /// id, Linux dev path, Windows interface path). Unique *per node*, so two
     /// units of the same model never collide, and stable while connected so the
     /// cache still hits across ticks.
-    Direct(async_hid::DeviceId),
+    Direct(NodeId),
 }
 
 /// Enumeration ticks a device may be missing before its cache entry is evicted.

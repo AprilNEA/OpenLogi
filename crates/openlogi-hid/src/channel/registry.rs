@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use async_hid::DeviceId;
+use crate::backend::NodeId;
 use hidpp::channel::HidppChannel;
 
 use crate::{DeviceRoute, SharedChannel};
@@ -161,7 +161,7 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
 /// oldest live node wins until it is removed.
 #[derive(Clone, Default)]
 pub struct ChannelRegistry {
-    inner: Registry<DeviceId, Arc<HidppChannel>>,
+    inner: Registry<NodeId, Arc<HidppChannel>>,
 }
 
 impl ChannelRegistry {
@@ -169,7 +169,7 @@ impl ChannelRegistry {
     /// collision priority when it was already present.
     pub(crate) fn replace_node(
         &self,
-        node: DeviceId,
+        node: NodeId,
         routes: impl IntoIterator<Item = DeviceRoute>,
         channel: Arc<HidppChannel>,
     ) {
@@ -177,12 +177,12 @@ impl ChannelRegistry {
     }
 
     /// Remove every route and channel reference owned by `node`.
-    pub(crate) fn remove_node(&self, node: &DeviceId) {
+    pub(crate) fn remove_node(&self, node: &NodeId) {
         self.inner.remove_node(node);
     }
 
     /// Remove publications for nodes absent from the current OS enumeration.
-    pub(crate) fn retain_nodes(&self, nodes: &HashSet<DeviceId>) {
+    pub(crate) fn retain_nodes(&self, nodes: &HashSet<NodeId>) {
         self.inner.retain_nodes(nodes);
     }
 

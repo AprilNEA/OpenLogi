@@ -14,9 +14,9 @@
 //! consecutive failures it asks the enumerator to drop the node's cached
 //! channel so the next tick reopens it fresh.
 //!
-//! Generic over the node key (`async_hid::DeviceId` in production) purely so
-//! the decision table is testable on every platform — the id type is
-//! `cfg`-gated per OS and not constructible off-target.
+//! Generic over the node key ([`crate::backend::NodeId`] in production) purely
+//! so the decision table can be exercised with a trivial key, keeping the
+//! tests about the replay policy rather than about node identity.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -57,7 +57,7 @@ pub(crate) struct NodeLedger<K> {
 }
 
 // Hand-written: `derive(Default)` would needlessly bound `K: Default`, which
-// `async_hid::DeviceId` doesn't (and needn't) satisfy.
+// a node key doesn't (and needn't) satisfy.
 impl<K> Default for NodeLedger<K> {
     fn default() -> Self {
         Self {

@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 #[cfg(not(target_os = "windows"))]
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
 use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
-use futures_lite::StreamExt as _;
+use futures_lite::{Stream, StreamExt as _};
 use hidpp::channel::HidppChannel;
 use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
-use crate::backend::BackendError;
+use crate::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
 use crate::write::{WriteError, matches_litra};
 
 /// Collapses `async-hid`'s error taxonomy into the backend-agnostic
@@ -46,6 +46,35 @@ impl From<async_hid::HidError> for BackendError {
                 Self::Disconnected
             }
             other => Self::Backend(other.to_string()),
+        }
+    }
+}
+
+/// `DeviceId` is an opaque OS handle (a hidraw path, a Windows device path, an
+/// IOKit entry), so [`NodeId`] carries its `Debug` rendering verbatim.
+///
+/// Verbatim matters: that string is what [`NodeInfo::identity`] has always
+/// embedded for serial-less nodes, so keeping it byte-identical keeps existing
+/// raw-HID routes resolving across this refactor.
+impl From<&DeviceInfo> for NodeId {
+    fn from(info: &DeviceInfo) -> Self {
+        Self::from(format!("{:?}", info.id))
+    }
+}
+
+/// Restates an `async-hid` node as the backend-agnostic [`NodeInfo`] every
+/// layer above this module stores, filters and routes on.
+impl From<&DeviceInfo> for NodeInfo {
+    fn from(info: &DeviceInfo) -> Self {
+        Self {
+            id: NodeId::from(info),
+            vendor_id: info.vendor_id,
+            product_id: info.product_id,
+            usage_page: info.usage_page,
+            usage_id: info.usage_id,
+            name: info.name.clone(),
+            manufacturer: info.manufacturer.clone(),
+            serial_number: info.serial_number.clone(),
         }
     }
 }
@@ -147,9 +176,18 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// across threads is the model hidapi uses too.
 static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
 
-/// The process-wide HID backend shared by enumeration and hotplug watching.
-pub(crate) fn hid_backend() -> &'static HidBackend {
-    &HID_BACKEND
+/// Subscribe to the backend's node connect/disconnect events, restated as the
+/// backend-agnostic [`HotplugEvent`].
+///
+/// The node identity `async-hid` attaches is dropped: every consumer reacts by
+/// re-enumerating, so carrying it would only invite someone to trust it.
+pub(crate) fn watch_nodes() -> Result<impl Stream<Item = HotplugEvent> + Send + Unpin, BackendError>
+{
+    let stream = HID_BACKEND.watch()?;
+    Ok(stream.map(|event| match event {
+        async_hid::DeviceEvent::Connected(_) => HotplugEvent::Connected,
+        async_hid::DeviceEvent::Disconnected(_) => HotplugEvent::Disconnected,
+    }))
 }
 
 pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, BackendError> {
@@ -170,25 +208,6 @@ pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, Backen
     }
 
     Ok(all)
-}
-
-/// Stable opaque identity used by raw-device routes. Prefer the HID serial;
-/// otherwise retain the backend's platform identifier as a runtime identity.
-/// The latter is deliberately not treated as a cross-machine portable key,
-/// but it is stronger than enumeration order and lets duplicate nodes be
-/// rejected deterministically.
-pub(crate) fn device_identity(info: &DeviceInfo) -> String {
-    info.serial_number
-        .as_deref()
-        .filter(|serial| !serial.is_empty())
-        .map_or_else(
-            // `DeviceInfo::id` is an OS-node identity (hidraw path, registry
-            // entry, or Windows device path). It is useful to re-find a node
-            // during this process lifetime, but it is intentionally marked as
-            // transient and must never become a persisted physical key.
-            || format!("id:{:?}", info.id),
-            |serial| format!("serial:{}", serial.to_ascii_lowercase()),
-        )
 }
 
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, BackendError> {
@@ -311,7 +330,7 @@ pub(crate) async fn open_route_writer(
                     && dev.product_id == *product_id
                     && dev.usage_page == *usage_page
                     && dev.usage_id == *usage_id
-                    && device_identity(&dev) == *identity
+                    && NodeInfo::from(&*dev).identity() == *identity
             }
             _ => false,
         };
@@ -376,7 +395,7 @@ fn configure_channel_sw_ids(channel: &mut HidppChannel) {
 
 pub(crate) async fn open_hidpp_channel(
     dev: async_hid::Device,
-) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, BackendError> {
+) -> Result<Option<(NodeInfo, Arc<HidppChannel>)>, BackendError> {
     // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we can
     // keep using `dev` (which `to_device_info` would consume).
     let info: DeviceInfo = (*dev).clone();
@@ -397,7 +416,7 @@ pub(crate) async fn open_hidpp_channel(
                 return Ok(None);
             }
         };
-        Ok(Some((info, channel)))
+        Ok(Some((NodeInfo::from(&info), channel)))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -421,7 +440,7 @@ pub(crate) async fn open_hidpp_channel(
         // ticks, so a steadily-connected device should log this on first sight (and
         // on reconnect) only — not every ~2s tick.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
-        Ok(Some((info, channel)))
+        Ok(Some((NodeInfo::from(&info), channel)))
     }
 }
 

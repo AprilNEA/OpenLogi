@@ -16,7 +16,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
-use crate::backend::BackendError;
+use crate::backend::{BackendError, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, is_receiver_pid};
 use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 use ledger::NodeLedger;
@@ -137,11 +137,11 @@ pub struct Enumerator {
     /// each open also leaks an `io_service_t` in async-hid's macOS backend — so a
     /// steadily-connected node is opened once here and reused until it
     /// disconnects.
-    channels: ChannelCache<async_hid::DeviceId, CachedChannel>,
+    channels: ChannelCache<NodeId, CachedChannel>,
     /// Per-node last-good inventory + consecutive-failure counts: replays a
     /// node's snapshot through transient probe failures and decides when its
     /// cached channel must be dropped and reopened (see [`crate::inventory::ledger`]).
-    ledger: NodeLedger<async_hid::DeviceId>,
+    ledger: NodeLedger<NodeId>,
     /// Optional publication sink used by the persistent Agent watcher. One-shot
     /// callers keep this `None` and retain the route-opening library behavior.
     registry: Option<ChannelRegistry>,
@@ -159,14 +159,14 @@ pub struct Enumerator {
 /// drops) closes the device and joins the channel's read thread via
 /// [`HidppChannel`]'s `Drop`.
 struct CachedChannel {
-    info: async_hid::DeviceInfo,
+    info: NodeInfo,
     channel: Arc<HidppChannel>,
 }
 
 struct PreparedNodes {
-    active: Vec<(async_hid::DeviceInfo, Arc<HidppChannel>)>,
-    open_failures: Vec<async_hid::DeviceId>,
-    retiring: Vec<async_hid::DeviceId>,
+    active: Vec<(NodeInfo, Arc<HidppChannel>)>,
+    open_failures: Vec<NodeId>,
+    retiring: Vec<NodeId>,
 }
 
 /// Disjoint active and retiring channels, generic so ownership transitions can
@@ -373,9 +373,9 @@ where
 /// Add cached channels omitted by this OS enumeration while their open
 /// transport still reports a live connection.
 fn append_live_cached_channels(
-    nodes: &mut HashSet<async_hid::DeviceId>,
-    channels: &ChannelCache<async_hid::DeviceId, CachedChannel>,
-    active: &mut Vec<(async_hid::DeviceInfo, Arc<HidppChannel>)>,
+    nodes: &mut HashSet<NodeId>,
+    channels: &ChannelCache<NodeId, CachedChannel>,
+    active: &mut Vec<(NodeInfo, Arc<HidppChannel>)>,
 ) {
     let retained = retained_nodes(
         nodes,
@@ -442,7 +442,7 @@ impl Enumerator {
         let mut open_failures = Vec::new();
         let mut retiring = Vec::new();
         for dev in candidates {
-            let node = dev.id.clone();
+            let node = NodeId::from(&*dev);
             seen_nodes.insert(node.clone());
             if !self
                 .channels

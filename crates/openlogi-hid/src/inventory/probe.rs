@@ -20,6 +20,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
+use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
@@ -52,7 +53,7 @@ impl NodeProbe {
 
 /// Probe one open HID++ node (channel reused across ticks by the caller).
 pub(super) async fn probe_one(
-    info: async_hid::DeviceInfo,
+    info: NodeInfo,
     channel: Arc<HidppChannel>,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
@@ -74,7 +75,7 @@ pub(super) async fn probe_one(
 
 async fn probe_bolt_receiver(
     channel: Arc<HidppChannel>,
-    info: async_hid::DeviceInfo,
+    info: NodeInfo,
     bolt: BoltReceiver,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
@@ -164,7 +165,7 @@ pub(super) fn assemble_bolt_probe(
 
 async fn probe_unifying_receiver(
     channel: Arc<HidppChannel>,
-    info: async_hid::DeviceInfo,
+    info: NodeInfo,
     unifying: UnifyingReceiver,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
@@ -420,7 +421,7 @@ pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &
 /// that merely failed to answer is settled as a failed probe instead.
 async fn probe_direct(
     channel: Arc<HidppChannel>,
-    info: &async_hid::DeviceInfo,
+    info: &NodeInfo,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
 ) -> NodeProbe {
