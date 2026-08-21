@@ -10,16 +10,28 @@ description = "Core types, config, and paths for OpenLogi. No I/O specifics."
 keywords = ["logitech", "hidpp", "config", "mouse", "hid"]
 categories = ["hardware-support", "config"]
 
+[features]
+default = ["fs"]
+# Reading and writing the user's config file, and the paths it lives at.
+#
+# Everything else here is data: the device model, the action catalogue, the
+# binding types, the TOML *shapes* of the config. Those describe a device and a
+# user's choices and need no host at all, which is what lets them be checked
+# against `wasm32-unknown-unknown` (see xtask's `WASM_PORTABLE_CRATES`). This
+# feature is the line between the two, and it is on by default so every
+# consumer in this workspace is unaffected.
+fs = ["dep:atomic-write-file", "dep:etcetera", "dep:toml_edit"]
+
 [dependencies]
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-etcetera = "0.11.0"
-atomic-write-file = { workspace = true }
+etcetera = { version = "0.11.0", optional = true }
+atomic-write-file = { workspace = true, optional = true }
 num_enum = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
-toml_edit = "0.22"
+toml_edit = { version = "0.22", optional = true }
 nutype = { version = "0.7.0", features = ["serde"] }
 az = "1.3.0"
 

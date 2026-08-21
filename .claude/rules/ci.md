@@ -53,6 +53,7 @@ that host clippy `-D warnings` does not surface still fails CI.
 | `tests (macos, <arch>)` | `cargo test --workspace --all-targets` | macOS. CI matrix is arm64 (`macos-latest`) and x86_64 (`macos-15-intel`) |
 | `cargo-deny` | `cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
+| `wasm (portable crates)` | `cargo check -p openlogi-hidpp --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`,
 `RUSTFLAGS=-D warnings`. There is no Windows test job — only `clippy (windows)`.
@@ -87,6 +88,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | anything Rust | `rustfmt`; crate-scoped clippy + tests while iterating; host `clippy` / `tests` before push |
 | any `*.sh`, any file with a shell shebang, `.editorconfig` | `shell` (the prek hooks run the same two tools at commit) |
 | `#[cfg(target_os = …)]`, hook/inject/hid/camera platform files | `clippy-windows` proxy + the linux-musl recipe; say so if you cannot |
+| `crates/openlogi-hidpp/**`, `crates/openlogi-core/**`, or any dependency they gain | `wasm` — those crates must keep building with no OS under them |
 | `Cargo.lock` / `deny.toml` / new deps | `cargo-deny` |
 | `rust-version` or a newly stabilized API | `MSRV` |
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |

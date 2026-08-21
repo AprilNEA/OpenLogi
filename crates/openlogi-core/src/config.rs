@@ -11,16 +11,21 @@ use std::{collections::BTreeMap, path::Path};
 use serde::{Deserialize, Serialize};
 
 mod device;
+#[cfg(feature = "fs")]
 mod file;
 mod key_trigger;
 mod settings;
 
+// Stacked, not `all(test, …)`: clippy reads the combined form as a test
+// outside a test module and withdraws the `unwrap`/`expect` exemption.
 #[cfg(test)]
+#[cfg(feature = "fs")]
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity};
+#[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
-#[cfg(test)]
+#[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
@@ -35,6 +40,7 @@ use crate::binding::{
     RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::hid::Dpi;
+#[cfg(feature = "fs")]
 use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
@@ -80,6 +86,14 @@ pub struct Config {
     /// this config never writes the on-disk file. Never true for a loaded or
     /// default-constructed config.
     #[serde(skip)]
+    // Read only by the `fs` half, which is where saving happens. The field
+    // stays in every build: `Config::ephemeral()` is public API, and a field
+    // that exists conditionally is a struct whose shape depends on a feature.
+    #[cfg_attr(
+        not(feature = "fs"),
+        expect(clippy::allow_attributes, reason = "see above"),
+        allow(dead_code, reason = "only the `fs` half suppresses a save")
+    )]
     ephemeral: bool,
     /// Per-device state, keyed by the stable physical-device identifier
     /// (e.g. `"receiver:abc123:slot:2"`) so two identical models never share
@@ -206,6 +220,7 @@ impl Config {
     /// gestures from, inferred from the binding shapes — the owner-lock-era
     /// resolution rule, retained solely for
     /// [`Self::migrate_owner_locked_gestures`]. `None` means gestures were off.
+    #[cfg(feature = "fs")]
     fn infer_gesture_owner(bindings: &BTreeMap<ButtonId, Binding>) -> Option<ButtonId> {
         // An OS-hook button left in gesture mode took the role over.
         if let Some((id, _)) = bindings
@@ -339,6 +354,7 @@ impl Config {
     ///   capture layer leaves native;
     /// - the consumed `gesture_owner` never serializes again — the shape is
     ///   the whole truth from here on.
+    #[cfg(feature = "fs")]
     fn migrate_owner_locked_gestures(&mut self) {
         for device in self.devices.values_mut() {
             let owner = match device.gesture_owner.take() {

@@ -124,7 +124,7 @@ impl to a derive macro kills every `Type::trait_method` doc link — is explaine
 
 The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
 (Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
-`--all-targets` tests, cargo-deny, Windows clippy, shell lint). macOS-green is
+`--all-targets` tests, cargo-deny, Windows clippy, wasm portability, shell lint). macOS-green is
 not that matrix. To run every job this machine can reproduce:
 
 ```sh

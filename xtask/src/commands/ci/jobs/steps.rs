@@ -43,11 +43,13 @@ const WINDOWS_LINT_CRATES: [&str; 8] = [
 /// portable by default. Adding a name here is the claim; this job is what makes
 /// it a fact.
 ///
-/// `openlogi-core` is not on the list yet — its config half writes files
-/// through `atomic-write-file`, which pulls `getrandom` and does not build for
-/// `wasm32-unknown-unknown`. Splitting that half off is what would earn it a
-/// place here.
+/// `openlogi-core` qualifies only with its `fs` feature off — that feature is
+/// the config file, and a config file needs a filesystem. Hence
+/// `--no-default-features`, which is why this job checks it in its own pass.
 const WASM_PORTABLE_CRATES: [&str; 1] = ["openlogi-hidpp"];
+
+/// The crates that are portable once their host-facing feature is off.
+const WASM_PORTABLE_NO_DEFAULT_CRATES: [&str; 1] = ["openlogi-core"];
 
 /// The GPUI crates `cargo doc` skips — documenting them drags the whole
 /// graphics toolchain into the job. Excluding by name rather than listing the
@@ -324,12 +326,22 @@ fn wasm(job: Job, sh: &Shell) -> Result<Plan> {
     let crates = WASM_PORTABLE_CRATES
         .iter()
         .flat_map(|crate_name| ["-p", crate_name]);
+    let no_default = WASM_PORTABLE_NO_DEFAULT_CRATES
+        .iter()
+        .flat_map(|crate_name| ["-p", crate_name]);
     Ok(Plan::run(
         job,
-        [Step::new("cargo")
-            .args(["check"])
-            .args(crates)
-            .args(["--target", "wasm32-unknown-unknown"])],
+        [
+            Step::new("cargo")
+                .args(["check"])
+                .args(crates)
+                .args(["--target", "wasm32-unknown-unknown"]),
+            Step::new("cargo").args(["check"]).args(no_default).args([
+                "--no-default-features",
+                "--target",
+                "wasm32-unknown-unknown",
+            ]),
+        ],
     ))
 }
 
