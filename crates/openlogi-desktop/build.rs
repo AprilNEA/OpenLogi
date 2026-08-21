@@ -19,7 +19,7 @@
 //! the exact version already in the lock as gpui's own build-dependency, which
 //! adds an edge, not a crate.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     reason = "a build script fails by panicking, so expect — whose message surfaces in the build log — is the idiomatic error path"
 )]

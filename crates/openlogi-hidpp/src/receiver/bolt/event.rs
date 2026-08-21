@@ -394,11 +394,6 @@ pub enum PairingPasskeyPressType {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use super::{
         DeviceConnection, DeviceKind, Event, PairingError, PairingPasskeyPressType, decode,

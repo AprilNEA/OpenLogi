@@ -1,5 +1,5 @@
 //! Windows helpers for synthesising OS-level input events via `SendInput`.
-#![allow(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
+#![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
 use std::mem::size_of;
 

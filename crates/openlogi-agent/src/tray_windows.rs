@@ -23,13 +23,6 @@
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    reason = "win32 message plumbing round-trips ids through WPARAM/LPARAM by design"
-)]
-
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tracing::{info, warn};
@@ -139,6 +132,11 @@ fn run_tray_loop() {
     }
 }
 
+#[expect(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "WM_TRAY packs the mouse message id into the low bits of LPARAM"
+)]
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -176,6 +174,10 @@ unsafe extern "system" fn wnd_proc(
 
 /// Install the icon (idempotent enough for the re-add path: a duplicate
 /// `NIM_ADD` fails silently and the existing icon stays).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
 unsafe fn add_tray_icon(hwnd: HWND) {
     // SAFETY: `nid` is fully initialized below; the tip buffer is bounded.
     unsafe {
@@ -199,6 +201,10 @@ unsafe fn add_tray_icon(hwnd: HWND) {
 /// macOS status-item asset; `CreateIconFromResourceEx` accepts raw PNG
 /// buffers (the same PNG-compressed form .ico files carry since Vista).
 /// Falls back to the stock application icon rather than showing nothing.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the PNG is embedded at build time and is a few kilobytes"
+)]
 unsafe fn tray_icon() -> HICON {
     const BLACK: &[u8] = include_bytes!("../assets/tray-icon@2x.png");
     const WHITE: &[u8] = include_bytes!("../assets/tray-icon-white@2x.png");
@@ -236,6 +242,10 @@ fn taskbar_is_light() -> bool {
 }
 
 /// Show the context menu at the cursor and run the chosen command.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "TrackPopupMenu returns the command id it was given, never negative"
+)]
 unsafe fn show_menu(hwnd: HWND) {
     // SAFETY: menu handles are created and destroyed here; the
     // SetForegroundWindow/WM_NULL bracket is the documented TrackPopupMenu
@@ -396,6 +406,10 @@ fn spawn_gui() {
 /// the agent we are about to exit), then the icon, then the agent. Mirrors
 /// the macOS Quit semantics; the GUI holds no unsaved state (config writes
 /// are immediate).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
 fn quit(hwnd: HWND) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut system = System::new();

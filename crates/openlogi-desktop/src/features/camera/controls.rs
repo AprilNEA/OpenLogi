@@ -11,13 +11,6 @@
 //! Streaming / Video call) plus user-saved customs, applied to the hardware in
 //! a single batched device-open.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "UVC control values are small integers; slider math goes through f32"
-)]
-
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, ClickEvent, Context, Entity,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
@@ -79,7 +72,7 @@ pub struct CameraControlsPanel {
     uid: Option<String>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
-    #[allow(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
 }
 
@@ -88,7 +81,7 @@ struct ControlSlider {
     label: SharedString,
     range: ControlRange,
     state: Entity<SliderState>,
-    #[allow(dead_code, reason = "held to keep the slider subscription alive")]
+    #[expect(dead_code, reason = "held to keep the slider subscription alive")]
     sub: Subscription,
 }
 
@@ -287,7 +280,7 @@ impl CameraControlsPanel {
         cx: &mut Context<Self>,
     ) {
         let state = cx.new(|_| {
-            let (lo, hi) = (range.min as f32, range.max as f32);
+            let (lo, hi) = (to_slider(range.min), to_slider(range.max));
             // `SliderState` defaults to [0, 100] and re-clamps its value on every
             // builder call, panicking if min > max even transiently. A fully
             // negative range (UVC exposure reports e.g. -11..-2) would make
@@ -298,7 +291,7 @@ impl CameraControlsPanel {
             } else {
                 SliderState::new().max(hi).min(lo)
             };
-            bounded.step(1.0).default_value(shown as f32)
+            bounded.step(1.0).default_value(to_slider(shown))
         });
         let uid_for_event = uid.to_string();
         let key_for_event = key.to_string();
@@ -308,7 +301,7 @@ impl CameraControlsPanel {
                 // so we don't flood the camera with intermediate values.
                 SliderEvent::Change(_) => cx.notify(),
                 SliderEvent::Release(value) => {
-                    let v = value.start().round() as i32;
+                    let v = from_slider(value.start());
                     panel.commit_release(control, &uid_for_event, &key_for_event, v, cx);
                 }
             }
@@ -392,7 +385,7 @@ impl CameraControlsPanel {
         {
             values.push((
                 slider.control,
-                slider.state.read(cx).value().start().round() as i32,
+                from_slider(slider.state.read(cx).value().start()),
             ));
         }
         if let Err(e) = openlogi_camera::apply_settings(&uid, &[(toggle, on)], &values) {
@@ -458,7 +451,7 @@ impl CameraControlsPanel {
         for (control, value) in values {
             if let Some(slider) = self.sliders.iter().find(|s| s.control == *control) {
                 slider.state.clone().update(cx, |s, cx| {
-                    s.set_value(*value as f32, window, cx);
+                    s.set_value(to_slider(*value), window, cx);
                 });
             }
         }
@@ -506,7 +499,7 @@ impl CameraControlsPanel {
             });
         }
         state.update(cx, |slider, cx| {
-            slider.set_value(default as f32, window, cx);
+            slider.set_value(to_slider(default), window, cx);
         });
         cx.update_global::<AppState, _>(|state, _| {
             state.commit_camera_control(&key, control, default);
@@ -549,8 +542,8 @@ impl CameraControlsPanel {
                     .iter()
                     .find(|(c, _)| *c == slider.control)
                     .map_or(slider.range.default, |(_, pct)| {
-                        let span = (slider.range.max - slider.range.min) as f32;
-                        slider.range.min + (span * pct).round() as i32
+                        let span = to_slider(slider.range.max - slider.range.min);
+                        slider.range.min + from_slider(span * pct)
                     });
                 values.push((
                     slider.control,
@@ -594,7 +587,7 @@ impl CameraControlsPanel {
         for slider in &self.sliders {
             snap.0.insert(
                 slider.control.name().to_string(),
-                slider.state.read(cx).value().start().round() as i32,
+                from_slider(slider.state.read(cx).value().start()),
             );
         }
         for row in &self.autos {
@@ -860,7 +853,7 @@ fn control_row(
     pal: Palette,
 ) -> AnyElement {
     let slider = &panel.sliders[ix];
-    let value = slider.state.read(cx).value().start().round() as i32;
+    let value = from_slider(slider.state.read(cx).value().start());
     let auto_on = panel.auto_state_for(slider.control);
     let dimmed = auto_on == Some(true);
 
@@ -986,4 +979,22 @@ fn control_label(control: CameraControl) -> SharedString {
         CameraControl::WhiteBalance => tr!("White balance"),
         CameraControl::Tint => tr!("Tint"),
     }
+}
+
+/// A UVC control value as the GPUI slider wants it.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a UVC control range is far below f32's exact integer range"
+)]
+fn to_slider(value: i32) -> f32 {
+    value as f32
+}
+
+/// Inverse of [`to_slider`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the slider steps by 1 over the control's own i32 range"
+)]
+fn from_slider(value: f32) -> i32 {
+    value.round() as i32
 }

@@ -109,6 +109,10 @@ mod tests {
         assert_eq!(rust_i18n::t!("Settings"), "Настройки");
         assert_eq!(rust_i18n::t!("Left Click"), "Левый щелчок");
 
+        rust_i18n::set_locale("uk");
+        assert_eq!(rust_i18n::t!("Settings"), "Налаштування");
+        assert_eq!(rust_i18n::t!("Left Click"), "Клацання лівою");
+
         rust_i18n::set_locale("zh-TW");
         assert_eq!(rust_i18n::t!("Settings"), "設定");
         assert_eq!(rust_i18n::t!("Left Click"), "左鍵按一下");

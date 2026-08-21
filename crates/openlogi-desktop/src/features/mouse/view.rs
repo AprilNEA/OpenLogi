@@ -304,7 +304,7 @@ fn breathing_art(
         .child(device_art)
 }
 
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "layout inputs + hover/active/gesture state; bundling would just hide the dependency"
 )]
@@ -382,7 +382,7 @@ where
 /// host a Popover whose trigger is the label card itself. Same picker
 /// content as the hotspot dot — clicking either entry point lands on the
 /// same binding flow.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "wrapper position + trigger \
 state both need this many inputs; bundling would just hide the dependency"

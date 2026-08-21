@@ -282,7 +282,7 @@ async fn manage(
 
 /// Start one device's capture session plus its input-forwarding task, and
 /// return the manager's tracking entry for it.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "plumbing between the manager loop's channels; grouping them into \
               a struct would only relabel the same eight values"
@@ -437,7 +437,7 @@ fn dispatch(
 /// Advance one direction's accumulator by `magnitude` rotation increments and
 /// decide what to emit. Pure given `now`, so the decay/cooldown/threshold logic
 /// is unit-testable without touching the OS.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     reason = "magnitude/sensitivity are small integers and `lines` is a trunc'd \

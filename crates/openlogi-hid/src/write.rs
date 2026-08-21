@@ -27,7 +27,8 @@ mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
 pub use diagnostics::{
-    FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls, read_battery_raw,
+    FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
+    dump_firmware_entities, dump_reprog_controls, read_battery_raw,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
@@ -102,5 +103,4 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests;

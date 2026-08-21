@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::binding::Action;
 
@@ -115,14 +116,9 @@ impl<'de> Deserialize<'de> for KeyTrigger {
 }
 
 /// Error returned by [`KeyTrigger`]'s `FromStr` impl.
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("invalid key trigger: {0}")]
 pub struct ParseTriggerError(pub String);
-impl std::fmt::Display for ParseTriggerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid key trigger: {}", self.0)
-    }
-}
-impl std::error::Error for ParseTriggerError {}
 
 impl std::str::FromStr for KeyTrigger {
     type Err = ParseTriggerError;

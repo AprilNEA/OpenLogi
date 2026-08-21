@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "full schema parsed; label direction codes + extra coords land in later phases"
-)]
-
 //! Parses the per-depot hotspot metadata shipped by the Logi Options+
 //! installer (and re-hosted by assets.openlogi.org) — `core_metadata.json`
 //! on newer depots, `metadata.json` on older ones. The caller picks the
@@ -122,7 +117,6 @@ impl Metadata {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::Metadata;
 

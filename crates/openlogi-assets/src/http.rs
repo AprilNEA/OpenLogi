@@ -381,7 +381,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
     fn write_replace_overwrites_in_place() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let dst = dir.path().join("a.png");
@@ -394,7 +393,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
     fn write_replace_replaces_a_planted_symlink_instead_of_following_it() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let victim = dir.path().join("victim.txt");

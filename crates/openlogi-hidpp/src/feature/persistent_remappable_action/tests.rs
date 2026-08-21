@@ -1,5 +1,4 @@
 //! Unit tests for `PersistentRemappableAction` payload parsing.
-#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use std::assert_matches;
 

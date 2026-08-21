@@ -60,7 +60,7 @@ pub(super) fn selected_language_index(
 
 /// The language picker field. "Follow system" clears the stored preference
 /// (`None`); explicit locale entries come from [`openlogi_ui::locale::SUPPORTED`].
-#[allow(
+#[expect(
     clippy::needless_pass_by_value,
     reason = "built inside an `Fn` render closure, so a `&Entity` parameter would make \
               the returned element borrow a captured variable; `Entity` is a cheap handle"

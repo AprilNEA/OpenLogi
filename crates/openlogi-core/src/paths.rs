@@ -161,7 +161,6 @@ pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
 
 #[cfg(test)]
 #[cfg(unix)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

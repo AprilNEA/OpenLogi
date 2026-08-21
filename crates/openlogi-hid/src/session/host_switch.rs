@@ -519,7 +519,6 @@ fn event_host(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use std::sync::Arc;
 
@@ -530,7 +529,7 @@ mod tests {
         host_channel, prepare_host_change_on, restoration_change, shares_channel,
     };
     use crate::DeviceRoute;
-    use crate::channel::scripted::ScriptedRawHidChannel;
+    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
     use crate::reprog_controls::{
         AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
     };
@@ -617,19 +616,6 @@ mod tests {
         response[1..4].copy_from_slice(&request[1..4]);
         response[4..].copy_from_slice(&payload[..3]);
         Some(response)
-    }
-
-    /// A HID++ 2.0 error response to `request`: feature index `0xff`, then the
-    /// addressed feature index, the function/software id, and the error code.
-    fn feature_error(request: &[u8], error: u8) -> Vec<u8> {
-        let mut response = vec![0u8; 7];
-        response[0] = 0x10;
-        response[1] = request[1];
-        response[2] = 0xff;
-        response[3] = request[2];
-        response[4] = request[3];
-        response[5] = error;
-        response
     }
 
     async fn scripted_channel(responder: crate::channel::scripted::Responder) -> Arc<HidppChannel> {

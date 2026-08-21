@@ -252,11 +252,6 @@ async fn read_feature_entry(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use std::sync::Arc;
 

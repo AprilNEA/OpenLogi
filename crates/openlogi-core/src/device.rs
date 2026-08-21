@@ -95,7 +95,7 @@ impl DeviceKind {
 /// actually announced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
 )]
@@ -269,8 +269,17 @@ pub struct DeviceModelInfo {
     /// Which transports the firmware supports; defines the slot order of
     /// [`Self::model_ids`].
     pub transports: DeviceTransports,
-    /// Per-transport PIDs ordered to match [`Self::transports`] (USB, eQuad,
-    /// BTLE, Bluetooth); slots for disabled transports stay `0`.
+    /// Per-transport PIDs for the transports enabled in [`Self::transports`],
+    /// packed from the front in ascending HID++ transport-bit order:
+    /// Bluetooth (bit 0), BTLE (bit 1), eQuad (bit 2), USB (bit 3). Only
+    /// enabled transports take a slot — a disabled transport is skipped, not
+    /// zero-filled — so unused trailing slots stay `0` and the array holds at
+    /// most three PIDs.
+    ///
+    /// Note this is the reverse of the field order of [`DeviceTransports`],
+    /// which lists `usb` first. A device with `usb + equad` reports
+    /// `[eQuad PID, USB PID, 0]`; one with `equad + btle` reports
+    /// `[BTLE PID, eQuad PID, 0]`.
     pub model_ids: [u16; 3],
     /// Extra model byte prefixed to a PID to form the asset registry's
     /// `modelId` — see [`Self::config_key`].
@@ -295,7 +304,7 @@ impl DeviceModelInfo {
 /// device firmware exposes. The shape is dictated by HID++ feature 0x0003;
 /// a state machine doesn't fit since a single device can announce multiple
 /// transports simultaneously.
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
@@ -422,11 +431,6 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "range fixture construction is intentionally asserted in tests"
-    )]
-
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
         DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,

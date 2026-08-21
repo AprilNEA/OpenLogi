@@ -154,8 +154,11 @@ pub fn action_device_path() -> Option<std::path::PathBuf> {
 pub const SYNTHETIC_EVENT_USER_DATA: i64 = 0x4F4C_4749;
 
 /// Translate a platform-neutral USB HID keyboard usage to a Win32 virtual key.
+// Not `expect`: the lint fires in the `--lib` build and not in the `--test`
+// one, so an expectation is always unfulfilled for one of them.
 #[cfg_attr(
     not(target_os = "windows"),
+    expect(clippy::allow_attributes, reason = "see above"),
     allow(dead_code, reason = "called only by the Windows backend")
 )]
 fn hid_usage_to_windows(usage: u8) -> Option<u16> {

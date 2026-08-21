@@ -17,10 +17,13 @@
 //! `PROTOCOL_VERSION`, update [`protocol_version_is_pinned`], and replace the
 //! golden with the actual hex from the assertion message.
 
-#![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 #![expect(
     clippy::tests_outside_test_module,
     reason = "an integration test file is already its own test-only crate"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "the fixture helpers sit outside any `#[test]` fn, where `allow-expect-in-tests` cannot see them"
 )]
 
 use std::collections::BTreeMap;

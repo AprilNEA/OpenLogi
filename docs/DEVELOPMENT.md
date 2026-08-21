@@ -43,7 +43,8 @@ nfpm on Linux, and the macOS packaging/env helpers GPUI needs
 
 ```sh
 devenv tasks run openlogi:gui      # run the desktop app
-devenv tasks run openlogi:check    # fmt + clippy + tests (run before committing)
+devenv tasks run openlogi:check    # host-OS gate: fmt + clippy + tests + rustdoc
+devenv tasks run openlogi:ci       # every GitHub Actions CI job this host can reproduce
 devenv tasks run openlogi:dmg      # build the macOS DMG
 devenv tasks run openlogi:i18n-upload    # upload English source strings to Crowdin
 devenv tasks run openlogi:i18n-download  # download translations and run i18n tests
@@ -169,17 +170,40 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
-## Pre-commit checklist
+## Local CI
 
-Before committing, the following must pass:
+The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
+machine can reproduce — including MSRV, cargo-deny, and the Windows cross-lint
+the host-OS gate does not run:
 
 ```sh
+cargo xtask ci
+cargo xtask ci --list                        # job → command table
+devenv tasks run openlogi:ci                 # same, from devenv
+```
+
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
+OS are reported as skipped; a skip is not a pass. The full job map (and which
+diff requires which job) is [`.claude/rules/ci.md`](../.claude/rules/ci.md).
+
+### Pre-push gate
+
+Before pushing, the host-OS subset must pass:
+
+```sh
+export RUSTFLAGS="-D warnings"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+  --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
+  --exclude openlogi-overlay --exclude openlogi-agent
 ```
 
-Equivalent to `devenv tasks run openlogi:check`.
+Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
+pipeline: Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell lint
+(shellcheck + shfmt) are separate CI jobs. Reproduce those with `cargo xtask ci` or the commands in
+`.claude/rules/ci.md`.
 
 ## Packaging the macOS DMG
 

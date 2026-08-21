@@ -1,11 +1,12 @@
 #![expect(unsafe_code, reason = "Win32 HID report writes require FFI")]
 
 use std::{
-    fmt, io,
+    io,
     ptr::{null, null_mut},
 };
 
 use async_hid::{DeviceId, DeviceInfo};
+use thiserror::Error;
 use tracing::debug;
 use windows_sys::Win32::{
     Devices::HumanInterfaceDevice::{
@@ -276,29 +277,12 @@ impl Drop for PreparsedData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum NativeWriteError {
+    #[error("all native Windows HID write methods failed: {}", .0.join("; "))]
     AllMethodsFailed(Vec<String>),
+    #[error("{0} returned NTSTATUS {1:#010x}")]
     HidpStatus(&'static str, i32),
+    #[error("{0}: {1}")]
     LastOsError(&'static str, io::Error),
 }
-
-impl fmt::Display for NativeWriteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AllMethodsFailed(errors) => {
-                write!(f, "all native Windows HID write methods failed")?;
-                for error in errors {
-                    write!(f, "; {error}")?;
-                }
-                Ok(())
-            }
-            Self::HidpStatus(operation, status) => {
-                write!(f, "{operation} returned NTSTATUS {status:#010x}")
-            }
-            Self::LastOsError(operation, error) => write!(f, "{operation}: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for NativeWriteError {}

@@ -195,10 +195,6 @@ impl<'de> Deserialize<'de> for LightValueRange {
 /// advertise a control merely because the product is classified as a light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "independent optional light controls are a serialized capability DTO"
-)]
 pub struct LightCapabilities {
     /// Whether the driver can switch the light on and off.
     pub power: bool,

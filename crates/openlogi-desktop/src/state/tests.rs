@@ -1,10 +1,5 @@
 //! AppState unit tests.
 
-#![allow(
-    clippy::expect_used,
-    reason = "state fixture construction is intentionally asserted in tests"
-)]
-
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,

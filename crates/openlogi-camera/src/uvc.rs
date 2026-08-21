@@ -16,13 +16,6 @@
 //! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
 //! block in this backend and hands the descriptor up as a plain `&[u8]`.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    reason = "UVC payloads are bounded 16-bit values copied verbatim"
-)]
-
 mod iokit;
 
 use std::collections::HashMap;
@@ -456,7 +449,7 @@ impl UsbDevice {
             payload,
         } = control.spec();
         let entity = self.entity(unit)?;
-        let mut buf = (value as u32).to_le_bytes();
+        let mut buf = value.cast_unsigned().to_le_bytes();
         self.transfer(
             RT_SET,
             UVC_SET_CUR,
@@ -513,6 +506,10 @@ impl UsbDevice {
             bRequest: request,
             wValue: selector << 8,
             wIndex: (u16::from(entity) << 8) | u16::from(self.vc_interface),
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "`data` is a UVC control payload — at most the 4 bytes a `ControlSpec` declares"
+            )]
             wLength: data.len() as u16,
             pData: data.as_mut_ptr().cast::<c_void>(),
             wLenDone: 0,
@@ -659,16 +656,8 @@ mod tests {
 
     /// An 8-byte VC_INPUT_TERMINAL descriptor for `entity`.
     fn input_terminal(entity: u8, terminal_type: u16) -> Vec<u8> {
-        vec![
-            8,
-            0x24,
-            0x02,
-            entity,
-            terminal_type as u8,
-            (terminal_type >> 8) as u8,
-            0,
-            0,
-        ]
+        let [type_lo, type_hi] = terminal_type.to_le_bytes();
+        vec![8, 0x24, 0x02, entity, type_lo, type_hi, 0, 0]
     }
 
     /// A minimal VC_PROCESSING_UNIT descriptor for `entity`.
