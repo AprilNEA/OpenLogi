@@ -3,7 +3,6 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -26,11 +25,12 @@ mod features;
 pub mod hotplug;
 mod ledger;
 mod mappings;
-mod persist;
+pub mod persist;
 mod probe;
 pub(crate) mod standalone;
 
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
+use persist::{FileProbeCacheStore, ProbeCacheSnapshot, ProbeCacheStore};
 use probe::{NodeProbe, probe_one};
 
 /// How long to wait for device-arrival event bursts before assuming the
@@ -148,9 +148,9 @@ pub struct Enumerator {
     /// callers keep this `None` and retain the route-opening library behavior.
     registry: Option<ChannelRegistry>,
     tick: u64,
-    /// Where the immutable probe cache is persisted across restarts, `None`
-    /// for a memory-only enumerator (one-shot CLI calls, tests).
-    persist_path: Option<PathBuf>,
+    /// Where the immutable probe cache is kept across restarts, `None` for a
+    /// memory-only enumerator (one-shot CLI calls, tests).
+    store: Option<Arc<dyn ProbeCacheStore>>,
     /// Whether the persistable cache content changed since the last save —
     /// fresh full probes and evictions, not per-tick battery refreshes.
     cache_dirty: bool,
@@ -418,7 +418,7 @@ impl Enumerator {
             ledger: NodeLedger::default(),
             registry: None,
             tick: 0,
-            persist_path: None,
+            store: None,
             cache_dirty: false,
         }
     }
@@ -441,23 +441,26 @@ impl Enumerator {
     /// A modifier rather than a constructor: persistence is orthogonal to the
     /// channel registry, so the agent's enumerator carries both.
     #[must_use]
-    pub fn persisted(mut self) -> Self {
-        self.persist_path = match openlogi_core::paths::data_dir() {
-            Ok(dir) => Some(dir.join("probe-cache.json")),
-            Err(e) => {
-                warn!(error = %e, "no data dir — probe cache is memory-only");
-                None
-            }
-        };
-        let cache = self
-            .persist_path
-            .as_deref()
-            .map(persist::load)
-            .unwrap_or_default();
+    pub fn persisted(self) -> Self {
+        match FileProbeCacheStore::in_data_dir() {
+            Some(store) => self.with_probe_cache(Arc::new(store)),
+            None => self,
+        }
+    }
+
+    /// Warm-start this enumerator's immutable probe cache from `store`, and
+    /// write it back there whenever its persistable content changes.
+    ///
+    /// A modifier rather than a constructor: persistence is orthogonal to the
+    /// channel registry and the backend, so an enumerator can carry all three.
+    #[must_use]
+    pub fn with_probe_cache(mut self, store: Arc<dyn ProbeCacheStore>) -> Self {
+        let cache = store.load().into_entries();
         if !cache.is_empty() {
-            debug!(entries = cache.len(), "probe cache warm-started from disk");
+            debug!(entries = cache.len(), "probe cache warm-started");
         }
         self.cache.extend(cache);
+        self.store = Some(store);
         self
     }
 
@@ -528,19 +531,19 @@ impl Enumerator {
         }
     }
 
-    /// Write the cache through to disk when its persistable content changed
-    /// this tick. Best-effort: a failed write is logged and retried on the
-    /// next dirty tick.
+    /// Write the cache through to its store when the persistable content
+    /// changed this tick. Best-effort: a failed write is logged and retried on
+    /// the next dirty tick.
     fn flush_cache(&mut self) {
         if !self.cache_dirty {
             return;
         }
-        let Some(path) = self.persist_path.as_deref() else {
+        let Some(store) = &self.store else {
             return;
         };
-        match persist::save(path, &self.cache) {
+        match store.save(&ProbeCacheSnapshot::of(&self.cache)) {
             Ok(()) => self.cache_dirty = false,
-            Err(e) => warn!(error = %e, ?path, "failed to persist probe cache"),
+            Err(e) => warn!(error = %e, "failed to persist probe cache"),
         }
     }
 

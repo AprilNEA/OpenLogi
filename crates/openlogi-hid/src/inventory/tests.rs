@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use openlogi_core::device::{
@@ -11,7 +12,7 @@ use super::cache::{
     keep_known_capabilities,
 };
 use super::features::{BatteryProbe, ProbedFeatures};
-use super::persist;
+use super::persist::{self, ProbeCacheStore as _};
 use super::probe::{
     NodeProbe, assemble_bolt_probe, parse_codename_unifying, preferred_direct_codename,
 };
@@ -670,8 +671,11 @@ fn probe_cache_roundtrips_through_disk() {
         },
     );
 
-    persist::save(&path, &cache).expect("save");
-    let loaded = persist::load(&path);
+    let store = persist::FileProbeCacheStore::at(path);
+    store
+        .save(&persist::ProbeCacheSnapshot::of(&cache))
+        .expect("save");
+    let loaded = store.load().into_entries();
 
     let bolt = loaded
         .get(&CacheKey::Bolt {
@@ -703,16 +707,20 @@ fn probe_cache_load_tolerates_missing_or_garbage_files() {
     // The persisted cache is a warm-start optimization: a missing file, torn
     // write, or foreign schema must yield an empty cache, never an error.
     let dir = tempfile::tempdir().expect("tempdir");
-    let missing = dir.path().join("nope.json");
-    assert!(persist::load(&missing).is_empty());
+    let entries_at = |path: PathBuf| persist::FileProbeCacheStore::at(path).load().into_entries();
+
+    assert!(entries_at(dir.path().join("nope.json")).is_empty());
 
     let garbage = dir.path().join("garbage.json");
     std::fs::write(&garbage, b"not json at all").expect("write");
-    assert!(persist::load(&garbage).is_empty());
+    assert!(entries_at(garbage).is_empty());
 
     let wrong_version = dir.path().join("future.json");
     std::fs::write(&wrong_version, br#"{"version":999,"entries":[]}"#).expect("write");
-    assert!(persist::load(&wrong_version).is_empty());
+    assert!(
+        entries_at(wrong_version).is_empty(),
+        "a snapshot from another schema describes a shape this build cannot read"
+    );
 }
 
 /// A node the backend cannot open is a *failure*, not a disconnect: the tick

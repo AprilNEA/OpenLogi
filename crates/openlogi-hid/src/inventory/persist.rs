@@ -1,4 +1,4 @@
-//! Disk persistence for the immutable probe cache.
+//! The immutable probe cache's persistable form, and the port that keeps it.
 //!
 //! A device's expensive probe result (model info, capabilities, feature
 //! indexes) is immutable, so it only ever needs to be read once per device —
@@ -9,31 +9,67 @@
 //!
 //! Only Bolt identities are persisted, because only they are keyed on the
 //! device's *own* identity (the pairing-register unit id), which no re-pairing
-//! can silently reassign. A [`CacheKey::UnifyingSlot`] is `receiver + slot`: a
+//! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
 //! different device paired into that slot while the agent is down would
-//! inherit the previous occupant's probe on warm start. A [`CacheKey::Direct`]
+//! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
 //! is an OS-runtime node id with no cross-boot stability. Loaded entries get
-//! `probed_tick = 0`, so the regular [`super::cache::REFRESH_TICKS`]
+//! `probed_tick = 0`, so the regular `cache::REFRESH_TICKS`
 //! self-healing pass re-walks them on schedule; until (and unless) that walk
 //! succeeds, the persisted data serves exactly like an in-memory cache hit.
+//!
+//! *Where* a snapshot is kept is the host's business, not this module's: the
+//! enumerator writes through a [`ProbeCacheStore`], and every native build
+//! supplies [`FileProbeCacheStore`].
 
 use std::collections::HashMap;
-use std::io;
-use std::path::Path;
 
-use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::cache::{CacheKey, Cached};
 use super::features::{BatteryProbe, ProbedFeatures};
 
-/// Bumped when the on-disk shape changes; a mismatched file is discarded
+mod file;
+
+pub use file::FileProbeCacheStore;
+
+/// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 const SCHEMA_VERSION: u32 = 2;
 
+/// A probe-cache store could not keep a snapshot.
+///
+/// Carries only a message: nothing branches on why a best-effort write failed,
+/// and the reasons differ per store (a filesystem error, a browser storage
+/// quota).
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct ProbeCacheError(String);
+
+/// Where an [`Enumerator`](super::Enumerator)'s probe cache lives between runs.
+///
+/// A port, like [`HidBackend`](crate::backend::HidBackend): the enumerator
+/// knows what is worth keeping and when it changed, and nothing about where it
+/// goes. Native builds use [`FileProbeCacheStore`].
+pub trait ProbeCacheStore: Send + Sync {
+    /// The last snapshot saved here, or an empty one.
+    ///
+    /// Never fails: an absent, torn or foreign-schema store is a cold start,
+    /// which the enumerator handles by re-probing — not an error worth
+    /// propagating into device discovery.
+    fn load(&self) -> ProbeCacheSnapshot;
+
+    /// Persist `snapshot`.
+    ///
+    /// An `Err` is logged by the caller and the snapshot retried on the next
+    /// tick that dirties the cache, so a store may fail freely.
+    fn save(&self, snapshot: &ProbeCacheSnapshot) -> Result<(), ProbeCacheError>;
+}
+
+/// The persistable subset of the probe cache, in the shape a store keeps.
 #[derive(Serialize, Deserialize)]
-struct PersistedCache {
+pub struct ProbeCacheSnapshot {
     version: u32,
     entries: Vec<PersistedEntry>,
 }
@@ -58,9 +94,9 @@ fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     }
 }
 
-/// Whether a cache change under `key` affects the persisted file at all —
+/// Whether a cache change under `key` affects the persisted snapshot at all —
 /// gates `cache_dirty` so churn on never-persisted keys (e.g. a direct-only
-/// system's full refresh) doesn't rewrite an unchanged file every pass.
+/// system's full refresh) doesn't rewrite an unchanged snapshot every pass.
 pub(super) fn is_persistable(key: &CacheKey) -> bool {
     persistable(key).is_some()
 }
@@ -71,75 +107,72 @@ fn runtime_key(key: PersistedKey) -> CacheKey {
     }
 }
 
-/// Write the persistable subset of `cache` to `path`, atomically via
-/// [`AtomicWriteFile`] so a crash mid-write can't leave a torn file (and the
-/// replace works on Windows, where a plain rename onto an existing file
-/// fails). Errors are the caller's to log — persistence is best-effort and
-/// must never fail enumeration.
-pub(super) fn save(path: &Path, cache: &HashMap<CacheKey, Cached>) -> io::Result<()> {
-    let entries: Vec<PersistedEntry> = cache
-        .iter()
-        .filter_map(|(key, cached)| {
-            persistable(key).map(|key| {
-                // The battery *reading* is volatile and re-read live on every
-                // cache hit — persisting it would resurrect a stale value
-                // after a restart. The battery *feature index*
-                // (`PersistedEntry::battery`) is immutable and kept.
-                let mut probe = cached.probe.clone();
-                probe.battery = None;
-                PersistedEntry {
-                    key,
-                    probe,
-                    battery: cached.battery,
-                }
-            })
-        })
-        .collect();
-    let file = PersistedCache {
-        version: SCHEMA_VERSION,
-        entries,
-    };
-    let json = serde_json::to_vec(&file).map_err(io::Error::other)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+impl ProbeCacheSnapshot {
+    /// A snapshot carrying nothing — what a store with no readable content
+    /// returns, and a cold start for the enumerator.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            version: SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
     }
-    let mut out = AtomicWriteFile::open(path)?;
-    io::Write::write_all(&mut out, &json)?;
-    out.commit()
-}
 
-/// Load a previously saved cache. Any failure — missing file, unreadable
-/// JSON, unknown schema version — yields an empty cache: the data is a
-/// warm-start optimization, never a correctness requirement.
-pub(super) fn load(path: &Path) -> HashMap<CacheKey, Cached> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return HashMap::new();
-    };
-    let Ok(file) = serde_json::from_slice::<PersistedCache>(&bytes) else {
-        tracing::warn!(?path, "probe cache unreadable — starting cold");
-        return HashMap::new();
-    };
-    if file.version != SCHEMA_VERSION {
-        tracing::debug!(
-            version = file.version,
-            "probe cache from another schema — starting cold"
-        );
-        return HashMap::new();
+    /// Everything in `cache` worth keeping across restarts.
+    pub(super) fn of(cache: &HashMap<CacheKey, Cached>) -> Self {
+        let entries = cache
+            .iter()
+            .filter_map(|(key, cached)| {
+                persistable(key).map(|key| {
+                    // The battery *reading* is volatile and re-read live on
+                    // every cache hit — persisting it would resurrect a stale
+                    // value after a restart. The battery *feature index*
+                    // (`PersistedEntry::battery`) is immutable and kept.
+                    let mut probe = cached.probe.clone();
+                    probe.battery = None;
+                    PersistedEntry {
+                        key,
+                        probe,
+                        battery: cached.battery,
+                    }
+                })
+            })
+            .collect();
+        Self {
+            version: SCHEMA_VERSION,
+            entries,
+        }
     }
-    file.entries
-        .into_iter()
-        .map(|entry| {
-            (
-                runtime_key(entry.key),
-                Cached {
-                    probe: entry.probe,
-                    battery: entry.battery,
-                    // Restart the refresh clock: the entry serves immediately
-                    // as a cache hit, and the periodic self-healing re-walk
-                    // decides when it is due for a fresh read.
-                    probed_tick: 0,
-                },
-            )
-        })
-        .collect()
+
+    /// Fold this snapshot back into runtime cache entries.
+    ///
+    /// A snapshot written by another schema version yields nothing: the shape
+    /// it describes is not the one this build reads, and re-probing is always
+    /// correct.
+    pub(super) fn into_entries(self) -> HashMap<CacheKey, Cached> {
+        if self.version != SCHEMA_VERSION {
+            tracing::debug!(
+                version = self.version,
+                "probe cache from another schema — starting cold"
+            );
+            return HashMap::new();
+        }
+        self.entries
+            .into_iter()
+            .map(|entry| {
+                (
+                    runtime_key(entry.key),
+                    Cached {
+                        probe: entry.probe,
+                        battery: entry.battery,
+                        // Restart the refresh clock: the entry serves
+                        // immediately as a cache hit, and the periodic
+                        // self-healing re-walk decides when it is due for a
+                        // fresh read.
+                        probed_tick: 0,
+                    },
+                )
+            })
+            .collect()
+    }
 }
