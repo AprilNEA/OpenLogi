@@ -52,7 +52,8 @@ pub use succession::Identity;
 ///      [`RingObservation`]).
 /// v22: DPI scalar values use the validated [`Dpi`] type end to end.
 /// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
-pub const PROTOCOL_VERSION: u32 = 23;
+/// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
