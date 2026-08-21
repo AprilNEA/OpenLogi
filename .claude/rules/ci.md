@@ -14,7 +14,11 @@ paths:
 `.github/workflows/ci.yml` is the source of truth for the PR test pipeline.
 This file is the agent-facing map of every job in that workflow to a local
 command. Keep them in lockstep: changing a `run:` in `ci.yml` without updating
-this file and `cargo xtask ci` is a bug.
+this file and `cargo xtask ci` is a bug. Two xtask tests catch part of that
+drift — `ci_yml_runs_what_this_runner_runs` compares the commands of the jobs
+whose invocation does not depend on the host, and `every_ci_yml_job_name_resolves`
+fails on a job name the runner cannot even name — but neither can check this
+file, so it is on you.
 
 `devenv tasks run openlogi:check` is the **host-OS pre-push gate** (fmt, clippy,
 tests, rustdoc). It is **not** the pipeline. macOS-green clippy does not compile
@@ -108,7 +112,10 @@ Not part of `ci.yml`, not in the default run:
 1. Add a `Job` variant plus its `Spec` row (name, aliases, hosts, caveat) in
    `xtask/src/commands/ci/jobs.rs`, its steps in `ci/jobs/steps.rs`, and a row
    in the table above. `--list` renders itself from the `Spec` rows, so it
-   needs no edit. The `Spec` row is also what decides the host skip — do not
-   reach for `cfg!(target_os = …)` in a job's steps.
+   needs no edit; `every_ci_yml_job_name_resolves` fails until the `Spec` row
+   answers to the workflow's `name:`. The `Spec` row is also what decides the
+   host skip — do not reach for `cfg!(target_os = …)` in a job's steps.
+   If the new job's command is the same everywhere, add it to
+   `ci_yml_runs_what_this_runner_runs` so a typo in either copy fails a test.
 2. If it belongs in the host-OS pre-push gate, also update `openlogi:check` in
    `devenv.nix` and the Local gate in `AGENTS.md`.

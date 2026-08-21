@@ -148,6 +148,16 @@ impl Step {
         self
     }
 
+    /// The program and its arguments, without the environment prefix
+    /// [`Display`] adds — the shape a workflow's `run:` line holds.
+    #[cfg(test)]
+    pub(crate) fn argv_line(&self) -> String {
+        std::iter::once(self.program.to_string_lossy())
+            .chain(self.args.iter().map(|arg| arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn run(&self, sh: &Shell) -> Result<()> {
         let program = &self.program;
         let args = &self.args;
