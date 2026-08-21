@@ -533,7 +533,7 @@ async fn read_loop(
             len,
             matched,
             pending_count,
-            payload = format!("{:02x?}", &buf[..len.min(16)]),
+            payload = format_args!("{:02x?}", &buf[..len.min(16)]),
             "raw report received"
         );
 

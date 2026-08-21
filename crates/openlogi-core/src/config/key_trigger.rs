@@ -55,22 +55,24 @@ pub struct KeyTrigger {
 
 impl std::fmt::Display for KeyTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts: Vec<&str> = Vec::new();
-        let m = &self.modifiers;
-        if m.shift {
-            parts.push("shift");
+        let modifiers = &self.modifiers;
+        let mut separator = "";
+        for (enabled, name) in [
+            (modifiers.shift, "shift"),
+            (modifiers.control, "control"),
+            (modifiers.option, "option"),
+            (modifiers.command, "command"),
+        ] {
+            if enabled {
+                write!(f, "{separator}{name}")?;
+                separator = "+";
+            }
         }
-        if m.control {
-            parts.push("control");
-        }
-        if m.option {
-            parts.push("option");
-        }
-        if m.command {
-            parts.push("command");
-        }
-        parts.push(keycode_to_name(self.keycode).ok_or(std::fmt::Error)?);
-        write!(f, "{}", parts.join("+"))
+        write!(
+            f,
+            "{separator}{}",
+            keycode_to_name(self.keycode).ok_or(std::fmt::Error)?
+        )
     }
 }
 
