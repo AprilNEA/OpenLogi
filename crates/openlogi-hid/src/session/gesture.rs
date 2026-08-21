@@ -40,6 +40,22 @@ const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// happen under pointer load) doesn't churn the session.
 const LIVENESS_PING_STRIKES: u8 = 2;
 
+/// Magnitude (raw-XY units, either axis) above which a raw-XY sample from any
+/// gesture source is treated as a jump artifact — an absolute-position
+/// glitch, not a delta — rather than real motion. A whole deliberate swipe
+/// totals a few hundred units; observed contact-jump artifacts run from the
+/// low thousands to the low tens of thousands (measured on real MX Master 4
+/// hardware, reported under both `HAPTIC_PANEL_CID` and the mechanical
+/// gesture button's CID — raw-XY reports carry no CID on the wire, so this
+/// isn't a per-control quirk to special-case). Applied unconditionally, for
+/// the whole hold rather than just its leading samples: bookkeeping meant to
+/// scope the discard to "only the first sample or two after contact" has
+/// repeatedly proven unreliable at telling a jump apart from real motion by
+/// position in the hold, so the magnitude check alone carries the whole job.
+/// A sample past this bound is never real, physically-possible travel in one
+/// ~8ms tick, so there's no legitimate motion this costs.
+const RAW_XY_JUMP_THRESHOLD: u16 = 250;
+
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
@@ -105,14 +121,6 @@ struct CaptureAccum {
     /// reports are unattributed on the wire, so overlap motion could belong to
     /// either control — it is dropped until the overlap ends.
     overlap: bool,
-    /// The armed gesture sources held in the last event, for edge detection:
-    /// a source not previously held that becomes the holder is a fresh touch
-    /// (the haptic panel's first sample is then a contact jump to discard).
-    gestures_down: Vec<u16>,
-    /// Whether the current hold's next raw-XY sample must be dropped: the
-    /// haptic panel's first sample after contact is an absolute position
-    /// jump, not a delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
-    skip_first_raw_xy: bool,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
@@ -648,21 +656,14 @@ fn handle_reprog(
                         }
                     }
                     // ...and the first still-held source begins (or takes
-                    // over) the hold. A source not down in the previous event
-                    // is a fresh touch, so the panel's contact-jump discard
-                    // applies; one that was already held has had its jump
-                    // dropped during the overlap.
+                    // over) the hold.
                     if let Some(&(cid, button)) = held.first() {
                         acc.gesture_source = Some((cid, button));
                         acc.swipe.begin();
                         acc.overlap = held.len() > 1;
-                        acc.skip_first_raw_xy = cid == reprog_controls::HAPTIC_PANEL_CID
-                            && !acc.gestures_down.contains(&cid);
                     }
                 }
             }
-            acc.gestures_down = held.into_iter().map(|(cid, _)| cid).collect();
-
             let dpi_down = dpi_cids.iter().any(|cid| cids.contains(cid));
             if dpi_down && !acc.dpi_down {
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None));
@@ -692,10 +693,21 @@ fn handle_reprog(
             if acc.overlap {
                 return;
             }
-            // The haptic panel's first sample after contact is a position
-            // jump; summing it would commit a bogus direction instantly.
-            if acc.skip_first_raw_xy {
-                acc.skip_first_raw_xy = false;
+            // Raw-XY gesture sources occasionally report an absolute-position
+            // jump instead of a delta, at any point in a hold, not only the
+            // first sample after contact — documented on the MX Master 4
+            // haptic panel (`HAPTIC_PANEL_CID`), but observed just as often
+            // reported under the mechanical gesture button's CID instead:
+            // raw-XY reports carry no CID on the wire (see
+            // `CaptureAccum::gesture_source`), so whichever control is
+            // diverting one, the jump is a wire-level artifact of this
+            // control family, not something to special-case per CID.
+            // Summing a jump would let it single-handedly commit a bogus
+            // direction, so any sample whose magnitude alone is physically
+            // implausible for a swipe is dropped outright, for the whole
+            // hold, not just its leading samples.
+            if dx.unsigned_abs().max(dy.unsigned_abs()) > RAW_XY_JUMP_THRESHOLD {
+                debug!(dx, dy, "gesture: discarded contact-jump sample");
                 return;
             }
             // Commit the instant a clean direction emerges (mid-swipe, once per
