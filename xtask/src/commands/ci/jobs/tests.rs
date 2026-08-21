@@ -28,10 +28,22 @@ fn workflow() -> Option<String> {
 /// again.
 fn workflow_commands(workflow: &str) -> String {
     workflow
+        .replace("\\\r\n", " ")
         .replace("\\\n", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn workflow_commands_fold_unix_and_windows_continuations() {
+    let expected = "cargo doc --workspace --no-deps";
+    for workflow in [
+        "cargo doc --workspace \\\n  --no-deps",
+        "cargo doc --workspace \\\r\n  --no-deps",
+    ] {
+        assert_eq!(workflow_commands(workflow), expected);
+    }
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
