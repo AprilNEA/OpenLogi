@@ -184,7 +184,7 @@ pub async fn apply_profiles_config(
 
 /// The config apply itself, on an already-open channel at HID++ `index`.
 /// Shared by [`apply_profiles_config`] and
-/// [`apply_profiles_config_on`](super::apply_profiles_config_on).
+/// [`apply_profiles_config_on`].
 pub(super) async fn apply_profiles_config_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
