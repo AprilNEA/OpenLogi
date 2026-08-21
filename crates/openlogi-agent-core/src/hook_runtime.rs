@@ -6,7 +6,7 @@
 //! and gesture events.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread;
@@ -89,10 +89,16 @@ pub struct HookMaps {
     /// Per-button single action — the single-action dispatch path.
     pub bindings: BTreeMap<ButtonId, Action>,
     /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
-    /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
-    /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
-    /// instead — it never reaches the OS hook.
+    /// gesture mode), so a hold+swipe resolves to a bound action. The HID++
+    /// gesture sources use the gesture watcher's separate map instead — a
+    /// diverted control never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// `(vendor_id, product_id)` of each device whose wheel is inverted in
+    /// software, for firmware reporting no native HID++ inversion (`0x2121`).
+    /// Keyed by OS-level identity because that is all the hook sees — a scroll
+    /// event carries an [`openlogi_hook::EventDevice`], not a config key — and a
+    /// set rather than one bool is what keeps the inversion per-device.
+    pub invert_scroll: BTreeSet<(u32, u32)>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -406,8 +412,23 @@ pub fn start(
                     EventDisposition::PassThrough
                 }
                 MouseEvent::Scroll {
-                    delta_x, delta_y, ..
+                    delta_x,
+                    delta_y,
+                    from_trackpad,
+                    device,
                 } => {
+                    // Trackpad scroll is never rewritten: macOS already applies
+                    // its own natural-scrolling preference there, so inverting
+                    // on top would fight the OS.
+                    if !from_trackpad
+                        && let Some(ids) =
+                            device.as_ref().and_then(|d| d.vendor_id.zip(d.product_id))
+                        && hooks
+                            .try_read()
+                            .is_ok_and(|maps| maps.invert_scroll.contains(&ids))
+                    {
+                        return EventDisposition::InvertScroll;
+                    }
                     #[cfg(not(target_os = "windows"))]
                     let _ = (delta_x, delta_y);
                     #[cfg(target_os = "windows")]
@@ -796,6 +817,7 @@ mod tests {
                 (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
             ]),
             gestures: BTreeMap::new(),
+            ..Default::default()
         };
         assert_eq!(
             rebound_thumbwheel_action(&maps, 1.0),
@@ -822,6 +844,7 @@ mod tests {
                 ),
             ]),
             gestures: BTreeMap::new(),
+            ..Default::default()
         };
         assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
         assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);

@@ -485,6 +485,27 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     event.get_integer_value_field(axis.line) as f64
 }
 
+/// Negate whichever of one axis's delta fields the event carries — the in-place
+/// half of [`EventDisposition::InvertScroll`].
+///
+/// All three must be touched (see [`ScrollAxisFields`]), but only where already
+/// non-zero: writing a field the device left empty would *introduce* a delta on
+/// an axis it never scrolled, which an app reading that field would honour.
+fn negate_scroll_axis(event: &CGEvent, axis: ScrollAxisFields) {
+    let point = event.get_double_value_field(axis.point);
+    if point != 0.0 {
+        event.set_double_value_field(axis.point, -point);
+    }
+    let fixed = event.get_double_value_field(axis.fixed);
+    if fixed != 0.0 {
+        event.set_double_value_field(axis.fixed, -fixed);
+    }
+    let line = event.get_integer_value_field(axis.line);
+    if line != 0 {
+        event.set_integer_value_field(axis.line, -line);
+    }
+}
+
 /// Create the event tap and run loop on a dedicated thread.
 pub(crate) fn start(
     cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
@@ -587,6 +608,15 @@ fn run_tap_callback(
         match cb(hook_event) {
             EventDisposition::PassThrough => CallbackResult::Keep,
             EventDisposition::Suppress => CallbackResult::Drop,
+            // Guarded on the type because only a scroll has deltas to negate;
+            // any other class degrades to a plain pass-through.
+            EventDisposition::InvertScroll => {
+                if matches!(etype, CGEventType::ScrollWheel) {
+                    negate_scroll_axis(event, VERTICAL);
+                    negate_scroll_axis(event, HORIZONTAL);
+                }
+                CallbackResult::Keep
+            }
         }
     }));
     if let Ok(disposition) = result {

@@ -10,7 +10,7 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -236,16 +236,47 @@ impl Orchestrator {
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
-        // A disabled selected device gets empty maps: the OS hook then passes
-        // its events through untouched instead of applying remaps to a device
-        // the user asked OpenLogi to leave alone.
+        // A disabled selected device gets empty button maps so the hook stops
+        // remapping it. Inversion is exempt: it is keyed per device, so muting
+        // this one must not stop inverting another's wheel (and the builder
+        // already drops a device that is itself disabled).
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
-            return HookMaps::default();
+            return HookMaps {
+                invert_scroll: self.software_scroll_inversion(),
+                ..Default::default()
+            };
         }
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
+            invert_scroll: self.software_scroll_inversion(),
         }
+    }
+
+    /// `(vendor_id, product_id)` of every device with scroll inversion on but no
+    /// native HID++ inversion to carry it — the set the OS hook rewrites deltas
+    /// for. Not app-scoped, unlike the button maps: inversion belongs to the
+    /// device, not the foreground app.
+    ///
+    /// Natively-capable devices are excluded because their setting goes to the
+    /// firmware (`scroll_settings_for`); rewriting on top would invert twice.
+    /// Only [`DeviceRoute::Direct`] devices qualify — a receiver-paired device
+    /// reports the receiver's ids, which would match every device on that
+    /// dongle.
+    fn software_scroll_inversion(&self) -> BTreeSet<(u32, u32)> {
+        self.devices
+            .iter()
+            .filter(|dev| self.config.device_enabled(&dev.config_key))
+            .filter(|dev| !dev.capabilities.is_some_and(|caps| caps.scroll_inversion))
+            .filter(|dev| self.config.invert_scroll(&dev.config_key))
+            .filter_map(|dev| match dev.route {
+                Some(DeviceRoute::Direct {
+                    vendor_id,
+                    product_id,
+                }) => Some((u32::from(vendor_id), u32::from(product_id))),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The keyboard key-capture spec for the first known keyboard, or `None`
