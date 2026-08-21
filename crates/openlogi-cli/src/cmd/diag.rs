@@ -21,7 +21,6 @@ pub mod fsb;
 pub mod hidden;
 pub mod hidsniff;
 pub mod lighting;
-pub mod panel;
 pub mod rawinput;
 pub mod smartshift;
 pub mod wheel;
@@ -52,8 +51,6 @@ pub enum DiagCmd {
     Rawinput(rawinput::RawInputArgs),
     /// Send one raw call to any HID++ 2.0 feature by ID (reverse-engineering).
     Call(call::CallArgs),
-    /// Arm the Action Ring panel (Options+ recipe) and print its press events.
-    Panel(panel::PanelArgs),
 }
 
 impl DiagCmd {
@@ -71,7 +68,6 @@ impl DiagCmd {
             Self::Fsb(args) => fsb::run(args).await,
             Self::Rawinput(args) => rawinput::run(args).await,
             Self::Call(args) => call::run(args).await,
-            Self::Panel(args) => panel::run(args).await,
         }
     }
 }

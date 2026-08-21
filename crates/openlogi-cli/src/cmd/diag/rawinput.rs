@@ -112,11 +112,11 @@ mod windows_impl {
             rid(0xff00, flags, hwnd),
             rid(0xff43, flags, hwnd),
         ];
-        // SAFETY: registrations array outlives the call; cbSize matches.
         #[expect(
             clippy::cast_possible_truncation,
             reason = "a four-element array length and a fixed struct size are far below u32::MAX"
         )]
+        // SAFETY: registrations array outlives the call; cbSize matches.
         let ok = unsafe {
             RegisterRawInputDevices(
                 registrations.as_ptr(),
