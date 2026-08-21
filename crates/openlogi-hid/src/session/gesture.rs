@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 use crate::SharedChannel;
 use crate::backend::BackendError;
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::channel::transport::native_backend;
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel};
 
@@ -179,7 +180,7 @@ pub async fn run_capture_session(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let chan = open_route_channel(&route)
+    let chan = open_route_channel(native_backend(), &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
 
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::channel::transport::native_backend;
 
 mod backlight;
 mod diagnostics;
@@ -92,7 +93,7 @@ where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
-    match open_route_channel(route).await? {
+    match open_route_channel(native_backend(), route).await? {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
     }

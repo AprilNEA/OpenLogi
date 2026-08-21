@@ -32,6 +32,7 @@ use super::gesture::{CaptureChannel, CapturedInput, GestureError, enumerate_cont
 use crate::ChannelRegistry;
 use crate::SharedChannel;
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::channel::transport::native_backend;
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
 /// The divertable keyboard F-row controls OpenLogi models, as
@@ -65,7 +66,7 @@ pub async fn run_keyboard_capture_session(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let chan = open_route_channel(&route)
+    let chan = open_route_channel(native_backend(), &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());

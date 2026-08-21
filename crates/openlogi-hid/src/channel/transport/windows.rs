@@ -85,7 +85,7 @@ pub(super) struct WindowsHidppChannel {
 #[cfg(target_os = "windows")]
 impl WindowsHidppChannel {
     pub(super) async fn open(
-        long_dev: async_hid::Device,
+        long_dev: &async_hid::Device,
         long_info: DeviceInfo,
     ) -> Result<Self, async_hid::HidError> {
         let short_dev = find_windows_short_collection(&long_info).await?;

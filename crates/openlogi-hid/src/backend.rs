@@ -10,7 +10,11 @@
 //! nameable by code that has no backend at all.
 
 use std::fmt;
+use std::sync::Arc;
 
+use futures_lite::Stream;
+use hidpp::async_trait;
+use hidpp::channel::HidppChannel;
 use thiserror::Error;
 
 /// A failure raised by the HID backend beneath the HID++ channel layer.
@@ -114,4 +118,57 @@ impl NodeInfo {
                 |serial| format!("serial:{}", serial.to_ascii_lowercase()),
             )
     }
+}
+
+/// A stream of [`HotplugEvent`]s, boxed so [`HidBackend`] stays object-safe.
+pub type HotplugStream = Box<dyn Stream<Item = HotplugEvent> + Send + Unpin>;
+
+/// A raw output-report sink, for reports the HID++ framing cannot model.
+///
+/// The HID++ channel covers reports `0x10`/`0x11`/`0x12` with request/response
+/// correlation. A few devices need a bare output report written with no reply
+/// expected — Logitech's Litra lights, driven over their own vendor protocol —
+/// and that is all this is for.
+#[async_trait]
+pub trait RawWriter: Send + Sync {
+    /// Write one output report, report id included as the first byte.
+    async fn write_output_report(&mut self, report: &[u8]) -> Result<(), BackendError>;
+}
+
+/// The HID stack beneath OpenLogi's HID++ layer.
+///
+/// One implementation per host HID API. Everything above it — enumeration
+/// policy, the probe, the write layer, capture sessions — is expressed against
+/// this trait and holds none of the backend's own types, which is what lets a
+/// second implementation (a scripted device tree in tests, WebHID under wasm)
+/// drop in without touching that code.
+///
+/// Opening is only defined for a node a previous [`Self::enumerate`] reported:
+/// a backend may hold OS handles from that enumeration rather than re-finding
+/// the node, so an unknown [`NodeInfo`] is [`BackendError::Disconnected`].
+#[async_trait]
+pub trait HidBackend: Send + Sync {
+    /// Every HID node the host currently reports.
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, BackendError>;
+
+    /// The subset of [`Self::enumerate`] that can carry HID++ traffic.
+    ///
+    /// Separate from filtering in the caller because part of the answer is
+    /// platform knowledge the backend owns — on Linux the `hid-logitech-dj`
+    /// driver publishes a per-device child node that exposes the same vendor
+    /// collection as its receiver but must never be addressed directly.
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, BackendError>;
+
+    /// Open `node` as a HID++ channel, or `None` if it does not speak HID++.
+    ///
+    /// The backend owns the framing details behind this: which report widths
+    /// the node carries, and on Windows the pairing of the separate short- and
+    /// long-report interfaces into one channel.
+    async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError>;
+
+    /// Open `node` for raw output reports.
+    async fn open_raw_writer(&self, node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError>;
+
+    /// Subscribe to node connect/disconnect events.
+    fn watch(&self) -> Result<HotplugStream, BackendError>;
 }

@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
 
 #[cfg(not(target_os = "windows"))]
-use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
-use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
+use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter};
+use async_hid::{DeviceInfo, HidBackend};
 use futures_lite::{Stream, StreamExt as _};
 use hidpp::channel::HidppChannel;
 use hidpp::nibble::U4;
@@ -29,7 +29,7 @@ use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
 use crate::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
-use crate::write::{WriteError, matches_litra};
+use crate::write::matches_litra;
 
 /// Collapses `async-hid`'s error taxonomy into the backend-agnostic
 /// [`BackendError`] every caller above this module sees.
@@ -88,6 +88,9 @@ impl From<&DeviceInfo> for NodeInfo {
 /// lifetime (no rotation — offset rotating sequences still collide across
 /// channels) and frees it on drop via [`HidppChannel::set_sw_id_lease`].
 static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
+
+mod native;
+pub(crate) use native::native_backend;
 
 #[cfg(any(target_os = "windows", test))]
 mod windows;
@@ -210,20 +213,18 @@ pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, Backen
     Ok(all)
 }
 
-pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, BackendError> {
-    Ok(enumerate_devices()
-        .await?
-        .into_iter()
-        .filter(|d| {
-            is_hidpp_candidate(
-                d.vendor_id,
-                d.product_id,
-                d.usage_page,
-                d.usage_id,
-                is_receiver_child_node(&d.id),
-            )
-        })
-        .collect())
+/// Whether an enumerated node belongs to the HID++ channel path.
+///
+/// Wraps [`is_hidpp_candidate`] with the parts only this backend can answer:
+/// the platform node id needed to recognise a `hid-logitech-dj` child node.
+pub(crate) fn is_hidpp_node(device: &async_hid::Device) -> bool {
+    is_hidpp_candidate(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+        is_receiver_child_node(&device.id),
+    )
 }
 
 /// Whether an enumerated node belongs to the HID++ channel path.
@@ -300,61 +301,6 @@ fn is_receiver_child_node(_id: &async_hid::DeviceId) -> bool {
     false
 }
 
-/// Open the raw HID writer for a directly-attached (USB) device, for sending
-/// reports the HID++ wrapper can't model — e.g. the 64-byte `0x12` lighting
-/// frames G-series keyboards use. Returns `None` for Bolt routes or when no
-/// matching node is connected.
-pub(crate) async fn open_route_writer(
-    route: &crate::channel::route::DeviceRoute,
-) -> Result<Option<DeviceWriter>, WriteError> {
-    let candidates = match route {
-        crate::channel::route::DeviceRoute::Direct { .. } => enumerate_hidpp_devices().await?,
-        crate::channel::route::DeviceRoute::RawHid { .. } => enumerate_devices().await?,
-        _ => return Ok(None),
-    };
-    let mut matched = None;
-    for dev in candidates {
-        let is_match = match route {
-            crate::channel::route::DeviceRoute::Direct {
-                vendor_id,
-                product_id,
-            } => dev.vendor_id == *vendor_id && dev.product_id == *product_id,
-            crate::channel::route::DeviceRoute::RawHid {
-                vendor_id,
-                product_id,
-                usage_page,
-                usage_id,
-                identity,
-            } => {
-                dev.vendor_id == *vendor_id
-                    && dev.product_id == *product_id
-                    && dev.usage_page == *usage_page
-                    && dev.usage_id == *usage_id
-                    && NodeInfo::from(&*dev).identity() == *identity
-            }
-            _ => false,
-        };
-        if is_match {
-            if matches!(route, crate::channel::route::DeviceRoute::Direct { .. }) {
-                let (_reader, writer) = dev.open().await.map_err(BackendError::from)?;
-                return Ok(Some(writer));
-            }
-            if matched.is_some() {
-                tracing::warn!("multiple raw HID nodes matched one route");
-                return Err(WriteError::AmbiguousRawDevice);
-            }
-            matched = Some(dev);
-        }
-    }
-    match matched {
-        Some(dev) => {
-            let (_reader, writer) = dev.open().await.map_err(BackendError::from)?;
-            Ok(Some(writer))
-        }
-        None => Ok(None),
-    }
-}
-
 /// Lease one free software id in `1..=15`, or `None` if all 15 are held.
 fn try_lease_sw_id() -> Option<u8> {
     loop {
@@ -394,11 +340,11 @@ fn configure_channel_sw_ids(channel: &mut HidppChannel) {
 }
 
 pub(crate) async fn open_hidpp_channel(
-    dev: async_hid::Device,
-) -> Result<Option<(NodeInfo, Arc<HidppChannel>)>, BackendError> {
-    // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we can
-    // keep using `dev` (which `to_device_info` would consume).
-    let info: DeviceInfo = (*dev).clone();
+    dev: &async_hid::Device,
+) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+    // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value because
+    // the channel keeps it for the lifetime of the open.
+    let info: DeviceInfo = (**dev).clone();
     // On Windows the short (0x10) and long (0x11) HID++ report collections are
     // exposed as separate device interfaces, so the channel must open both and
     // route by report id (see WindowsHidppChannel). Elsewhere one node carries
@@ -416,7 +362,7 @@ pub(crate) async fn open_hidpp_channel(
                 return Ok(None);
             }
         };
-        Ok(Some((NodeInfo::from(&info), channel)))
+        Ok(Some(channel))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -440,7 +386,7 @@ pub(crate) async fn open_hidpp_channel(
         // ticks, so a steadily-connected device should log this on first sight (and
         // on reconnect) only — not every ~2s tick.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
-        Ok(Some((NodeInfo::from(&info), channel)))
+        Ok(Some(channel))
     }
 }
 

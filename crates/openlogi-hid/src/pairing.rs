@@ -38,8 +38,8 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
-use crate::backend::BackendError;
-use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
+use crate::backend::{BackendError, HidBackend as _};
+use crate::channel::transport::native_backend;
 
 mod notification;
 mod registers;
@@ -187,8 +187,9 @@ impl From<BackendError> for PairingError {
 /// Lists supported pairing-capable receivers connected to the host.
 pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
     let mut out = Vec::new();
-    for dev in enumerate_hidpp_devices().await? {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+    let backend = native_backend();
+    for node in backend.enumerate_hidpp().await? {
+        let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {
@@ -219,8 +220,9 @@ async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
 async fn open_receiver(
     target: &ReceiverSelector,
 ) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
-    for dev in enumerate_hidpp_devices().await? {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+    let backend = native_backend();
+    for node in backend.enumerate_hidpp().await? {
+        let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {

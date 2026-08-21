@@ -16,9 +16,9 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
-use crate::backend::{BackendError, NodeId, NodeInfo};
+use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, is_receiver_pid};
-use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
+use crate::channel::transport::native_backend;
 use ledger::NodeLedger;
 
 mod cache;
@@ -436,13 +436,17 @@ impl Enumerator {
         self
     }
 
-    async fn prepare_nodes(&mut self, candidates: Vec<async_hid::Device>) -> PreparedNodes {
+    async fn prepare_nodes(
+        &mut self,
+        backend: &dyn HidBackend,
+        candidates: Vec<NodeInfo>,
+    ) -> PreparedNodes {
         let mut active = Vec::new();
         let mut seen_nodes = HashSet::new();
         let mut open_failures = Vec::new();
         let mut retiring = Vec::new();
-        for dev in candidates {
-            let node = NodeId::from(&*dev);
+        for info in candidates {
+            let node = info.id.clone();
             seen_nodes.insert(node.clone());
             if !self
                 .channels
@@ -456,8 +460,8 @@ impl Enumerator {
                 active.push((open.info.clone(), Arc::clone(&open.channel)));
                 continue;
             }
-            match open_hidpp_channel(dev).await {
-                Ok(Some((info, channel))) => {
+            match backend.open_hidpp(&info).await {
+                Ok(Some(channel)) => {
                     self.channels.insert(
                         node,
                         CachedChannel {
@@ -544,7 +548,8 @@ impl Enumerator {
     ) -> Result<(Vec<DeviceInventory>, bool, bool), InventoryError> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
-        let candidates = enumerate_hidpp_devices().await?;
+        let backend = native_backend();
+        let candidates = backend.enumerate_hidpp().await?;
         debug!(count = candidates.len(), "HID++ candidate interfaces");
 
         // Reuse an open channel per node, opening only when no active or
@@ -553,7 +558,7 @@ impl Enumerator {
             active,
             open_failures,
             retiring: retiring_nodes,
-        } = self.prepare_nodes(candidates).await;
+        } = self.prepare_nodes(backend, candidates).await;
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`).

@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::BackendError;
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::channel::transport::native_backend;
 
 /// Reuses one open HID++ channel for routes on the same receiver.
 #[derive(Clone, Default)]
@@ -36,7 +37,7 @@ impl ChannelPool {
         }) {
             return Ok(Some(channel));
         }
-        let Some(channel) = open_route_channel(route).await? else {
+        let Some(channel) = open_route_channel(native_backend(), route).await? else {
             return Ok(None);
         };
         entries.push(PoolEntry {

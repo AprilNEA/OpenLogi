@@ -9,16 +9,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use async_hid::AsyncHidWrite as _;
 use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
-use crate::channel::route::DeviceRoute;
+use crate::channel::route::{DeviceRoute, open_route_writer};
+use crate::channel::transport::native_backend;
 
 use super::WriteError;
-use crate::backend::BackendError;
 
 // LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
 // `openlogi_core::hid::light`; re-exported here unchanged so this module's
@@ -249,15 +248,14 @@ pub async fn apply(
     }
     let report = encode_command(model, command)?;
     let _guard = device_lock(route).await;
-    let Some(mut writer) = crate::channel::transport::open_route_writer(route).await? else {
+    let Some(mut writer) = open_route_writer(native_backend(), route).await? else {
         return Err(WriteError::DeviceNotFound);
     };
     tokio::time::timeout(RAW_WRITE_TIMEOUT, writer.write_output_report(&report))
         .await
         .map_err(|_| WriteError::RequestTimedOut {
             operation: super::HidppOperation::Light,
-        })?
-        .map_err(BackendError::from)?;
+        })??;
     debug!(route = %route, "applied raw Litra command");
     Ok(())
 }

@@ -19,8 +19,10 @@ pub use openlogi_core::hid::route::{
     UNIFYING_PIDS, is_receiver_pid, receiver_display_name, speaks_unifying_protocol,
 };
 
-use crate::backend::BackendError;
-use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
+use tracing::warn;
+
+use crate::backend::{BackendError, HidBackend, NodeInfo, RawWriter};
+use crate::write::WriteError;
 
 /// Enumerate HID++ candidates and open the channel that reaches `route`.
 ///
@@ -29,27 +31,27 @@ use crate::channel::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 /// route it is the device's own channel. Returns `None` when nothing matching
 /// is currently connected.
 pub(crate) async fn open_route_channel(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
     if matches!(route, DeviceRoute::RawHid { .. }) {
         return Ok(None);
     }
-    let candidates = enumerate_hidpp_devices().await?;
-    for dev in candidates {
-        // A direct route's vendor/product id is on the unopened `DeviceInfo`
-        // (`async_hid::Device` derefs to it), so skip non-matching nodes before
-        // paying the ~100ms channel-open cost — otherwise every direct write on
-        // a host that also has a Bolt receiver opens the receiver's channel
-        // first. The Bolt branch still needs an open channel for `detect`.
+    for node in backend.enumerate_hidpp().await? {
+        // A direct route's vendor/product id is on the unopened node, so skip
+        // non-matching ones before paying the ~100ms channel-open cost —
+        // otherwise every direct write on a host that also has a Bolt receiver
+        // opens the receiver's channel first. The Bolt branch still needs an
+        // open channel for `detect`.
         if let DeviceRoute::Direct {
             vendor_id,
             product_id,
         } = route
-            && (dev.vendor_id != *vendor_id || dev.product_id != *product_id)
+            && (node.vendor_id != *vendor_id || node.product_id != *product_id)
         {
             continue;
         }
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+        let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
         };
         match route {
@@ -79,4 +81,65 @@ pub(crate) async fn open_route_channel(
         }
     }
     Ok(None)
+}
+
+/// Open the raw output-report writer for the device `route` reaches, for
+/// reports the HID++ wrapper can't model — e.g. the 64-byte `0x12` lighting
+/// frames G-series keyboards use. Returns `None` for receiver-slot routes or
+/// when no matching node is connected.
+///
+/// A direct route names one device outright, so the first match wins. A raw
+/// route is addressed by its full HID identity tuple, and two nodes answering
+/// to the same tuple cannot be told apart — that is an error, not a coin toss.
+pub(crate) async fn open_route_writer(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<Option<Box<dyn RawWriter>>, WriteError> {
+    let candidates = match route {
+        DeviceRoute::Direct { .. } => backend.enumerate_hidpp().await?,
+        DeviceRoute::RawHid { .. } => backend.enumerate().await?,
+        _ => return Ok(None),
+    };
+    let mut matched = None;
+    for node in candidates {
+        if !route_matches_node(route, &node) {
+            continue;
+        }
+        if matches!(route, DeviceRoute::Direct { .. }) {
+            return Ok(Some(backend.open_raw_writer(&node).await?));
+        }
+        if matched.is_some() {
+            warn!("multiple raw HID nodes matched one route");
+            return Err(WriteError::AmbiguousRawDevice);
+        }
+        matched = Some(node);
+    }
+    match matched {
+        Some(node) => Ok(Some(backend.open_raw_writer(&node).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Whether `node` is the HID node `route` addresses.
+fn route_matches_node(route: &DeviceRoute, node: &NodeInfo) -> bool {
+    match route {
+        DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        } => node.vendor_id == *vendor_id && node.product_id == *product_id,
+        DeviceRoute::RawHid {
+            vendor_id,
+            product_id,
+            usage_page,
+            usage_id,
+            identity,
+        } => {
+            node.vendor_id == *vendor_id
+                && node.product_id == *product_id
+                && node.usage_page == *usage_page
+                && node.usage_id == *usage_id
+                && node.identity() == *identity
+        }
+        DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } => false,
+    }
 }
