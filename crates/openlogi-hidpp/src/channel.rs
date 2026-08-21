@@ -8,9 +8,10 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
-    thread::{self, JoinHandle},
     time::Duration,
 };
+
+use std::future::Future;
 
 use futures::{FutureExt, channel::oneshot, select};
 use tracing::trace;
@@ -101,12 +102,8 @@ pub struct HidppChannel {
     /// construction where drawing needed a retry loop to be merely unlikely.
     next_listener_hdl: AtomicU32,
 
-    /// The sender signaling the read thread to stop.
-    read_thread_close: Option<oneshot::Sender<()>>,
-
-    /// The handle to the read thread. Should be joined after signaling
-    /// [`Self::read_thread_close`].
-    read_thread_hdl: Option<JoinHandle<()>>,
+    /// The sender that tells this channel's reader to stop.
+    read_close: Option<oneshot::Sender<()>>,
 
     /// Optional process-wide software-id lease: `(id, free)` run on drop.
     ///
@@ -122,22 +119,10 @@ impl Drop for HidppChannel {
             free(id);
         }
 
-        if let Some(read_thread_close) = self.read_thread_close.take() {
-            // This only fails if the receiving end, which is owned by the read thread in
-            // this case, is dropped.
-            // This just means that the read thread is already stopped, so we can ignore the
-            // error here.
-            let _ = read_thread_close.send(());
-        }
-
-        if let Some(read_thread_hdl) = self.read_thread_hdl.take() {
-            // A panic here means the read thread itself panicked; propagate
-            // it rather than silently ignore a crashed background worker.
-            #[expect(
-                clippy::unwrap_used,
-                reason = "propagate a read-thread panic instead of ignoring a crashed background worker"
-            )]
-            read_thread_hdl.join().unwrap();
+        if let Some(read_close) = self.read_close.take() {
+            // Fails only if the receiver is already gone, i.e. the reader has
+            // already stopped — which is the state this is asking for.
+            let _ = read_close.send(());
         }
     }
 }
@@ -159,9 +144,22 @@ struct PendingMessage {
 impl HidppChannel {
     /// Tries to construct a HID++ channel from a raw HID channel.
     ///
+    /// Returns the channel and the future that drives its reads. **The reader
+    /// must be polled** — spawned on the caller's executor, or raced against
+    /// the caller's own work — or no response and no notification ever
+    /// arrives, and every [`Self::send`] times out.
+    ///
+    /// Handing it back rather than starting it here is what keeps this crate
+    /// free of an executor choice: it used to spawn an OS thread per channel
+    /// and block on it, which cost a thread per open and cannot exist on a
+    /// single-threaded target at all. Dropping the channel signals the reader
+    /// to stop; it winds down on its executor rather than being joined.
+    ///
     /// If the given HID channel does not support HID++,
     /// [`ChannelError::HidppNotSupported`] will be returned.
-    pub async fn from_raw_channel(raw: impl RawHidChannel) -> Result<Self, ChannelError> {
+    pub async fn from_raw_channel(
+        raw: impl RawHidChannel,
+    ) -> Result<(Self, impl Future<Output = ()> + Send + 'static), ChannelError> {
         let (supports_short, supports_long) = supports_short_long_hidpp(&raw).await?;
 
         if !supports_short && !supports_long {
@@ -174,22 +172,23 @@ impl HidppChannel {
 
         let (close_sender, close_receiver) = oneshot::channel::<()>();
 
-        let read_thread_hdl = thread::spawn({
+        let reader = {
             let raw_channel = Arc::clone(&raw_channel_rc);
             let pending_messages = Arc::clone(&pending_messages_rc);
             let message_listeners = Arc::clone(&message_listeners_rc);
 
-            move || {
-                futures::executor::block_on(read_loop(
+            async move {
+                read_loop(
                     &*raw_channel,
                     &pending_messages,
                     &message_listeners,
                     close_receiver,
-                ));
+                )
+                .await;
             }
-        });
+        };
 
-        Ok(Self {
+        let channel = Self {
             supports_short,
             supports_long,
             vendor_id: raw_channel_rc.vendor_id(),
@@ -201,10 +200,10 @@ impl HidppChannel {
             pending_message_id: AtomicU64::new(1),
             next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
-            read_thread_close: Some(close_sender),
-            read_thread_hdl: Some(read_thread_hdl),
+            read_close: Some(close_sender),
             sw_id_lease: None,
-        })
+        };
+        Ok((channel, reader))
     }
 
     /// Whether the underlying HID transport still reports a live connection.
@@ -385,7 +384,7 @@ impl HidppChannel {
 
         if result.is_err() {
             // A timeout or write failure leaves the entry queued — remove it
-            // eagerly. After a matched response the read thread has already
+            // eagerly. After a matched response the reader has already
             // taken it, so this is a no-op then.
             self.remove_pending_message(pending_id);
         }
@@ -484,7 +483,7 @@ impl HidppChannel {
 /// Reads reports from `raw_channel` until `close` fires, resolving each one
 /// against the pending requests and then handing it to every listener.
 ///
-/// Runs on the channel's dedicated read thread. `read_report` is always raced
+/// Runs as the channel's reader future. `read_report` is always raced
 /// against `close` so a transport that parks forever on a dead device still
 /// lets the channel shut down — see [`RawHidChannel::read_report`].
 async fn read_loop(

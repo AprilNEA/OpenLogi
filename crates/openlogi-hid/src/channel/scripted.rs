@@ -142,6 +142,18 @@ pub(crate) fn mock_error() -> Box<dyn Error + Send + Sync> {
     ))
 }
 
+/// A live channel over `raw`, with its reader spawned on the ambient runtime.
+///
+/// `HidppChannel` hands its reader back rather than starting it, so a channel
+/// built without spawning one receives nothing and every request times out.
+pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChannel> {
+    let (channel, reader) = HidppChannel::from_raw_channel(raw)
+        .await
+        .expect("the scripted transport speaks HID++");
+    tokio::spawn(reader);
+    Arc::new(channel)
+}
+
 /// How a scripted node behaves when the layers above ask to open it.
 ///
 /// The two cases are distinct contracts the enumerator must not conflate: only

@@ -148,7 +148,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: true,
-                caveat: "Proves the portable crates depend on nothing host-bound. A check, so it catches a dependency that cannot build for wasm — not one that compiles and then fails at runtime (`std::thread::spawn`).",
+                caveat: "Proves the portable crates depend on nothing host-bound. A check, so it catches what cannot build for wasm — not what compiles and then does nothing at runtime (a timer crate whose wasm backend is behind a feature nobody enabled).",
             },
             Self::I18n => Spec {
                 name: "i18n",

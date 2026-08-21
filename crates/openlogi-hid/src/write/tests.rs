@@ -1,13 +1,10 @@
-use std::sync::Arc;
-
 use super::*;
-use hidpp::channel::HidppChannel;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 
 use crate::SharedChannel;
-use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
+use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_reports};
@@ -181,11 +178,7 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
 #[tokio::test]
 async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), WriteError> {
     let (raw, handle) = ScriptedRawHidChannel::with_responder(scripted_response);
-    let channel = Arc::new(
-        HidppChannel::from_raw_channel(raw)
-            .await
-            .expect("scripted HID++ channel must open"),
-    );
+    let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
         channel,
         DeviceRoute::Direct {
@@ -321,11 +314,7 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     // 0x2202, so a mouse that only speaks 0x2202 has to be drivable — it used
     // to get a panel that failed every read and write.
     let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
-    let channel = Arc::new(
-        HidppChannel::from_raw_channel(raw)
-            .await
-            .expect("scripted HID++ channel must open"),
-    );
+    let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
         channel,
         DeviceRoute::Direct {
@@ -413,11 +402,7 @@ async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteEr
     // 0x8081 supersedes 0x8080 but nothing had ever driven it, so a keyboard
     // exposing only 0x8081 could not be coloured at all.
     let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_v2_scripted_response);
-    let channel = Arc::new(
-        HidppChannel::from_raw_channel(raw)
-            .await
-            .expect("scripted HID++ channel must open"),
-    );
+    let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
         channel,
         DeviceRoute::Direct {
@@ -692,11 +677,7 @@ fn is_fw_info_for(request: &[u8], entity: u8) -> bool {
 }
 
 async fn scripted_device_info_channel(channel: ScriptedRawHidChannel) -> Arc<HidppChannel> {
-    Arc::new(
-        HidppChannel::from_raw_channel(channel)
-            .await
-            .expect("scripted HID++ channel must open"),
-    )
+    scripted_channel(channel).await
 }
 
 #[tokio::test]

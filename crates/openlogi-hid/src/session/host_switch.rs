@@ -621,11 +621,7 @@ mod tests {
 
     async fn scripted_channel(responder: crate::channel::scripted::Responder) -> Arc<HidppChannel> {
         let (raw, _handle) = ScriptedRawHidChannel::with_responder(responder);
-        Arc::new(
-            HidppChannel::from_raw_channel(raw)
-                .await
-                .expect("scripted HID++ channel must open"),
-        )
+        crate::channel::scripted::scripted_channel(raw).await
     }
 
     #[tokio::test]

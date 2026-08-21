@@ -30,9 +30,10 @@ fn passkey_clicks_are_msb_first_10_bits() {
 #[tokio::test]
 async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
     let (raw, mut written_reports) = EchoRawHidChannel::new();
-    let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
+    let Ok((channel, reader)) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    tokio::spawn(reader);
     let (command_tx, mut commands) = mpsc::unbounded_channel();
     let (notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, _events) = mpsc::unbounded_channel();

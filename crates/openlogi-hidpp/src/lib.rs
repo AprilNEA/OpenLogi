@@ -62,11 +62,15 @@
 //! // First, we will create the HID++ channel.
 //! // This function will return `ChannelError::HidppNotSupported`
 //! // if the passed HID channel does not support HID++.
-//! let channel = Arc::new(
-//!     HidppChannel::from_raw_channel(my_hid_channel)
-//!         .await
-//!         .expect("could not establish HID++ communication"),
-//! );
+//! //
+//! // It hands back the channel and the future that reads for it. Spawn the
+//! // reader on your executor — a channel whose reader is never polled hears
+//! // nothing back. Dropping the channel stops it.
+//! let (channel, reader) = HidppChannel::from_raw_channel(my_hid_channel)
+//!     .await
+//!     .expect("could not establish HID++ communication");
+//! tokio::spawn(reader);
+//! let channel = Arc::new(channel);
 //!
 //! // HID++2.0 includes an arbitrary "software ID" in every message.
 //! // This ID is meant to differentiate messages of different

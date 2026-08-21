@@ -164,8 +164,8 @@ impl Default for Enumerator {
 
 /// An open channel to a receiver / direct-device HID node, held across
 /// `enumerate` ticks. Evicting it (on disconnect, or when the `Enumerator`
-/// drops) closes the device and joins the channel's read thread via
-/// [`HidppChannel`]'s `Drop`.
+/// drops) signals the channel's reader to stop via [`HidppChannel`]'s `Drop`;
+/// the device closes once that task winds down and releases the last handle.
 struct CachedChannel {
     info: NodeInfo,
     channel: Arc<HidppChannel>,
