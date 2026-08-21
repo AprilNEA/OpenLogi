@@ -382,14 +382,30 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
 }
 
 #[test]
-fn the_dedicated_buttons_first_sample_is_not_discarded() {
-    // The discard is a panel quirk: the dedicated button's raw-XY stream is
-    // relative from the first sample, which must keep committing as-is.
+fn the_dedicated_buttons_first_sample_is_also_discarded() {
+    // The HID++ raw-XY divert buffer accumulates noise from the moment diversion
+    // is activated, not from when the user starts moving. The first sample after
+    // any gesture source press must be discarded for ALL gesture sources, not
+    // just the haptic panel.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.swipe.backdate_hold_for_test();
+    // First sample (buffered noise) — must be discarded.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -3000, dy: 40 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the dedicated button's first sample (buffered noise) must not commit a swipe"
+    );
+    // Second sample (real movement) — commits correctly.
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -398,14 +414,13 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
         &[],
         &tx,
     );
-
     assert_eq!(
         rx.try_recv(),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Right
         )),
-        "the dedicated button's very first sample still counts"
+        "the second sample commits the swipe"
     );
 }
 

@@ -656,8 +656,12 @@ fn handle_reprog(
                         acc.gesture_source = Some((cid, button));
                         acc.swipe.begin();
                         acc.overlap = held.len() > 1;
-                        acc.skip_first_raw_xy = cid == reprog_controls::HAPTIC_PANEL_CID
-                            && !acc.gestures_down.contains(&cid);
+                        // The HID++ raw-XY divert buffer accumulates deltas from the moment
+                        // diversion is activated, not from when the user starts moving.
+                        // The first sample after any gesture source press carries this
+                        // buffered noise and must be discarded for all gesture sources,
+                        // not just the haptic panel.
+                        acc.skip_first_raw_xy = !acc.gestures_down.contains(&cid);
                     }
                 }
             }
