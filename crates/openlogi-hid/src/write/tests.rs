@@ -613,3 +613,126 @@ fn per_key_v2_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     response[4..].copy_from_slice(&payload[..payload_len]);
     Some(response)
 }
+
+#[tokio::test]
+async fn read_battery_raw_handles_unified_legacy_and_voltage_features() -> Result<(), WriteError> {
+    // 1. Unified 0x1004 device
+    let (raw, _) =
+        ScriptedRawHidChannel::with_responder(|req| battery_scripted_response(req, Some(0x1004)));
+    let chan = Arc::new(
+        HidppChannel::from_raw_channel(raw)
+            .await
+            .expect("scripted channel"),
+    );
+    let mut dev = Device::new(chan, 0xff).await.expect("device");
+    let report = diagnostics::read_battery_raw_device(&mut dev).await?;
+    assert!(report.starts_with("0x1004 UnifiedBattery:"));
+    assert!(report.contains("percentage=85"));
+
+    // 2. Legacy 0x1000 device
+    let (raw, _) =
+        ScriptedRawHidChannel::with_responder(|req| battery_scripted_response(req, Some(0x1000)));
+    let chan = Arc::new(
+        HidppChannel::from_raw_channel(raw)
+            .await
+            .expect("scripted channel"),
+    );
+    let mut dev = Device::new(chan, 0xff).await.expect("device");
+    let report = diagnostics::read_battery_raw_device(&mut dev).await?;
+    assert!(report.starts_with("0x1000 BatteryStatus:"));
+    assert!(report.contains("discharge_level=70"));
+
+    // 3. Voltage 0x1001 device (e.g. G502 / G915)
+    let (raw, _) =
+        ScriptedRawHidChannel::with_responder(|req| battery_scripted_response(req, Some(0x1001)));
+    let chan = Arc::new(
+        HidppChannel::from_raw_channel(raw)
+            .await
+            .expect("scripted channel"),
+    );
+    let mut dev = Device::new(chan, 0xff).await.expect("device");
+    let report = diagnostics::read_battery_raw_device(&mut dev).await?;
+    assert!(report.starts_with("0x1001 BatteryVoltage:"));
+    assert!(report.contains("voltage_mv=3950"));
+
+    // 4. Device without any battery feature
+    let (raw, _) =
+        ScriptedRawHidChannel::with_responder(|req| battery_scripted_response(req, None));
+    let chan = Arc::new(
+        HidppChannel::from_raw_channel(raw)
+            .await
+            .expect("scripted channel"),
+    );
+    let mut dev = Device::new(chan, 0xff).await.expect("device");
+    let err = diagnostics::read_battery_raw_device(&mut dev)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        WriteError::FeatureUnsupported {
+            feature_hex: 0x1004
+        }
+    ));
+
+    Ok(())
+}
+
+fn battery_scripted_response(request: &[u8], feature_id: Option<u16>) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let req_fid = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = if Some(req_fid) == feature_id {
+                0x05
+            } else {
+                0x00
+            };
+            false
+        }
+        // Battery reading function (feature index 0x05, function 0 or 1)
+        (0x05, 0x00 | 0x01) => {
+            match feature_id {
+                Some(0x1004) if function == 1 => {
+                    // UnifiedBattery: percentage = 85, level = Good (4), status = Discharging (0)
+                    payload[0] = 85;
+                    payload[1] = 4;
+                    payload[2] = 0;
+                    true
+                }
+                Some(0x1000) if function == 0 => {
+                    // BatteryStatus: discharge_level = 70, next_level = 50, status = Discharging (0)
+                    payload[0] = 70;
+                    payload[1] = 50;
+                    payload[2] = 0;
+                    true
+                }
+                Some(0x1001) if function == 0 => {
+                    // BatteryVoltage: 3950 mV (0x0f6e), status flags = 0 (discharging)
+                    payload[..2].copy_from_slice(&3950u16.to_be_bytes());
+                    payload[2] = 0;
+                    true
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
