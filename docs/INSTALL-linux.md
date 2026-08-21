@@ -56,6 +56,53 @@ For a build without installing the module:
 nix build github:AprilNEA/OpenLogi#openlogi
 ```
 
+## Flatpak
+
+The Flatpak is the only Linux install that updates itself. The `.deb`, `.rpm`
+and `.pkg.tar.zst` packages ship without a repository behind them, so upgrading
+those means downloading a newer file by hand.
+
+```sh
+flatpak remote-add --if-not-exists --user openlogi \
+  https://aprilnea.github.io/OpenLogi/openlogi.flatpakrepo
+flatpak install --user openlogi org.openlogi.OpenLogi
+```
+
+After that, `flatpak update` carries you forward, and GNOME Software or KDE
+Discover pick the update up in the background.
+
+> [!IMPORTANT]
+> A Flatpak cannot write to `/etc`, so the udev rules have to be installed on
+> the host by hand. **Until you do, no devices are detected at all**: the
+> sandbox is allowed to reach `/dev/hidraw*`, `/dev/uinput` and
+> `/dev/input/event*`, but the kernel still refuses your user access to them,
+> so the app opens to an empty device list.
+
+The same rules the packages install ship inside the app, so no checkout is
+needed:
+
+```sh
+flatpak run --command=cat org.openlogi.OpenLogi \
+  /app/share/openlogi/udev/70-openlogi.rules |
+  sudo tee /etc/udev/rules.d/70-openlogi.rules
+
+echo uinput | sudo tee /etc/modules-load.d/openlogi.conf
+sudo modprobe uinput
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+See [Device access: udev rules](#device-access-udev-rules) for what those rules
+grant and how to verify them. The agent installs its input hook once at startup,
+so restart it after granting access:
+
+```sh
+flatpak kill org.openlogi.OpenLogi
+```
+
+Then launch the app again.
+
 ## Build from source
 
 Pre-built `.deb` and `.rpm` packages are available on the

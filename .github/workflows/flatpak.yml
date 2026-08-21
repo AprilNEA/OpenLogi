@@ -1,0 +1,305 @@
+# Build the Flatpak for both architectures and publish them as a signed OSTree
+# repository on GitHub Pages.
+#
+# This is the only Linux install that can update itself: the .deb/.rpm/.pkg
+# packages ship without a repository, and the in-app updater publishes no Linux
+# artifact (`xtask release latest-json` classifies only .dmg/.msi/.zip), so
+# every other Linux upgrade is a manual download. Once a user has added the
+# remote, `flatpak update` — and the background updater in GNOME Software or
+# KDE Discover — carries them forward on its own.
+#
+# Publishing is gated on FLATPAK_GPG_PRIVATE_KEY. Without the secret the build
+# still runs and uploads artifacts, so this workflow is inert rather than red
+# until a maintainer decides to turn publishing on.
+name: Flatpak
+
+on:
+  release:
+    types: [published]
+  # Build-only rehearsal by default; publishing needs the box ticked *and* the
+  # signing key configured.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to build and advertise (blank = build this ref)"
+        type: string
+        default: ""
+      publish:
+        description: "Publish to GitHub Pages"
+        type: boolean
+        default: false
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FLATPAK_ID: org.openlogi.OpenLogi
+  RUNTIME_VERSION: "25.08"
+  MANIFEST_DIR: packaging/linux/flatpak
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      ref: ${{ steps.pick.outputs.ref }}
+      publish: ${{ steps.pick.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Pick the version to advertise
+        id: pick
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # `ref` is what gets built and `version` is what the build calls
+          # itself; they must never disagree, or a signed repository ends up
+          # advertising a release identity its binaries were not built from.
+          if [ -n "${TAG}" ]; then
+            version="${TAG}"
+            ref="${TAG}"
+          elif [ -n "${REQUESTED}" ]; then
+            version="${REQUESTED}"
+            ref="${REQUESTED}"
+          else
+            # A dispatch with no tag is a rehearsal of whatever ref it ran on,
+            # so the workspace version is the honest label for it.
+            version="v$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            ref="${GITHUB_REF}"
+          fi
+          echo "building ${ref} as ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+          # A release always publishes; a dispatch only when asked.
+          if [ "${{ github.event_name }}" = "release" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - name: Install flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder ostree
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install runtime and SDK
+        run: |
+          flatpak install --user -y --noninteractive flathub \
+            "org.freedesktop.Platform//${RUNTIME_VERSION}" \
+            "org.freedesktop.Sdk//${RUNTIME_VERSION}" \
+            "org.freedesktop.Sdk.Extension.llvm20//${RUNTIME_VERSION}"
+
+      - name: Stamp the AppStream release
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # AppStream drives what software centres call the latest version, so a
+          # stale <release> advertises the wrong one whatever the build contains.
+          python3 - "$VERSION" <<'PY'
+          import datetime, re, sys, os
+          bare = sys.argv[1].lstrip("v")
+          path = os.path.join(os.environ["MANIFEST_DIR"], "org.openlogi.OpenLogi.metainfo.xml")
+          text = open(path, encoding="utf-8").read()
+          text = re.sub(
+              r'<release version="[^"]*" date="[^"]*"/>',
+              f'<release version="{bare}" date="{datetime.date.today().isoformat()}"/>',
+              text,
+              count=1,
+          )
+          open(path, "w", encoding="utf-8").write(text)
+          PY
+          grep '<release ' "${MANIFEST_DIR}/org.openlogi.OpenLogi.metainfo.xml"
+
+      - name: Build
+        run: |
+          flatpak-builder --user --disable-rofiles-fuse --force-clean \
+            --repo=repo --default-branch=stable \
+            build "${MANIFEST_DIR}/${FLATPAK_ID}.yml"
+          flatpak build-update-repo repo
+          ostree --repo=repo refs
+          du -sh repo
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-repo-${{ matrix.arch }}
+          path: repo
+          retention-days: 7
+          compression-level: 0 # OSTree objects are already compressed
+
+  publish:
+    name: Publish to GitHub Pages
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # This job holds Pages and OIDC permissions and imports the signing key, so
+    # the mutable action tags below are a deliberate choice rather than an
+    # oversight. Every action here is first-party `actions/*`, on the same tags
+    # release.yml and windows-sign-dryrun.yml already use while handling Apple
+    # codesign certs and Azure signing credentials; pinning this one workflow
+    # would make it the only pinned one in the tree. With no Dependabot or
+    # Renovate config to bump them, hand-pinned SHAs go stale unnoticed, which
+    # trades a hypothetical risk for a certain one. Follow a repo-wide pinning
+    # policy here if one is ever adopted.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - name: Check for the signing key
+        id: gpg
+        env:
+          KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "FLATPAK_GPG_PRIVATE_KEY is not configured, skipping publish." >&2
+            echo "An unsigned repository would force every user to add the" >&2
+            echo "remote with --no-gpg-verify, so this stops instead." >&2
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install flatpak
+        if: steps.gpg.outputs.configured == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak ostree
+
+      - uses: actions/download-artifact@v8
+        if: steps.gpg.outputs.configured == 'true'
+        with:
+          pattern: flatpak-repo-*
+          path: arch-repos
+
+      - name: Import the signing key
+        if: steps.gpg.outputs.configured == 'true'
+        env:
+          KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="${RUNNER_TEMP}/gnupg"
+          mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+          printf '%s' "$KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          gpg --list-secret-keys --with-colons \
+            | awk -F: '/^fpr:/ {print "GPG_FINGERPRINT=" $10; exit}' >> "$GITHUB_ENV"
+
+      - name: Merge both architectures into one signed repository
+        if: steps.gpg.outputs.configured == 'true'
+        run: |
+          # Rebuilt from scratch each release rather than appended to: GitHub
+          # Pages caps a site at 1 GB and an accumulating OSTree store would
+          # reach it within a handful of releases, while clients only ever need
+          # the current commit to update.
+          # ostree init does not create parents.
+          mkdir -p site/repo
+          ostree --repo=site/repo init --mode=archive-z2
+          for repo in arch-repos/flatpak-repo-*; do
+            echo "pulling $(basename "$repo")"
+            ostree --repo=site/repo remote add --no-gpg-verify \
+              --if-not-exists "$(basename "$repo")" "file://${PWD}/${repo}"
+            ostree --repo=site/repo pull --mirror "$(basename "$repo")"
+          done
+
+          # Sign the commits themselves. flatpak-builder creates them in the
+          # build jobs, which have no access to the key, and
+          # `build-update-repo --gpg-sign` signs only the summary, while a
+          # client verifies the commit it pulls. Without this every install
+          # fails with "GPG verification enabled, but no signatures found".
+          for ref in $(ostree --repo=site/repo refs); do
+            echo "signing $ref"
+            ostree --repo=site/repo gpg-sign \
+              --gpg-homedir="${GNUPGHOME}" "$ref" "${GPG_FINGERPRINT}"
+          done
+
+          # No --generate-static-deltas: with no history to delta against they
+          # are from-scratch copies of every object, roughly doubling a site
+          # that has a 1 GB ceiling.
+          flatpak build-update-repo \
+            --gpg-sign="${GPG_FINGERPRINT}" \
+            --prune --prune-depth=0 \
+            site/repo
+          ostree --repo=site/repo refs
+          du -sh site/repo
+
+      - uses: actions/configure-pages@v5
+        if: steps.gpg.outputs.configured == 'true'
+        id: pages_base
+
+      - name: Write the remote descriptors
+        if: steps.gpg.outputs.configured == 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          base="${{ steps.pages_base.outputs.base_url }}"
+          base="${base:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}}"
+          gpg --export "${GPG_FINGERPRINT}" > site/openlogi.gpg
+          key_b64="$(base64 -w0 < site/openlogi.gpg)"
+
+          cat > site/openlogi.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=OpenLogi
+          Url=${base}/repo/
+          Homepage=https://github.com/${GITHUB_REPOSITORY}
+          Comment=Logitech HID++ device control
+          Description=Remap buttons, DPI, and SmartShift on Logitech devices.
+          GPGKey=${key_b64}
+          EOF
+
+          cat > "site/${FLATPAK_ID}.flatpakref" <<EOF
+          [Flatpak Ref]
+          Title=OpenLogi
+          Name=${FLATPAK_ID}
+          Branch=stable
+          Url=${base}/repo/
+          RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+          IsRuntime=false
+          GPGKey=${key_b64}
+          EOF
+
+          sed -e "s|@BASE@|${base}|g" -e "s|@VERSION@|${VERSION}|g" \
+            "${MANIFEST_DIR}/index.html.in" > site/index.html
+
+      - uses: actions/upload-pages-artifact@v4
+        if: steps.gpg.outputs.configured == 'true'
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v4
+        if: steps.gpg.outputs.configured == 'true'
+        id: deploy
