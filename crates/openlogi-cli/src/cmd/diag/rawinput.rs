@@ -19,6 +19,10 @@ pub struct RawInputArgs {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[expect(
+    clippy::unused_async,
+    reason = "keeps one async command interface across cfg-gated platform implementations"
+)]
 pub async fn run(_args: RawInputArgs) -> Result<()> {
     anyhow::bail!("`diag rawinput` is Windows-only")
 }
