@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OpenLogi Flatpak repository</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.55; }
+  pre { background: #1113; padding: .75rem 1rem; overflow-x: auto; border-radius: 6px; }
+  code { font-family: ui-monospace, monospace; }
+</style>
+<h1>OpenLogi Flatpak repository</h1>
+<p>
+  The Flatpak build of <a href="https://github.com/AprilNEA/OpenLogi">OpenLogi</a>,
+  currently <strong>@VERSION@</strong>.
+</p>
+<p>
+  It exists because the other Linux packages ship without a repository, so they
+  cannot update themselves. This one can: install once, and
+  <code>flatpak update</code> keeps it current.
+</p>
+<h2>Install</h2>
+<pre><code>flatpak remote-add --if-not-exists --user openlogi @BASE@/openlogi.flatpakrepo
+flatpak install --user openlogi org.openlogi.OpenLogi</code></pre>
+<p>Updates then arrive with <code>flatpak update</code>, or automatically via GNOME Software / KDE Discover.</p>
+<h2>One-time host setup</h2>
+<p>
+  A Flatpak cannot write to <code>/etc</code>, so OpenLogi's udev rules must be
+  installed on the host. <strong>Until you do this, no devices are detected.</strong>
+  The rules ship inside the app:
+</p>
+<pre><code>flatpak run --command=cat org.openlogi.OpenLogi \
+  /app/share/openlogi/udev/70-openlogi.rules \
+  | sudo tee /etc/udev/rules.d/70-openlogi.rules
+
+echo uinput | sudo tee /etc/modules-load.d/openlogi.conf
+sudo modprobe uinput
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger</code></pre>
+<p>
+  The <code>uinput</code> lines matter on a machine that has never loaded that
+  module: the rule creates the device node, but its ACL is only granted in
+  response to a device event, and with no module loaded there is no device for
+  <code>udevadm trigger</code> to act on.
+</p>
+<p>
+  Then quit OpenLogi completely (<code>flatpak kill org.openlogi.OpenLogi</code>)
+  and start it again. The background agent outlives the window and installs its
+  input hook once at startup, so a permission granted while it runs does not
+  reach it.
+</p>
+<h2>Problems?</h2>
+<p>
+  Report anything that goes wrong on the
+  <a href="https://github.com/AprilNEA/OpenLogi/issues">issue tracker</a>.
+</p>

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.openlogi.OpenLogi</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0 OR MIT</project_license>
+
+  <name>OpenLogi</name>
+  <summary>Control Logitech mice and keyboards</summary>
+
+  <developer id="org.openlogi">
+    <name>AprilNEA</name>
+  </developer>
+
+  <description>
+    <p>
+      OpenLogi is a native, local-first alternative to Logitech Options+. It remaps
+      buttons, sets DPI, tunes SmartShift, and applies per-application profiles to
+      Logitech HID++ devices: over a Bolt or Unifying receiver, over Bluetooth, or
+      wired.
+    </p>
+    <p>
+      There is no account and no telemetry. Configuration is a plain TOML file you
+      can read, edit, and put in version control.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Remap buttons, including gesture and Actions Ring bindings</li>
+      <li>Set DPI and cycle between DPI presets</li>
+      <li>Configure SmartShift and wheel behaviour</li>
+      <li>Per-application profiles that switch on the focused window</li>
+      <li>Battery level for connected devices</li>
+    </ul>
+    <p>
+      One setup step is required after installing. Device nodes are owned by root,
+      so OpenLogi's udev rules must be installed on the host, because a Flatpak
+      cannot write to /etc. The rules ship inside the application at
+      /app/share/openlogi/udev/70-openlogi.rules; copy that file to
+      /etc/udev/rules.d/ and reload udev. Until then no devices are detected.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.openlogi.OpenLogi.desktop</launchable>
+
+  <url type="homepage">https://github.com/AprilNEA/OpenLogi</url>
+  <url type="bugtracker">https://github.com/AprilNEA/OpenLogi/issues</url>
+  <url type="vcs-browser">https://github.com/AprilNEA/OpenLogi</url>
+
+  <categories>
+    <category>Settings</category>
+    <category>HardwareSettings</category>
+  </categories>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.7.3" date="2026-08-21"/>
+  </releases>
+</component>
