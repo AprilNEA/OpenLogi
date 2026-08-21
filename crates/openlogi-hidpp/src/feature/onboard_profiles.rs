@@ -17,7 +17,6 @@
 mod types;
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect is idiomatic in parser tests")]
 mod tests;
 
 use openlogi_hidpp_derive::Feature;
@@ -124,6 +123,8 @@ impl OnboardProfilesFeature {
 /// Whether any complete directory entry in `bytes` is the terminator.
 fn contains_terminator(bytes: &[u8]) -> bool {
     bytes
-        .chunks_exact(DIRECTORY_ENTRY_LEN)
+        .as_chunks::<DIRECTORY_ENTRY_LEN>()
+        .0
+        .iter()
         .any(|entry| be16(entry, 0) == DIRECTORY_END)
 }
