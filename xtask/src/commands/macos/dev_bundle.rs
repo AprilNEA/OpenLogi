@@ -249,7 +249,6 @@ impl Profile {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::*;
 

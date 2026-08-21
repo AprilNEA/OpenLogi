@@ -45,9 +45,10 @@ sits beneath both.
   `openlogi-desktop`. Anything both need goes in `openlogi-ui`, and every dependency
   added there lands in the overlay too (`.claude/rules/gui.md` has the rule).
 - Platform code is cfg-gated per crate (`[target.'cfg(target_os = …)'.dependencies]`).
-  `crates/openlogi-desktop/src/platform/AGENTS.md` is the contract for the workspace's ObjC
-  FFI and indexes every file that carries any — read it before editing one, including
-  `crates/openlogi-overlay/src/platform.rs`, which lives outside that directory.
+  `.claude/rules/objc-ffi.md` is the contract for the workspace's macOS native FFI and
+  indexes every file that carries any — read it before editing one. That surface spans
+  seven crates: the agent's tray, the camera backends, the hook, the injector, the
+  overlay, `openlogi-permissions`, and one file in the GUI.
 
 ## Build, run, verify
 
@@ -261,4 +262,4 @@ before editing that area.
 | `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
-| `crates/openlogi-desktop/src/platform/**`, `crates/openlogi-overlay/src/platform.rs`, `crates/openlogi-permissions/**` (ObjC FFI) | `crates/openlogi-desktop/src/platform/AGENTS.md` |
+| macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |

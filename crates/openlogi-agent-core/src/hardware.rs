@@ -627,7 +627,6 @@ mod tests {
     /// forever. Uses a paused clock so the test doesn't spend `WRITE_BUDGET`
     /// (5s) of real wall-clock time.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::expect_used, reason = "expect is idiomatic in tests")]
     async fn timed_maps_an_elapsed_deadline_to_request_timed_out() {
         let handle = tokio::spawn(timed(
             HidppOperation::WriteDpi,

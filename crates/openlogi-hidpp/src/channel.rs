@@ -23,11 +23,6 @@ mod message;
 mod raw;
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 pub(crate) mod tests;
 
 pub use error::ChannelError;

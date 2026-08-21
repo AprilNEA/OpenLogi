@@ -1,7 +1,5 @@
 //! Config load/save and binding-map tests.
 
-#![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
-
 use std::{assert_matches, fs};
 
 use super::*;

@@ -126,7 +126,6 @@ pub fn oshook_gestures_for(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use crate::binding::default_gesture_binding;
 

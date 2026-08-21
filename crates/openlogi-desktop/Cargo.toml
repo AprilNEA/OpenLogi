@@ -33,8 +33,6 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror.workspace = true
-ureq.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -50,7 +48,6 @@ url = "2.5.8"
 walkdir = "2.5.0"
 backon.workspace = true
 opener = { workspace = true }
-succession = "0.1"
 derive_more = { version = "2.1.1", default-features = false, features = ["display", "from"] }
 
 # Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
@@ -59,19 +56,17 @@ derive_more = { version = "2.1.1", default-features = false, features = ["displa
 [build-dependencies]
 embed-resource = "3.0.9"
 
-# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
-# `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
+# Native window chrome + host OS version (platform/os.rs): NSAppearance /
+# NSApplication pin the titlebar to the in-app light/dark preference, and
+# NSProcessInfo supplies the diagnostics report's OS string. The menu-bar status
+# item lives in the agent, not here.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow"] }
-objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
-# Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums —
-# see platform/permissions.rs.
-objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
 
-# unsafe_code stays denied (from [workspace.lints]); the status-item/tray modules
-# opt in locally with #[expect(unsafe_code)] for the few objc2 calls
-# (init-with-action, set-target, super-init) that remain unsafe.
+# unsafe_code stays denied (from [workspace.lints]); platform/os.rs opts in
+# locally with #[expect(unsafe_code)] to read AppKit's `NSAppearanceName`
+# statics.
 [lints]
 workspace = true
 

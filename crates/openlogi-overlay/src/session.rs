@@ -141,11 +141,6 @@ pub(crate) fn spawned_by() -> Option<Run> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "panic helpers are idiomatic in tests"
-)]
 mod tests {
     use super::*;
 

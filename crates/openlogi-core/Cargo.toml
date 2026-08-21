@@ -28,7 +28,6 @@ plist = "1.10.0"
 
 [dev-dependencies]
 tempfile = "3"
-tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

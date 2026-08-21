@@ -34,7 +34,6 @@ core-foundation = { workspace = true }
 # device-of-origin lookup). Matches the version core-graphics already resolves.
 foreign-types-shared = "0.3"
 objc2 = { workspace = true }
-objc2-foundation = { workspace = true, features = ["NSString"] }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
 # Accessibility-trust query + prompt (`AXIsProcessTrusted[WithOptions]`) and the
 # `kAXTrustedCheckOptionPrompt` dictionary it takes — typed, so no hand-written

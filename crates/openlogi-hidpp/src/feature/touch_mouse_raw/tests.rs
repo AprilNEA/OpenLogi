@@ -1,5 +1,4 @@
 //! Unit tests for `TouchMouseRaw` info parsing and raw-event decoding.
-#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use super::event::{TouchMousePoint, TouchMouseRawEvent, TouchMouseStatus, decode_event};
 use super::{Origin, RawMode, TouchMouseInfo};

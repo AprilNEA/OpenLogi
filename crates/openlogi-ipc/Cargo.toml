@@ -18,7 +18,6 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
-tokio = { workspace = true }
 succession = { version = "0.1", features = ["serde"] }
 
 [lints]

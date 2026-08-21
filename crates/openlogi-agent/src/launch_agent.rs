@@ -319,7 +319,6 @@ fn run_systemctl(args: &[&str]) {
 
 #[cfg(test)]
 #[cfg(target_os = "macos")]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -426,7 +425,6 @@ mod linux_tests {
         // When XDG_CONFIG_HOME is unset (or relative), falls back to $HOME/.config.
         // We can't mutate global env safely in a parallel test suite, so we test
         // the logic indirectly: unit_path() must end in the UNIT_NAME component.
-        #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
         let path = unit_path().expect("unit_path should resolve with a valid HOME");
         assert!(path.ends_with(UNIT_NAME));
         assert!(path.to_string_lossy().contains("systemd/user"));

@@ -567,7 +567,6 @@ pub async fn run(server: AgentServer) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
     use std::time::{Duration, Instant};

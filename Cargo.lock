@@ -4869,13 +4869,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags 2.13.1",
- "block2 0.6.2",
  "dispatch2",
- "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-io-surface",
- "objc2-metal 0.3.2",
 ]
 
 [[package]]
@@ -5202,6 +5199,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "serde",
+ "thiserror 2.0.18",
  "tracing",
  "v4l",
  "windows 0.61.3",
@@ -5242,7 +5240,6 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5260,10 +5257,8 @@ dependencies = [
  "gpui-updater",
  "gpui_platform",
  "image",
- "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "objc2-io-kit",
  "opener",
  "openlogi-assets",
  "openlogi-camera",
@@ -5275,15 +5270,12 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
- "succession",
  "sys-locale",
  "tarpc",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "ureq",
  "url",
  "walkdir",
 ]
@@ -5296,9 +5288,6 @@ dependencies = [
  "atomic-write-file",
  "futures-concurrency",
  "futures-lite",
- "num_enum",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
  "objc2-io-kit",
  "openlogi-core",
  "openlogi-hidpp",
@@ -5355,7 +5344,6 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-application-services",
  "objc2-core-foundation",
- "objc2-foundation 0.3.2",
  "openlogi-core",
  "openlogi-inject",
  "thiserror 2.0.18",
@@ -5399,7 +5387,6 @@ dependencies = [
  "succession",
  "tarpc",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

@@ -203,8 +203,6 @@ fn select<'a>(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, reason = "expect is idiomatic in selection tests")]
-
     use super::select;
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
 

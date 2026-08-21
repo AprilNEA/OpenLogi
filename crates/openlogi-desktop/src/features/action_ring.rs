@@ -26,7 +26,7 @@ pub struct ActionRingPanel {
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
-    #[allow(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
 }
 

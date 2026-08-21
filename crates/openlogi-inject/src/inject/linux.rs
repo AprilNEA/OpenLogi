@@ -607,7 +607,6 @@ fn try_mpris_command(command: &str) -> Option<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::{KeyCombo, Shortcut};

@@ -111,7 +111,10 @@ pub enum ConfigPersistence {
     /// A load error made the config unsafe to write for this process lifetime.
     ReadOnly(String),
     /// Keep changes in the in-memory [`Config`] only.
-    #[cfg_attr(not(test), allow(dead_code, reason = "test-only persistence boundary"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "test-only persistence boundary")
+    )]
     MemoryOnly,
 }
 
