@@ -53,6 +53,9 @@ struct Spec {
     hosts: &'static [Host],
     /// Part of a bare `cargo xtask ci`. The focused suites are not.
     in_default_run: bool,
+    /// What `--list` says about it: the trap, or how a local run differs from
+    /// CI's. Empty when the command speaks for itself.
+    caveat: &'static str,
 }
 
 /// The names that select more than one job, because `ci.yml` has more than one.
@@ -70,6 +73,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: true,
+                caveat: "",
             },
             Self::Shell => Spec {
                 name: "shell",
@@ -77,6 +81,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: true,
+                caveat: "shellcheck and shfmt over every tracked shell script. shfmt decides what counts as one — by extension, and by shebang for the extensionless ones — and takes its formatting options from .editorconfig, which any printer flag would discard.",
             },
             Self::Clippy => Spec {
                 name: "clippy",
@@ -84,6 +89,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: true,
+                caveat: "CI runs it on ubuntu-latest, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
             },
             Self::Msrv => Spec {
                 name: "MSRV (cargo check)",
@@ -91,6 +97,7 @@ impl Job {
                 prefix: Some("MSRV (cargo check"),
                 hosts: &[Host::Linux, Host::Macos],
                 in_default_run: true,
+                caveat: "rust-toolchain.toml pins the channel to stable and rustup honours that over an installed toolchain, so CI and this runner both set RUSTUP_TOOLCHAIN to the rust-version floor — without it the check silently runs stable.",
             },
             Self::Rustdoc => Spec {
                 name: "rustdoc (non-GUI crates)",
@@ -98,6 +105,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: true,
+                caveat: "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
             },
             Self::TestsLinux => Spec {
                 name: "tests (linux)",
@@ -105,6 +113,7 @@ impl Job {
                 prefix: None,
                 hosts: &[Host::Linux],
                 in_default_run: true,
+                caveat: "Excludes openlogi-desktop, so the i18n locale-parity tests never run on Linux CI.",
             },
             Self::TestsMacos => Spec {
                 name: "tests (macos)",
@@ -112,6 +121,7 @@ impl Job {
                 prefix: Some("tests (macos"),
                 hosts: &[Host::Macos],
                 in_default_run: true,
+                caveat: "CI's matrix is arm64 (macos-latest) and x86_64 (macos-15-intel); a host only ever covers its own arch.",
             },
             Self::CargoDeny => Spec {
                 name: "cargo-deny",
@@ -119,6 +129,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: true,
+                caveat: "Rooted at crates/openlogi — exactly the crates published to crates.io. Falls back to `nix run nixpkgs#cargo-deny` when the binary is not installed.",
             },
             Self::ClippyWindows => Spec {
                 name: "clippy (windows)",
@@ -128,6 +139,7 @@ impl Job {
                 // cross-lint proxy.
                 hosts: Host::ANY,
                 in_default_run: true,
+                caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
             },
             Self::I18n => Spec {
                 name: "i18n",
@@ -135,6 +147,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: false,
+                caveat: "Locale parity. Part of tests (macos), and the suite Linux CI cannot run because it excludes openlogi-desktop.",
             },
             Self::Wire => Spec {
                 name: "wire_format",
@@ -142,6 +155,7 @@ impl Job {
                 prefix: None,
                 hosts: Host::ANY,
                 in_default_run: false,
+                caveat: "The bincode/tarpc golden wire format. Part of the test jobs.",
             },
         }
     }
@@ -151,6 +165,35 @@ impl Job {
     /// of them, a named skip is the honest report, and silence is not.
     pub(crate) fn default_run() -> impl Iterator<Item = Self> {
         Self::iter().filter(|job| job.spec().in_default_run)
+    }
+
+    /// The suites that are not jobs of their own — the other half of
+    /// [`Job::default_run`].
+    pub(crate) fn focused() -> impl Iterator<Item = Self> {
+        Self::iter().filter(|job| !job.spec().in_default_run)
+    }
+
+    /// The CI `name:`, before a plan fills in the matrix leg this host covers.
+    pub(crate) fn name(self) -> &'static str {
+        self.spec().name
+    }
+
+    /// The hosts CI gives this job, as `--list` names them.
+    pub(crate) fn runs_on(self) -> String {
+        let hosts = self.spec().hosts;
+        if hosts == Host::ANY {
+            return "any".to_owned();
+        }
+        hosts
+            .iter()
+            .map(Host::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The trap worth knowing, or how a local run differs from CI's.
+    pub(crate) fn caveat(self) -> &'static str {
+        self.spec().caveat
     }
 
     /// Every name this job answers to, the matrix-leg prefix included. Only the

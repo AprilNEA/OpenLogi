@@ -86,7 +86,7 @@ xtask/
         jobs.rs              # one row of facts per ci.yml job + host gating
         jobs/
           steps.rs           # what each job runs
-        list.rs              # the --list table
+        list.rs              # renders --list from those rows (comfy-table)
       macos.rs               # macOS domain entry
       macos/
         bundle.rs

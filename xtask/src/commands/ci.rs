@@ -83,7 +83,7 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: &Args) -> Result<()> {
     if args.list {
-        print!("{}", list::TABLE);
+        println!("{}", list::render());
         return Ok(());
     }
 

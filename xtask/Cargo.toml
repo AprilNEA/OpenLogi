@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at

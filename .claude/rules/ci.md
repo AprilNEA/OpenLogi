@@ -105,9 +105,10 @@ Not part of `ci.yml`, not in the default run:
 
 ## When you add a CI job
 
-1. Add a `Job` variant plus its `Spec` row (name, aliases, hosts) in
-   `xtask/src/commands/ci/jobs.rs`, its steps in `ci/jobs/steps.rs`, a row in
-   `ci/list.rs`, and a row in the table above. The `Spec` row is what decides
-   the host skip — do not reach for `cfg!(target_os = …)` in a job's steps.
+1. Add a `Job` variant plus its `Spec` row (name, aliases, hosts, caveat) in
+   `xtask/src/commands/ci/jobs.rs`, its steps in `ci/jobs/steps.rs`, and a row
+   in the table above. `--list` renders itself from the `Spec` rows, so it
+   needs no edit. The `Spec` row is also what decides the host skip — do not
+   reach for `cfg!(target_os = …)` in a job's steps.
 2. If it belongs in the host-OS pre-push gate, also update `openlogi:check` in
    `devenv.nix` and the Local gate in `AGENTS.md`.
