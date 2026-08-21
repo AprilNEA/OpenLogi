@@ -242,3 +242,26 @@ jobs:
       # and the agent's HKCU-Run autostart) that the Linux/macOS clippy jobs
       # never compile.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  wasm:
+    name: wasm (portable crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: wasm-stable-debug
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      # A portability gate, not a deliverable: nothing here is built for the
+      # browser. `wasm32-unknown-unknown` has no OS under it, so a crate that
+      # picks up a filesystem, a randomness source or a thread stops compiling
+      # here and nowhere else. The crate list lives in xtask
+      # (`WASM_PORTABLE_CRATES`) and the drift test keeps the two in step.
+      - run: cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown
+      # `openlogi-core` earns its place only with `fs` off: that feature is
+      # the config file, and a config file needs a filesystem.
+      - run: cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown

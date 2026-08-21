@@ -20,8 +20,9 @@ use thiserror::Error;
 pub enum WriteError {
     /// HID transport error serialized as text.
     ///
-    /// `async_hid::HidError` isn't `Serialize`, so carry its message as text;
-    /// the typed error is never matched on (only constructed + displayed).
+    /// `openlogi_hid::BackendError` isn't `Serialize`, so carry its message as
+    /// text; the typed error is never matched on (only constructed +
+    /// displayed).
     #[error("HID transport error: {0}")]
     Hid(String),
     /// No currently connected device matched the requested route.

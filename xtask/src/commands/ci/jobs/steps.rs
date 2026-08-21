@@ -36,6 +36,29 @@ const WINDOWS_LINT_CRATES: [&str; 8] = [
     "openlogi-agent-core",
 ];
 
+/// The crates that must keep compiling with no OS underneath them.
+///
+/// Listed rather than excluded, unlike [`RUSTDOC_EXCLUDES`]: portability is a
+/// property a crate earns and then has to keep, so a new crate is *not*
+/// portable by default. Adding a name here is the claim; this job is what makes
+/// it a fact.
+///
+/// `openlogi-core` qualifies only with its `fs` feature off — that feature is
+/// the config file, and a config file needs a filesystem. Hence
+/// `--no-default-features`, which is why this job checks it in its own pass.
+const WASM_PORTABLE_CRATES: [&str; 2] = ["openlogi-hidpp", "openlogi-device"];
+
+/// The crates that are portable once their host-facing feature is off.
+const WASM_PORTABLE_NO_DEFAULT_CRATES: [&str; 1] = ["openlogi-core"];
+
+/// Every crate the wasm job checks, however it checks it.
+#[cfg(test)]
+pub(super) fn wasm_portable_crates() -> impl Iterator<Item = &'static str> {
+    WASM_PORTABLE_CRATES
+        .into_iter()
+        .chain(WASM_PORTABLE_NO_DEFAULT_CRATES)
+}
+
 /// The GPUI crates `cargo doc` skips — documenting them drags the whole
 /// graphics toolchain into the job. Excluding by name rather than listing the
 /// covered crates keeps a new crate documented by default.
@@ -125,6 +148,7 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
         Job::TestsMacos => Ok(tests_macos(job)),
         Job::CargoDeny => Ok(cargo_deny(job)),
         Job::ClippyWindows => clippy_windows(job, sh, host),
+        Job::Wasm => wasm(job, sh),
         Job::I18n => Ok(Plan::run(
             job,
             [Step::new("cargo").args(["test", "-p", "openlogi-desktop", "i18n"])],
@@ -283,6 +307,50 @@ fn cargo_deny(job: Job) -> Plan {
         Some(note) => plan.note(note),
         None => plan,
     }
+}
+
+/// Check the portable crates for `wasm32-unknown-unknown`.
+///
+/// Not a build anyone ships: no wasm artifact exists. The target is chosen
+/// precisely because it has no OS under it, so a crate that quietly grows a
+/// host-bound dependency — a filesystem, a randomness source, a thread — stops
+/// compiling here and nowhere else.
+///
+/// It covers only the crates that pass today. Widening the list is how a crate
+/// declares itself portable, and the day one of them regresses this job is what
+/// says so.
+fn wasm(job: Job, sh: &Shell) -> Result<Plan> {
+    let sysroot = cmd!(sh, "rustc --print sysroot").quiet().read()?;
+    if !Path::new(sysroot.trim())
+        .join("lib/rustlib/wasm32-unknown-unknown")
+        .is_dir()
+    {
+        return Ok(Plan::skip(
+            job,
+            "missing wasm32-unknown-unknown std (devenv, or: rustup target add wasm32-unknown-unknown)",
+        ));
+    }
+
+    let crates = WASM_PORTABLE_CRATES
+        .iter()
+        .flat_map(|crate_name| ["-p", crate_name]);
+    let no_default = WASM_PORTABLE_NO_DEFAULT_CRATES
+        .iter()
+        .flat_map(|crate_name| ["-p", crate_name]);
+    Ok(Plan::run(
+        job,
+        [
+            Step::new("cargo")
+                .args(["check"])
+                .args(crates)
+                .args(["--target", "wasm32-unknown-unknown"]),
+            Step::new("cargo").args(["check"]).args(no_default).args([
+                "--no-default-features",
+                "--target",
+                "wasm32-unknown-unknown",
+            ]),
+        ],
+    ))
 }
 
 fn clippy_windows(job: Job, sh: &Shell, host: Host) -> Result<Plan> {

@@ -85,7 +85,15 @@ in
     # plus prebuilt import libs (no `cc`-compiled C), so it lints cleanly. It is
     # a fast proxy for CI's authoritative `clippy (windows)` (msvc); building a
     # runnable .exe would additionally need pkgsCross.mingwW64 and is out of scope.
-    targets = [ "x86_64-pc-windows-gnu" ];
+    # `wasm32-unknown-unknown` is not a shipping target: nothing here is built
+    # for the browser. It exists so `cargo check` can *prove* the portable
+    # layer stays portable — a crate that has no business touching the host
+    # (protocol codec, device model) fails to compile here the moment it picks
+    # up a dependency that does. Discipline drifts; a compiler does not.
+    targets = [
+      "x86_64-pc-windows-gnu"
+      "wasm32-unknown-unknown"
+    ];
   };
 
   enterShell = ''

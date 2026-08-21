@@ -253,12 +253,10 @@ fn spawn_inner(
             // is reused instead of being re-handshaked every poll.
             // Warm-start from the persisted probe cache too, so devices keep
             // their identity across agent restarts without a fresh interview.
-            let mut enumerator = registry
-                .map_or_else(
-                    openlogi_hid::Enumerator::default,
-                    openlogi_hid::Enumerator::with_registry,
-                )
-                .persisted();
+            let mut enumerator = openlogi_hid::host::persisted_enumerator();
+            if let Some(registry) = registry {
+                enumerator = enumerator.with_registry(registry);
+            }
             let mut state = WatchState::default();
             let mut last_tick = SystemTime::now();
             // `block_on` installs runtime context so a backend that registers an
@@ -348,14 +346,14 @@ mod tests {
     use std::assert_matches;
 
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
-    use openlogi_hid::InventoryError;
+    use openlogi_hid::{BackendError, InventoryError};
 
     use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
 
     /// A transport-level enumerate failure — what the watcher's `Err` arm now
     /// sees (a partial per-node read is replayed by the hid ledger as `Ok`).
     fn enumerate_failed() -> InventoryError {
-        InventoryError::Hid(async_hid::HidError::Disconnected)
+        InventoryError::Hid(BackendError::Disconnected)
     }
 
     #[test]

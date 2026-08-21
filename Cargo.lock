@@ -5174,7 +5174,6 @@ dependencies = [
 name = "openlogi-agent-core"
 version = "0.7.4"
 dependencies = [
- "async-hid",
  "futures-lite",
  "openlogi-core",
  "openlogi-hid",
@@ -5291,6 +5290,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-device"
+version = "0.7.4"
+dependencies = [
+ "futures-concurrency",
+ "futures-lite",
+ "openlogi-core",
+ "openlogi-hidpp",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "openlogi-hid"
 version = "0.7.4"
 dependencies = [
@@ -5300,6 +5314,7 @@ dependencies = [
  "futures-lite",
  "objc2-io-kit",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-hidpp",
  "serde",
  "serde_json",
@@ -5325,7 +5340,6 @@ dependencies = [
  "hidreport",
  "num_enum",
  "openlogi-hidpp-derive",
- "rand 0.9.4",
  "serde",
  "thiserror 2.0.18",
  "tracing",

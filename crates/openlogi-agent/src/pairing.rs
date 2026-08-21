@@ -305,7 +305,7 @@ mod tests {
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
-            channel_pool: openlogi_hid::ChannelPool::default(),
+            channel_pool: openlogi_hid::host::channel_pool(),
             keyboard_spec: Arc::new(RwLock::new(None)),
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(0.into()),
