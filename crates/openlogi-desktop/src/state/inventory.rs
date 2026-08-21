@@ -355,12 +355,52 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
             registry_model_id: record.registry_model_id.clone(),
         }
         .without_unit_identifiers();
+
+        // Anti-downgrade: do not overwrite a resolved identity with a
+        // fallback-quality one. A fallback identity has no model_info, no
+        // codename, and its display_name is a generic placeholder like
+        // "Slot N" or "Unknown device". If the existing persisted identity
+        // carries richer information, preserve it.
+        if let Some(existing) = config.device_identity(config_key) {
+            if !identity_is_resolved(&identity) && identity_is_resolved(existing) {
+                continue;
+            }
+        }
+
         if config.device_identity(config_key) != Some(&identity) {
             config.set_device_identity(config_key, identity);
             changed = true;
         }
     }
     changed
+}
+
+/// An identity is considered "resolved" (non-fallback) when it carries at
+/// least one piece of model-level information beyond the bare slot number:
+/// a real model_info, a codename, or a display_name that doesn't look like
+/// a generic placeholder.
+fn identity_is_resolved(identity: &DeviceIdentity) -> bool {
+    if identity.model_info.is_some() {
+        return true;
+    }
+    if identity.codename.is_some() {
+        return true;
+    }
+    // A display_name that is NOT a generic fallback pattern indicates a
+    // previously resolved asset name (e.g. "K540/K545", "MX Master 3S").
+    let name = &identity.display_name;
+    !is_fallback_display_name(name)
+}
+
+/// Returns true if the display name looks like a generic fallback rather than
+/// a real product name resolved from the asset registry.
+pub(super) fn is_fallback_display_name(name: &str) -> bool {
+    // "Slot N" pattern
+    if name.starts_with("Slot ") && name[5..].chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Other known fallback patterns
+    name == "Unknown device" || name == "Wireless Mouse" || name == "Wireless Keyboard"
 }
 
 /// Reset `key`'s consecutive-miss counter — the device was just confirmed

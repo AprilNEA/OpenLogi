@@ -13,6 +13,7 @@ use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
+use super::inventory::is_fallback_display_name;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -125,7 +126,17 @@ pub(super) fn build_device_list(
             let route = DeviceRoute::device_route_for(inv, paired.slot);
             let (model_key, asset, model_info, codename, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
-                    let asset = cache.resolve(model, paired.codename.as_deref());
+                    let asset = cache
+                        .resolve(model, paired.codename.as_deref())
+                        .or_else(|| {
+                            // Normal resolution failed (e.g. model_ids are all
+                            // zero on HID++ 1.0 devices). Fall back to WPID-based
+                            // suffix matching against the asset registry.
+                            cache.resolve_by_wpid(
+                                paired.wpid,
+                                paired.codename.as_deref(),
+                            )
+                        });
                     (
                         model.config_key(),
                         asset,
@@ -139,11 +150,18 @@ pub(super) fn build_device_list(
                     // timed out. Surface the device anyway using the wpid (or slot
                     // as a last-resort model key) so it appears in the carousel
                     // with a stable display fallback.
+                    //
+                    // Try resolving assets via wpid suffix or codename: many
+                    // Unifying keyboards (K540/K545, K375s, …) are HID++ 1.0 and
+                    // lack feature 0x0003, but their wpid still matches the asset
+                    // registry's modelId.
                     let key = paired.wpid.map_or_else(
                         || format!("slot{}", paired.slot),
                         |w| format!("wpid{w:04x}"),
                     );
-                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
+                    let asset =
+                        cache.resolve_by_wpid(paired.wpid, paired.codename.as_deref());
+                    (key, asset, None, paired.codename.clone(), None, [0u8; 4])
                 };
             let stable_id = DeviceStableId::from_parts(
                 route.as_ref(),
@@ -160,6 +178,19 @@ pub(super) fn build_device_list(
                 .as_ref()
                 .map(|a| a.display_name.clone())
                 .or_else(|| paired.codename.as_deref().map(prettify_codename))
+                .or_else(|| {
+                    // Transient resolver failure protection: when the asset
+                    // resolver cannot find a match this cycle (e.g. the index
+                    // is being rewritten by the sync task), fall back to the
+                    // persisted identity's display name if it carries a known
+                    // product name. This prevents a transient `None` from
+                    // degrading "K540/K545" into "Slot 3".
+                    config
+                        .device_identity(&config_key)
+                        .map(|id| &id.display_name)
+                        .filter(|name| !is_fallback_display_name(name))
+                        .cloned()
+                })
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
             let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
             list.push(DeviceRecord {

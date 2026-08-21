@@ -215,6 +215,47 @@ impl AssetResolver {
         self.load_standalone_files(depot, entry, registry_model_id)
     }
 
+    /// Resolve a device that lacks HID++ 2.0 `DeviceModelInfo` using its
+    /// Unifying/Bolt wireless product id (wpid) and optional codename.
+    ///
+    /// HID++ 1.0 devices (many Unifying keyboards) never expose feature
+    /// 0x0003, so the probe produces `model_info = None`. However, the
+    /// device-arrival event still carries a wpid that — when formatted as a
+    /// 4-hex suffix — matches the asset registry's `modelId` for these
+    /// products. The codename (read from the receiver's pairing register) is
+    /// tried as a display-name fallback when the suffix match misses.
+    pub fn resolve_by_wpid(
+        &self,
+        wpid: Option<u16>,
+        codename: Option<&str>,
+    ) -> Option<ResolvedAsset> {
+        let index = self.index.as_ref()?;
+
+        // Try wpid as a suffix match (e.g. wpid 0x4076 → "4076" matches
+        // registry modelId "4076" for the K540/K545).
+        if let Some(wpid) = wpid {
+            let suffix = format!("{wpid:04x}");
+            if let Some((depot, entry)) = index.find_by_model_id_suffix(&suffix) {
+                debug!(depot, wpid = %suffix, "asset matched via wpid suffix for HID++ 1.0 device");
+                let model_id = &entry.model_id;
+                if let Some(asset) = self.load_standalone_files(depot, entry, model_id) {
+                    return Some(asset);
+                }
+            }
+        }
+
+        // Fall back to codename ↔ displayName when the wpid lookup misses.
+        if let Some(name) = codename {
+            if let Some((depot, entry)) = index.find_by_display_name(name) {
+                debug!(depot, codename = name, "asset matched via codename for HID++ 1.0 device");
+                let model_id = &entry.model_id;
+                return self.load_standalone_files(depot, entry, model_id);
+            }
+        }
+
+        None
+    }
+
     fn load_files(
         &self,
         depot: &str,
