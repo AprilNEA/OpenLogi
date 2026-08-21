@@ -84,6 +84,8 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/volume-1.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-1.svg"))),
     ("action-icons/volume-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-2.svg"))),
     ("action-icons/volume-x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-x.svg"))),
+    ("action-icons/zoom-in.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/zoom-in.svg"))),
+    ("action-icons/zoom-out.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/zoom-out.svg"))),
 ];
 
 /// GPUI asset source for the embedded ring glyphs, and nothing else.

@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Rulla ned"
 "Scroll Left": "Rulla vänster"
 "Scroll Right": "Rulla höger"
+"Zoom In": "Zooma in"
+"Zoom Out": "Zooma ut"
 "Add Device": "Lägg till enhet"
 "Add Device…": "Lägg till enhet…"
 "Put the device in pairing mode, then start searching.": "Sätt enheten i ihopparningsläge och börja sedan söka."

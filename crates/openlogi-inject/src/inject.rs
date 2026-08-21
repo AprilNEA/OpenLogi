@@ -133,6 +133,60 @@ pub fn post_horizontal_scroll(delta: i32) {
     }
 }
 
+/// Synthesise a zoom step of `delta` wheel-detent units — a trackpad-pinch
+/// (magnify) gesture on macOS, a modifier-stamped vertical wheel on
+/// Linux/Windows. Positive `delta` zooms in, negative zooms out.
+///
+/// Fired by [`execute`] when a `ZoomIn`/`ZoomOut` binding sits on a button:
+/// one press = one complete micro-gesture. The thumb-wheel watcher instead
+/// streams through [`post_zoom_continuous`] for Options+-style smoothness.
+///
+/// No-op (logs nothing) on platforms without a supported injection mechanism.
+pub fn post_zoom(delta: i32) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom(delta);
+        }
+        target_os = "linux" => {
+            linux::post_zoom(delta);
+        }
+        target_os = "windows" => {
+            windows::post_zoom(delta);
+        }
+        _ => {
+            let _ = delta;
+        }
+    }
+}
+
+/// Stream one fractional increment of pinch-zoom magnification.
+///
+/// `lines` is the sensitivity-scaled wheel-lines delta of ONE rotation report
+/// (+ in, − out). On macOS these land as `changed` events inside a single
+/// ongoing pinch gesture — began on the first delta after a quiet spell,
+/// ended automatically once the wheel rests — which renders as continuous
+/// Logi-Options+-style zoom in iWork/Preview-class apps. Linux/Windows bank
+/// the fractional deltas and emit whole modifier-stamped wheel detents once
+/// they cross ±1.
+///
+/// No-op (logs nothing) on platforms without a supported injection mechanism.
+pub fn post_zoom_continuous(lines: f32) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom_continuous(lines);
+        }
+        target_os = "linux" => {
+            linux::post_zoom_continuous(lines);
+        }
+        target_os = "windows" => {
+            windows::post_zoom_continuous(lines);
+        }
+        _ => {
+            let _ = lines;
+        }
+    }
+}
+
 /// Return the `/dev/input/eventN` node for the action-injector uinput device,
 /// initialising it if needed.
 ///

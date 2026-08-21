@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "下にスクロール"
 "Scroll Left": "左にスクロール"
 "Scroll Right": "右にスクロール"
+"Zoom In": "拡大"
+"Zoom Out": "縮小"
 "Add Device": "デバイスを追加"
 "Add Device…": "デバイスを追加…"
 "Put the device in pairing mode, then start searching.": "デバイスをペアリングモードにしてから検索を開始してください。"

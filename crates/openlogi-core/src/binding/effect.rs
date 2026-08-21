@@ -46,6 +46,13 @@ pub enum Effect<'a> {
         /// Vertical direction: -1 down, 1 up, 0 none.
         dy: i8,
     },
+    /// Synthesise one zoom step in direction `delta` — a trackpad pinch
+    /// (magnify) micro-gesture on macOS, a modifier-stamped vertical wheel
+    /// tick on Linux/Windows. Each backend applies its own step magnitude.
+    Zoom {
+        /// Zoom direction: -1 out, 1 in.
+        delta: i8,
+    },
     /// Fire a media/volume key. Every backend reaches these through a
     /// dedicated OS mechanism rather than an ordinary keyboard chord.
     Media(MediaKey),
@@ -268,6 +275,8 @@ impl Action {
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },
             Action::HorizontalScrollLeft => Effect::Scroll { dx: -1, dy: 0 },
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
+            Action::ZoomIn => Effect::Zoom { delta: 1 },
+            Action::ZoomOut => Effect::Zoom { delta: -1 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
 

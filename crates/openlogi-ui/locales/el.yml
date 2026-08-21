@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Κύλιση προς τα κάτω"
 "Scroll Left": "Κύλιση προς τα αριστερά"
 "Scroll Right": "Κύλιση προς τα δεξιά"
+"Zoom In": "Μεγέθυνση"
+"Zoom Out": "Σμίκρυνση"
 "Add Device": "Προσθήκη συσκευής"
 "Add Device…": "Προσθήκη συσκευής…"
 "Put the device in pairing mode, then start searching.": "Θέστε τη συσκευή σε λειτουργία αντιστοίχισης και μετά ξεκινήστε την αναζήτηση."

@@ -27,10 +27,12 @@ pub(crate) enum ThumbwheelPreset {
     CycleDpi,
     VerticalScroll,
     HorizontalScroll,
+    Zoom,
+    ZoomReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -42,6 +44,8 @@ impl ThumbwheelPreset {
         Self::CycleDpi,
         Self::VerticalScroll,
         Self::HorizontalScroll,
+        Self::Zoom,
+        Self::ZoomReversed,
     ];
 
     #[must_use]
@@ -58,6 +62,8 @@ impl ThumbwheelPreset {
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
             Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            Self::Zoom => (Action::ZoomOut, Action::ZoomIn),
+            Self::ZoomReversed => (Action::ZoomIn, Action::ZoomOut),
         };
         ThumbwheelPair { backward, forward }
     }
@@ -72,21 +78,24 @@ impl ThumbwheelPreset {
         })
     }
 
+    /// Localized display label, rendered as "<backward> / <forward>" composed
+    /// from each side's already-translated action name. The flat "X / Y"
+    /// strings are keys in no locale file — every preset row used to fall back
+    /// to English regardless of app language — while per-action names carry
+    /// translations for all locales, so composing reuses that reviewed
+    /// coverage instead of duplicating it. CycleDpi fires one action in both
+    /// directions and renders as a single name without the separator.
     #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::BackForward => "Back / Forward",
-            Self::UndoRedo => "Undo / Redo",
-            Self::BrowserHistory => "Browser Back / Forward",
-            Self::Tabs => "Previous / Next Tab",
-            Self::Desktops => "Previous / Next Desktop",
-            Self::Tracks => "Previous / Next Track",
-            Self::Volume => "Volume Down / Up",
-            Self::VolumeReversed => "Volume Up / Down",
-            Self::CycleDpi => "Cycle DPI Presets",
-            Self::VerticalScroll => "Vertical Scroll",
-            Self::HorizontalScroll => "Horizontal Scroll",
+    pub(crate) fn label(self) -> String {
+        let pair = self.pair();
+        if pair.backward == pair.forward {
+            return rust_i18n::t!(pair.backward.label()).into_owned();
         }
+        format!(
+            "{} / {}",
+            rust_i18n::t!(pair.backward.label()),
+            rust_i18n::t!(pair.forward.label())
+        )
     }
 
     #[must_use]
@@ -102,6 +111,9 @@ impl ThumbwheelPreset {
             Self::CycleDpi => "action-icons/gauge.svg",
             Self::VerticalScroll => "action-icons/chevrons-up.svg",
             Self::HorizontalScroll => "action-icons/chevrons-right.svg",
+            // One glyph per feature — the row label carries the direction,
+            // same convention as the two volume rows sharing volume-2.
+            Self::Zoom | Self::ZoomReversed => "action-icons/zoom-in.svg",
         }
     }
 }
@@ -124,6 +136,8 @@ mod tests {
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ScrollDown, Action::ScrollUp),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            (Action::ZoomOut, Action::ZoomIn),
+            (Action::ZoomIn, Action::ZoomOut),
         ];
 
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
