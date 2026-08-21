@@ -17,14 +17,17 @@ use super::{enumerate_devices, is_hidpp_node, open_hidpp_channel, watch_nodes};
 
 /// The process-wide native backend.
 ///
-/// Shared rather than constructed per call because it owns the `async-hid`
-/// handle cache below, and because the `IOHIDManager` underneath must not be
-/// rebuilt on every enumeration (issue #99 — see [`super::HID_BACKEND`]).
-static NATIVE_BACKEND: LazyLock<NativeBackend> = LazyLock::new(NativeBackend::default);
+/// One instance, not one per caller: it owns the handle cache below, and the
+/// `IOHIDManager` underneath must not be rebuilt on every enumeration (issue
+/// #99 — see [`super::HID_BACKEND`]). Handed out as an `Arc` so a long-lived
+/// holder (the inventory enumerator, a channel pool) can keep it in a field
+/// typed against the trait rather than against this implementation.
+static NATIVE_BACKEND: LazyLock<Arc<NativeBackend>> =
+    LazyLock::new(|| Arc::new(NativeBackend::default()));
 
 /// The native HID backend this build talks to hardware through.
-pub(crate) fn native_backend() -> &'static NativeBackend {
-    &NATIVE_BACKEND
+pub(crate) fn native_backend() -> Arc<dyn HidBackend> {
+    Arc::clone(&NATIVE_BACKEND) as Arc<dyn HidBackend>
 }
 
 /// [`HidBackend`] over `async-hid`.

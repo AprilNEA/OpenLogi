@@ -126,8 +126,10 @@ pub enum InventoryError {
 /// watcher reuses immutable data across ticks instead of re-handshaking every
 /// device every ~2s. One-shot callers use the [`enumerate`] free function, which
 /// runs against a fresh (empty) cache.
-#[derive(Default)]
 pub struct Enumerator {
+    /// The HID stack this enumerator walks. Defaults to the host's; tests and
+    /// non-native hosts supply their own through [`Enumerator::with_backend`].
+    backend: Arc<dyn HidBackend>,
     cache: HashMap<CacheKey, Cached>,
     /// Consecutive ticks each cached device has been missing, for grace-period
     /// eviction.
@@ -152,6 +154,12 @@ pub struct Enumerator {
     /// Whether the persistable cache content changed since the last save —
     /// fresh full probes and evictions, not per-tick battery refreshes.
     cache_dirty: bool,
+}
+
+impl Default for Enumerator {
+    fn default() -> Self {
+        Self::with_backend(native_backend())
+    }
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -398,6 +406,23 @@ fn append_live_cached_channels(
 }
 
 impl Enumerator {
+    /// Build an enumerator that walks `backend` instead of the host's HID
+    /// stack — a scripted device tree in tests, or another host's stack.
+    #[must_use]
+    pub fn with_backend(backend: Arc<dyn HidBackend>) -> Self {
+        Self {
+            backend,
+            cache: HashMap::new(),
+            misses: HashMap::new(),
+            channels: ChannelCache::default(),
+            ledger: NodeLedger::default(),
+            registry: None,
+            tick: 0,
+            persist_path: None,
+            cache_dirty: false,
+        }
+    }
+
     /// Build a persistent enumerator that publishes its already-open channels
     /// into `registry` after each settled inventory tick.
     #[must_use]
@@ -548,7 +573,7 @@ impl Enumerator {
     ) -> Result<(Vec<DeviceInventory>, bool, bool), InventoryError> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
-        let backend = native_backend();
+        let backend = Arc::clone(&self.backend);
         let candidates = backend.enumerate_hidpp().await?;
         debug!(count = candidates.len(), "HID++ candidate interfaces");
 
@@ -558,7 +583,7 @@ impl Enumerator {
             active,
             open_failures,
             retiring: retiring_nodes,
-        } = self.prepare_nodes(backend, candidates).await;
+        } = self.prepare_nodes(&*backend, candidates).await;
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`).

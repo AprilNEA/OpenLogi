@@ -19,6 +19,7 @@ use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, retained_nodes,
     routes_for_inventories, settle_unhealthy_node,
 };
+use crate::channel::scripted::{ScriptedBackend, ScriptedNode, scripted_node_info};
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
 fn cache_entry(probed_tick: u64) -> Cached {
@@ -712,4 +713,58 @@ fn probe_cache_load_tolerates_missing_or_garbage_files() {
     let wrong_version = dir.path().join("future.json");
     std::fs::write(&wrong_version, br#"{"version":999,"entries":[]}"#).expect("write");
     assert!(persist::load(&wrong_version).is_empty());
+}
+
+/// A node the backend cannot open is a *failure*, not a disconnect: the tick
+/// must report itself unhealthy so the one-shot retry runs its budget and the
+/// ledger keeps replaying that node's last-good snapshot.
+#[tokio::test]
+async fn a_node_that_will_not_open_makes_the_tick_unhealthy() {
+    let backend = ScriptedBackend::new(vec![(
+        scripted_node_info("wont-open"),
+        ScriptedNode::OpenFails,
+    )]);
+    let mut enumerator = Enumerator::with_backend(backend);
+
+    let (inventories, complete, healthy) = enumerator
+        .enumerate_reporting_completeness()
+        .await
+        .expect("enumeration itself must succeed — one node failing to open is not a fatal error");
+
+    assert!(
+        inventories.is_empty(),
+        "a node that never opened has nothing to report"
+    );
+    assert!(
+        !healthy,
+        "a failed open must not be settled as a healthy probe"
+    );
+    assert!(!complete, "a failed open leaves the tick incomplete");
+}
+
+/// A node that opens but does not speak HID++ is simply not ours. It must not
+/// be confused with a failed open: dragging the tick unhealthy for it would
+/// make every host with an unrelated HID device retry forever.
+#[tokio::test]
+async fn a_non_hidpp_node_leaves_the_tick_healthy() {
+    let backend = ScriptedBackend::new(vec![(
+        scripted_node_info("not-hidpp"),
+        ScriptedNode::NotHidpp,
+    )]);
+    let mut enumerator = Enumerator::with_backend(backend);
+
+    let (inventories, complete, healthy) = enumerator
+        .enumerate_reporting_completeness()
+        .await
+        .expect("enumeration must succeed");
+
+    assert!(
+        inventories.is_empty(),
+        "a non-HID++ node contributes no inventory"
+    );
+    assert!(
+        healthy,
+        "a node that is not HID++ is not a failure to retry"
+    );
+    assert!(complete, "nothing was left unchecked");
 }

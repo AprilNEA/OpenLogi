@@ -93,7 +93,8 @@ where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
-    match open_route_channel(native_backend(), route).await? {
+    let backend = native_backend();
+    match open_route_channel(&*backend, route).await? {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
     }

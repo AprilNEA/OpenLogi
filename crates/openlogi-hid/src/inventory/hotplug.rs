@@ -5,7 +5,6 @@ use futures_lite::Stream;
 pub use crate::backend::HotplugEvent;
 
 use super::InventoryError;
-use crate::backend::HidBackend as _;
 use crate::channel::transport::native_backend;
 
 /// Subscribe to OS HID hotplug events through the shared process-wide backend.

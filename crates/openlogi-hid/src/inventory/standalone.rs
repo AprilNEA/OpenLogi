@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
 
 use super::InventoryError;
-use crate::backend::HidBackend as _;
 use crate::channel::transport::native_backend;
 use crate::write::{LitraModel, matches_litra};
 

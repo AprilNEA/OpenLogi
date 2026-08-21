@@ -38,7 +38,7 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
-use crate::backend::{BackendError, HidBackend as _};
+use crate::backend::BackendError;
 use crate::channel::transport::native_backend;
 
 mod notification;

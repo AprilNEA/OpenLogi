@@ -10,8 +10,10 @@ use std::error::Error;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hidpp::channel::RawHidChannel;
+use hidpp::channel::{HidppChannel, RawHidChannel};
 use tokio::sync::mpsc;
+
+use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
 
 #[derive(Clone)]
 pub(crate) struct ScriptedRawHidHandle {
@@ -138,4 +140,83 @@ pub(crate) fn mock_error() -> Box<dyn Error + Send + Sync> {
         io::ErrorKind::BrokenPipe,
         "scripted HID channel closed",
     ))
+}
+
+/// How a scripted node behaves when the layers above ask to open it.
+///
+/// The two cases are distinct contracts the enumerator must not conflate: only
+/// [`Self::OpenFails`] is a failure the ledger replays a last-good snapshot
+/// through. A node that opens into a live HID++ channel belongs here too — add
+/// that variant with the test that drives it, so it never sits unconstructed.
+pub(crate) enum ScriptedNode {
+    /// The backend cannot open the node at all — unplugged mid-tick, or denied.
+    OpenFails,
+    /// The node opens but carries no HID++ collection.
+    NotHidpp,
+}
+
+/// A [`HidBackend`] over scripted nodes.
+///
+/// Lets the enumerator, the probe and the write layer be driven end to end with
+/// no HID stack under them — including the partial-failure paths (a node that
+/// will not open, one that is not HID++ at all) that hardware cannot be asked
+/// to reproduce on demand.
+pub(crate) struct ScriptedBackend {
+    nodes: Vec<(NodeInfo, ScriptedNode)>,
+}
+
+impl ScriptedBackend {
+    /// A backend presenting `nodes`, in the order given.
+    pub(crate) fn new(nodes: Vec<(NodeInfo, ScriptedNode)>) -> Arc<Self> {
+        Arc::new(Self { nodes })
+    }
+
+    fn node(&self, id: &NodeId) -> Option<&ScriptedNode> {
+        self.nodes
+            .iter()
+            .find_map(|(info, node)| (info.id == *id).then_some(node))
+    }
+}
+
+#[hidpp::async_trait]
+impl HidBackend for ScriptedBackend {
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, BackendError> {
+        Ok(self.nodes.iter().map(|(info, _)| info.clone()).collect())
+    }
+
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, BackendError> {
+        self.enumerate().await
+    }
+
+    async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+        match self.node(&node.id) {
+            None | Some(ScriptedNode::OpenFails) => Err(BackendError::Disconnected),
+            Some(ScriptedNode::NotHidpp) => Ok(None),
+        }
+    }
+
+    async fn open_raw_writer(&self, _node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError> {
+        Err(BackendError::Backend(
+            "scripted backend has no raw writer".into(),
+        ))
+    }
+
+    fn watch(&self) -> Result<HotplugStream, BackendError> {
+        Ok(Box::new(futures_lite::stream::empty()))
+    }
+}
+
+/// A scripted node's descriptor, identified by `id` and otherwise a plausible
+/// Logitech HID++ collection.
+pub(crate) fn scripted_node_info(id: &str) -> NodeInfo {
+    NodeInfo {
+        id: NodeId::from(id.to_owned()),
+        vendor_id: crate::LOGITECH_VENDOR_ID,
+        product_id: 0xb35b,
+        usage_page: 0xff00,
+        usage_id: 0x0002,
+        name: format!("scripted node {id}"),
+        manufacturer: Some("Logitech".into()),
+        serial_number: None,
+    }
 }

@@ -66,7 +66,8 @@ pub async fn run_keyboard_capture_session(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let chan = open_route_channel(native_backend(), &route)
+    let backend = native_backend();
+    let chan = open_route_channel(&*backend, &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());

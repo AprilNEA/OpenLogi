@@ -248,7 +248,8 @@ pub async fn apply(
     }
     let report = encode_command(model, command)?;
     let _guard = device_lock(route).await;
-    let Some(mut writer) = open_route_writer(native_backend(), route).await? else {
+    let backend = native_backend();
+    let Some(mut writer) = open_route_writer(&*backend, route).await? else {
         return Err(WriteError::DeviceNotFound);
     };
     tokio::time::timeout(RAW_WRITE_TIMEOUT, writer.write_output_report(&report))
