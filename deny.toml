@@ -11,7 +11,7 @@
 #   cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check
 #   nix run nixpkgs#cargo-deny -- --all-features \
 #     --manifest-path crates/openlogi/Cargo.toml check
-#   .github/scripts/ci-local.sh cargo-deny
+#   cargo xtask ci cargo-deny
 
 [advisories]
 yanked = "deny"

@@ -11,6 +11,8 @@ devenv shell -- cargo run -p xtask -- <command>
 
 ## Commands
 
+- `ci [--list] [--dry-run] [JOB…]` — reproduce the `ci.yml` jobs this host can
+  run; a job it cannot is skipped with a reason, never passed.
 - `macos icns` — generate `crates/openlogi-desktop/icon/AppIcon.icns` from the master PNG.
 - `macos bundle [--channel dev|production]` — build `OpenLogi.app` and embed the
   agent and overlay helpers.
@@ -79,6 +81,10 @@ xtask/
     main.rs                  # CLI shape and dispatch only
     commands/
       mod.rs
+      ci.rs                  # CI job runner: CLI, step execution, summary
+      ci/
+        jobs.rs              # the ci.yml jobs and what each costs on this host
+        list.rs              # the --list table
       macos.rs               # macOS domain entry
       macos/
         bundle.rs

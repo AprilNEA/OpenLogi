@@ -106,7 +106,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
   --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
   --exclude openlogi-overlay --exclude openlogi-agent
 # or: devenv tasks run openlogi:check
-# every CI job this host can reproduce: .github/scripts/ci-local.sh
+# every CI job this host can reproduce: cargo xtask ci
 ```
 
 Exit non-zero on any of those → fix, re-run the **whole** set, then push.
@@ -128,13 +128,13 @@ The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
 not that matrix. To run every job this machine can reproduce:
 
 ```sh
-.github/scripts/ci-local.sh
-.github/scripts/ci-local.sh --list          # job → command table
-.github/scripts/ci-local.sh rustfmt clippy  # one job, names match CI
+cargo xtask ci
+cargo xtask ci --list           # job → command table
+cargo xtask ci rustfmt clippy   # one job, names match CI
 # or: devenv tasks run openlogi:ci
 ```
 
-The script sets `RUSTFLAGS=-D warnings` the way CI does. A skipped job (wrong
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. A skipped job (wrong
 OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as not
 run in the PR Testing section. Full map, including "if you changed X, run Y":
 [`.claude/rules/ci.md`](.claude/rules/ci.md).
@@ -147,7 +147,7 @@ not a substitute for running the gate yourself after a rebase.
 
 1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
 2. Full local gate green on the **final** tree (fmt + Clippy + tests + rustdoc).
-3. Pipeline jobs this host can reproduce for the diff: `.github/scripts/ci-local.sh`
+3. Pipeline jobs this host can reproduce for the diff: `cargo xtask ci`
    (or named jobs from `--list`). Skipped jobs stay named as not run — never
    claimed green. Mapping: `.claude/rules/ci.md`.
 4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):

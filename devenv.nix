@@ -129,7 +129,7 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        bash .github/scripts/ci-local.sh
+        cargo run -p xtask -- ci
       '';
     };
     "openlogi:i18n-upload" = {
@@ -159,34 +159,10 @@ in
     };
     "openlogi:check-windows" = {
       description = "Lint the Windows code paths locally (check-only cross lint).";
-      # The package list is every crate carrying `cfg(target_os = "windows")`
-      # code, minus what cannot cross-compile from macOS. Keep it that way: a
-      # crate missing here is a crate whose Windows paths nothing checks until
-      # CI, which is how three `chunks_exact` sites in openlogi-camera survived
-      # a whole 1.98 lint sweep.
-      #
-      # `clippy --target` is check-only (no linker needed), but a C-compiling
-      # build dep DOES need a cross C toolchain: openlogi-{assets,cli} and the
-      # root `openlogi` pull ureq -> ring, whose curve25519.c can't cross-compile
-      # from macOS without mingw. They have no Windows-specific code, so lint the
-      # ring-free agent/leaf subset here; CI's clippy (windows) covers the rest
-      # natively on windows-latest. The GUI (openlogi-{desktop,overlay}) is
-      # excluded because GPUI has no Windows backend.
-      # `cargo-clippy clippy`, not `cargo clippy`: cargo resolves an external
-      # subcommand from `$CARGO_HOME/bin` before PATH, so on a machine with
-      # rustup installed `cargo clippy` runs rustup's clippy against this
-      # shell's cargo. That silently lints with a different compiler — and
-      # fails outright when rustup's toolchain has no windows-gnu std. Naming
-      # the binary keeps the task on the toolchain devenv pins.
-      # Keep the -p list in lockstep with `.github/scripts/ci-local.sh`
-      # `job_clippy_windows`.
-      exec = ''
-        cargo-clippy clippy --target x86_64-pc-windows-gnu \
-          -p openlogi-core -p openlogi-hidpp -p openlogi-hid -p openlogi-hook \
-          -p openlogi-inject -p openlogi-camera \
-          -p openlogi-agent -p openlogi-agent-core \
-          --all-targets -- -D warnings
-      '';
+      # The crate list, the `cargo-clippy` vs `cargo clippy` trap, and why this
+      # is not CI's `clippy (windows)` job all live in one place now:
+      # `WINDOWS_LINT_CRATES` in xtask/src/commands/ci/jobs.rs.
+      exec = "cargo run -p xtask -- ci clippy-windows";
     };
     "openlogi:assets" = {
       description = "Sync device assets.";

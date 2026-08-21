@@ -25,6 +25,11 @@ paths:
   Windows MSI in `packaging/windows/OpenLogi.wxs`. Packaging env overrides
   (`OPENLOGI_SIGN_IDENTITY`, `OPENLOGI_BUNDLE_ASSETS`, `PKG_ARCH`, …) are documented in
   `docs/DEVELOPMENT.md`.
+- `cargo xtask ci` is the local CI runner (`xtask/src/commands/ci/`): the job table,
+  what each job costs on this host, and the `--list` table. It is the only place the
+  Windows cross-lint crate list lives — `devenv.nix`'s `openlogi:check-windows` calls
+  it rather than repeating the `-p` flags. Adding a job to `ci.yml` means adding a
+  `Job` variant, a `--list` row, and a row in `.claude/rules/ci.md`.
 - `.cargo/run-macos.sh` stays a shell script — cargo execs it for every binary of every
   `cargo run`/`test`/`bench`, including xtask's own, so the passthrough must stay cheap —
   but it holds no bundling logic: that is `xtask macos dev-bundle`, which shares the

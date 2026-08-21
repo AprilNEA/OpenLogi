@@ -1,7 +1,8 @@
 ---
 paths:
   - ".github/workflows/**"
-  - ".github/scripts/ci-local.sh"
+  - "xtask/src/commands/ci.rs"
+  - "xtask/src/commands/ci/**"
   - ".editorconfig"
   - "deny.toml"
   - "rust-toolchain.toml"
@@ -13,7 +14,7 @@ paths:
 `.github/workflows/ci.yml` is the source of truth for the PR test pipeline.
 This file is the agent-facing map of every job in that workflow to a local
 command. Keep them in lockstep: changing a `run:` in `ci.yml` without updating
-this file and `.github/scripts/ci-local.sh` is a bug.
+this file and `cargo xtask ci` is a bug.
 
 `devenv tasks run openlogi:check` is the **host-OS pre-push gate** (fmt, clippy,
 tests, rustdoc). It is **not** the pipeline. macOS-green clippy does not compile
@@ -24,14 +25,15 @@ Do not claim a skipped job passed. Name it as not run in the PR Testing section.
 ## How to run it
 
 ```sh
-.github/scripts/ci-local.sh                 # every job this host can reproduce
-.github/scripts/ci-local.sh --list          # job → command table
-.github/scripts/ci-local.sh rustfmt docs    # named jobs (CI `name:` or job id)
-direnv exec . .github/scripts/ci-local.sh   # when cargo is only inside devenv
-devenv tasks run openlogi:ci                # same as the script
+cargo xtask ci                    # every job this host can reproduce
+cargo xtask ci --list             # job → command table
+cargo xtask ci rustfmt docs       # named jobs (CI `name:` or job id)
+cargo xtask ci --dry-run          # print each job's commands, run nothing
+direnv exec . cargo xtask ci      # when cargo is only inside devenv
+devenv tasks run openlogi:ci      # same as the command
 ```
 
-The script sets the same env CI does (`RUSTFLAGS=-D warnings`). A rustc warning
+The runner sets the same env CI does (`RUSTFLAGS=-D warnings`). A rustc warning
 that host clippy `-D warnings` does not surface still fails CI.
 
 ## Job map (`ci.yml`)
@@ -88,11 +90,11 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-desktop i18n` (macOS; Linux CI does not run this) |
 | `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
 | `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
-| `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; Build workflow is not in `ci-local.sh` |
+| `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |
 
 ## Other PR workflows
 
-Not part of `ci.yml`, not in the script's default run:
+Not part of `ci.yml`, not in the default run:
 
 - **Nix CI** (path-filtered): evaluate + format, then `nix build` the package on
   x86_64-linux and aarch64-linux. Local: the `nix fmt` / `nix flake check`
@@ -103,6 +105,7 @@ Not part of `ci.yml`, not in the script's default run:
 
 ## When you add a CI job
 
-1. Add a function to `.github/scripts/ci-local.sh` and a row to the table above.
+1. Add a `Job` variant in `xtask/src/commands/ci/jobs.rs`, a row in
+   `xtask/src/commands/ci/list.rs`, and a row in the table above.
 2. If it belongs in the host-OS pre-push gate, also update `openlogi:check` in
    `devenv.nix` and the Local gate in `AGENTS.md`.
