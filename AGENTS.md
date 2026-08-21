@@ -45,9 +45,10 @@ sits beneath both.
   `openlogi-desktop`. Anything both need goes in `openlogi-ui`, and every dependency
   added there lands in the overlay too (`.claude/rules/gui.md` has the rule).
 - Platform code is cfg-gated per crate (`[target.'cfg(target_os = …)'.dependencies]`).
-  `crates/openlogi-desktop/src/platform/AGENTS.md` is the contract for the workspace's ObjC
-  FFI and indexes every file that carries any — read it before editing one, including
-  `crates/openlogi-overlay/src/platform.rs`, which lives outside that directory.
+  `.claude/rules/objc-ffi.md` is the contract for the workspace's macOS native FFI and
+  indexes every file that carries any — read it before editing one. That surface spans
+  seven crates: the agent's tray, the camera backends, the hook, the injector, the
+  overlay, `openlogi-permissions`, and one file in the GUI.
 
 ## Build, run, verify
 
@@ -97,6 +98,7 @@ This section applies to the final pre-push tree, not normal edit iterations.
 Mac" is not enough. Run **all four** on the commit you are about to push:
 
 ```sh
+export RUSTFLAGS="-D warnings"   # CI sets this globally; clippy `-D warnings` is not the same
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -104,6 +106,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
   --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
   --exclude openlogi-overlay --exclude openlogi-agent
 # or: devenv tasks run openlogi:check
+# every CI job this host can reproduce: cargo xtask ci
 ```
 
 Exit non-zero on any of those → fix, re-run the **whole** set, then push.
@@ -117,24 +120,46 @@ a new crate is documented by default. The classic silent breakage — handing a 
 impl to a derive macro kills every `Type::trait_method` doc link — is explained in
 `.claude/rules/rust.md`.
 
-prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy at push
-(rust-scoped, so non-Rust pushes skip it). Hooks are a backstop, not a substitute
-for running the gate yourself after a rebase.
+### Reproduce every CI job locally
+
+The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
+(Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
+`--all-targets` tests, cargo-deny, Windows clippy, shell lint). macOS-green is
+not that matrix. To run every job this machine can reproduce:
+
+```sh
+cargo xtask ci
+cargo xtask ci --list           # job → command table
+cargo xtask ci rustfmt clippy   # one job, names match CI
+# or: devenv tasks run openlogi:ci
+```
+
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. A skipped job (wrong
+OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as not
+run in the PR Testing section. Full map, including "if you changed X, run Y":
+[`.claude/rules/ci.md`](.claude/rules/ci.md).
+
+prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy **and
+rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a backstop,
+not a substitute for running the gate yourself after a rebase.
 
 **Push checklist (agents):**
 
 1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
 2. Full local gate green on the **final** tree (fmt + Clippy + tests + rustdoc).
-3. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
+3. Pipeline jobs this host can reproduce for the diff: `cargo xtask ci`
+   (or named jobs from `--list`). Skipped jobs stay named as not run — never
+   claimed green. Mapping: `.claude/rules/ci.md`.
+4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
    `.claude/rules/cross-platform.md`.
-4. If wire types changed: `PROTOCOL_VERSION` bumped and
+5. If wire types changed: `PROTOCOL_VERSION` bumped and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `.claude/rules/ipc-protocol.md`.
-5. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
+6. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
    as `en.yml` (new keys at the same position); run
    `cargo test -p openlogi-desktop i18n` — see `.claude/rules/i18n.md`.
-6. Only then `git push` / force-push to the PR branch.
+7. Only then `git push` / force-push to the PR branch.
 
 ### Running the app
 
@@ -156,7 +181,10 @@ for running the gate yourself after a rebase.
 
 ## Rust standards
 
-Edition 2024, MSRV 1.96, one shared workspace lint table. The full standards — the
+Edition 2024, MSRV = current stable (1.98), one shared workspace lint table. The
+floor tracks stable instead of trailing it — raise it the day a release ships
+something worth using, and run `devenv update rust-overlay` with it so the local
+toolchain stops being older than CI's. The full standards — the
 lint table and what it changes day to day, typed-invariant style, house rules on
 refactoring, dependencies, and module layout — live in `.claude/rules/rust.md`,
 loaded for any Rust or `Cargo.toml` edit.
@@ -224,6 +252,7 @@ before editing that area.
 
 | Area | Rule file |
 |---|---|
+| reproducing CI jobs locally (every `ci.yml` job → command) | `.claude/rules/ci.md` |
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
 | `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |
@@ -233,4 +262,4 @@ before editing that area.
 | `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
-| `crates/openlogi-desktop/src/platform/**`, `crates/openlogi-overlay/src/platform.rs`, `crates/openlogi-permissions/**` (ObjC FFI) | `crates/openlogi-desktop/src/platform/AGENTS.md` |
+| macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |

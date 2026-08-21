@@ -31,9 +31,8 @@ enum DescriptorScan {
 }
 
 fn scan_descriptor_page(payload: &[u8], mut diversion_index: u16) -> DescriptorScan {
-    for field in payload.chunks_exact(2).take(8) {
-        let high = field[0];
-        let low = field[1];
+    let (fields, _partial) = payload.as_chunks::<2>();
+    for &[high, low] in fields.iter().take(8) {
         if high == 0x01 {
             return DescriptorScan::End;
         }
@@ -135,7 +134,6 @@ impl Gestures2Feature {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

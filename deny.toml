@@ -8,8 +8,10 @@
 # archaeology exercise.
 #
 # Run locally with the same scope CI uses:
+#   cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check
 #   nix run nixpkgs#cargo-deny -- --all-features \
 #     --manifest-path crates/openlogi/Cargo.toml check
+#   cargo xtask ci cargo-deny
 
 [advisories]
 yanked = "deny"

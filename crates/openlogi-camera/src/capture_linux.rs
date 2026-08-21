@@ -19,13 +19,6 @@
 //! [`camera_authorization`] reports `Granted`/`Denied` by probing whether the
 //! node actually opens, and never `Undetermined`: there is nothing to prompt.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    reason = "pixel arithmetic is bounded by the negotiated frame size"
-)]
-
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -427,8 +420,10 @@ fn decode_yuyv(buffer: &[u8], width: u32, height: u32) -> Option<Frame> {
 
     let mut bgra = vec![0u8; pixels * 4];
     for (pair, out) in buffer[..pixels * 2]
-        .chunks_exact(4)
-        .zip(bgra.chunks_exact_mut(8))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(bgra.as_chunks_mut::<8>().0)
     {
         let (y0, u, y1, v) = (
             i32::from(pair[0]),
@@ -457,6 +452,10 @@ fn write_bgra(out: &mut [u8], y: i32, u: i32, v: i32) {
 }
 
 /// Saturate a fixed-point channel (scaled by 256) into a byte.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the channel is clamped to 0..=255 before the narrowing"
+)]
 fn clamp_u8(scaled: i32) -> u8 {
     (scaled / 256).clamp(0, 255) as u8
 }
@@ -493,7 +492,6 @@ pub fn camera_authorization() -> CameraAuthorization {
 pub fn request_camera_access() {}
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

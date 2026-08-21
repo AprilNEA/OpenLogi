@@ -297,11 +297,6 @@ bitflags::bitflags! {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use super::event_payload;
     use crate::{

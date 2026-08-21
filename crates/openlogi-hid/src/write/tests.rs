@@ -162,9 +162,9 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
 
     let entries: Vec<_> = frames
         .iter()
-        .flat_map(|report| report[8..64].chunks_exact(4))
+        .flat_map(|report| report[8..64].as_chunks::<4>().0)
         .take(0xe9)
-        .map(|entry| (entry[0], entry[1], entry[2], entry[3]))
+        .map(|&[a, b, c, d]| (a, b, c, d))
         .collect();
     assert_eq!(entries.len(), 0xe9);
     for (key, entry) in (0x00u8..=0xe8).zip(entries) {

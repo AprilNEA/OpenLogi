@@ -36,6 +36,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("sv", "Svenska"),
     ("el", "Ελληνικά"),
     ("ru", "Русский"),
+    ("uk", "Українська"),
     ("ja", "日本語"),
     ("zh-CN", "简体中文"),
     ("zh-HK", "繁體中文（香港）"),
@@ -153,6 +154,8 @@ mod tests {
         assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("ru"), Some("ru"));
         assert_eq!(match_supported("ru-RU"), Some("ru"));
+        assert_eq!(match_supported("uk"), Some("uk"));
+        assert_eq!(match_supported("uk-UA"), Some("uk"));
         assert_eq!(match_supported("en-US"), Some("en"));
         assert_eq!(match_supported("it"), Some("it"));
         assert_eq!(match_supported("it-IT"), Some("it"));
@@ -197,6 +200,7 @@ mod tests {
         let catalogs = [
             ("ja", include_str!("../locales/ja.yml")),
             ("ru", include_str!("../locales/ru.yml")),
+            ("uk", include_str!("../locales/uk.yml")),
             ("zh-CN", include_str!("../locales/zh-CN.yml")),
             ("zh-HK", include_str!("../locales/zh-HK.yml")),
             ("zh-TW", include_str!("../locales/zh-TW.yml")),

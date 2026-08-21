@@ -26,7 +26,6 @@ use crate::windows::{self, AuxWindow};
 /// Standalone first-run update-consent window root view.
 pub struct UpdateConsentView {
     focus_handle: FocusHandle,
-    #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
 }
 

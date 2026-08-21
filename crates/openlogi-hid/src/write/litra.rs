@@ -263,11 +263,6 @@ pub async fn apply(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "expect is idiomatic in pure encoding tests"
-    )]
-
     use std::assert_matches;
 
     use super::{

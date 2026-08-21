@@ -4,7 +4,7 @@
 //! descriptor, but `async-hid 0.4` only exposes descriptors on Linux. We avoid
 //! that path by pre-filtering to the Logitech HID++ vendor collections at
 //! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
-//! straight from [`AsyncHidChannel::supports_short_long_hidpp`]: USB / receiver
+//! straight from [`hidpp::channel::RawHidChannel::supports_short_long_hidpp`]: USB / receiver
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
@@ -94,8 +94,11 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 // Windows routes short vs long by report id over the composite channel
 // (WindowsHidppChannel), so the long-only up-conversion path — and thus this
 // helper — is only reached off Windows. Still compiled + unit-tested there.
+// Not `expect`: the lint fires in the `--lib` build and not in the `--test`
+// one, so an expectation is always unfulfilled for one of them.
 #[cfg_attr(
     target_os = "windows",
+    expect(clippy::allow_attributes, reason = "see above"),
     allow(
         dead_code,
         reason = "long-only up-conversion is the non-Windows AsyncHidChannel path"

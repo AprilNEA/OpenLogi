@@ -32,11 +32,6 @@
 //! renders. The rest of the schema is parsed permissively so additional
 //! fields don't break older clients.
 
-#![allow(
-    dead_code,
-    reason = "schema captured in full; only `device_image` is consumed in v0.0.1"
-)]
-
 use std::path::Path;
 
 use serde::Deserialize;

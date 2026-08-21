@@ -1,15 +1,8 @@
 //! Windows `WH_MOUSE_LL` + `WH_KEYBOARD_LL` implementation of the OS-level
 //! input hook.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "the low-level input hook is built on the Win32 C API"
-)]
-#![allow(
-    clippy::borrow_as_ptr,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::needless_pass_by_value,
-    reason = "Win32 FFI uses raw pointer parameters and fixed-width message values"
 )]
 
 use std::cell::Cell;
@@ -105,6 +98,10 @@ pub(crate) fn stop(mut inner: HookInner) {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "callback and ready are moved into the thread's hook state and channel"
+)]
 fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError>>) {
     match CALLBACK.lock() {
         Ok(mut slot) if slot.is_none() => {
@@ -133,7 +130,7 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
     // PostThreadMessageW from `stop` can't race queue creation and be lost.
     unsafe {
         PeekMessageW(
-            &mut bootstrap_msg,
+            &raw mut bootstrap_msg,
             std::ptr::null_mut(),
             WM_USER,
             WM_USER,
@@ -199,14 +196,14 @@ fn message_loop() {
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
         // messages for the calling thread. Returns <= 0 on WM_QUIT or error.
-        let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
+        let result = unsafe { GetMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0) };
         if result <= 0 {
             break;
         }
         // SAFETY: `msg` was just populated by GetMessageW and outlives the call.
-        unsafe { TranslateMessage(&msg) };
+        unsafe { TranslateMessage(&raw const msg) };
         // SAFETY: as above — `msg` is a live, initialized MSG.
-        unsafe { DispatchMessageW(&msg) };
+        unsafe { DispatchMessageW(&raw const msg) };
     }
 }
 
@@ -232,7 +229,7 @@ fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 /// `code == HC_ACTION`, Windows guarantees `lparam` points to a live
 /// `MSLLHOOKSTRUCT`; [`hook_data`] relies on that contract to dereference it.
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
+    if code != HC_ACTION.cast_signed() {
         return call_next(code, wparam, lparam);
     }
 
@@ -275,6 +272,10 @@ unsafe fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
     Some(unsafe { *(lparam as *const MSLLHOOKSTRUCT) })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "WPARAM/LPARAM are pointer-sized by ABI but carry 32-bit message payloads"
+)]
 fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
     // Every mouse message carries the cursor point, so the baseline advances on
     // all of them: injected motion is dropped below but still moves the cursor,
@@ -365,7 +366,7 @@ fn motion_delta(previous: POINT, pt: POINT) -> Option<(i32, i32)> {
 /// `KBDLLHOOKSTRUCT`; [`key_hook_data`] relies on that contract to
 /// dereference it.
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
+    if code != HC_ACTION.cast_signed() {
         return call_next(code, wparam, lparam);
     }
 
@@ -413,6 +414,10 @@ unsafe fn key_hook_data(lparam: LPARAM) -> Option<KBDLLHOOKSTRUCT> {
 /// for injected input (our own `SendInput` synthesis must not re-enter the
 /// remapper) and for keys outside the remapper's Esc/F1–F19 vocabulary, which
 /// pass through without ever reaching the callback.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "WPARAM is pointer-sized by ABI but carries a 32-bit message id"
+)]
 fn translate_key(
     wparam: WPARAM,
     data: KBDLLHOOKSTRUCT,
@@ -476,7 +481,7 @@ fn high_word(value: u32) -> u16 {
 }
 
 fn signed_high_word(value: u32) -> i16 {
-    high_word(value) as i16
+    high_word(value).cast_signed()
 }
 
 pub(crate) fn cursor_position() -> Option<CursorPosition> {
@@ -491,6 +496,10 @@ pub(crate) fn cursor_position() -> Option<CursorPosition> {
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the path buffer is a fixed 32768 u16s"
+)]
 pub(crate) fn frontmost_process_path() -> Option<String> {
     // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
     // or null; no preconditions.
@@ -500,10 +509,10 @@ pub(crate) fn frontmost_process_path() -> Option<String> {
     }
 
     let mut pid = 0;
-    // SAFETY: `hwnd` is the non-null handle just returned; `&mut pid` is a valid
-    // out-pointer the call writes the owning process id into.
+    // SAFETY: `hwnd` is the non-null handle just returned; `&raw mut pid` is a
+    // valid out-pointer the call writes the owning process id into.
     unsafe {
-        GetWindowThreadProcessId(hwnd, &mut pid);
+        GetWindowThreadProcessId(hwnd, &raw mut pid);
     }
     if pid == 0 {
         return None;
@@ -521,7 +530,7 @@ pub(crate) fn frontmost_process_path() -> Option<String> {
     // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
     // 32768-u16 buffer and `len` holds its length, so the call writes at most
     // `len` code units and updates `len` with the count written.
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) };
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
     // SAFETY: `process` is the handle from OpenProcess, owned here and closed
     // exactly once now that the query has returned.
     unsafe {
@@ -541,7 +550,6 @@ fn last_error(context: &str) -> HookError {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

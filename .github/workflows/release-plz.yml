@@ -81,10 +81,12 @@ jobs:
           git config user.name "aprilnea[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # Script/config may not be on the release-plz branch yet — copy from master.
+          # Config/tool may not be on the release-plz branch yet — take both
+          # from master. The tool reads the version out of the checked-out tree
+          # at run time, so building it here still writes the bumped version.
           cp cliff.toml "${RUNNER_TEMP}/cliff.toml"
-          cp .github/scripts/release/write-changelog.sh "${RUNNER_TEMP}/write-changelog.sh"
-          chmod +x "${RUNNER_TEMP}/write-changelog.sh"
+          cargo build -p xtask
+          cp target/debug/xtask "${RUNNER_TEMP}/xtask"
           git fetch origin "${branch}"
           git checkout --force "origin/${branch}"
           cp "${RUNNER_TEMP}/cliff.toml" cliff.toml
@@ -92,7 +94,7 @@ jobs:
           curl -sL "https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xz -C "${RUNNER_TEMP}"
           export PATH="${RUNNER_TEMP}/git-cliff-2.13.1:${PATH}"
-          "${RUNNER_TEMP}/write-changelog.sh"
+          "${RUNNER_TEMP}/xtask" release changelog
           if git diff --quiet -- CHANGELOG.md; then
             echo "CHANGELOG already complete."
             exit 0

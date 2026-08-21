@@ -80,6 +80,13 @@ impl AgentServer {
     }
 }
 
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "the handlers that only read cached state need no await, but the RPC \
+              surface reads as one thing when every method in the impl keeps the \
+              `async fn` the tarpc trait declares — worth more than shaving a \
+              future off a dozen of them with `std::future::ready`"
+)]
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
@@ -560,7 +567,6 @@ pub async fn run(server: AgentServer) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
     use std::time::{Duration, Instant};

@@ -103,7 +103,6 @@ pub(super) enum ThemeFilter {
 /// Standalone Settings window root view.
 pub struct SettingsView {
     focus_handle: FocusHandle,
-    #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
@@ -119,7 +118,7 @@ pub struct SettingsView {
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "held to re-render the Updates page on status change"
     )]
@@ -141,10 +140,6 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "sensitivity bounds are tiny 1..=100 integers — exact in f32"
-    )]
     fn new(initial_page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -253,7 +248,7 @@ impl SettingsView {
     /// Commit the thumb-wheel sensitivity slider. The label tracks the live
     /// slider value on every `Change`; persistence (and the one shared-atomic
     /// write the watcher reads) happens once on `Release`.
-    #[allow(
+    #[expect(
         clippy::unused_self,
         reason = "gpui subscription handlers must take &mut self"
     )]

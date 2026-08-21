@@ -152,7 +152,7 @@ pub(super) fn assets_page(
         .group(group)
 }
 
-#[allow(
+#[expect(
     clippy::needless_pass_by_value,
     reason = "built inside an `Fn` render closure, so a `&Entity` parameter would make \
               the returned element borrow a captured variable; `Entity` is a cheap handle"
@@ -190,7 +190,7 @@ fn refresh_cache_desc_after(view: &Entity<SettingsView>, delay: Duration, cx: &m
 /// Computed once when the Settings window opens (`asset_cache_desc`), not per
 /// render.
 pub(super) fn cache_size_description() -> SharedString {
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "the cache is at most a few hundred MB; f64 is exact far past that, \
                   and this is a display-only size"

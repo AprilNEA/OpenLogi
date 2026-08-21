@@ -1,6 +1,8 @@
 //! Platform-independent control vocabulary shared by every UVC backend
 //! (IOKit on macOS, DirectShow on Windows, stubs elsewhere).
 
+use thiserror::Error;
+
 /// One adjustable camera control, mapped to a UVC selector by each backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraControl {
@@ -106,30 +108,21 @@ pub struct ControlRange {
 }
 
 /// Why a UVC control operation failed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum ControlError {
     /// No matching camera device (or it exposes no controllable unit).
+    #[error("no matching UVC device")]
     NotFound,
     /// The selected camera can't be uniquely identified: its unique id didn't
     /// resolve to a USB location and more than one Logitech camera is attached,
     /// so a write could hit the wrong device. Fails closed instead of guessing.
+    #[error("camera could not be uniquely identified")]
     Ambiguous,
     /// The camera rejected or didn't support the control — or the platform
     /// has no UVC control backend at all.
+    #[error("camera does not support that control")]
     Unsupported,
     /// A platform API call failed (open, bind, or the control transfer).
+    #[error("platform error: {0}")]
     Io(String),
 }
-
-impl std::fmt::Display for ControlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => write!(f, "no matching UVC device"),
-            Self::Ambiguous => write!(f, "camera could not be uniquely identified"),
-            Self::Unsupported => write!(f, "camera does not support that control"),
-            Self::Io(s) => write!(f, "platform error: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for ControlError {}

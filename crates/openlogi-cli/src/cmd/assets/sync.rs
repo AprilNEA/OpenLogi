@@ -126,7 +126,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
                 .sum::<u64>()
         })
         .sum();
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "bundle sizes are well under 2^53 bytes; f64 precision is fine for a display string"
     )]

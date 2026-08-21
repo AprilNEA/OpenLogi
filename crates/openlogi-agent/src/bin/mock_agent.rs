@@ -548,7 +548,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                         btle: true,
                         bluetooth: false,
                     },
-                    model_ids: [0x408a, 0xb35b, 0],
+                    model_ids: [0xb35b, 0x408a, 0],
                     extended_model_id: 0,
                 }),
                 capabilities: Some(Capabilities {
@@ -684,6 +684,11 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
 // Pairing updates are sent with `let _ =`: a send only fails when the GUI's
 // long-poll receiver is gone (Add Device window closed / GUI died), and
 // dropping the event is exactly right then.
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "scripted answers rarely await; keeping every method `async fn` mirrors \
+              the real server impl, which is the point of the mock"
+)]
 impl Agent for MockAgent {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION

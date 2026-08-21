@@ -227,30 +227,40 @@ async fn begin_action_ring(
     }
 }
 
-/// Fire the macOS permission prompts this process needs, at startup.
-///
-/// The agent (not the GUI) owns both the CGEventTap and every HID++ device
-/// open, so it must be the binary the user authorizes for Accessibility and
-/// Input Monitoring — a grant is scoped to the code-signing identity that
-/// asks for it. macOS only shows a dialog when the process isn't already
-/// listed, so this doesn't nag on every login. The GUI's Accessibility grant
-/// button drives the same prompt on demand over IPC
-/// (`request_accessibility_prompt`); Input Monitoring has no on-demand IPC
-/// path yet, so it is only requested here, at startup.
-fn prompt_missing_permissions(capture_mouse_events: bool) {
+/// Prompt for Accessibility when the enabled mouse hook needs it.
+fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
     // opt-out also silences that prompt.
     if capture_mouse_events && !Hook::has_accessibility() {
         Hook::prompt_accessibility();
     }
+}
 
+/// Request Input Monitoring before starting the HID inventory on macOS.
+///
+/// The agent (not the GUI) owns every HID++ device open, so it must be the
+/// binary the user authorizes. A newly granted permission requires a process
+/// relaunch before macOS lets the agent open HID devices.
+#[cfg(target_os = "macos")]
+async fn request_input_monitoring() {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
-    // discovered. `request_access` blocks on the consent dialog, so it runs
-    // on a blocking thread rather than stalling startup.
+    // discovered. Wait for the blocking consent dialog before starting the
+    // inventory so it cannot cache the pre-grant access state.
     if !openlogi_hid::permissions::has_access() {
-        tokio::task::spawn_blocking(openlogi_hid::permissions::request_access);
+        let access_after_prompt = tokio::task::spawn_blocking(|| {
+            openlogi_hid::permissions::request_access();
+            openlogi_hid::permissions::has_access()
+        })
+        .await;
+        match access_after_prompt {
+            Ok(true) => self_restart::relaunch_after_input_monitoring_grant(),
+            Ok(false) => {}
+            Err(e) => {
+                warn!(error = %e, "Input Monitoring permission request task failed");
+            }
+        }
     }
 }
 
@@ -267,7 +277,9 @@ async fn run(
     // an agent restart, which the config docs state.
     let capture_mouse_events = config.app_settings.capture_mouse_events;
 
-    prompt_missing_permissions(capture_mouse_events);
+    prompt_missing_accessibility(capture_mouse_events);
+    #[cfg(target_os = "macos")]
+    request_input_monitoring().await;
 
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives

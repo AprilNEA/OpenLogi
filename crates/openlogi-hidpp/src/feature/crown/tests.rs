@@ -1,9 +1,4 @@
 //! Unit tests for `Crown` mode parsing and event decoding.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 
 use std::assert_matches;
 

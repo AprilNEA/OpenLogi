@@ -226,9 +226,9 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
 fn is_activated(states: &[u8]) -> bool {
     use zwlr_foreign_toplevel_handle_v1::State;
 
-    states.chunks_exact(4).any(|chunk| {
-        let value = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        State::try_from(value).is_ok_and(|s| s == State::Activated)
+    let (values, _partial) = states.as_chunks::<4>();
+    values.iter().any(|value| {
+        State::try_from(u32::from_ne_bytes(*value)).is_ok_and(|s| s == State::Activated)
     })
 }
 

@@ -35,7 +35,7 @@ pub fn run(args: SnapshotArgs) -> Result<()> {
         .map_err(|e| anyhow!("{e}"))?;
     // Frames are stored BGRA (gpui's order); PNG wants RGBA, so swap R/B once.
     let mut rgba = frame.bgra;
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     write_png(&args.path, frame.width, frame.height, &rgba)

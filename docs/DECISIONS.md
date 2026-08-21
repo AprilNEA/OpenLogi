@@ -4,6 +4,57 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-08: Suppressions are `expect`, and tests are exempt by config
+
+A sweep of every lint suppression in the tree (207 attributes, 247 lints) found
+two systemic problems, both now fixed.
+
+- **Tests restated the same exemption 78 times.** `unwrap_used`/`expect_used`
+  stay at warn so product code has to state its panics, but every test module
+  had copied `#[allow(…, reason = "idiomatic in tests")]` to opt out — about
+  40% of all suppressions in the workspace, carrying no information. A root
+  `clippy.toml` with `allow-unwrap-in-tests` / `allow-expect-in-tests` replaces
+  all of them. Clippy's exemption covers `#[cfg(test)]` modules and `#[test]`
+  functions; a free helper in a `tests/` integration file is the one shape it
+  cannot see, so `openlogi-ipc`'s wire-format test keeps a file-level
+  suppression. Build scripts are not tests and keep theirs too.
+- **`allow` rots silently.** 20 suppressions no longer suppressed anything,
+  including three module-wide `dead_code` blankets in `openlogi-assets` that
+  had been inert since those modules became `pub mod` — and would have hidden
+  real dead code the moment they went private again. Suppressions are now
+  `#[expect]` by default, which fails the build once it stops being needed.
+  `allow` survives only where `expect` cannot work: a lint that fires under
+  some `cfg` but not others, one whose fulfilment differs between a crate's
+  lib and test targets, and one raised inside a macro expansion (rustc does not
+  credit an expectation with those, so it both suppresses the warning and
+  reports itself unfulfilled). Each such site carries a comment saying which.
+- **Both rules are now machine-checked.** `allow_attributes` and
+  `allow_attributes_without_reason` join the lint table, costing three
+  annotated exceptions and nothing else — the sweep had already left the tree
+  compliant. One blind spot to remember: `allow_attributes` only sees outer
+  `#[allow]`, so a module-wide `#![allow(…)]` — precisely the shape that rotted
+  in `openlogi-assets` — still passes it. Adding them also disproved the
+  first-pass rule that a `cfg_attr`-wrapped suppression always needs `allow`:
+  two of the four turned out to work fine as `expect`.
+
+Related: the seven file-wide `cast_*` blankets were narrowed to the functions
+that need them, and most of their sites turned out not to need a suppression at
+all — `cast_signed`/`cast_unsigned`, `&raw const`/`&raw mut`, `to_le_bytes`, or
+a shared conversion helper. Linux CI showed `capture_linux`'s file-level
+blanket was two-thirds dead (`cast_possible_truncation` /
+`cast_possible_wrap`); the remaining `cast_sign_loss` sits on `clamp_u8`.
+
+Supersedes the "`openlogi-hidpp` stays out on purpose (vendored)" note in the
+shared-lint-set entry below: the hard-fork ruling retired that, and the crate
+inherits `[lints] workspace = true` like every other.
+
+Sweeping for rot is mechanical and worth repeating: rewrite every
+non-`cfg_attr` `allow(` to `expect(`, run clippy, and each "lint expectation is
+unfulfilled" is a suppression to delete. Run it on all three lanes — native,
+`--target x86_64-pc-windows-gnu`, `--target aarch64-unknown-linux-musl` —
+because CI has no macOS clippy job and a platform-gated suppression is only
+evaluated on its own platform.
+
 ## 2026-08: Shared clippy lint set
 
 The workspace adopted the shared ten-lint set (`assertions_on_result_states`,
