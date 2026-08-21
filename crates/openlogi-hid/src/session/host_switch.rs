@@ -103,10 +103,8 @@ impl HostSwitchError {
     /// keyboards disconnect before software can probe them). Validation
     /// errors like [`HostSlotEmpty`](Self::HostSlotEmpty) are NOT departure.
     fn is_device_unreachable(&self) -> bool {
-        matches!(
-            self,
-            Self::Hid(_) | Self::KeyboardNotFound | Self::TimedOut { .. }
-        ) || matches!(self, Self::Hidpp(msg) if msg.contains("DeviceNotFound"))
+        matches!(self, Self::Hid(_) | Self::KeyboardNotFound)
+            || matches!(self, Self::Hidpp(msg) if msg.contains("DeviceNotFound"))
     }
 }
 
