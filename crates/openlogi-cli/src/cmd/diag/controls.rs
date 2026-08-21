@@ -1,5 +1,7 @@
 //! `openlogi diag controls` — dump HID++ reprogrammable controls.
 
+use std::fmt;
+
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_hid::ReprogControlEntry;
@@ -38,33 +40,34 @@ pub async fn run(args: ControlsArgs) -> Result<()> {
             control.cid,
             control.task_id,
             control.flags.raw(),
-            summarize_capabilities(control)
+            ControlCapabilitiesDisplay(control)
         );
     }
     Ok(())
 }
 
-fn summarize_capabilities(control: ReprogControlEntry) -> String {
-    let mut caps = Vec::new();
-    if control.flags.is_divertable() {
-        caps.push("divertable");
-    }
-    if control.flags.supports_raw_xy() {
-        caps.push("raw-xy");
-    }
-    if control.flags.supports_force_raw_xy() {
-        caps.push("force-raw-xy");
-    }
-    if control.flags.supports_analytics_key_events() {
-        caps.push("analytics-events");
-    }
-    if control.flags.supports_raw_wheel() {
-        caps.push("raw-wheel");
-    }
-    if caps.is_empty() {
-        "-".to_string()
-    } else {
-        caps.join(", ")
+struct ControlCapabilitiesDisplay(ReprogControlEntry);
+
+impl fmt::Display for ControlCapabilitiesDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let flags = self.0.flags;
+        let mut separator = "";
+        for (enabled, name) in [
+            (flags.is_divertable(), "divertable"),
+            (flags.supports_raw_xy(), "raw-xy"),
+            (flags.supports_force_raw_xy(), "force-raw-xy"),
+            (flags.supports_analytics_key_events(), "analytics-events"),
+            (flags.supports_raw_wheel(), "raw-wheel"),
+        ] {
+            if enabled {
+                write!(f, "{separator}{name}")?;
+                separator = ", ";
+            }
+        }
+        if separator.is_empty() {
+            write!(f, "-")?;
+        }
+        Ok(())
     }
 }
 
@@ -80,7 +83,7 @@ mod tests {
             flags: openlogi_hid::reprog_controls::CidFlags::default(),
         };
 
-        assert_eq!(summarize_capabilities(entry), "-");
+        assert_eq!(ControlCapabilitiesDisplay(entry).to_string(), "-");
     }
 
     #[test]
@@ -94,7 +97,7 @@ mod tests {
         };
 
         assert_eq!(
-            summarize_capabilities(entry),
+            ControlCapabilitiesDisplay(entry).to_string(),
             "divertable, force-raw-xy, analytics-events"
         );
     }

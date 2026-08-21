@@ -24,11 +24,10 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
                     vendor_id: inv.receiver.vendor_id,
                     product_id: inv.receiver.product_id,
                 });
-            let name = paired
-                .codename
-                .clone()
-                .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            println!("device: {name} ({route})");
+            match paired.codename.as_deref() {
+                Some(name) => println!("device: {name} ({route})"),
+                None => println!("device: Slot {} ({route})", paired.slot),
+            }
             match openlogi_hid::dump_features(&route).await {
                 Ok(entries) => {
                     println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
