@@ -525,7 +525,7 @@ fn main() -> Result<()> {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
                     },
-                    _ = &mut camera_scan_timer => {
+                    () = &mut camera_scan_timer => {
                         camera_scan_timer = cx.background_executor().timer(CAMERA_SCAN_PERIOD);
                         // Nothing to show it to. The app runs from the menu bar
                         // with every window closed, and this scan is the only
