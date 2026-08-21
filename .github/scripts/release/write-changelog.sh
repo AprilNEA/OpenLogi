@@ -19,10 +19,10 @@ PY
 tag="v${version}"
 
 last_tag="$(
-  git tag --list 'v*' \
-    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-    | sort -V \
-    | tail -n1
+  git tag --list 'v*' |
+    grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+    sort -V |
+    tail -n1
 )"
 if [[ -z "${last_tag}" ]]; then
   echo "error: no previous vX.Y.Z tag" >&2

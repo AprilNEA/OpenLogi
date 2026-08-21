@@ -1,0 +1,6 @@
+root = true
+
+[[shell]]
+indent_style = space
+indent_size = 2
+switch_case_indent = true

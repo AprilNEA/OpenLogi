@@ -46,7 +46,7 @@ is_linux() { [ "$UNAME" = Linux ]; }
 is_darwin() { [ "$UNAME" = Darwin ]; }
 is_windows() {
   case "$UNAME" in
-    MINGW*|MSYS*|CYGWIN*|Windows*) return 0 ;;
+    MINGW* | MSYS* | CYGWIN* | Windows*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -340,22 +340,28 @@ EOF
 
 run_named() {
   case "$1" in
-    rustfmt|fmt) job_fmt ;;
+    rustfmt | fmt) job_fmt ;;
     clippy) job_clippy ;;
-    msrv|MSRV|\
-    "MSRV (cargo check, macos-latest)"|"MSRV (cargo check, ubuntu-latest)"|\
-    "MSRV (cargo check, <os>)"|"MSRV (cargo check"*) job_msrv ;;
-    rustdoc|docs|"rustdoc (non-GUI crates)") job_docs ;;
+    msrv | MSRV | \
+      "MSRV (cargo check, macos-latest)" | "MSRV (cargo check, ubuntu-latest)" | \
+      "MSRV (cargo check, <os>)" | "MSRV (cargo check"*) job_msrv ;;
+    rustdoc | docs | "rustdoc (non-GUI crates)") job_docs ;;
     tests) job_tests ;;
-    test-linux|"tests (linux)") job_test_linux ;;
-    test-macos|"tests (macos)"|"tests (macos, arm64)"|"tests (macos, x86_64)"|\
-    "tests (macos, <arch>)"|"tests (macos"*) job_test_macos ;;
-    cargo-deny|deny) job_deny ;;
-    clippy-windows|"clippy (windows)") job_clippy_windows ;;
+    test-linux | "tests (linux)") job_test_linux ;;
+    test-macos | "tests (macos)" | "tests (macos, arm64)" | "tests (macos, x86_64)" | \
+      "tests (macos, <arch>)" | "tests (macos"*) job_test_macos ;;
+    cargo-deny | deny) job_deny ;;
+    clippy-windows | "clippy (windows)") job_clippy_windows ;;
     i18n) job_i18n ;;
-    wire|wire_format) job_wire ;;
-    -h|--help|help) usage; exit 0 ;;
-    --list|list) print_list; exit 0 ;;
+    wire | wire_format) job_wire ;;
+    -h | --help | help)
+      usage
+      exit 0
+      ;;
+    --list | list)
+      print_list
+      exit 0
+      ;;
     --dry-run) DRY_RUN=1 ;;
     *)
       echo "unknown job: $1" >&2
@@ -393,8 +399,11 @@ summarize() {
 args=()
 for arg in "$@"; do
   case "$arg" in
-    -h|--help|help) usage; exit 0 ;;
-    --list|list) LIST_ONLY=1 ;;
+    -h | --help | help)
+      usage
+      exit 0
+      ;;
+    --list | list) LIST_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     *) args+=("$arg") ;;
   esac
