@@ -356,11 +356,8 @@ pub(crate) async fn open_hidpp_channel(
             .await
             .map_err(backend_error)?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok((mut c, reader)) => {
+            Ok(mut c) => {
                 configure_channel_sw_ids(&mut c);
-                // The channel is inert until its reader runs; dropping the
-                // channel is what ends the task.
-                tokio::spawn(reader);
                 Arc::new(c)
             }
             Err(e) => {
@@ -379,11 +376,8 @@ pub(crate) async fn open_hidpp_channel(
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok((mut c, reader)) => {
+            Ok(mut c) => {
                 configure_channel_sw_ids(&mut c);
-                // The channel is inert until its reader runs; dropping the
-                // channel is what ends the task.
-                tokio::spawn(reader);
                 Arc::new(c)
             }
             Err(e) => {

@@ -21,19 +21,11 @@ use crate::{
     protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
-/// A live channel whose reader runs on a thread of its own.
-///
-/// The library no longer spawns one: the reader is a future the caller drives.
-/// These tests run on `futures::executor::block_on`, which polls exactly one
-/// future, so something has to poll the reader — and a thread is the smallest
-/// way to do that without pulling a runtime into this crate's dev-dependencies.
-/// It ends when the returned channel is dropped.
+/// A live channel over the mock transport.
 pub(crate) async fn channel_with_reader(raw: MockRawHidChannel) -> HidppChannel {
-    let (channel, reader) = HidppChannel::from_raw_channel(raw)
+    HidppChannel::from_raw_channel(raw)
         .await
-        .expect("the mock transport speaks HID++");
-    std::thread::spawn(move || futures::executor::block_on(reader));
-    channel
+        .expect("the mock transport speaks HID++")
 }
 
 #[test]
