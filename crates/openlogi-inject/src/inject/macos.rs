@@ -601,11 +601,15 @@ fn post_gesture_event(src: &CGEventSource, subtype: i64, phase: i64, value: i64)
     ev.post(CGEventTapLocation::HID);
 }
 
-/// Post one complete pinch-zoom micro-gesture carrying `delta` wheel steps of
-/// magnification: a began-phase event holding the delta, closed by an ended
-/// event. This is the BUTTON flavour of zoom — a press is inherently a single
-/// discrete gesture. The thumb-wheel watcher instead streams through
-/// [`post_zoom_continuous`].
+/// Post one pinch-zoom step of `delta` wheel detents from a BUTTON press.
+///
+/// A press is inherently a discrete gesture — but only while no wheel-driven
+/// pinch session is open. An independent began→ended pair posted mid-session
+/// would end the app's active gesture while our own [`ZOOM_SESSION`] still
+/// reads open, and the next wheel delta would land as an orphaned `changed`
+/// (apps ignore it; zoom freezes until the idle closer resets us). So while a
+/// session is open the step folds in as one more `changed` delta; with none,
+/// it posts the standalone began→ended micro-gesture.
 pub(super) fn post_zoom(delta: i32) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for zoom");
@@ -613,7 +617,15 @@ pub(super) fn post_zoom(delta: i32) {
     };
 
     let bits = zoom_bits(f64::from(delta) * ZOOM_MAGNIFICATION_PER_STEP);
-
+    let mut session = lock_zoom_session();
+    if session.open {
+        // The open wheel pinch owns the gesture channel: contribute the step
+        // to it instead of competing with it.
+        post_gesture_event(&src, SUBTYPE_ZOOM, PHASE_CHANGED, bits);
+        post_gesture_event(&src, SUBTYPE_TRANSLATION, PHASE_CHANGED, TRANSLATION_ONE);
+        session.last_activity = Some(std::time::Instant::now());
+        return;
+    }
     post_gesture_event(&src, SUBTYPE_ZOOM, PHASE_BEGAN, bits);
     post_gesture_event(&src, SUBTYPE_TRANSLATION, PHASE_BEGAN, TRANSLATION_ONE);
     post_gesture_event(&src, SUBTYPE_ZOOM, PHASE_ENDED, 0);

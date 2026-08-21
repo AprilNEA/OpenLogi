@@ -184,6 +184,12 @@ pub(super) fn post_zoom(delta: i32) {
 
 /// Buffered counterpart to macOS's streamed pinch: fractional deltas bank up
 /// until they form whole wheel detents, which then fire through [`post_zoom`].
+///
+/// The bank is a single *signed* process-global accumulator on purpose: the
+/// zoom output is focus-directed, so there is no per-device or per-direction
+/// stream identity for state to cross, and net-proportional semantics are what
+/// a wheel means — rolling up 0.4 lines then down 0.4 cancels to no zoom,
+/// where direction-keyed banks would emit two contradicting detents.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "whole-detent extraction truncates by design; the remainder stays banked"
