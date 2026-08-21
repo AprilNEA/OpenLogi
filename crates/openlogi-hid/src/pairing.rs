@@ -38,7 +38,6 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
-use crate::backend::BackendError;
 use crate::channel::transport::native_backend;
 
 mod notification;
@@ -170,18 +169,6 @@ pub enum PairingCommand {
     Pair(DiscoveredDevice),
     /// Abort the in-progress flow.
     Cancel,
-}
-
-/// Carries a backend failure across the IPC boundary as text.
-///
-/// [`PairingError`] is `Serialize` and [`BackendError`] is not, so the message
-/// is the payload. A `From` impl is legal here because [`BackendError`] is
-/// local to this crate — the orphan rule only blocked it while the source type
-/// was `async_hid::HidError`, foreign like [`PairingError`] itself.
-impl From<BackendError> for PairingError {
-    fn from(error: BackendError) -> Self {
-        Self::Hid(error.to_string())
-    }
 }
 
 /// Lists supported pairing-capable receivers connected to the host.

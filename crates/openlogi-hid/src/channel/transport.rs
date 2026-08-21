@@ -34,19 +34,17 @@ use crate::write::matches_litra;
 /// Collapses `async-hid`'s error taxonomy into the backend-agnostic
 /// [`BackendError`] every caller above this module sees.
 ///
-/// Lives here rather than beside [`BackendError`] because it is this backend's
-/// business: `async_hid` must stay unnameable outside `channel::transport`.
-/// `Disconnected` and `NotConnected` fold together — one means the device
-/// vanished after opening and the other that it was already gone, a
-/// distinction nothing above the transport acts on.
-impl From<async_hid::HidError> for BackendError {
-    fn from(error: async_hid::HidError) -> Self {
-        match error {
-            async_hid::HidError::Disconnected | async_hid::HidError::NotConnected => {
-                Self::Disconnected
-            }
-            other => Self::Backend(other.to_string()),
+/// A named function, not a `From` impl: both types are foreign to this crate
+/// now that the contract lives in `openlogi-device`, which is the orphan rule
+/// saying out loud what the layering already did — an adapter belongs to the
+/// backend it adapts. `Disconnected` and `NotConnected` fold together; nothing
+/// above the transport acts on the distinction.
+fn backend_error(error: async_hid::HidError) -> BackendError {
+    match error {
+        async_hid::HidError::Disconnected | async_hid::HidError::NotConnected => {
+            BackendError::Disconnected
         }
+        other => BackendError::Backend(other.to_string()),
     }
 }
 
@@ -56,18 +54,16 @@ impl From<async_hid::HidError> for BackendError {
 /// Verbatim matters: that string is what [`NodeInfo::identity`] has always
 /// embedded for serial-less nodes, so keeping it byte-identical keeps existing
 /// raw-HID routes resolving across this refactor.
-impl From<&DeviceInfo> for NodeId {
-    fn from(info: &DeviceInfo) -> Self {
-        Self::from(format!("{:?}", info.id))
-    }
+fn node_id(info: &DeviceInfo) -> NodeId {
+    NodeId::from(format!("{:?}", info.id))
 }
 
 /// Restates an `async-hid` node as the backend-agnostic [`NodeInfo`] every
 /// layer above this module stores, filters and routes on.
-impl From<&DeviceInfo> for NodeInfo {
-    fn from(info: &DeviceInfo) -> Self {
-        Self {
-            id: NodeId::from(info),
+fn node_info(info: &DeviceInfo) -> NodeInfo {
+    {
+        NodeInfo {
+            id: node_id(info),
             vendor_id: info.vendor_id,
             product_id: info.product_id,
             usage_page: info.usage_page,
@@ -186,7 +182,7 @@ static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
 /// re-enumerating, so carrying it would only invite someone to trust it.
 pub(crate) fn watch_nodes() -> Result<impl Stream<Item = HotplugEvent> + Send + Unpin, BackendError>
 {
-    let stream = HID_BACKEND.watch()?;
+    let stream = HID_BACKEND.watch().map_err(backend_error)?;
     Ok(stream.map(|event| match event {
         async_hid::DeviceEvent::Connected(_) => HotplugEvent::Connected,
         async_hid::DeviceEvent::Disconnected(_) => HotplugEvent::Disconnected,
@@ -194,7 +190,12 @@ pub(crate) fn watch_nodes() -> Result<impl Stream<Item = HotplugEvent> + Send + 
 }
 
 pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, BackendError> {
-    let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
+    let all: Vec<async_hid::Device> = HID_BACKEND
+        .enumerate()
+        .await
+        .map_err(backend_error)?
+        .collect()
+        .await;
 
     // One-time visibility into what the OS actually reports for Logitech nodes,
     // so a transport that uses an unexpected vendor page (e.g. a new BLE mouse)
@@ -351,7 +352,9 @@ pub(crate) async fn open_hidpp_channel(
     // both reports (or is long-only), handled by AsyncHidChannel.
     #[cfg(target_os = "windows")]
     {
-        let raw = WindowsHidppChannel::open(dev, info.clone()).await?;
+        let raw = WindowsHidppChannel::open(dev, info.clone())
+            .await
+            .map_err(backend_error)?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok((mut c, reader)) => {
                 configure_channel_sw_ids(&mut c);
@@ -370,7 +373,7 @@ pub(crate) async fn open_hidpp_channel(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let (reader, writer) = dev.open().await?;
+        let (reader, writer) = dev.open().await.map_err(backend_error)?;
         // BLE-direct devices expose only the long HID++ report; flag the channel so
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);

@@ -12,7 +12,13 @@
 
 mod channel;
 
-pub mod backend;
+/// The backend contract this crate implements over `async-hid`.
+///
+/// Defined in `openlogi-device`, which knows nothing of any host — re-exported
+/// here so the path callers already use keeps resolving, and so a consumer
+/// that only needs to *name* a backend need not decide which one.
+pub use openlogi_device as backend;
+
 pub mod backlight;
 pub mod inventory;
 pub mod pairing;

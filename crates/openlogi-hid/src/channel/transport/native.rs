@@ -55,7 +55,7 @@ impl NativeBackend {
             .collect();
         let handles = devices
             .iter()
-            .map(|device| (NodeId::from(&***device), Arc::clone(device)))
+            .map(|device| (super::node_id(device), Arc::clone(device)))
             .collect();
         *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
         Ok(devices)
@@ -79,7 +79,7 @@ impl HidBackend for NativeBackend {
             .refresh()
             .await?
             .iter()
-            .map(|device| NodeInfo::from(&***device))
+            .map(|device| super::node_info(device))
             .collect())
     }
 
@@ -89,7 +89,7 @@ impl HidBackend for NativeBackend {
             .await?
             .iter()
             .filter(|device| is_hidpp_node(device))
-            .map(|device| NodeInfo::from(&***device))
+            .map(|device| super::node_info(device))
             .collect())
     }
 
@@ -99,7 +99,11 @@ impl HidBackend for NativeBackend {
     }
 
     async fn open_raw_writer(&self, node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError> {
-        let (_reader, writer) = self.handle(node)?.open().await?;
+        let (_reader, writer) = self
+            .handle(node)?
+            .open()
+            .await
+            .map_err(super::backend_error)?;
         Ok(Box::new(NativeRawWriter(writer)))
     }
 
@@ -114,6 +118,9 @@ struct NativeRawWriter(DeviceWriter);
 #[async_trait]
 impl RawWriter for NativeRawWriter {
     async fn write_output_report(&mut self, report: &[u8]) -> Result<(), BackendError> {
-        self.0.write_output_report(report).await.map_err(Into::into)
+        self.0
+            .write_output_report(report)
+            .await
+            .map_err(super::backend_error)
     }
 }

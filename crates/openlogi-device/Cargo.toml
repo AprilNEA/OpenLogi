@@ -1,0 +1,24 @@
+[package]
+name = "openlogi-device"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The contract between OpenLogi's HID++ layer and the HID stack beneath it."
+keywords = ["logitech", "hidpp", "hid", "backend"]
+categories = ["hardware-support"]
+
+# Nothing here may reach a host. That is not a style preference — it is what
+# lets a second backend (a scripted device tree, WebHID under wasm) exist at
+# all, and CI's `wasm (portable crates)` job holds this manifest to it. Adding
+# a dependency that cannot build for `wasm32-unknown-unknown` breaks that job.
+[dependencies]
+hidpp = { workspace = true }
+futures-lite = { workspace = true }
+thiserror = { workspace = true }
+openlogi-core = { version = "0.7.4", path = "../openlogi-core", default-features = false }
+
+[lints]
+workspace = true

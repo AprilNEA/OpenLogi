@@ -1,13 +1,17 @@
-//! The contract between the HID++ layer and the HID stack beneath it.
+//! The contract between OpenLogi's HID++ layer and the HID stack beneath it.
 //!
-//! Everything above the `channel::transport` module speaks these types, never
-//! the backend's own. That keeps the choice of HID stack — `async-hid` today —
-//! an implementation detail of this crate instead of part of its public API,
-//! and it is the half of the backend seam that callers see.
+//! [`HidBackend`] is the seam. Above it sits everything that knows HID++ and
+//! nothing about a host; below it sits one implementation per host HID API —
+//! `openlogi-hid` over `async-hid` today, a scripted device tree in tests, and
+//! WebHID under wasm if that is ever built.
 //!
-//! The conversions *from* a backend's types deliberately live with the backend
-//! that raises them (`channel::transport`), not here: this module must stay
-//! nameable by code that has no backend at all.
+//! Its own dependencies stay host-free for the same reason, which CI's
+//! `wasm (portable crates)` job checks rather than trusts. The conversions
+//! *from* a backend's own types belong with that backend, never here.
+
+#![deny(missing_docs)]
+#![deny(rustdoc::bare_urls)]
+#![deny(rustdoc::broken_intra_doc_links)]
 
 use std::fmt;
 use std::sync::Arc;
@@ -171,4 +175,27 @@ pub trait HidBackend: Send + Sync {
 
     /// Subscribe to node connect/disconnect events.
     fn watch(&self) -> Result<HotplugStream, BackendError>;
+}
+
+/// Carries a backend failure across the IPC boundary as text.
+///
+/// [`WriteError`](openlogi_core::hid::WriteError) is `Serialize` and
+/// [`BackendError`] is not, so the message is the payload; the typed error is
+/// never matched on downstream.
+///
+/// The impl lives here rather than beside `WriteError` because [`BackendError`]
+/// is the local half — the orphan rule allows exactly one of the two homes, and
+/// `openlogi-core` must never depend on a backend.
+impl From<BackendError> for openlogi_core::hid::WriteError {
+    fn from(error: BackendError) -> Self {
+        Self::Hid(error.to_string())
+    }
+}
+
+/// Carries a backend failure across the IPC boundary as text, as
+/// [`From<BackendError> for WriteError`](BackendError) does for writes.
+impl From<BackendError> for openlogi_core::hid::PairingError {
+    fn from(error: BackendError) -> Self {
+        Self::Hid(error.to_string())
+    }
 }

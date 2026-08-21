@@ -5290,6 +5290,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-device"
+version = "0.7.4"
+dependencies = [
+ "futures-lite",
+ "openlogi-core",
+ "openlogi-hidpp",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "openlogi-hid"
 version = "0.7.4"
 dependencies = [
@@ -5299,6 +5309,7 @@ dependencies = [
  "futures-lite",
  "objc2-io-kit",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-hidpp",
  "serde",
  "serde_json",

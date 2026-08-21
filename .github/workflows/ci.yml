@@ -261,7 +261,7 @@ jobs:
       # picks up a filesystem, a randomness source or a thread stops compiling
       # here and nowhere else. The crate list lives in xtask
       # (`WASM_PORTABLE_CRATES`) and the drift test keeps the two in step.
-      - run: cargo check -p openlogi-hidpp --target wasm32-unknown-unknown
+      - run: cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown
       # `openlogi-core` earns its place only with `fs` off: that feature is
       # the config file, and a config file needs a filesystem.
       - run: cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown
