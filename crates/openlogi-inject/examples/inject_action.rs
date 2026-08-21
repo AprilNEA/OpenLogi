@@ -34,6 +34,7 @@
 //! PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume
 //! CycleDpiPresets ToggleSmartShift
 //! ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight
+//! ZoomIn ZoomOut
 
 use std::time::Duration;
 
@@ -180,6 +181,7 @@ fn print_usage() {
                   PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume\n\
                   CycleDpiPresets ToggleSmartShift\n\
                   ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight\n\
+                  ZoomIn ZoomOut\n\
                   CustomShortcut:<mod_hex>:<key_hex>\n\
          \n\
          CustomShortcut modifier bits: 0x01=Cmd/Ctrl 0x02=Shift 0x04=Ctrl 0x08=Option/Alt\n\

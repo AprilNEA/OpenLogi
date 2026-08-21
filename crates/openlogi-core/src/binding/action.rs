@@ -219,6 +219,17 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Synthesise one zoom step — a trackpad-pinch (magnify) micro-gesture on
+    /// macOS, a modifier-stamped vertical wheel tick on Linux/Windows. Bound
+    /// to a thumb-wheel rotation direction the watcher re-synthesises
+    /// continuous, sensitivity-scaled zoom.
+    ///
+    /// Appended at the end of the enum because the serde variant index is the
+    /// wire format (see the stability contract above) — new variants only ever
+    /// go at the end.
+    ZoomIn,
+    /// Zoom out: the downward counterpart of [`Action::ZoomIn`].
+    ZoomOut,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -333,6 +344,8 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            ZoomIn "Zoom In" "actions.zoom_in" Scroll ZoomIn,
+            ZoomOut "Zoom Out" "actions.zoom_out" Scroll ZoomOut,
         }
     };
 }

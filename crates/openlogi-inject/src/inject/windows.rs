@@ -3,6 +3,7 @@
 
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -96,6 +97,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom { delta } => post_zoom(i32::from(delta)),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
         Effect::Script(script) => super::dispatch_script(script),
@@ -272,6 +274,45 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 
 pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(key) = Key::for_usage(combo.key(), ForegroundLayout::current()) else {
+/// Post a vertical wheel scroll of `delta` notches with Ctrl held — the
+/// native wheel-zoom gesture on Windows. One `SendInput` batch keeps
+/// Ctrl-down, the wheel notch(es), and Ctrl-up atomically ordered so the
+/// target app sees the modifier as held when the wheel event lands.
+pub(super) fn post_zoom(delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    send_inputs(&[
+        key_input(VK_CONTROL, false),
+        mouse_input(MOUSEEVENTF_WHEEL, delta.saturating_mul(WHEEL_DELTA)),
+        key_input(VK_CONTROL, true),
+    ]);
+}
+
+/// Buffered counterpart to macOS's streamed pinch: fractional deltas bank up
+/// until they form whole wheel detents, which then fire through [`post_zoom`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "whole-detent extraction truncates by design; the remainder stays banked"
+)]
+pub(super) fn post_zoom_continuous(delta_lines: f32) {
+    static PENDING_LINES: Mutex<f32> = Mutex::new(0.0);
+
+    let mut pending = PENDING_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *pending += delta_lines;
+    let whole = *pending as i32;
+    if whole == 0 {
+        return;
+    }
+    *pending -= f32::from(whole);
+    drop(pending);
+    post_zoom(whole);
+}
+
+fn post_custom_shortcut(combo: &KeyCombo) {
+    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
         tracing::warn!(
             usage = combo.key().code(),
             chord = %combo.rendered_label(),

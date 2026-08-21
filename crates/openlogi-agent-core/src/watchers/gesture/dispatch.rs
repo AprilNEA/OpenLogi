@@ -307,6 +307,15 @@ impl InputDispatcher {
                 debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
                 self.outputs.post_scroll(session, delta);
             }
+            WheelOutput::Zoom(delta) => {
+                debug!(key, ?button, action = %action.label(), delta, "thumb wheel → continuous zoom");
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "zoom lines are small fractional deltas well within f32 range"
+                )]
+                let lines = delta as f32;
+                openlogi_inject::post_zoom_continuous(lines);
+            }
             WheelOutput::FireAction(repeats) => {
                 debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");
                 for _ in 0..repeats {

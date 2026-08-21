@@ -242,6 +242,8 @@ enum ScrollBinding {
     Down,
     Right,
     Left,
+    ZoomIn,
+    ZoomOut,
 }
 
 impl ScrollBinding {
@@ -251,6 +253,8 @@ impl ScrollBinding {
             Action::ScrollDown => Some(Self::Down),
             Action::HorizontalScrollRight => Some(Self::Right),
             Action::HorizontalScrollLeft => Some(Self::Left),
+            Action::ZoomIn => Some(Self::ZoomIn),
+            Action::ZoomOut => Some(Self::ZoomOut),
             _ => None,
         }
     }
@@ -262,6 +266,8 @@ impl ScrollBinding {
             Self::Down => ScrollDelta::wheel_ticks(0.0, -distance),
             Self::Right => ScrollDelta::wheel_ticks(distance, 0.0),
             Self::Left => ScrollDelta::wheel_ticks(-distance, 0.0),
+            Self::ZoomIn => return WheelOutput::Zoom(distance),
+            Self::ZoomOut => return WheelOutput::Zoom(-distance),
         };
         WheelOutput::Scroll(delta)
     }
@@ -274,6 +280,9 @@ pub(super) enum WheelOutput {
     Idle,
     /// Typed fractional distance for the smooth-scroll runtime or injector.
     Scroll(ScrollDelta),
+    /// Stream this fractional, signed zoom delta into the ongoing pinch
+    /// session (+ in, - out).
+    Zoom(f64),
     /// Fire the bound action this many times; only volume actions may repeat.
     FireAction(u32),
 }
