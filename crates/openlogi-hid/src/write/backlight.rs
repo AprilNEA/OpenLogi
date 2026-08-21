@@ -12,6 +12,7 @@ use hidpp::{
 };
 use tracing::debug;
 
+use crate::backend::HidBackend;
 use crate::backlight::{BacklightMode, BacklightState, BacklightStatus};
 use crate::channel::route::DeviceRoute;
 
@@ -79,9 +80,12 @@ async fn read_state(feature: &BacklightFeature) -> Result<BacklightState, WriteE
 ///
 /// `FeatureUnsupported` when the device does not expose HID++ `0x1982` — RGB
 /// keyboards (`0x8070` / `0x8080`) and every mouse fall in that group.
-pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteError> {
+pub async fn get_backlight(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<BacklightState, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -113,11 +117,12 @@ pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteE
 ///
 /// `FeatureUnsupported` when the device does not expose HID++ `0x1982`.
 pub async fn set_backlight_enabled(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     enabled: bool,
 ) -> Result<BacklightState, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;

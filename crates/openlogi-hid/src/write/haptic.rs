@@ -9,6 +9,7 @@ use hidpp::{
     },
 };
 
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, SharedChannel};
 
@@ -240,9 +241,13 @@ pub async fn play_haptic_on(
 }
 
 /// Play a waveform immediately by route.
-pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
+pub async fn play_haptic(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    waveform: HapticWaveform,
+) -> Result<(), WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let feature = feature_on_channel(&channel, index).await?;
         feature.play(waveform).await.map_err(|error| {
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)

@@ -22,6 +22,7 @@ use hidpp::{
 use tracing::debug;
 
 use crate::SharedChannel;
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
@@ -82,9 +83,13 @@ impl FnInversion {
 }
 
 /// Write the keyboard's Fn-lock state: `true` = F-row sends F1–F12 directly.
-pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<(), WriteError> {
+pub async fn set_fn_lock(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    on: bool,
+) -> Result<(), WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         set_fn_lock_on_channel(&channel, index, on).await
     })
     .await

@@ -14,6 +14,7 @@ use hidpp::{
 use tracing::debug;
 
 use crate::SharedChannel;
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 use crate::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque};
 
@@ -243,9 +244,12 @@ impl SmartShift {
 
 /// Read the device's current SmartShift mode + sensitivity — companion to
 /// [`toggle_smartshift`].
-pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
+pub async fn get_smartshift_status(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<SmartShiftStatus, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         get_smartshift_status_on_channel(&channel, index).await
     })
     .await
@@ -269,11 +273,12 @@ pub(super) async fn get_smartshift_status_on_channel(
 /// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
 /// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).
 pub async fn set_smartshift_sensitivity(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     value: SmartShiftAutoDisengage,
 ) -> Result<SmartShiftStatus, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -291,9 +296,12 @@ pub async fn set_smartshift_sensitivity(
 /// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
 /// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S) — i.e. it has no
 /// SmartShift wheel.
-pub async fn toggle_smartshift(route: &DeviceRoute) -> Result<SmartShiftMode, WriteError> {
+pub async fn toggle_smartshift(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<SmartShiftMode, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         toggle_smartshift_on_channel(&channel, index).await
     })
     .await
@@ -347,11 +355,12 @@ async fn toggle_once(device: &mut Device, index: u8) -> Result<SmartShiftMode, W
 /// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
 /// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).
 pub async fn set_smartshift(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     status: SmartShiftStatus,
 ) -> Result<(), WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         set_smartshift_on_channel(&channel, index, status).await
     })
     .await

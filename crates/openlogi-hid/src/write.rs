@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
 
+use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
-use crate::channel::transport::native_backend;
 
 mod backlight;
 mod diagnostics;
@@ -88,13 +88,16 @@ pub(crate) async fn open_feature<F: CreatableFeature + 'static>(
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
 /// with it. The caller addresses features at [`DeviceRoute::device_index`].
-pub(crate) async fn with_route<F, Fut, T>(route: &DeviceRoute, f: F) -> Result<T, WriteError>
+pub(crate) async fn with_route<F, Fut, T>(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    f: F,
+) -> Result<T, WriteError>
 where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
-    let backend = native_backend();
-    match open_route_channel(&*backend, route).await? {
+    match open_route_channel(backend, route).await? {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
     }

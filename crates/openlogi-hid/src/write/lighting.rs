@@ -16,6 +16,7 @@ use hidpp::{
 use tracing::debug;
 
 use crate::SharedChannel;
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
@@ -82,18 +83,20 @@ pub enum LightingMethod {
 /// profile) when present, else the `0x8080` per-key stream. `FeatureUnsupported`
 /// when the device exposes neither.
 pub async fn set_keyboard_color(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     r: u8,
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    set_keyboard_color_with(route, LightingMethod::Auto, r, g, b).await
+    set_keyboard_color_with(backend, route, LightingMethod::Auto, r, g, b).await
 }
 
 /// [`set_keyboard_color`] with an explicit [`LightingMethod`]. `Auto` tries
 /// `0x8070` first and falls back to `0x8080` only when the effect engine is
 /// absent (a missing-`0x8070` `FeatureUnsupported`); any other error propagates.
 pub async fn set_keyboard_color_with(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     method: LightingMethod,
     r: u8,
@@ -101,7 +104,7 @@ pub async fn set_keyboard_color_with(
     b: u8,
 ) -> Result<(), WriteError> {
     let device_index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         set_keyboard_color_with_on_channel(&channel, device_index, method, r, g, b).await
     })
     .await

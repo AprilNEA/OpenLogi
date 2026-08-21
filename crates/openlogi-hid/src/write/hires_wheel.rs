@@ -16,6 +16,7 @@ use tracing::debug;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 use crate::SharedChannel;
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 /// Destination for vertical wheel movement reports.
@@ -49,9 +50,12 @@ impl ScrollWheelMode {
 }
 
 /// Read the current vertical wheel reporting mode.
-pub async fn get_scroll_wheel_mode(route: &DeviceRoute) -> Result<ScrollWheelMode, WriteError> {
+pub async fn get_scroll_wheel_mode(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<ScrollWheelMode, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         get_scroll_wheel_mode_on_channel(&channel, index).await
     })
     .await
@@ -76,11 +80,12 @@ async fn get_scroll_wheel_mode_on_channel(
 /// Set only the wheel resolution while preserving the current inversion flag.
 /// Reporting is always normalized to native HID.
 pub async fn set_scroll_resolution(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     resolution: ScrollResolution,
 ) -> Result<ScrollWheelMode, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         change_wheel_mode_on_channel(&channel, index, Some(resolution), None, false).await
     })
     .await
@@ -106,12 +111,13 @@ pub async fn set_scroll_resolution_on(
 /// This is the agent re-apply path: reading once and writing the complete mode
 /// avoids briefly exposing a mixed resolution/inversion state after reconnect.
 pub async fn set_scroll_wheel_mode(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     resolution: ScrollResolution,
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         change_wheel_mode_on_channel(&channel, index, Some(resolution), Some(inverted), true).await
     })
     .await
@@ -138,9 +144,13 @@ pub async fn set_scroll_wheel_mode_on(
 ///
 /// Returns [`WriteError::FeatureUnsupported`] when the device lacks `0x2121` or
 /// reports that native inversion is not supported.
-pub async fn set_scroll_inversion(route: &DeviceRoute, inverted: bool) -> Result<(), WriteError> {
+pub async fn set_scroll_inversion(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    inverted: bool,
+) -> Result<(), WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         change_wheel_mode_on_channel(&channel, index, None, Some(inverted), true)
             .await
             .map(|_| ())

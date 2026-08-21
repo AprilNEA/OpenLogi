@@ -14,6 +14,7 @@ use hidpp::{
     protocol::v20::Hidpp20Error,
 };
 
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
 use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
@@ -59,9 +60,12 @@ impl From<CidInfo> for ReprogControlEntry {
 /// feature IDs a given peripheral actually exposes (e.g. whether a mouse
 /// speaks `0x2201 AdjustableDpi`, `0x2202 ExtendedAdjustableDpi`, or both —
 /// `write::dpi` drives either).
-pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
+pub async fn dump_features(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<Vec<FeatureEntry>, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -104,10 +108,11 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
 /// Sense Panel in the thumb area; this probe lets us identify the panel's CID
 /// and capabilities before wiring it into the capture/remapping model.
 pub async fn dump_reprog_controls(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<Vec<ReprogControlEntry>, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -142,9 +147,12 @@ pub async fn dump_reprog_controls(
 /// `openlogi diag battery`: surfaces exactly what the firmware reports so a
 /// claim like "MX2S shows 0% while charging" can be confirmed against the wire
 /// instead of guessed (the GUI only ever shows the mapped value).
-pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
+pub async fn read_battery_raw(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<String, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -277,10 +285,11 @@ pub enum FirmwareEntity {
 /// the call — see [`FirmwareEntity::Unreadable`]. A channel failure does: the
 /// route is gone, not the entity.
 pub async fn dump_firmware_entities(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<Vec<FirmwareEntity>, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         dump_firmware_entities_on_channel(&channel, index).await
     })
     .await

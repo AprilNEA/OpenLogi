@@ -14,8 +14,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
+use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_writer};
-use crate::channel::transport::native_backend;
 
 use super::WriteError;
 
@@ -236,6 +236,7 @@ async fn device_lock(route: &DeviceRoute) -> OwnedMutexGuard<()> {
 
 /// Apply a semantic Litra command through a raw HID route.
 pub async fn apply(
+    backend: &dyn HidBackend,
     route: &DeviceRoute,
     model: LitraModel,
     command: LightCommand,
@@ -248,8 +249,7 @@ pub async fn apply(
     }
     let report = encode_command(model, command)?;
     let _guard = device_lock(route).await;
-    let backend = native_backend();
-    let Some(mut writer) = open_route_writer(&*backend, route).await? else {
+    let Some(mut writer) = open_route_writer(backend, route).await? else {
         return Err(WriteError::DeviceNotFound);
     };
     tokio::time::timeout(RAW_WRITE_TIMEOUT, writer.write_output_report(&report))

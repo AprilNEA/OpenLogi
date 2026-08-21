@@ -12,6 +12,7 @@ use hidpp::{
 use tracing::debug;
 
 use crate::SharedChannel;
+use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
@@ -186,9 +187,9 @@ pub(super) fn expand_dpi_ranges(ranges: &[DpiRange]) -> Vec<u16> {
 /// Read the device's current DPI on sensor 0 — companion to [`set_dpi`].
 /// Used by `openlogi diag dpi` and any future Settings → Diagnostics
 /// surface that wants to display the current value without writing.
-pub async fn get_dpi(route: &DeviceRoute) -> Result<Dpi, WriteError> {
+pub async fn get_dpi(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<Dpi, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         get_dpi_on_channel(&channel, index).await
     })
     .await
@@ -224,9 +225,12 @@ fn classify_dpi_error(feature_hex: u16, error: Hidpp20Error) -> WriteError {
 
 /// Read the current DPI and the supported DPI values for sensor 0 in one
 /// route/channel session.
-pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+pub async fn get_dpi_info(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<DpiInfo, WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         get_dpi_info_on_channel(&channel, index).await
     })
     .await
@@ -265,9 +269,13 @@ pub(super) async fn get_dpi_info_on_channel(
 }
 
 /// Set sensor 0's DPI for the device addressed by `route`.
-pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+pub async fn set_dpi(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    dpi: Dpi,
+) -> Result<(), WriteError> {
     let index = route.device_index();
-    with_route(route, move |channel| async move {
+    with_route(backend, route, move |channel| async move {
         set_dpi_on_channel(&channel, index, dpi).await
     })
     .await
