@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-21
+
+### Added
+
+- *(hid)* support G602 nano receiver ([#684](https://github.com/AprilNEA/OpenLogi/pull/684))
+
+### Fixed
+
+- *(hid)* surface the 0xc539 dongle as a Lightspeed receiver, not Unifying ([#665](https://github.com/AprilNEA/OpenLogi/pull/665))
+- *(ci)* make the MSRV job actually pin the toolchain it installs
+- *(camera)* finish the 1.98 chunks_exact sweep in the platform backends
+- satisfy the lints Rust 1.98 added
+
 ## [0.7.3] - 2026-08-20
 
 ### Fixed
