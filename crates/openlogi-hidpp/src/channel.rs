@@ -6,14 +6,13 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
 use futures::{FutureExt, channel::oneshot, select};
-use rand::Rng;
 use tracing::trace;
 
 use crate::{nibble::U4, sync::lock};
@@ -94,6 +93,13 @@ pub struct HidppChannel {
     /// Registered listeners that will receive notifications about incoming
     /// messages.
     message_listeners: Arc<Mutex<HashMap<u32, MessageListener>>>,
+
+    /// The handle assigned to the next registered message listener.
+    ///
+    /// A counter, not a random draw: a handle is only ever a key into
+    /// [`Self::message_listeners`], so counting up is collision-free by
+    /// construction where drawing needed a retry loop to be merely unlikely.
+    next_listener_hdl: AtomicU32,
 
     /// The sender signaling the read thread to stop.
     read_thread_close: Option<oneshot::Sender<()>>,
@@ -193,6 +199,7 @@ impl HidppChannel {
             software_id: AtomicU8::new(0x01),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
+            next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
@@ -448,15 +455,8 @@ impl HidppChannel {
         &self,
         listener: impl Fn(HidppMessage, bool) + Send + Sync + 'static,
     ) -> u32 {
-        let mut listeners = lock(&self.message_listeners);
-
-        let mut rng = rand::rng();
-        let mut hdl = rng.random::<u32>();
-        while listeners.contains_key(&hdl) {
-            hdl = rng.random::<u32>();
-        }
-
-        listeners.insert(hdl, Arc::new(listener));
+        let hdl = self.next_listener_hdl.fetch_add(1, Ordering::Relaxed);
+        lock(&self.message_listeners).insert(hdl, Arc::new(listener));
         hdl
     }
 

@@ -57,6 +57,7 @@ fn ci_yml_runs_what_this_runner_runs() {
         Job::Rustdoc,
         Job::TestsLinux,
         Job::TestsMacos,
+        Job::Wasm,
     ] {
         let host = *job.spec().hosts.first().expect("every job names a host");
         let plan = job.plan(&sh, host).expect("a plan");

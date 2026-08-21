@@ -26,6 +26,7 @@ pub(crate) enum Job {
     TestsMacos,
     CargoDeny,
     ClippyWindows,
+    Wasm,
     /// Locale parity. Part of `tests (macos)`, and the suite Linux CI cannot
     /// run because it excludes `openlogi-desktop`.
     I18n,
@@ -140,6 +141,14 @@ impl Job {
                 hosts: Host::ANY,
                 in_default_run: true,
                 caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
+            },
+            Self::Wasm => Spec {
+                name: "wasm (portable crates)",
+                aliases: &["wasm"],
+                prefix: None,
+                hosts: Host::ANY,
+                in_default_run: true,
+                caveat: "Proves the portable crates depend on nothing host-bound. A check, so it catches a dependency that cannot build for wasm — not one that compiles and then fails at runtime (`std::thread::spawn`).",
             },
             Self::I18n => Spec {
                 name: "i18n",
