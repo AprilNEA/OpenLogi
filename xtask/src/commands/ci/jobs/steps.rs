@@ -51,6 +51,14 @@ const WASM_PORTABLE_CRATES: [&str; 2] = ["openlogi-hidpp", "openlogi-device"];
 /// The crates that are portable once their host-facing feature is off.
 const WASM_PORTABLE_NO_DEFAULT_CRATES: [&str; 1] = ["openlogi-core"];
 
+/// Every crate the wasm job checks, however it checks it.
+#[cfg(test)]
+pub(super) fn wasm_portable_crates() -> impl Iterator<Item = &'static str> {
+    WASM_PORTABLE_CRATES
+        .into_iter()
+        .chain(WASM_PORTABLE_NO_DEFAULT_CRATES)
+}
+
 /// The GPUI crates `cargo doc` skips — documenting them drags the whole
 /// graphics toolchain into the job. Excluding by name rather than listing the
 /// covered crates keeps a new crate documented by default.
