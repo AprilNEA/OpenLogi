@@ -92,11 +92,16 @@ xtask/
           tests.rs
       macos.rs               # macOS domain entry
       macos/
-        bundle.rs
+        bundle.rs              # the assembly order, and what it means
         bundle/
-          identity.rs
+          embed.rs             # login-item helpers, the CLI, required binaries
+          embed/tests.rs
+          icns.rs              # the app icon
+          identity.rs          # bundle ids, names, icons per channel
           identity/tests.rs
-          tests.rs
+          info_plist.rs        # reading and stamping plist keys
+          signing.rs           # codesign, inside out
+          signing/tests.rs
         dev_bundle.rs
         dev_bundle/
           processes.rs

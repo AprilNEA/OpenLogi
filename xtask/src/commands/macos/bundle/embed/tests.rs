@@ -1,4 +1,9 @@
+use strum::VariantArray as _;
+
+use super::super::identity;
+use super::super::info_plist::read_plist_string;
 use super::*;
+use crate::support::fs::repo_root;
 
 /// Identity work iterates every `Component`, so a component added without a
 /// `Helper` to embed it would only surface as a stamping failure during a
@@ -31,19 +36,6 @@ fn verify_bundle_binaries_accepts_a_complete_bundle() {
 
         verify_bundle_binaries(app.path(), channel).unwrap();
     }
-}
-
-#[test]
-fn camera_entitlements_declare_device_camera() {
-    let path = camera_entitlements_path(&repo_root().unwrap());
-    let plist = Value::from_file(&path).unwrap();
-    let dict = plist.as_dictionary().unwrap();
-    assert_eq!(
-        dict.get("com.apple.security.device.camera")
-            .and_then(Value::as_boolean),
-        Some(true),
-        "hardened-runtime camera capture needs this entitlement"
-    );
 }
 
 /// The checked-in helper plists are what a fresh bundle starts from, so a

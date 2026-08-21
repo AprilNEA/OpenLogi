@@ -19,7 +19,7 @@ use clap::ValueEnum;
 use openlogi_core::brand;
 use strum::{Display, VariantArray};
 
-use super::{read_plist_string, stamp_plist_strings};
+use super::info_plist::{read_plist_string, stamp_plist_strings};
 
 /// The icon every component shares, as `CFBundleIconFile` spells it (the `.icns`
 /// extension is optional there, so it is trimmed before comparing).
