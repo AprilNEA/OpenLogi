@@ -20,6 +20,8 @@ devenv shell -- cargo run -p xtask -- <command>
 - `macos package` — build the app bundle, optionally sign it, then create the branded DMG.
 - `linux package` — build release binaries and package `.deb`, `.rpm`, and
   `.pkg.tar.zst` artifacts with nfpm.
+- `release changelog` — write the next workspace version's section into
+  `CHANGELOG.md` with git-cliff.
 - `release latest-json` — generate the static updater manifest for the stable channel.
 
 ### Bundle identity
@@ -86,10 +88,12 @@ xtask/
         package.rs
       release.rs             # release metadata entry
       release/
+        changelog.rs
         latest_json.rs
     support/
       mod.rs
       fs.rs                  # shared filesystem/process guards only
+      manifest.rs            # the root Cargo.toml's [workspace.package]
 ```
 
 Keep command modules aligned with the CLI hierarchy. A platform action belongs

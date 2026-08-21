@@ -31,3 +31,8 @@ paths:
   identity/helper/plist tables with `macos bundle`. Keep it that way; the two drifted
   badly while they were separate implementations.
   `.github/scripts/release-notes/` is a dedicated Node/Octokit tool; don't wrap it in xtask.
+- Shell that is really program logic belongs here instead: `cargo xtask release changelog`
+  replaced a script whose version parsing and changelog editing were two embedded Python
+  heredocs. The release-plz workflow builds the binary on `master` before checking out
+  the release branch, so the tool must keep reading the version from the tree at run
+  time — `env!("CARGO_PKG_VERSION")` would bake in the pre-bump one.

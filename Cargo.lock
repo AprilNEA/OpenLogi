@@ -9956,6 +9956,7 @@ dependencies = [
  "sysinfo 0.38.4",
  "tempfile",
  "time",
+ "toml 0.8.23",
  "which 8.0.4",
  "xshell",
 ]
