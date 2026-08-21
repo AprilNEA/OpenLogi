@@ -159,6 +159,15 @@ jobs:
     needs: [resolve, build]
     if: needs.resolve.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    # This job holds Pages and OIDC permissions and imports the signing key, so
+    # the mutable action tags below are a deliberate choice rather than an
+    # oversight. Every action here is first-party `actions/*`, on the same tags
+    # release.yml and windows-sign-dryrun.yml already use while handling Apple
+    # codesign certs and Azure signing credentials; pinning this one workflow
+    # would make it the only pinned one in the tree. With no Dependabot or
+    # Renovate config to bump them, hand-pinned SHAs go stale unnoticed, which
+    # trades a hypothetical risk for a certain one. Follow a repo-wide pinning
+    # policy here if one is ever adopted.
     permissions:
       contents: read
       pages: write
