@@ -16,7 +16,7 @@ fs-err = "3.3.0"
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
 # runtime, so what packaging builds and what the app claims cannot diverge.
-openlogi-core = { version = "0.7.3", path = "../crates/openlogi-core" }
+openlogi-core = { version = "0.7.4", path = "../crates/openlogi-core" }
 path-absolutize = "3.1.1"
 plist = "1.10.0"
 serde = { workspace = true }
