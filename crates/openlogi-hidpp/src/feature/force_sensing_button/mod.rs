@@ -4,7 +4,7 @@
 //! The function map of this feature is NOT publicly documented. Everything
 //! here is reverse-engineered against real hardware; this wrapper therefore
 //! exposes a deliberately raw probe surface so callers can map the function
-//! table, and typed accessors should replace [`Self::raw_call`] as layouts are
+//! table, and typed accessors should replace [`ForceSensingButtonFeature::raw_call`] as layouts are
 //! confirmed on hardware. Keep the reverse-engineering annotations honest.
 
 use std::sync::Arc;
