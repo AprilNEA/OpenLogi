@@ -20,6 +20,17 @@ if [ "$removing" = yes ]; then
   # agent may also have written its own copy to $XDG_CONFIG_HOME/systemd/user/ for
   # launch-at-login. Both carry the same unit name, so one disable stops whichever
   # is active and drops the .wants symlink that would otherwise start it again.
+  # Removing the unit file first does not defeat this: systemd matches .wants
+  # symlinks by unit name, so a dangling one is still cleaned up here.
+  #
+  # /run/user covers logged-in and lingering users. A logged-out user without
+  # linger keeps a dangling symlink that starts nothing (the unit file went with
+  # the package) until the package is reinstalled. That is deliberate, not an
+  # oversight: root has no route into a logged-out user's systemd instance, and
+  # the standard tooling does not try either — Fedora's %systemd_user_* macros
+  # and Debian's deb-systemd-helper both manage global enablement under
+  # /etc/systemd/user and never touch per-user config. Do not "fix" this by
+  # walking /home and deleting files inside user config directories.
   if command -v systemctl >/dev/null 2>&1; then
     if command -v runuser >/dev/null 2>&1; then
       as_user="runuser -u"
