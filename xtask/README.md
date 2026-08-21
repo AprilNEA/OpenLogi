@@ -127,6 +127,14 @@ helper outside any `#[test]` fn still gets it. Note that `include_str!` in such
 a file resolves relative to `foo/`, one level deeper than the module it came
 from.
 
+A test that reads a file from the repository has one more constraint: the Nix
+package builds from a source derivation that deliberately omits documentation
+and CI metadata — editing a workflow must not rebuild the application — and it
+runs `cargo test` inside that sandbox. Either add the file to the fileset in
+`packaging/linux/package.nix`, the way `nfpm.yaml` is there for the packaged-bins
+test, or let the test skip when the file's whole directory is absent, the way
+the `ci.yml` drift tests do.
+
 Keep command modules aligned with the CLI hierarchy. A platform action belongs
 under its platform (`macos bundle`, `linux package`); release metadata belongs
 under `release`; shared helpers belong in `support` only when they are reused by

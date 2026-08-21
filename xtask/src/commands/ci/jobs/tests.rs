@@ -7,22 +7,31 @@ use super::{Action, GROUPS, Job};
 use crate::commands::ci::Host;
 use crate::support::fs::repo_root;
 
-/// `ci.yml`, with the workflow's line continuations joined back up and every
-/// run of whitespace collapsed, so a command it wraps for readability is one
-/// line again.
-fn workflow_commands() -> String {
-    workflow()
+/// `ci.yml`, or `None` when this tree carries no CI metadata at all.
+///
+/// The Nix package builds from a source derivation that deliberately excludes
+/// documentation and CI metadata — editing a workflow must not rebuild the
+/// application — and it runs `cargo test` inside that sandbox. The condition is
+/// the whole `.github` directory rather than the workflow file: a tree that has
+/// the directory but lost `ci.yml` is drift, and still fails below.
+fn workflow() -> Option<String> {
+    let github = repo_root().expect("repo root").join(".github");
+    if !github.is_dir() {
+        return None;
+    }
+    let path = github.join("workflows/ci.yml");
+    Some(fs_err::read_to_string(path).expect("ci.yml is readable"))
+}
+
+/// The workflow with its line continuations joined back up and every run of
+/// whitespace collapsed, so a command it wraps for readability is one line
+/// again.
+fn workflow_commands(workflow: &str) -> String {
+    workflow
         .replace("\\\n", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn workflow() -> String {
-    let path = repo_root()
-        .expect("repo root")
-        .join(".github/workflows/ci.yml");
-    fs_err::read_to_string(path).expect("ci.yml is readable")
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
@@ -35,7 +44,10 @@ fn workflow() -> String {
 /// their CI job rather than copies of it.
 #[test]
 fn ci_yml_runs_what_this_runner_runs() {
-    let commands = workflow_commands();
+    let Some(workflow) = workflow() else {
+        return;
+    };
+    let commands = workflow_commands(&workflow);
     let sh = Shell::new().expect("a shell");
     sh.change_dir(repo_root().expect("repo root"));
 
@@ -65,7 +77,9 @@ fn ci_yml_runs_what_this_runner_runs() {
 /// name is a job nobody can reproduce locally.
 #[test]
 fn every_ci_yml_job_name_resolves() {
-    let workflow = workflow();
+    let Some(workflow) = workflow() else {
+        return;
+    };
     // Job names sit at one indent level under `jobs:`; a step's `- name:` is
     // deeper and carries the dash.
     let names: Vec<&str> = workflow
