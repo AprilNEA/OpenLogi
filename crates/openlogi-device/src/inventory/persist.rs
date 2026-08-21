@@ -18,8 +18,8 @@
 //! succeeds, the persisted data serves exactly like an in-memory cache hit.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
-//! enumerator writes through a [`ProbeCacheStore`], and every native build
-//! supplies [`FileProbeCacheStore`].
+//! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
+//! the file-backed one every native build uses.
 
 use std::collections::HashMap;
 
@@ -29,14 +29,18 @@ use thiserror::Error;
 use super::cache::{CacheKey, Cached};
 use super::features::{BatteryProbe, ProbedFeatures};
 
-mod file;
-
-pub use file::FileProbeCacheStore;
-
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 const SCHEMA_VERSION: u32 = 2;
+
+impl ProbeCacheError {
+    /// Report why a store could not keep a snapshot.
+    #[must_use]
+    pub fn new(reason: impl std::fmt::Display) -> Self {
+        Self(reason.to_string())
+    }
+}
 
 /// A probe-cache store could not keep a snapshot.
 ///
@@ -51,7 +55,7 @@ pub struct ProbeCacheError(String);
 ///
 /// A port, like [`HidBackend`](crate::backend::HidBackend): the enumerator
 /// knows what is worth keeping and when it changed, and nothing about where it
-/// goes. Native builds use [`FileProbeCacheStore`].
+/// goes. `openlogi-hid` supplies the file-backed one native builds use.
 pub trait ProbeCacheStore: Send + Sync {
     /// The last snapshot saved here, or an empty one.
     ///
@@ -118,6 +122,12 @@ impl ProbeCacheSnapshot {
         }
     }
 
+    /// Whether this snapshot carries nothing — a store may skip writing one.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Everything in `cache` worth keeping across restarts.
     pub(super) fn of(cache: &HashMap<CacheKey, Cached>) -> Self {
         let entries = cache
@@ -174,5 +184,104 @@ impl ProbeCacheSnapshot {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
+    };
+
+    use super::super::cache::{CacheKey, Cached};
+    use super::super::features::{BatteryProbe, ProbedFeatures};
+    use super::{ProbeCacheSnapshot, SCHEMA_VERSION};
+
+    /// A device fully probed once keeps its identity across restarts — that is
+    /// the whole point of the snapshot — but only the parts that are actually
+    /// immutable, and only for keys a re-pair cannot silently reassign.
+    #[test]
+    fn a_snapshot_keeps_bolt_identity_and_drops_the_volatile_reading() {
+        let model = DeviceModelInfo {
+            entity_count: 1,
+            serial_number: Some("TESTSERIAL01".into()),
+            unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+            transports: DeviceTransports::default(),
+            model_ids: [0xb042, 0, 0],
+            extended_model_id: 0,
+        };
+        let mut cache = HashMap::new();
+        cache.insert(
+            CacheKey::Bolt {
+                unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+            },
+            Cached {
+                probe: ProbedFeatures {
+                    model_info: Some(model.clone()),
+                    // A live reading at snapshot time.
+                    battery: Some(BatteryInfo {
+                        percentage: 55,
+                        level: BatteryLevel::Good,
+                        status: BatteryStatus::Discharging,
+                    }),
+                    ..Default::default()
+                },
+                battery: Some(BatteryProbe::Unified(9)),
+                probed_tick: 7,
+            },
+        );
+        cache.insert(
+            CacheKey::UnifyingSlot {
+                receiver_uid: "DA2699E1".into(),
+                slot: 2,
+            },
+            Cached {
+                probe: ProbedFeatures::default(),
+                battery: None,
+                probed_tick: 3,
+            },
+        );
+
+        let restored = ProbeCacheSnapshot::of(&cache).into_entries();
+
+        let bolt = restored
+            .get(&CacheKey::Bolt {
+                unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+            })
+            .expect("a Bolt entry survives");
+        assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
+        assert_eq!(
+            bolt.battery,
+            Some(BatteryProbe::Unified(9)),
+            "the battery *feature index* is immutable and kept"
+        );
+        assert!(
+            bolt.probe.battery.is_none(),
+            "the battery *reading* is volatile — restoring it would resurrect a stale value"
+        );
+        assert_eq!(
+            bolt.probed_tick, 0,
+            "a restored entry restarts the refresh clock"
+        );
+        assert!(
+            !restored.contains_key(&CacheKey::UnifyingSlot {
+                receiver_uid: "DA2699E1".into(),
+                slot: 2,
+            }),
+            "unifying entries are slot-keyed, so a re-pair while the agent is \
+             down could hand them to a different device — never persisted"
+        );
+    }
+
+    /// A snapshot written by another schema describes a shape this build does
+    /// not read. Re-probing is always correct; guessing is not.
+    #[test]
+    fn a_foreign_schema_yields_a_cold_start() {
+        let mut snapshot = ProbeCacheSnapshot::of(&HashMap::new());
+        snapshot.version = SCHEMA_VERSION + 1;
+
+        assert!(snapshot.into_entries().is_empty());
     }
 }

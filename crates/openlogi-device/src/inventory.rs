@@ -26,7 +26,7 @@ mod ledger;
 mod mappings;
 pub mod persist;
 mod probe;
-pub(crate) mod standalone;
+pub mod standalone;
 
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};

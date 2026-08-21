@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use atomic_write_file::AtomicWriteFile;
 use tracing::warn;
 
-use super::{ProbeCacheError, ProbeCacheSnapshot, ProbeCacheStore};
+use openlogi_device::inventory::persist::{ProbeCacheError, ProbeCacheSnapshot, ProbeCacheStore};
 
 /// Keeps the probe cache as JSON at a fixed path.
 pub struct FileProbeCacheStore {
@@ -59,7 +59,7 @@ impl ProbeCacheStore for FileProbeCacheStore {
     /// rename onto an existing file fails.
     fn save(&self, snapshot: &ProbeCacheSnapshot) -> Result<(), ProbeCacheError> {
         self.write(snapshot)
-            .map_err(|e| ProbeCacheError(format!("{}: {e}", self.path.display())))
+            .map_err(|e| ProbeCacheError::new(format!("{}: {e}", self.path.display())))
     }
 }
 
@@ -72,5 +72,41 @@ impl FileProbeCacheStore {
         let mut out = AtomicWriteFile::open(&self.path)?;
         io::Write::write_all(&mut out, &json)?;
         out.commit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_device::inventory::persist::{ProbeCacheSnapshot, ProbeCacheStore as _};
+
+    use super::FileProbeCacheStore;
+
+    /// The store is a warm-start optimization, so anything it cannot read is a
+    /// cold start — never an error that reaches device discovery.
+    #[test]
+    fn load_tolerates_a_missing_or_unreadable_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let missing = FileProbeCacheStore::at(dir.path().join("nope.json"));
+        assert!(missing.load().is_empty(), "a missing file is a cold start");
+
+        let path = dir.path().join("garbage.json");
+        std::fs::write(&path, b"not json at all").expect("write");
+        assert!(
+            FileProbeCacheStore::at(path).load().is_empty(),
+            "a torn write is a cold start, not a panic"
+        );
+    }
+
+    /// Writing goes through a directory that may not exist yet — the app data
+    /// dir on a first run.
+    #[test]
+    fn save_creates_the_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileProbeCacheStore::at(dir.path().join("nested/deep/probe-cache.json"));
+
+        store.save(&ProbeCacheSnapshot::empty()).expect("save");
+
+        assert!(store.path().is_file(), "the snapshot must land on disk");
     }
 }

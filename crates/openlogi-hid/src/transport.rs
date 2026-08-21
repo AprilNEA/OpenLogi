@@ -28,8 +28,8 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
-use crate::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
-use crate::write::matches_litra;
+use openlogi_device::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
+use openlogi_device::write::matches_litra;
 
 /// Collapses `async-hid`'s error taxonomy into the backend-agnostic
 /// [`BackendError`] every caller above this module sees.

@@ -14,16 +14,16 @@ use std::sync::Arc;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 
-use crate::backend::{HidBackend, HotplugStream};
-use crate::backlight::BacklightState;
-use crate::channel::ChannelPool;
-use crate::channel::route::DeviceRoute;
-use crate::channel::transport::native_backend;
-use crate::inventory::persist::FileProbeCacheStore;
-use crate::inventory::{Enumerator, InventoryError};
-use crate::pairing::PairingReceiver;
-use crate::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
-use crate::write::{
+use crate::probe_cache::FileProbeCacheStore;
+use crate::transport::native_backend;
+use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
+use openlogi_device::ChannelPool;
+use openlogi_device::DeviceRoute;
+use openlogi_device::backend::{HidBackend, HotplugStream};
+use openlogi_device::backlight::BacklightState;
+use openlogi_device::inventory::{Enumerator, InventoryError};
+use openlogi_device::pairing::PairingReceiver;
+use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
@@ -214,20 +214,20 @@ pub fn channel_pool() -> ChannelPool {
 
 /// Enumerate this host's recognized standalone devices.
 pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryError> {
-    crate::inventory::standalone::enumerate_standalone(&*native_backend()).await
+    openlogi_device::inventory::standalone::enumerate_standalone(&*native_backend()).await
 }
 
 /// Subscribe to this host's HID hotplug events.
 pub fn watch_hotplug() -> Result<HotplugStream, InventoryError> {
-    crate::inventory::hotplug::watch_hotplug(&*native_backend())
+    openlogi_device::inventory::hotplug::watch_hotplug(&*native_backend())
 }
 
 /// Enumerate the HID++ receivers and paired devices on this host, once.
 pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
-    crate::inventory::enumerate(native_backend()).await
+    openlogi_device::inventory::enumerate(native_backend()).await
 }
 
 /// List the pairing-capable receivers connected to this host.
 pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
-    crate::pairing::list_pairing_receivers(&*native_backend()).await
+    openlogi_device::pairing::list_pairing_receivers(&*native_backend()).await
 }

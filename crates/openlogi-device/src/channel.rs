@@ -1,11 +1,12 @@
 //! HID++ transport and channel lifecycle.
 //!
-//! Everything between the OS HID stack and an open [`hidpp`] channel lives
-//! here: the `async-hid` transport ([`transport`]), resolving a
-//! [`route::DeviceRoute`] to an open channel ([`route`]), and the reuse
-//! strategies — [`ChannelPool`] for sessions that open on demand,
+//! Resolving a [`route::DeviceRoute`] to an open channel, and the strategies
+//! that keep one open: [`ChannelPool`] for sessions that open on demand,
 //! [`ChannelRegistry`] for channels owned by the inventory enumerator, and
-//! [`SharedChannel`] handles lent out to the crate's read/write entry points.
+//! [`SharedChannel`] handles lent out to this crate's read/write entry points.
+//!
+//! Opening itself belongs to a [`crate::backend::HidBackend`]; nothing here
+//! names a HID stack.
 
 use std::sync::Arc;
 
@@ -18,7 +19,6 @@ pub(crate) mod registry;
 pub(crate) mod route;
 #[cfg(test)]
 pub(crate) mod scripted;
-pub(crate) mod transport;
 
 pub use pool::ChannelPool;
 pub use registry::ChannelRegistry;

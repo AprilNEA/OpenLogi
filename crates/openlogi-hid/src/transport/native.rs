@@ -11,7 +11,9 @@ use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
 
-use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
+use openlogi_device::backend::{
+    BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter,
+};
 
 use super::{enumerate_devices, is_hidpp_node, open_hidpp_channel, watch_nodes};
 

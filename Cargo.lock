@@ -5293,10 +5293,15 @@ dependencies = [
 name = "openlogi-device"
 version = "0.7.4"
 dependencies = [
+ "futures-concurrency",
  "futures-lite",
  "openlogi-core",
  "openlogi-hidpp",
+ "serde",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -16,7 +16,9 @@ use tracing::debug;
 use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
-use crate::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque};
+use openlogi_core::hid::smartshift::{
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque,
+};
 
 use super::{
     HidppFeatureErrorKind, HidppOperation, WriteError, classify_hidpp_error, open_feature,

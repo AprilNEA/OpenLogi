@@ -23,7 +23,8 @@ sits beneath both.
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog. No I/O, no async |
 | `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
-| `crates/openlogi-hid` | Device discovery + HID++ writes over `async-hid` |
+| `crates/openlogi-device` | The HID++ device layer: enumeration, probing, writes, sessions, pairing. Knows no host — expressed against `HidBackend` |
+| `crates/openlogi-hid` | That layer wired to this host: `async-hid` transport, macOS Input Monitoring, the on-disk probe cache |
 | `crates/openlogi-assets` | Device-render registry + cached fetch from OpenLogi asset mirrors |
 | `crates/openlogi-cli` | `clap` command tree: `list`, `assets`, `diag` |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
@@ -256,10 +257,10 @@ before editing that area.
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
 | `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |
-| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**`, plus `openlogi-core`/`openlogi-hid` (their serde types ride the wire) | `.claude/rules/ipc-protocol.md` |
+| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**`, plus `openlogi-core`/`openlogi-device` (their serde types ride the wire) | `.claude/rules/ipc-protocol.md` |
 | `crates/openlogi-hook/**`, `crates/openlogi-inject/**`, `crates/openlogi-hid/**` (cfg-gated platform code) | `.claude/rules/cross-platform.md` |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
-| `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
+| `crates/openlogi-device/**`, `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
 | macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |

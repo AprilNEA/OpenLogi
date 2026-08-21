@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use openlogi_core::device::{
@@ -11,8 +10,7 @@ use super::cache::{
     CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
     keep_known_capabilities,
 };
-use super::features::{BatteryProbe, ProbedFeatures};
-use super::persist::{self, ProbeCacheStore as _};
+use super::features::ProbedFeatures;
 use super::probe::{
     NodeProbe, assemble_bolt_probe, parse_codename_unifying, preferred_direct_codename,
 };
@@ -615,112 +613,6 @@ fn live_cached_channel_survives_a_transient_enumeration_gap() {
     assert!(retained.contains(&2));
     assert!(!retained.contains(&3));
     assert_eq!(retained, std::collections::HashSet::from([1, 2]));
-}
-
-#[test]
-fn probe_cache_roundtrips_through_disk() {
-    // A device fully probed once must keep its identity across restarts: the
-    // persisted cache is what spares a fresh process the expensive (and on
-    // degraded transports, failing) re-interview.
-    use openlogi_core::device::{
-        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
-    };
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("probe-cache.json");
-
-    let model = DeviceModelInfo {
-        entity_count: 1,
-        serial_number: Some("TESTSERIAL01".into()),
-        unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
-        transports: DeviceTransports::default(),
-        model_ids: [0xb042, 0, 0],
-        extended_model_id: 0,
-    };
-    let probe = ProbedFeatures {
-        model_info: Some(model.clone()),
-        // A live reading at save time: volatile, so it must NOT survive the
-        // round trip (the feature index in `battery` below does).
-        battery: Some(BatteryInfo {
-            percentage: 55,
-            level: BatteryLevel::Good,
-            status: BatteryStatus::Discharging,
-        }),
-        ..Default::default()
-    };
-    let mut cache = std::collections::HashMap::new();
-    cache.insert(
-        CacheKey::Bolt {
-            unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
-        },
-        Cached {
-            probe,
-            battery: Some(BatteryProbe::Unified(9)),
-            probed_tick: 7,
-        },
-    );
-    cache.insert(
-        CacheKey::UnifyingSlot {
-            receiver_uid: "DA2699E1".into(),
-            slot: 2,
-        },
-        Cached {
-            probe: ProbedFeatures::default(),
-            battery: None,
-            probed_tick: 3,
-        },
-    );
-
-    let store = persist::FileProbeCacheStore::at(path);
-    store
-        .save(&persist::ProbeCacheSnapshot::of(&cache))
-        .expect("save");
-    let loaded = store.load().into_entries();
-
-    let bolt = loaded
-        .get(&CacheKey::Bolt {
-            unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
-        })
-        .expect("bolt entry survives a save/load cycle");
-    assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
-    assert_eq!(bolt.battery, Some(BatteryProbe::Unified(9)));
-    assert!(
-        bolt.probe.battery.is_none(),
-        "the volatile battery reading must not be resurrected across restarts"
-    );
-    assert_eq!(
-        bolt.probed_tick, 0,
-        "loaded entries restart the refresh clock"
-    );
-    assert!(
-        !loaded.contains_key(&CacheKey::UnifyingSlot {
-            receiver_uid: "DA2699E1".into(),
-            slot: 2,
-        }),
-        "unifying entries are slot-keyed, so a re-pair while the agent is \
-         down could hand them to a different device — never persisted"
-    );
-}
-
-#[test]
-fn probe_cache_load_tolerates_missing_or_garbage_files() {
-    // The persisted cache is a warm-start optimization: a missing file, torn
-    // write, or foreign schema must yield an empty cache, never an error.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let entries_at = |path: PathBuf| persist::FileProbeCacheStore::at(path).load().into_entries();
-
-    assert!(entries_at(dir.path().join("nope.json")).is_empty());
-
-    let garbage = dir.path().join("garbage.json");
-    std::fs::write(&garbage, b"not json at all").expect("write");
-    assert!(entries_at(garbage).is_empty());
-
-    let wrong_version = dir.path().join("future.json");
-    std::fs::write(&wrong_version, br#"{"version":999,"entries":[]}"#).expect("write");
-    assert!(
-        entries_at(wrong_version).is_empty(),
-        "a snapshot from another schema describes a shape this build cannot read"
-    );
 }
 
 /// A node the backend cannot open is a *failure*, not a disconnect: the tick
