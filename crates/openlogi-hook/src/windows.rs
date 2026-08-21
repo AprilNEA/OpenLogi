@@ -328,7 +328,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             cb(HookEvent::Mouse(event))
         });
     match disposition {
-        EventDisposition::PassThrough => call_next(code, wparam, lparam),
+        // `InvertScroll` has no WH_MOUSE_LL implementation yet (see the
+        // variant's docs) — pass through rather than swallow the scroll.
+        EventDisposition::PassThrough | EventDisposition::InvertScroll => {
+            call_next(code, wparam, lparam)
+        }
         EventDisposition::Suppress => 1,
     }
 }
@@ -469,7 +473,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             cb(HookEvent::Key(event))
         });
     match disposition {
-        EventDisposition::PassThrough => call_next(code, wparam, lparam),
+        // `InvertScroll` has no WH_MOUSE_LL implementation yet (see the
+        // variant's docs) — pass through rather than swallow the scroll.
+        EventDisposition::PassThrough | EventDisposition::InvertScroll => {
+            call_next(code, wparam, lparam)
+        }
         EventDisposition::Suppress => 1,
     }
 }

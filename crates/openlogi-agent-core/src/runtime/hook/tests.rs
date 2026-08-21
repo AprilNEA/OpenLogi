@@ -182,6 +182,7 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
             (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
         ]),
         gestures: BTreeMap::new(),
+        ..Default::default()
     };
     assert_eq!(
         rebound_thumbwheel_action(&maps, 1.0),
@@ -208,6 +209,7 @@ fn native_thumbwheel_scroll_stays_os_native() {
             ),
         ]),
         gestures: BTreeMap::new(),
+        ..Default::default()
     };
     assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
     assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);

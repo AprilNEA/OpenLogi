@@ -4,7 +4,7 @@
 //! and converts callback-thread mouse/key input into the shared action runtime.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -32,10 +32,16 @@ pub struct HookMaps {
     /// Per-button immediate or threshold binding — the non-gesture dispatch path.
     pub bindings: BTreeMap<ButtonId, Binding>,
     /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
-    /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
-    /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
-    /// instead — it never reaches the OS hook.
+    /// gesture mode), so a hold+swipe resolves to a bound action. The HID++
+    /// gesture sources use the gesture watcher's separate map instead — a
+    /// diverted control never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// `(vendor_id, product_id)` of each device whose wheel is inverted in
+    /// software, for firmware reporting no native HID++ inversion (`0x2121`).
+    /// Keyed by OS-level identity because that is all the hook sees — a scroll
+    /// event carries an [`EventDevice`], not a config key — and a set rather
+    /// than one bool is what keeps the inversion per-device.
+    pub invert_scroll: BTreeSet<(u32, u32)>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -479,7 +485,21 @@ pub fn start(
                         return queued_event_disposition(try_queue_action(&action_tx, action));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
-                        return queued_event_disposition(scroll.try_hook_scroll(delta));
+                        if scroll.try_hook_scroll(delta) {
+                            return queued_event_disposition(true);
+                        }
+                        // The worker declined, so this event reaches the app as
+                        // it is. Software inversion rides the same policy — a
+                        // device whose firmware has no `0x2121` has no other way
+                        // to honour the setting.
+                        if let Some(ids) =
+                            device.as_ref().and_then(|d| d.vendor_id.zip(d.product_id))
+                            && hooks
+                                .try_read()
+                                .is_ok_and(|maps| maps.invert_scroll.contains(&ids))
+                        {
+                            return EventDisposition::InvertScroll;
+                        }
                     }
                     EventDisposition::PassThrough
                 }

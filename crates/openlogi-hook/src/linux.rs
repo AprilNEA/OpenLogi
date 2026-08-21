@@ -518,7 +518,11 @@ fn device_thread(
                     None => EventDisposition::PassThrough,
                 };
                 match disposition {
-                    EventDisposition::PassThrough => pending.push(event),
+                    // No evdev rewrite path for `InvertScroll` yet; pass it
+                    // through rather than silently eating the scroll.
+                    EventDisposition::PassThrough | EventDisposition::InvertScroll => {
+                        pending.push(event);
+                    }
                     EventDisposition::Suppress => {}
                 }
             }
