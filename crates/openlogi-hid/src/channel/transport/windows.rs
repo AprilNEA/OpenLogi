@@ -1,4 +1,6 @@
 #[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
 use std::{error::Error, io};
 
 #[cfg(target_os = "windows")]
@@ -80,6 +82,11 @@ pub(super) struct WindowsHidppChannel {
     info: DeviceInfo,
     short: Option<HidEndpoint>,
     long: Option<HidEndpoint>,
+    /// Cleared the first time either endpoint reports a permanently dead
+    /// handle. Read by [`RawHidChannel::is_connected`], which is what lets
+    /// `inventory::ledger` evict this channel — the node-vanish path never
+    /// fires for a cabled device whose receiver keeps the HID node enumerated.
+    connected: AtomicBool,
 }
 
 #[cfg(target_os = "windows")]
@@ -130,8 +137,36 @@ impl WindowsHidppChannel {
             info: long_info,
             short,
             long,
+            connected: AtomicBool::new(true),
         })
     }
+
+    fn mark_disconnected(&self) {
+        if self.connected.swap(false, Ordering::AcqRel) {
+            debug!(name = %self.info.name, "HID channel disconnected");
+        }
+    }
+
+    /// Honour the permanent-failure half of the [`RawHidChannel::read_report`]
+    /// contract: an `Err` is retried by the `hidpp` read loop, so a condition
+    /// that will never clear has to park instead of surfacing — otherwise the
+    /// loop busy-spins a core until something evicts the channel. Sound because
+    /// the read loop always races this future against the channel's close
+    /// signal in a `select!`.
+    async fn park_disconnected<T>(&self) -> T {
+        self.mark_disconnected();
+        std::future::pending().await
+    }
+}
+
+/// Whether an already-boxed transport error means the handle is permanently
+/// dead. [`HidEndpoint::write_report`] boxes the `async_hid` error before the
+/// channel sees it, so that path can only recognise the variant by downcast.
+#[cfg(target_os = "windows")]
+fn is_permanent_disconnect(error: &(dyn Error + Send + Sync + 'static)) -> bool {
+    error
+        .downcast_ref::<async_hid::HidError>()
+        .is_some_and(|e| matches!(e, async_hid::HidError::Disconnected))
 }
 
 #[cfg(target_os = "windows")]
@@ -219,7 +254,13 @@ impl RawHidChannel for WindowsHidppChannel {
             )
         })?;
 
-        endpoint.write_report(src).await
+        let result = endpoint.write_report(src).await;
+        if let Err(e) = &result
+            && is_permanent_disconnect(e.as_ref())
+        {
+            self.mark_disconnected();
+        }
+        result
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
@@ -236,23 +277,35 @@ impl RawHidChannel for WindowsHidppChannel {
                 // resumes it and retrieves the report. This relies on reusing the
                 // per-endpoint reader across calls; do not reopen readers per read.
                 tokio::select! {
-                    res = short_reader.read_input_report(&mut short_buf) => {
-                        copy_report(&short_buf, res?, buf)
-                    }
-                    res = long_reader.read_input_report(&mut long_buf) => {
-                        copy_report(&long_buf, res?, buf)
-                    }
+                    res = short_reader.read_input_report(&mut short_buf) => match res {
+                        Ok(len) => copy_report(&short_buf, len, buf),
+                        Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
+                        Err(e) => Err(e.into()),
+                    },
+                    res = long_reader.read_input_report(&mut long_buf) => match res {
+                        Ok(len) => copy_report(&long_buf, len, buf),
+                        Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
+                        Err(e) => Err(e.into()),
+                    },
                 }
             }
             (Some(endpoint), None) | (None, Some(endpoint)) => {
                 let mut reader = endpoint.reader.lock().await;
-                Ok(reader.read_input_report(buf).await?)
+                match reader.read_input_report(buf).await {
+                    Ok(len) => Ok(len),
+                    Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
+                    Err(e) => Err(e.into()),
+                }
             }
             (None, None) => Err(Box::new(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "no Windows HID++ endpoints are open",
             ))),
         }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
@@ -302,5 +355,26 @@ mod tests {
             Some(ReportEndpoint::Long)
         );
         assert_eq!(endpoint_for_report_id(0x13), None);
+    }
+
+    /// `HidEndpoint::write_report` boxes the `async_hid` error before the
+    /// channel sees it, so the permanent-disconnect check on that path only
+    /// works through a downcast — a plain `matches!` silently never fires.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_boxed_disconnect_is_recognised_as_permanent() {
+        let disconnected: Box<dyn Error + Send + Sync> =
+            Box::new(async_hid::HidError::Disconnected);
+        assert!(is_permanent_disconnect(disconnected.as_ref()));
+
+        // `NotConnected` is the *open* failure, not a dead live handle: it is
+        // retryable, so it must keep flowing to the read loop as an error.
+        let not_connected: Box<dyn Error + Send + Sync> =
+            Box::new(async_hid::HidError::NotConnected);
+        assert!(!is_permanent_disconnect(not_connected.as_ref()));
+
+        let unrelated: Box<dyn Error + Send + Sync> =
+            Box::new(io::Error::other("write failed for some other reason"));
+        assert!(!is_permanent_disconnect(unrelated.as_ref()));
     }
 }
