@@ -57,8 +57,9 @@ Full map: .claude/rules/ci.md
 /// Shown with an unknown job name.
 pub(crate) const JOB_NAMES_HELP: &str = "\
 Jobs: rustfmt shell clippy msrv rustdoc tests cargo-deny clippy-windows
-Also: i18n wire   (focused suites that fail the test jobs)
-`cargo xtask ci --list` prints what each one runs.";
+Also: i18n wire
+The focused suites are not CI jobs of their own; they fail the test jobs.
+`cargo xtask ci --list` prints what each name runs.";
 
 #[cfg(test)]
 mod tests {
@@ -68,17 +69,29 @@ mod tests {
     /// A new CI job that nothing documents is the drift this guards against:
     /// the table is what a reader consults instead of opening `ci.yml`.
     #[test]
-    fn every_ci_job_is_documented() {
+    fn every_ci_job_has_a_row() {
         let table = TABLE.to_lowercase();
-        let help = JOB_NAMES_HELP.to_lowercase();
-        for job in Job::DEFAULT_RUN {
-            let named = |text: &str| {
-                job.aliases()
-                    .iter()
-                    .any(|alias| text.contains(&alias.to_lowercase()))
-            };
-            assert!(named(&table), "{job:?} has no row in --list");
-            assert!(named(&help), "{job:?} is missing from the job-name help");
+        for job in Job::default_run() {
+            let named = job.names().any(|name| table.contains(&name.to_lowercase()));
+            assert!(named, "{job:?} has no row in --list");
+        }
+    }
+
+    /// The help is prose, so it can only be trusted if every name it hands the
+    /// reader is a name the runner accepts.
+    #[test]
+    fn every_name_the_help_advertises_resolves() {
+        let names: Vec<&str> = JOB_NAMES_HELP
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("Jobs:")
+                    .or_else(|| line.strip_prefix("Also:"))
+            })
+            .flat_map(str::split_whitespace)
+            .collect();
+        assert!(!names.is_empty(), "the help lists no job names");
+        for name in names {
+            assert!(Job::resolve(name).is_some(), "the help advertises {name}");
         }
     }
 }

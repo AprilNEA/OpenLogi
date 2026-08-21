@@ -81,9 +81,11 @@ xtask/
     main.rs                  # CLI shape and dispatch only
     commands/
       mod.rs
-      ci.rs                  # CI job runner: CLI, step execution, summary
+      ci.rs                  # CI job runner: CLI, host, step execution, summary
       ci/
-        jobs.rs              # the ci.yml jobs and what each costs on this host
+        jobs.rs              # one row of facts per ci.yml job + host gating
+        jobs/
+          steps.rs           # what each job runs
         list.rs              # the --list table
       macos.rs               # macOS domain entry
       macos/

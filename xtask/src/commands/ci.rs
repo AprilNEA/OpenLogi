@@ -18,6 +18,48 @@ use xshell::{Shell, cmd};
 use crate::support::fs::repo_root;
 use jobs::{Action, Job};
 
+/// The operating systems `ci.yml` names in its `runs-on:`, plus whatever else
+/// someone might be sitting at.
+///
+/// A runtime value rather than `cfg!(target_os = …)` so that which host a job
+/// needs is data a test can read, instead of a branch that only exists in a
+/// build for that host.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Host {
+    Linux,
+    Macos,
+    Windows,
+    /// Something CI has no runner for. Jobs that name their hosts skip here.
+    Other,
+}
+
+impl Host {
+    /// For a job whose command does not depend on the operating system.
+    pub(crate) const ANY: &'static [Self] = &[Self::Linux, Self::Macos, Self::Windows, Self::Other];
+
+    pub(crate) fn current() -> Self {
+        match std::env::consts::OS {
+            "linux" => Self::Linux,
+            "macos" => Self::Macos,
+            "windows" => Self::Windows,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+            // Only ever the host this binary is running on, so naming it is
+            // more useful than "other".
+            Self::Other => std::env::consts::OS,
+        })
+    }
+}
+
 /// The env CI sets for every job. A caller that already set one keeps theirs.
 const CI_ENV: [(&str, &str); 3] = [
     ("CARGO_TERM_COLOR", "always"),
@@ -53,22 +95,24 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         }
     }
 
-    let selected = if args.jobs.is_empty() {
-        Job::DEFAULT_RUN.to_vec()
+    let selected: Vec<Job> = if args.jobs.is_empty() {
+        Job::default_run().collect()
     } else {
         args.jobs
             .iter()
             .map(|name| {
-                Job::from_name(name).ok_or_else(|| {
+                Job::resolve(name).ok_or_else(|| {
                     anyhow::anyhow!("unknown job: {name}\n\n{}", list::JOB_NAMES_HELP)
                 })
             })
             .collect::<Result<Vec<_>>>()?
+            .concat()
     };
 
+    let host = Host::current();
     let mut summary = Summary::default();
     for job in selected {
-        summary.run(&sh, job, args.dry_run)?;
+        summary.run(&sh, job, host, args.dry_run)?;
     }
     summary.finish()
 }
@@ -143,8 +187,8 @@ struct Summary {
 }
 
 impl Summary {
-    fn run(&mut self, sh: &Shell, job: Job, dry_run: bool) -> Result<()> {
-        let plan = job.plan(sh)?;
+    fn run(&mut self, sh: &Shell, job: Job, host: Host, dry_run: bool) -> Result<()> {
+        let plan = job.plan(sh, host)?;
         println!();
         println!("==> {}", plan.label);
         for note in &plan.notes {
