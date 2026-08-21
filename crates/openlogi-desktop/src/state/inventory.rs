@@ -360,9 +360,14 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
         // fallback-quality one. A fallback identity has no model_info, no
         // codename, and its display_name is a generic placeholder like
         // "Slot N" or "Unknown device". If the existing persisted identity
-        // carries richer information, preserve it.
+        // carries richer information, preserve it — but only when the device
+        // in this slot hasn't changed. A different device kind signals a
+        // re-pairing, in which case the stale identity must not be retained.
         if let Some(existing) = config.device_identity(config_key) {
-            if !identity_is_resolved(&identity) && identity_is_resolved(existing) {
+            if !identity_is_resolved(&identity)
+                && identity_is_resolved(existing)
+                && existing.kind == identity.kind
+            {
                 continue;
             }
         }

@@ -183,10 +183,12 @@ pub(super) fn build_device_list(
                     // resolver cannot find a match this cycle (e.g. the index
                     // is being rewritten by the sync task), fall back to the
                     // persisted identity's display name if it carries a known
-                    // product name. This prevents a transient `None` from
-                    // degrading "K540/K545" into "Slot 3".
+                    // product name and the device kind hasn't changed (a kind
+                    // change signals a re-pairing — the stale name must not
+                    // be inherited by the replacement device).
                     config
                         .device_identity(&config_key)
+                        .filter(|id| id.kind == paired.kind)
                         .map(|id| &id.display_name)
                         .filter(|name| !is_fallback_display_name(name))
                         .cloned()
