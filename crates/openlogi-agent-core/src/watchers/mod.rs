@@ -7,6 +7,7 @@ pub mod camera;
 pub mod foreground_app;
 pub mod gesture;
 pub mod host_switch;
+pub mod input_monitoring;
 pub mod inventory;
 pub mod keyboard;
 pub mod pairing;

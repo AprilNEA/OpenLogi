@@ -264,6 +264,10 @@ async fn request_input_monitoring() {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "agent main loop: select over inventory/camera/app/accessibility/input-monitoring/ring"
+)]
 async fn run(
     config: Config,
     #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
@@ -317,6 +321,7 @@ async fn run(
     let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
     let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
     let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
+    let mut input_monitoring_rx = watchers::input_monitoring::spawn(Duration::from_millis(1200));
 
     // IPC server: the GUI connects here for device state + "apply now" commands.
     // The endpoint (Unix socket / Windows named pipe) is resolved inside
@@ -405,6 +410,9 @@ async fn run(
                 // One publish for every path above: revoked, installed, kept,
                 // or never installed because capture is off.
                 observable.set_hook_installed(hook.is_some());
+            }
+            Some(granted) = input_monitoring_rx.recv() => {
+                observable.set_input_monitoring_granted(granted);
             }
             else => break,
         }
