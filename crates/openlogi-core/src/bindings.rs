@@ -52,16 +52,20 @@ pub fn bindings_for(
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI
-/// shows. Empty when no HID++ source gestures (or `config_key` is `None`).
+/// shows. A per-app single-action override replaces only that source's Click
+/// arm; its global swipe arms and gesture mode remain intact. Empty when no
+/// HID++ source gestures (or `config_key` is `None`).
 #[must_use]
 pub fn hidpp_gesture_maps_for(
     config: &Config,
     config_key: Option<&str>,
+    app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
     let stored = config.bindings_for(key);
+    let effective = app_bundle.map(|app| config.effective_bindings(key, Some(app)));
     ButtonId::ALL
         .iter()
         .copied()
@@ -75,7 +79,17 @@ pub fn hidpp_gesture_maps_for(
                 .unwrap_or_else(|| default_binding_for(button));
             binding.fill_gesture_defaults();
             match binding {
-                Binding::Gesture(map) => Some((button, map)),
+                Binding::Gesture(mut map) => {
+                    // HID++ gesture sources never reach the OS hook. Keep the
+                    // global gesture shape armed and apply an app's single
+                    // override to the plain press only, preserving swipes.
+                    if let Some(Binding::Single(action)) =
+                        effective.as_ref().and_then(|map| map.get(&button))
+                    {
+                        map.insert(GestureDirection::Click, action.clone());
+                    }
+                    Some((button, map))
+                }
                 Binding::Single(_) => None,
             }
         })
@@ -219,7 +233,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         // The dedicated button gestures by default...
         let dedicated = maps
             .get(&ButtonId::GestureButton)
@@ -272,7 +286,7 @@ mod tests {
         // Default device: the dedicated HID++ gesture button gestures, with its
         // defaults seeded.
         let mut cfg = Config::default();
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         assert_eq!(
             maps.get(&ButtonId::GestureButton)
                 .and_then(|m| m.get(&GestureDirection::Up)),
@@ -285,8 +299,45 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
-            hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
+            hidpp_gesture_maps_for(&cfg, Some("2b042"), None).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
+    }
+
+    #[test]
+    fn hidpp_source_applies_per_app_click_and_preserves_swipes() {
+        let mut cfg = Config::default();
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.apple.Safari",
+            ButtonId::GestureButton,
+            Some(Action::BrowserBack),
+        );
+
+        let global = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
+        let safari = hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.apple.Safari"));
+        let global_map = global
+            .get(&ButtonId::GestureButton)
+            .expect("default HID++ gesture map");
+        let safari_map = safari
+            .get(&ButtonId::GestureButton)
+            .expect("app override must keep gesture mode armed");
+
+        assert_eq!(
+            safari_map.get(&GestureDirection::Click),
+            Some(&Action::BrowserBack)
+        );
+        for direction in [
+            GestureDirection::Up,
+            GestureDirection::Down,
+            GestureDirection::Left,
+            GestureDirection::Right,
+        ] {
+            assert_eq!(
+                safari_map.get(&direction),
+                global_map.get(&direction),
+                "per-app click override changed {direction:?}"
+            );
+        }
     }
 }
