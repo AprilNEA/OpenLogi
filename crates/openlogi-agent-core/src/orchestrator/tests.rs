@@ -810,6 +810,42 @@ fn software_scroll_inversion_skips_native_and_receiver_paired_devices() {
 }
 
 #[test]
+fn identical_devices_disagreeing_on_inversion_invert_neither() {
+    use std::collections::BTreeSet;
+
+    // The hook sees only vendor/product, so it cannot honour one setting without
+    // also applying it to the twin. Inverting a wheel nobody asked for is worse.
+    let mut config = Config::default();
+    config.set_invert_scroll("left-hand", true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        direct_dev("left-hand", 0xb020, false),
+        direct_dev("right-hand", 0xb020, false),
+    ];
+
+    assert_eq!(orch.software_scroll_inversion(), BTreeSet::new());
+}
+
+#[test]
+fn identical_devices_agreeing_on_inversion_yield_one_entry() {
+    use std::collections::BTreeSet;
+
+    let mut config = Config::default();
+    config.set_invert_scroll("left-hand", true);
+    config.set_invert_scroll("right-hand", true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        direct_dev("left-hand", 0xb020, false),
+        direct_dev("right-hand", 0xb020, false),
+    ];
+
+    assert_eq!(
+        orch.software_scroll_inversion(),
+        BTreeSet::from([(0x046d_u32, 0xb020_u32)])
+    );
+}
+
+#[test]
 fn disabling_the_selected_device_keeps_another_devices_software_inversion() {
     use std::collections::BTreeSet;
 

@@ -263,18 +263,51 @@ impl Orchestrator {
     /// Only [`DeviceRoute::Direct`] devices qualify — a receiver-paired device
     /// reports the receiver's ids, which would match every device on that
     /// dongle.
+    ///
+    /// Two identical directly-attached mice share one vendor/product pair, which
+    /// is all the hook can see, so they cannot hold different settings. When
+    /// their configs disagree the pair is dropped rather than applied to both:
+    /// inverting a wheel the user never asked to invert is the worse failure,
+    /// and it would be untraceable from the GUI.
     fn software_scroll_inversion(&self) -> BTreeSet<(u32, u32)> {
-        self.devices
-            .iter()
-            .filter(|dev| self.config.device_enabled(&dev.config_key))
-            .filter(|dev| !dev.capabilities.is_some_and(|caps| caps.scroll_inversion))
-            .filter(|dev| self.config.invert_scroll(&dev.config_key))
-            .filter_map(|dev| match dev.route {
-                Some(DeviceRoute::Direct {
-                    vendor_id,
-                    product_id,
-                }) => Some((u32::from(vendor_id), u32::from(product_id))),
-                _ => None,
+        // Per identity: whether some device wants inversion, and whether some
+        // other device sharing that identity does not.
+        let mut by_identity: BTreeMap<(u32, u32), (bool, bool)> = BTreeMap::new();
+        for dev in &self.devices {
+            if !self.config.device_enabled(&dev.config_key)
+                || dev.capabilities.is_some_and(|caps| caps.scroll_inversion)
+            {
+                continue;
+            }
+            let Some(DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            }) = dev.route
+            else {
+                continue;
+            };
+            let entry = by_identity
+                .entry((u32::from(vendor_id), u32::from(product_id)))
+                .or_default();
+            if self.config.invert_scroll(&dev.config_key) {
+                entry.0 = true;
+            } else {
+                entry.1 = true;
+            }
+        }
+        by_identity
+            .into_iter()
+            .filter_map(|(identity, (wanted, refused))| {
+                if wanted && refused {
+                    warn!(
+                        vendor_id = identity.0,
+                        product_id = identity.1,
+                        "identical devices disagree on scroll inversion; the hook \
+                         cannot tell them apart, so neither wheel is inverted"
+                    );
+                    return None;
+                }
+                wanted.then_some(identity)
             })
             .collect()
     }
