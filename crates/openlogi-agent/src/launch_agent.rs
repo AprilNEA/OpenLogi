@@ -337,20 +337,43 @@ fn enablement_marker_path() -> io::Result<PathBuf> {
 
 /// Enable the unit and record that this app is the one that did.
 ///
-/// The marker is written only once `systemctl` reports success. Recording an
-/// enablement that never happened — no session bus, unit not found — would let
-/// a later reconcile disable something this app never turned on.
+/// The claim is recorded *before* enabling. An enablement this app cannot
+/// record is one a later reconcile could never withdraw, leaving autostart
+/// running while the setting reads off — so if the marker cannot be written,
+/// autostart is left alone rather than turned on untrackably. If `systemctl`
+/// then fails, the claim is dropped again: recording an enablement that never
+/// happened would let a later reconcile disable something this app never
+/// turned on.
 ///
 /// Claiming an enablement the user made by hand is deliberate: reaching the
 /// toggle at all is an explicit request for this app to manage autostart, and
 /// the setting has to mean what it says when it is switched back off.
 #[cfg(target_os = "linux")]
 fn enable_unit() {
-    if !run_systemctl(&["enable", UNIT_NAME]) {
+    if let Err(e) = record_enablement() {
+        warn!(
+            error = %e,
+            "could not record the autostart enablement; leaving autostart unchanged",
+        );
         return;
     }
-    if let Err(e) = record_enablement() {
-        warn!(error = %e, "could not record the autostart enablement");
+    if !run_systemctl(&["enable", UNIT_NAME]) {
+        clear_enablement_marker();
+    }
+}
+
+/// Drop this app's claim on the enablement. Absent is success.
+#[cfg(target_os = "linux")]
+fn clear_enablement_marker() {
+    let Ok(marker) = enablement_marker_path() else {
+        return;
+    };
+    match std::fs::remove_file(&marker) {
+        Ok(()) => debug!(path = %marker.display(), "cleared the autostart marker"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(error = %e, path = %marker.display(), "could not clear the autostart marker");
+        }
     }
 }
 
@@ -386,9 +409,7 @@ fn disable_unit_if_ours() {
         // an enablement this app is still responsible for.
         return;
     }
-    if let Err(e) = std::fs::remove_file(&marker) {
-        warn!(error = %e, path = %marker.display(), "could not clear the autostart marker");
-    }
+    clear_enablement_marker();
 }
 
 /// Path to the generated unit:
