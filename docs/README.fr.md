@@ -106,7 +106,7 @@ Téléchargez le `.deb` ou le `.rpm` depuis la [dernière release](https://githu
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
+sudo dpkg -i openlogi-*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm

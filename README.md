@@ -110,7 +110,7 @@ Download the package for your distribution from the
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
+sudo dpkg -i openlogi-*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
