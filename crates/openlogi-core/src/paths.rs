@@ -116,10 +116,22 @@ pub fn home_dir() -> Result<PathBuf, PathsError> {
 /// The raw XDG config home directory (without the `openlogi` subdirectory).
 ///
 /// Honours an absolute `$XDG_CONFIG_HOME`; falls back to `~/.config`.
-/// Useful when placing files that belong to other apps under the same base
-/// (e.g. systemd user units at `$XDG_CONFIG_HOME/systemd/user/`).
+/// Useful when reading files that belong to another app's namespace under the
+/// same base. This tier is the user's own: generated files belong under
+/// [`xdg_data_home`] instead, which systemd and friends rank below it.
 pub fn xdg_config_home() -> Result<PathBuf, PathsError> {
     Ok(xdg()?.config_dir())
+}
+
+/// The raw XDG data home directory (without the `openlogi` subdirectory).
+///
+/// Honours an absolute `$XDG_DATA_HOME`; falls back to `~/.local/share`.
+/// The counterpart to [`xdg_config_home`] for files that belong to another
+/// app's namespace under the same base — generated systemd user units at
+/// `$XDG_DATA_HOME/systemd/user/`, which is the tier systemd reserves for
+/// units installed on the user's behalf rather than authored by them.
+pub fn xdg_data_home() -> Result<PathBuf, PathsError> {
+    Ok(xdg()?.data_dir())
 }
 
 /// Directory holding the user's `config.toml`.
