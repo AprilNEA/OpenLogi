@@ -46,7 +46,6 @@ const VPA_HUE: i32 = 2;
 const VPA_SATURATION: i32 = 3;
 const VPA_SHARPNESS: i32 = 4;
 const VPA_WHITE_BALANCE: i32 = 6;
-const VPA_BACKLIGHT_COMPENSATION: i32 = 8;
 const CC_ZOOM: i32 = 3;
 const CC_EXPOSURE: i32 = 4;
 const CC_FOCUS: i32 = 6;
@@ -68,8 +67,7 @@ impl CameraControl {
             Self::Zoom => Prop::CameraControl(CC_ZOOM),
             Self::Focus => Prop::CameraControl(CC_FOCUS),
             Self::Exposure => Prop::CameraControl(CC_EXPOSURE),
-            Self::PowerLineFrequency => Prop::Unsupported,
-            Self::LowLightCompensation => Prop::VideoProcAmp(VPA_BACKLIGHT_COMPENSATION),
+            Self::PowerLineFrequency | Self::LowLightCompensation => Prop::Unsupported,
             Self::Brightness => Prop::VideoProcAmp(VPA_BRIGHTNESS),
             Self::Contrast => Prop::VideoProcAmp(VPA_CONTRAST),
             Self::Saturation => Prop::VideoProcAmp(VPA_SATURATION),
@@ -290,6 +288,7 @@ impl<'a> Device<'a> {
                 max,
                 default,
                 current,
+                value_mask: None,
             },
             caps,
         ))

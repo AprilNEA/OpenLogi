@@ -407,15 +407,17 @@ impl UsbDevice {
     }
 
     /// Read one control's complete range. Boolean AE priority controls need
-    /// synthetic bounds because UVC cameras commonly implement only GET_CUR.
+    /// synthetic bounds because UVC cameras commonly implement only GET_CUR;
+    /// without GET_DEF, the live value is the only safe reset target.
     fn range(&self, control: CameraControl) -> Result<ControlRange, ControlError> {
         if control == CameraControl::LowLightCompensation {
             let current = self.get(control, UVC_GET_CUR)?;
             return Ok(ControlRange {
                 min: 0,
                 max: 1,
-                default: self.get(control, UVC_GET_DEF).unwrap_or(0),
+                default: self.get(control, UVC_GET_DEF).unwrap_or(current),
                 current,
+                value_mask: None,
             });
         }
         let min = self.get(control, UVC_GET_MIN)?;
@@ -427,6 +429,7 @@ impl UsbDevice {
             max,
             default,
             current,
+            value_mask: None,
         })
     }
 

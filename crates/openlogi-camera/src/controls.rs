@@ -111,6 +111,45 @@ pub struct ControlRange {
     pub max: i32,
     pub default: i32,
     pub current: i32,
+    /// Bit `n` is set when discrete value `n` is supported. `None` means every
+    /// value in the range is available.
+    pub value_mask: Option<u32>,
+}
+
+impl ControlRange {
+    /// Whether the device reports `value` as supported.
+    #[must_use]
+    pub fn supports(self, value: i32) -> bool {
+        if !(self.min..=self.max).contains(&value) {
+            return false;
+        }
+        self.value_mask.is_none_or(|mask| {
+            u32::try_from(value)
+                .ok()
+                .filter(|value| *value < u32::BITS)
+                .is_some_and(|value| mask & (1 << value) != 0)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControlRange;
+
+    #[test]
+    fn discrete_range_rejects_missing_values() {
+        let range = ControlRange {
+            min: 0,
+            max: 3,
+            default: 1,
+            current: 1,
+            value_mask: Some((1 << 1) | (1 << 3)),
+        };
+
+        assert!(range.supports(1));
+        assert!(!range.supports(2));
+        assert!(range.supports(3));
+    }
 }
 
 /// Why a UVC control operation failed.

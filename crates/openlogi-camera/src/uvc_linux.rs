@@ -292,6 +292,11 @@ fn range_of(device: &Device, description: &Description) -> Option<ControlRange> 
         max: clamp_i32(description.maximum),
         default: clamp_i32(description.default),
         current: clamp_i32(current),
+        value_mask: description.items.as_ref().and_then(|items| {
+            items.iter().try_fold(0u32, |mask, (value, _)| {
+                (*value < u32::BITS).then_some(mask | (1u32 << *value))
+            })
+        }),
     })
 }
 

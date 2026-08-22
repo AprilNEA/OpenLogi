@@ -863,8 +863,9 @@ fn control_row(
 ) -> AnyElement {
     let slider = &panel.sliders[ix];
     if slider.control == CameraControl::PowerLineFrequency
-        && slider.range.min <= 1
-        && slider.range.max >= 2
+        && [1, 2, 3]
+            .into_iter()
+            .any(|value| slider.range.supports(value))
     {
         return frequency_row(panel, ix, cx, pal);
     }
@@ -971,7 +972,7 @@ fn frequency_row(
         (3, tr!("Auto")),
     ]
     .into_iter()
-    .filter(|(value, _)| *value >= slider.range.min && *value <= slider.range.max)
+    .filter(|(value, _)| slider.range.supports(*value))
     .enumerate()
     {
         let active = value == current;
