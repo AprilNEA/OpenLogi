@@ -6,7 +6,7 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice,
+    LightCapabilities, PairedDevice, StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::hid::DeviceRoute;
@@ -179,12 +179,15 @@ pub(super) fn build_device_list(
                     // resolver cannot find a match this cycle (e.g. the index
                     // is being rewritten by the sync task), fall back to the
                     // persisted identity's display name if it carries a known
-                    // product name and the device kind hasn't changed (a kind
-                    // change signals a re-pairing — the stale name must not
-                    // be inherited by the replacement device).
+                    // product name and the device model hasn't changed (a kind
+                    // change or model mismatch signals a re-pairing — the stale
+                    // name must not be inherited by the replacement device).
                     config
                         .device_identity(&config_key)
                         .filter(|id| id.kind == paired.kind)
+                        .filter(|id| {
+                            persisted_model_matches_paired(id, paired)
+                        })
                         .map(|id| &id.display_name)
                         .filter(|name| !is_fallback_display_name(name))
                         .cloned()
@@ -662,6 +665,35 @@ pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) ->
 
 /// Tidy a raw HID++ codename for display when no curated asset name exists.
 /// Logitech reports gaming codenames in ALL CAPS (e.g. `"G513 RGB MECHANICAL
+/// Checks whether a persisted [`DeviceIdentity`] plausibly refers to the same
+/// product model as the live [`PairedDevice`]. Used to guard against inheriting
+/// a stale display name when a different device is re-paired into the same
+/// receiver slot.
+///
+/// Returns `true` when no available model-level identifier contradicts the
+/// persisted identity. When neither side carries a codename or model_info, the
+/// kind-only match is accepted (no stronger evidence is available).
+fn persisted_model_matches_paired(id: &DeviceIdentity, paired: &PairedDevice) -> bool {
+    // Codename is the lightest model discriminator — available even for
+    // HID++ 1.0 devices that lack feature 0x0003.
+    if let (Some(persisted_cn), Some(live_cn)) =
+        (id.codename.as_deref(), paired.codename.as_deref())
+    {
+        return persisted_cn == live_cn;
+    }
+
+    // model_info config_key: extended_model_id + model_ids[0].
+    if let (Some(persisted_mi), Some(live_mi)) =
+        (id.model_info.as_ref(), paired.model_info.as_ref())
+    {
+        return persisted_mi.config_key() == live_mi.config_key();
+    }
+
+    // No discriminator available beyond kind — conservatively allow the
+    // fallback (matches pre-existing behaviour).
+    true
+}
+
 /// GAMING KEYBOARD"`); title-case each word so it reads like the asset names
 /// (`"MX Master 3S"`) instead of shouting, while keeping model numbers (tokens
 /// with a digit, e.g. `G513`) and short acronyms (`RGB`, `TKL`, `SE`) as-is.

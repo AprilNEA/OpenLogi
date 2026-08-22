@@ -363,10 +363,13 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
         // carries richer information, preserve it — but only when the device
         // in this slot hasn't changed. A different device kind signals a
         // re-pairing, in which case the stale identity must not be retained.
+        // Additionally, even within the same kind, a different model (detected
+        // via codename or model_info config_key) signals slot reuse by a
+        // different physical product.
         if let Some(existing) = config.device_identity(config_key)
             && !identity_is_resolved(&identity)
             && identity_is_resolved(existing)
-            && existing.kind == identity.kind
+            && same_model_identity(existing, &identity, record)
         {
             continue;
         }
@@ -394,6 +397,52 @@ fn identity_is_resolved(identity: &DeviceIdentity) -> bool {
     // previously resolved asset name (e.g. "K540/K545", "MX Master 3S").
     let name = &identity.display_name;
     !is_fallback_display_name(name)
+}
+
+/// Checks whether the persisted identity and the incoming (possibly fallback)
+/// identity plausibly refer to the same physical product model in this slot.
+///
+/// When the incoming identity is unresolved (fallback-quality), it may lack
+/// codename and model_info entirely. In that case we also consult the live
+/// [`DeviceRecord`] for its codename — which may already be known from the
+/// receiver pairing table even before full feature probing completes.
+///
+/// Returns `true` when no evidence of a model change exists (safe to
+/// preserve the old identity). Returns `false` when any available identifier
+/// positively contradicts the persisted model — indicating a re-pairing into
+/// the same slot by a different product.
+fn same_model_identity(
+    existing: &DeviceIdentity,
+    incoming: &DeviceIdentity,
+    record: &DeviceRecord,
+) -> bool {
+    // Different device kind is an immediate disqualifier.
+    if existing.kind != incoming.kind {
+        return false;
+    }
+
+    // If the incoming identity carries a codename (even without model_info),
+    // compare it against the persisted one. A mismatch means a different
+    // product now occupies this slot.
+    let live_codename = incoming.codename.as_deref().or(record.codename.as_deref());
+    if let (Some(existing_cn), Some(new_cn)) = (existing.codename.as_deref(), live_codename) {
+        return existing_cn == new_cn;
+    }
+
+    // If both carry model_info, compare the model-level config_key (which is
+    // the extended_model_id + model_ids[0] — identifies the product model but
+    // not the physical unit).
+    if let (Some(existing_mi), Some(incoming_mi)) =
+        (existing.model_info.as_ref(), incoming.model_info.as_ref())
+    {
+        return existing_mi.config_key() == incoming_mi.config_key();
+    }
+
+    // No discriminating evidence available — conservatively assume it's the
+    // same device (the guard stays active). This matches the pre-existing
+    // kind-only behaviour for the corner case where neither side has any
+    // model-level identifiers at all.
+    true
 }
 
 /// Returns true if the display name looks like a generic fallback rather than
