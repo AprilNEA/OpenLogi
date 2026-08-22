@@ -7,6 +7,7 @@
 #![deny(missing_docs)]
 
 pub mod action_ring;
+mod app_selector;
 pub mod binding;
 pub mod bindings;
 pub mod brand;

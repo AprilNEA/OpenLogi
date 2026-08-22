@@ -6,7 +6,7 @@
 //! as `"receiver:abc123:slot:2"`. Schema migrations branch on
 //! [`Config::schema_version`].
 
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,7 @@ pub use settings::{
     ThumbwheelSensitivity, WheelMode,
 };
 
+use crate::app_selector::overlay_for;
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
     RingAction, default_binding, default_binding_for, default_gesture_binding,
@@ -409,7 +410,7 @@ impl Config {
         };
         let mut out = device.bindings.clone();
         if let Some(bid) = bundle_id
-            && let Some(overlay) = app_overlay(&device.per_app_bindings, bid)
+            && let Some(overlay) = overlay_for(&device.per_app_bindings, bid)
         {
             for (k, v) in overlay {
                 out.insert(*k, Binding::Single(v.clone()));
@@ -564,7 +565,7 @@ impl Config {
     #[must_use]
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
-            app_overlay(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
+            overlay_for(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
         })
     }
 
@@ -779,27 +780,4 @@ impl Config {
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
     }
-}
-
-/// Resolve the most specific application overlay for a foreground identifier.
-///
-/// Exact keys retain precedence. On Windows the foreground identifier is a
-/// lower-cased executable path, so `exe:<filename>` provides a stable fallback
-/// for Store and self-updating applications whose install directory changes
-/// between versions. Recognizing both path separators keeps hand-authored
-/// Windows config inspectable on every platform without changing macOS bundle
-/// identifiers or Linux application classes.
-fn app_overlay<'a, T>(overlays: &'a BTreeMap<String, T>, app: &str) -> Option<&'a T> {
-    overlays.get(app).or_else(|| {
-        let executable_name = app.rsplit(['\\', '/']).next()?;
-        if executable_name.is_empty()
-            || !Path::new(executable_name)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-        {
-            return None;
-        }
-
-        overlays.get(&format!("exe:{}", executable_name.to_ascii_lowercase()))
-    })
 }
