@@ -92,8 +92,19 @@ impl MouseModelView {
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
     /// `cx.notify()` to re-render.
-    pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
+    ///
+    /// Switching direction keeps the same popover open, so this — not
+    /// [`Self::set_binding_popover_open`] — is where the shortcut field has to
+    /// be reset: the flyout is rebuilt with `on_pick` aimed at the new
+    /// direction, and retained text would commit there instead.
+    pub(crate) fn set_gesture_selected_dir(
+        &mut self,
+        dir: Option<GestureDirection>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         self.gesture_active_dir = dir;
+        self.clear_shortcut_input(window, cx);
     }
 
     fn set_binding_popover_open(
@@ -108,10 +119,17 @@ impl MouseModelView {
         } else if self.open_binding_popover == Some(popover) {
             self.open_binding_popover = None;
         }
-        // One shortcut field serves every binding popover, so without this a
-        // chord typed for one button — committed or not — would still be
-        // sitting there when the next button's picker opens. Safe here because
-        // `on_open_change` runs outside paint (see `gesture_active_dir`).
+        self.clear_shortcut_input(window, cx);
+    }
+
+    /// Empty the shared shortcut field.
+    ///
+    /// One field serves every binding popover and every gesture direction, so
+    /// without this a chord typed against one target — committed or not —
+    /// would still be sitting there, ready to commit, once the user moves to
+    /// the next. Safe from these callers because all of them run outside paint
+    /// (see [`Self::gesture_active_dir`]).
+    fn clear_shortcut_input(&self, window: &mut Window, cx: &mut App) {
         if let Some(input) = &self.shortcut_input {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
@@ -409,7 +427,7 @@ where
             view_state.update(cx, |v, vcx| {
                 v.set_binding_popover_open(binding_popover, *open, window, vcx);
                 if !*open {
-                    v.set_gesture_selected_dir(None);
+                    v.set_gesture_selected_dir(None, window, vcx);
                 }
                 vcx.notify();
             });

@@ -447,10 +447,10 @@ fn direction_cell(
         // Click opens this direction's flyout; clicking the active cell again
         // closes it. (Hover-to-open was too easy to mis-trigger while moving the
         // cursor across the plus.)
-        .on_click(move |_event, _window, cx| {
+        .on_click(move |_event, window, cx| {
             view.update(cx, |v, vcx| {
                 let next = (v.gesture_selected_dir() != Some(dir)).then_some(dir);
-                v.set_gesture_selected_dir(next);
+                v.set_gesture_selected_dir(next, window, vcx);
                 vcx.notify();
             });
         })
