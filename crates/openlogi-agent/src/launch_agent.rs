@@ -24,13 +24,26 @@
 //!
 //! ## Linux
 //!
-//! A systemd **user** unit at
-//! `$XDG_CONFIG_HOME/systemd/user/openlogi-agent.service` (default
-//! `~/.config/systemd/user/openlogi-agent.service`) is written/removed, then
-//! `systemctl --user daemon-reload` and `enable`/`disable` are called.
+//! When a packaged unit already launches this exact binary — installed by a
+//! distribution package, `install.sh`, or an administrator — it is simply
+//! enabled. Generating a second copy would duplicate its directives one tier
+//! higher, shadowing later changes to it and outliving its removal, since no
+//! package script can clean a home directory.
+//!
+//! Otherwise a systemd **user** unit at
+//! `$XDG_DATA_HOME/systemd/user/openlogi-agent.service` (default
+//! `~/.local/share/systemd/user/openlogi-agent.service`) is written/removed,
+//! then `systemctl --user daemon-reload` and `enable`/`disable` are called.
+//! That is the tier systemd reserves for units installed *on* a user's behalf;
+//! `$XDG_CONFIG_HOME/systemd/user` outranks it and belongs to the user, so a
+//! unit they author by hand always wins over this generated one.
 //! `Restart=on-failure` mirrors the macOS `KeepAlive=SuccessfulExit:false`
 //! semantics. A clean `exit(0)` leaves the unit enabled but stopped until the
 //! next session login.
+//!
+//! Earlier versions wrote into `$XDG_CONFIG_HOME/systemd/user` directly; such a
+//! file is removed on reconcile, but only when it round-trips through the
+//! renderer and is therefore provably one of ours.
 
 use tracing::debug;
 
@@ -38,6 +51,8 @@ use tracing::debug;
 use std::fmt;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::io;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 #[cfg(target_os = "windows")]
@@ -214,10 +229,40 @@ fn reconcile_windows(enabled: bool) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 const UNIT_NAME: &str = "openlogi-agent.service";
 
+/// Unit directories outside the two user-writable tiers, in systemd's own
+/// precedence order (`systemd.unit(5)`, "Load path when running in user mode").
+///
+/// Probed to answer one question: has something outside this app's control —
+/// a distribution package, `install.sh`, or an administrator — already
+/// installed this unit? The user tiers are deliberately absent: a file there
+/// is either ours or the user's, never a package's.
+#[cfg(target_os = "linux")]
+const SYSTEM_UNIT_DIRS: &[&str] = &[
+    "/etc/systemd/user",
+    "/usr/local/share/systemd/user",
+    "/usr/share/systemd/user",
+    "/usr/local/lib/systemd/user",
+    "/usr/lib/systemd/user",
+];
+
 #[cfg(target_os = "linux")]
 fn reconcile_linux(enabled: bool) -> io::Result<()> {
-    let path = unit_path()?;
     let exe = std::env::current_exe()?;
+    migrate_legacy_unit();
+
+    // A packaged unit that already launches this exact binary makes a generated
+    // copy pure redundancy — identical directives, one tier higher. Writing one
+    // would shadow the package (later changes to the packaged unit would never
+    // reach this user) and outlive it (uninstall cannot reach a home
+    // directory). Enable the packaged unit instead and write nothing.
+    if enabled && let Some(packaged) = packaged_unit_for(&exe) {
+        remove_generated_unit()?;
+        info!(path = %packaged.display(), "enabling the packaged systemd user unit");
+        run_systemctl(&["enable", UNIT_NAME]);
+        return Ok(());
+    }
+
+    let path = generated_unit_path()?;
     let desired = enabled.then(|| render_unit(&exe.to_string_lossy()));
 
     let current = std::fs::read_to_string(&path).ok();
@@ -243,18 +288,162 @@ fn reconcile_linux(enabled: bool) -> io::Result<()> {
             run_systemctl(&["daemon-reload"]);
             info!(path = %path.display(), "systemd user unit removed");
         }
-        (None, None) => debug!("systemd user unit already absent"),
+        (None, None) => {
+            debug!("systemd user unit already absent");
+            // The packaged unit, if any, may still be enabled from an earlier
+            // run; disabling is cheap and idempotent when it is not.
+            run_systemctl(&["disable", UNIT_NAME]);
+        }
     }
     Ok(())
 }
 
-/// Path to the per-user systemd unit:
-/// `$XDG_CONFIG_HOME/systemd/user/openlogi-agent.service`
-/// (default `~/.config/systemd/user/openlogi-agent.service`).
+/// Path to the generated unit:
+/// `$XDG_DATA_HOME/systemd/user/openlogi-agent.service`
+/// (default `~/.local/share/systemd/user/openlogi-agent.service`).
+///
+/// The *data* tier, not `$XDG_CONFIG_HOME`: systemd ranks it below the user's
+/// own config directory, so a unit the user writes by hand always wins over
+/// this generated one. `$XDG_CONFIG_HOME/systemd/user` belongs to them.
 #[cfg(target_os = "linux")]
-fn unit_path() -> io::Result<PathBuf> {
+fn generated_unit_path() -> io::Result<PathBuf> {
+    let data_home = openlogi_core::paths::xdg_data_home().map_err(io::Error::other)?;
+    Ok(data_home.join("systemd").join("user").join(UNIT_NAME))
+}
+
+/// The location earlier versions wrote to, inside the user's own config tier.
+/// Read only, to clean up after them — never written.
+#[cfg(target_os = "linux")]
+fn legacy_unit_path() -> io::Result<PathBuf> {
     let config_home = openlogi_core::paths::xdg_config_home().map_err(io::Error::other)?;
     Ok(config_home.join("systemd").join("user").join(UNIT_NAME))
+}
+
+/// Remove the unit earlier versions wrote into `$XDG_CONFIG_HOME/systemd/user`.
+///
+/// That path outranks every other tier, so leaving it behind would shadow both
+/// the generated unit and any packaged one indefinitely — including a stale
+/// `ExecStart` pointing at a binary that no longer exists.
+///
+/// Only a file this app generated is removed, and provenance is exact rather
+/// than heuristic. One template has ever shipped, parameterised solely by
+/// `ExecStart`, so splicing a file's own `ExecStart` line back into that
+/// template reproduces the file byte for byte if and only if we rendered it.
+/// Anything carrying another directive is the user's: it is left in place and
+/// keeps winning, which is the right outcome for a unit they chose to author.
+#[cfg(target_os = "linux")]
+fn migrate_legacy_unit() {
+    let Ok(path) = legacy_unit_path() else {
+        return;
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if !is_generated_unit(&contents) {
+        warn!(
+            path = %path.display(),
+            "leaving a hand-edited systemd user unit in place; it takes precedence over OpenLogi's own",
+        );
+        return;
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            info!(path = %path.display(), "removed the generated systemd user unit from the user's config tier");
+            // The enable symlink still points at the file just deleted; the
+            // reload plus the enable that follows re-point it at the new unit.
+            run_systemctl(&["daemon-reload"]);
+        }
+        Err(e) => {
+            warn!(error = %e, path = %path.display(), "could not remove the legacy systemd user unit");
+        }
+    }
+}
+
+/// Whether `contents` is a unit this app rendered, for *any* executable path.
+#[cfg(target_os = "linux")]
+fn is_generated_unit(contents: &str) -> bool {
+    exec_start_value(contents).is_some_and(|value| render_unit_with_exec(value) == contents)
+}
+
+/// The verbatim, still-escaped value of the file's single `ExecStart=` line.
+///
+/// `None` when there is no such line, or more than one — neither shape is
+/// something [`render_unit`] can produce.
+#[cfg(target_os = "linux")]
+fn exec_start_value(contents: &str) -> Option<&str> {
+    let mut values = contents
+        .lines()
+        .filter_map(|line| line.strip_prefix("ExecStart="));
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+/// The first system-tier unit whose `ExecStart` launches `exe`, if any.
+///
+/// A unit that launches some *other* binary is not a match: the generated unit
+/// is what makes autostart work for a build the packaged unit cannot describe,
+/// so in that case the normal write path must still run.
+#[cfg(target_os = "linux")]
+fn packaged_unit_for(exe: &Path) -> Option<PathBuf> {
+    SYSTEM_UNIT_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join(UNIT_NAME))
+        .find(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|contents| exec_start_value(&contents).map(unescape_systemd_exec))
+                .is_some_and(|packaged| same_executable(Path::new(&packaged), exe))
+        })
+}
+
+/// Recover the executable path from a rendered `ExecStart` value.
+///
+/// Inverts [`escape_systemd_exec`] and drops any arguments. Units using
+/// systemd's `ExecStart` prefix characters (`-`, `@`, `+`, `!`) are not
+/// unwrapped: they are nothing this app writes, and failing to match one
+/// simply falls back to generating a unit, which is the safe direction.
+#[cfg(target_os = "linux")]
+fn unescape_systemd_exec(value: &str) -> String {
+    let program = match value.strip_prefix('"') {
+        Some(rest) => rest.split_once('"').map_or_else(
+            || rest.to_string(),
+            |(inner, _)| inner.replace("\\\"", "\""),
+        ),
+        None => value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+    };
+    program.replace("%%", "%").replace("$$", "$")
+}
+
+/// Whether two paths name the same executable.
+///
+/// Resolved through symlinks when both exist, so a merged-`/usr` layout or an
+/// `install.sh --prefix` that points one at the other still compares equal.
+/// Falls back to a literal comparison when either side cannot be resolved.
+#[cfg(target_os = "linux")]
+fn same_executable(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Delete the generated unit if present. Absent is success, not an error.
+#[cfg(target_os = "linux")]
+fn remove_generated_unit() -> io::Result<()> {
+    let path = generated_unit_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            info!(path = %path.display(), "removed the redundant generated systemd user unit");
+            run_systemctl(&["daemon-reload"]);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Render the systemd user unit for the given executable path.
@@ -264,7 +453,17 @@ fn unit_path() -> io::Result<PathBuf> {
 /// the tray's Quit) stays stopped until the next login.
 #[cfg(target_os = "linux")]
 fn render_unit(exe: &str) -> String {
-    let exec_start = escape_systemd_exec(exe);
+    render_unit_with_exec(&escape_systemd_exec(exe))
+}
+
+/// Render the unit around an `ExecStart` value that is **already escaped**.
+///
+/// Split out so [`is_generated_unit`] can splice a file's own `ExecStart` line
+/// back in verbatim: running [`escape_systemd_exec`] over an already-escaped
+/// value would double `%%` into `%%%%`, and a unit this app wrote would fail to
+/// match itself.
+#[cfg(target_os = "linux")]
+fn render_unit_with_exec(exec_start: &str) -> String {
     format!(
         "[Unit]\n\
         Description=OpenLogi background agent (Logitech HID++ device control)\n\
@@ -336,122 +535,8 @@ impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
 
 #[cfg(test)]
 #[cfg(target_os = "macos")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rendered_plist_targets_the_agent_and_keeps_alive() {
-        let body = render_plist(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        )
-        .expect("render plist");
-        assert!(body.contains(LABEL));
-        assert!(body.contains("openlogi-agent"));
-        assert!(body.contains("RunAtLoad"));
-        // KeepAlive uses SuccessfulExit:false so a crash respawns but the tray's
-        // Quit (a clean exit(0)) is NOT relaunched; no --minimized (always headless).
-        let parsed = plist::Value::from_reader_xml(body.as_bytes()).expect("parse plist");
-        let keep_alive = parsed
-            .as_dictionary()
-            .and_then(|root| root.get("KeepAlive"))
-            .and_then(plist::Value::as_dictionary)
-            .expect("KeepAlive dictionary");
-        assert_eq!(
-            keep_alive
-                .get("SuccessfulExit")
-                .and_then(plist::Value::as_boolean),
-            Some(false)
-        );
-        assert!(!body.contains("--minimized"));
-    }
-
-    #[test]
-    fn render_plist_serializes_xml_metacharacters_in_the_path() {
-        // A home/app path with XML metacharacters (all legal APFS filename chars)
-        // must not produce a malformed plist launchd would reject.
-        let path = "/Users/R&D/Apps/<OpenLogi>/openlogi-agent";
-        let body = render_plist(path).expect("render plist");
-        let parsed = plist::Value::from_reader_xml(body.as_bytes()).expect("parse plist");
-        let args = parsed
-            .as_dictionary()
-            .and_then(|root| root.get("ProgramArguments"))
-            .and_then(plist::Value::as_array)
-            .expect("ProgramArguments array");
-        assert_eq!(args.first().and_then(plist::Value::as_string), Some(path));
-    }
-}
+mod macos_tests;
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]
-mod linux_tests {
-    use super::*;
-
-    #[test]
-    fn rendered_unit_targets_agent_and_restarts_on_failure() {
-        let body = render_unit("/usr/bin/openlogi-agent");
-        assert!(body.contains("ExecStart=/usr/bin/openlogi-agent"));
-        assert!(body.contains("Restart=on-failure"));
-        assert!(body.contains("WantedBy=graphical-session.target"));
-        assert!(!body.contains("--minimized"));
-    }
-
-    #[test]
-    fn rendered_unit_is_valid_ini_with_all_three_sections() {
-        let body = render_unit("/usr/bin/openlogi-agent");
-        assert!(body.contains("[Unit]"));
-        assert!(body.contains("[Service]"));
-        assert!(body.contains("[Install]"));
-    }
-
-    #[test]
-    fn escape_systemd_exec_doubles_percent() {
-        assert_eq!(
-            escape_systemd_exec("/home/user%20/bin/openlogi-agent"),
-            "/home/user%%20/bin/openlogi-agent"
-        );
-    }
-
-    #[test]
-    fn escape_systemd_exec_quotes_path_with_spaces() {
-        let result = escape_systemd_exec("/home/my user/bin/openlogi-agent");
-        assert_eq!(result, "\"/home/my user/bin/openlogi-agent\"");
-    }
-
-    #[test]
-    fn escape_systemd_exec_quotes_and_doubles_percent_with_spaces() {
-        let result = escape_systemd_exec("/home/my%20 user/openlogi-agent");
-        assert_eq!(result, "\"/home/my%%20 user/openlogi-agent\"");
-    }
-
-    #[test]
-    fn escape_systemd_exec_doubles_dollar() {
-        assert_eq!(
-            escape_systemd_exec("/opt/release$1/bin/openlogi-agent"),
-            "/opt/release$$1/bin/openlogi-agent"
-        );
-    }
-
-    #[test]
-    fn escape_systemd_exec_plain_path_unchanged() {
-        let path = "/usr/local/bin/openlogi-agent";
-        assert_eq!(escape_systemd_exec(path), path);
-    }
-
-    #[test]
-    fn systemctl_arguments_render_as_a_command_suffix() {
-        assert_eq!(
-            SystemctlArgsDisplay(&["enable", UNIT_NAME]).to_string(),
-            "enable openlogi-agent.service"
-        );
-    }
-
-    #[test]
-    fn unit_path_uses_home_fallback() {
-        // When XDG_CONFIG_HOME is unset (or relative), falls back to $HOME/.config.
-        // We can't mutate global env safely in a parallel test suite, so we test
-        // the logic indirectly: unit_path() must end in the UNIT_NAME component.
-        let path = unit_path().expect("unit_path should resolve with a valid HOME");
-        assert!(path.ends_with(UNIT_NAME));
-        assert!(path.to_string_lossy().contains("systemd/user"));
-    }
-}
+mod linux_tests;

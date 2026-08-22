@@ -162,9 +162,16 @@ show connected devices. Enable it for your user session:
 systemctl --user enable --now openlogi-agent.service
 ```
 
-Alternatively, toggle **Settings → General → Launch at login** in the GUI — it
-writes the unit to `~/.config/systemd/user/openlogi-agent.service`
-automatically.
+Alternatively, toggle **Settings → General → Launch at login** in the GUI. When
+a packaged unit is already installed it simply enables that one. Otherwise — a
+build from source, or an install under a custom prefix — it generates a unit at
+`~/.local/share/systemd/user/openlogi-agent.service` pointing at the running
+binary.
+
+Either way `~/.config/systemd/user/openlogi-agent.service` stays yours: systemd
+ranks it above both locations, so a unit you write there overrides whatever
+OpenLogi does. Use `systemctl --user edit openlogi-agent.service` for a drop-in
+that survives package upgrades.
 
 ## Verify the installation
 
