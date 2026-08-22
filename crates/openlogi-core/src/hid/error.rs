@@ -95,6 +95,13 @@ pub enum WriteError {
     /// Multiple raw HID nodes matched one physical route.
     #[error("multiple raw HID devices matched the route")]
     AmbiguousRawDevice,
+    /// A ROM profile sector was supplied to an operation that only accepts
+    /// selectable user profiles.
+    #[error("ROM profile sector {sector:#06x} is not selectable")]
+    InvalidProfileSector {
+        /// Rejected ROM sector.
+        sector: u16,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -132,6 +139,11 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read onboard-profile state. Appended last—variant order is wire format.
+    ReadOnboardProfiles,
+    /// Write onboard-profile mode or active sector. Appended last—variant
+    /// order is wire format.
+    WriteOnboardProfiles,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

@@ -39,8 +39,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    LightCommand, OnboardProfilesInfo, PasskeyMethod, ProfileEntry, ProfilesMode, ReceiverSelector,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -85,7 +86,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 23);
+    assert_eq!(PROTOCOL_VERSION, 24);
 }
 
 #[test]
@@ -172,6 +173,26 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(
+        &AgentRequest::SetOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            mode: ProfilesMode::Onboard,
+            profile: Some(2),
+        },
+        "190008463030444341464501010102",
+    );
+    assert_wire(
+        &AgentRequest::ReadOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1a0008463030444341464501",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -223,6 +244,41 @@ fn action_ring_types() {
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
+    assert_wire(&HidppOperation::ReadOnboardProfiles, "0f");
+    assert_wire(&HidppOperation::WriteOnboardProfiles, "10");
+}
+
+#[test]
+fn onboard_profile_types() {
+    let profiles = OnboardProfilesInfo {
+        profile_count: 2,
+        profile_count_oob: 1,
+        button_count: 11,
+        sector_count: 4,
+        sector_size: 254,
+        memory_model_id: 1,
+        profile_format_id: 1,
+        macro_format_id: 1,
+        mode: ProfilesMode::Onboard,
+        active_profile: 2,
+        directory: vec![
+            ProfileEntry {
+                sector: 1,
+                enabled: true,
+            },
+            ProfileEntry {
+                sector: 2,
+                enabled: false,
+            },
+            ProfileEntry {
+                sector: 0x0101,
+                enabled: true,
+            },
+        ],
+    };
+    assert_wire(&ProfilesMode::Host, "00");
+    assert_wire(&ProfilesMode::Onboard, "01");
+    assert_wire(&profiles, "02010b04fbfe0001010101020301010200fb010101");
 }
 
 #[test]
@@ -353,12 +409,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                onboard_profiles: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101",
     );
 }
 
@@ -446,6 +503,10 @@ fn device_settings_payloads() {
         "0904626f6f6d",
     );
     assert_wire(&WriteError::AgentUnavailable, "0a");
+    assert_wire(
+        &WriteError::InvalidProfileSector { sector: 0x0101 },
+        "0efb0101",
+    );
 
     // serde encodes SmartShiftMode's variant *index* (Free=0, Ratchet=1), not
     // the `#[repr(u8)]` firmware discriminants (1/2) — pinned here because it

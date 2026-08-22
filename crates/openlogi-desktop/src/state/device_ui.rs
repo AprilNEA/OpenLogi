@@ -6,12 +6,13 @@ use super::SmartShiftWriteStatus;
 use super::light::PendingLightCommand;
 
 /// Everything `AppState` tracks per device outside the persisted config and
-/// the lazily-loaded DPI/SmartShift reads ([`super::load::LazyDeviceData`]).
+/// the lazily-loaded device reads ([`super::load::LazyDeviceData`]).
 ///
-/// Replaces six parallel `BTreeMap<String, _>` fields that all shared the
+/// Replaces the parallel `BTreeMap<String, _>` fields that all shared the
 /// same device-key domain — manual camera-light override, volatile light
 /// settings, an in-flight light command, the inventory-miss counter, a
-/// pending SmartShift write id, and the SmartShift write-confirmation status
+/// pending SmartShift write id, SmartShift write-confirmation status, and an
+/// onboard-profile confirmation marker
 /// — with one row per device. A device absent from the owning map is
 /// equivalent to every field here at its default.
 #[derive(Debug, Default)]
@@ -30,4 +31,6 @@ pub(super) struct DeviceUiState {
     pub(super) smartshift_pending_confirm: Option<u64>,
     /// Visible outcome of the post-write SmartShift confirmation.
     pub(super) smartshift_write_status: Option<SmartShiftWriteStatus>,
+    /// Whether an optimistic onboard-profile write needs one confirming read.
+    pub(super) profiles_pending_confirm: bool,
 }

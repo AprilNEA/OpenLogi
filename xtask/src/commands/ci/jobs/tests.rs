@@ -28,10 +28,19 @@ fn workflow() -> Option<String> {
 /// again.
 fn workflow_commands(workflow: &str) -> String {
     workflow
+        .replace("\\\r\n", " ")
         .replace("\\\n", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn workflow_commands_joins_windows_continuations() {
+    assert_eq!(
+        workflow_commands("cargo doc \\\r\n  --workspace"),
+        "cargo doc --workspace"
+    );
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.

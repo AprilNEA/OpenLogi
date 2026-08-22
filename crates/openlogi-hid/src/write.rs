@@ -23,6 +23,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard_profiles;
 mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
@@ -53,6 +54,10 @@ pub use lighting::{
 pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraModel, apply as apply_litra,
     encode_command as encode_litra_command, matches_litra,
+};
+pub use onboard_profiles::{
+    apply_profiles_config, apply_profiles_config_on, get_onboard_profiles, get_onboard_profiles_on,
+    set_active_profile, set_profiles_mode,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{assert_matches, sync::Arc};
 
 use super::*;
 use hidpp::channel::HidppChannel;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
+use hidpp::feature::onboard_profiles::OnboardMode;
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 
@@ -11,13 +12,17 @@ use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_reports};
+use crate::write::onboard_profiles::{
+    onboard_mode_to_profiles, profiles_to_onboard_mode, validate_user_profile,
+};
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
     status_matches_desired, wheel_mode_to_smartshift,
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    ProfilesMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
 
@@ -63,6 +68,37 @@ fn smartshift_to_wheel_round_trips() {
     for mode in [SmartShiftMode::Free, SmartShiftMode::Ratchet] {
         assert_eq!(wheel_mode_to_smartshift(smartshift_to_wheel(mode)), mode);
     }
+}
+
+#[test]
+fn onboard_mode_maps_to_profiles_mode() {
+    assert_eq!(
+        onboard_mode_to_profiles(OnboardMode::Host),
+        ProfilesMode::Host
+    );
+    assert_eq!(
+        onboard_mode_to_profiles(OnboardMode::Onboard),
+        ProfilesMode::Onboard
+    );
+}
+
+#[test]
+fn profiles_mode_round_trips_through_firmware_mode() {
+    for mode in [ProfilesMode::Host, ProfilesMode::Onboard] {
+        assert_eq!(
+            onboard_mode_to_profiles(profiles_to_onboard_mode(mode)),
+            mode
+        );
+    }
+}
+
+#[test]
+fn rom_profile_sectors_are_rejected_before_device_io() {
+    assert_matches!(
+        validate_user_profile(0x0101),
+        Err(WriteError::InvalidProfileSector { sector: 0x0101 })
+    );
+    assert_matches!(validate_user_profile(0x0002), Ok(()));
 }
 
 #[test]

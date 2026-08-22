@@ -25,8 +25,8 @@
 //! - A standalone Litra light whose power / brightness / temperature writes
 //!   persist, and a `camera_active` flag that flips every 30s so the
 //!   camera-linked light rendering has something to follow.
-//! - DPI / SmartShift writes persist in memory and read back, so sliders and
-//!   toggles behave like a live device.
+//! - DPI / SmartShift / onboard-profile writes persist in memory and read
+//!   back, so sliders and toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
 
@@ -49,8 +49,9 @@ use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, TunableTorque, WriteError,
+    LightCommand, OnboardProfilesInfo, PasskeyMethod, ProfileEntry, ProfilesMode, ReceiverSelector,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque, WriteError,
+    is_rom_sector,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -221,6 +222,7 @@ struct DpiState {
 struct DeviceSettings {
     dpi: Option<DpiState>,
     smartshift: Option<SmartShiftStatus>,
+    onboard_profiles: Option<OnboardProfilesInfo>,
     lighting: bool,
 }
 
@@ -229,6 +231,7 @@ impl DeviceSettings {
         Self {
             dpi: None,
             smartshift: None,
+            onboard_profiles: None,
             lighting: false,
         }
     }
@@ -285,6 +288,32 @@ impl State {
                     ),
                     tunable_torque: Some(MOCK_TORQUE),
                 }),
+                onboard_profiles: Some(OnboardProfilesInfo {
+                    profile_count: 2,
+                    profile_count_oob: 1,
+                    button_count: 11,
+                    sector_count: 4,
+                    sector_size: 254,
+                    memory_model_id: 1,
+                    profile_format_id: 1,
+                    macro_format_id: 1,
+                    mode: ProfilesMode::Host,
+                    active_profile: 0,
+                    directory: vec![
+                        ProfileEntry {
+                            sector: 1,
+                            enabled: true,
+                        },
+                        ProfileEntry {
+                            sector: 2,
+                            enabled: true,
+                        },
+                        ProfileEntry {
+                            sector: 0x0101,
+                            enabled: true,
+                        },
+                    ],
+                }),
                 lighting: false,
             },
         );
@@ -294,6 +323,7 @@ impl State {
             DeviceSettings {
                 dpi: None,
                 smartshift: None,
+                onboard_profiles: None,
                 lighting: true,
             },
         );
@@ -305,6 +335,7 @@ impl State {
                     capabilities: DpiCapabilities::new((400u16..=4000).step_by(100).collect())?,
                 }),
                 smartshift: None,
+                onboard_profiles: None,
                 lighting: false,
             },
         );
@@ -513,6 +544,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: true,
                     haptic_feedback: true,
                     haptic_panel: true,
+                    onboard_profiles: true,
                 }),
             },
             PairedDevice {
@@ -560,6 +592,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    onboard_profiles: false,
                 }),
             },
         ],
@@ -609,6 +642,7 @@ fn direct_inventory() -> DeviceInventory {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             }),
         }],
     }
@@ -996,5 +1030,52 @@ impl Agent for MockAgent {
         }
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
+    }
+
+    async fn set_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: ProfilesMode,
+        profile: Option<u16>,
+    ) -> Result<(), WriteError> {
+        if mode == ProfilesMode::Onboard
+            && let Some(sector) = profile
+            && is_rom_sector(sector)
+        {
+            return Err(WriteError::InvalidProfileSector { sector });
+        }
+        let mut state = self.state.lock().await;
+        let profiles = state
+            .settings_for_mut(&route)?
+            .onboard_profiles
+            .as_mut()
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x8100,
+            })?;
+        profiles.mode = mode;
+        match (mode, profile) {
+            (ProfilesMode::Host, _) => profiles.active_profile = 0,
+            (ProfilesMode::Onboard, Some(sector)) => profiles.active_profile = sector,
+            (ProfilesMode::Onboard, None) => {}
+        }
+        info!(%route, ?mode, ?profile, "set_onboard_profiles");
+        Ok(())
+    }
+
+    async fn read_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardProfilesInfo, WriteError> {
+        self.state
+            .lock()
+            .await
+            .settings_for(&route)?
+            .onboard_profiles
+            .clone()
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x8100,
+            })
     }
 }

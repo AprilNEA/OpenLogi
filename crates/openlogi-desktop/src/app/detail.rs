@@ -1,5 +1,5 @@
 //! The device-detail screen: the header (back + name + section tabs), and the
-//! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
+//! section bodies (Buttons, Keys, Pointer, Lighting, Profiles, Camera, Device).
 
 use gpui::{
     AnyElement, BorrowAppContext as _, Context, IntoElement, ParentElement, SharedString, Styled,
@@ -34,6 +34,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::profiles::ProfilesPanel;
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
@@ -100,6 +101,7 @@ pub(super) struct DetailPanels<'a> {
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
+    pub profiles_panel: &'a gpui::Entity<ProfilesPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
@@ -123,6 +125,7 @@ pub(super) fn detail_content(
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, pal, cx).into_any_element()
         }
         DetailTab::Lighting => lighting_tab(panels.lighting_panel, pal).into_any_element(),
+        DetailTab::Profiles => profiles_tab(panels.profiles_panel, pal).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls, pal).into_any_element()
         }
@@ -446,6 +449,23 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
             Icon::new(IconName::Palette),
             pal,
             lighting_panel.clone().into_any_element(),
+        )))
+}
+
+/// Onboard-profile source and active-profile controls.
+fn profiles_tab(profiles_panel: &gpui::Entity<ProfilesPanel>, pal: Palette) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p(px(SCREEN_PAD))
+        .child(div().w_full().max_w(px(560.)).child(panel_card(
+            tr!("Profiles"),
+            Icon::empty().path("action-icons/list-checks.svg"),
+            pal,
+            profiles_panel.clone().into_any_element(),
         )))
 }
 

@@ -1,6 +1,6 @@
-//! Lazy device reads shared by the DPI and SmartShift panels.
+//! Lazy device reads shared by the DPI, SmartShift, and Profiles panels.
 //!
-//! Both panels resolve their state by sending a one-shot read request to the
+//! These panels resolve their state by sending a one-shot read request to the
 //! agent over IPC and awaiting the typed reply off the render thread, then
 //! storing the result — or clearing the loading marker if the reply never
 //! comes. Only the command, the store action, and the clear action differ; the
