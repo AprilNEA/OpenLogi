@@ -769,3 +769,103 @@ fn app_switch_republishes_capture_plans() {
     orch.set_current_app(Some("com.example.editor".into()));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
+
+/// A directly-attached mouse with inversion configured, either reporting native
+/// HID++ inversion or not.
+fn direct_dev(key: &str, product_id: u16, native_inversion: bool) -> AgentDevice {
+    AgentDevice {
+        route: Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id,
+        }),
+        capabilities: Some(Capabilities {
+            scroll_inversion: native_inversion,
+            ..Capabilities::default()
+        }),
+        ..dev(key, DIRECT_DEVICE_INDEX, true)
+    }
+}
+
+#[test]
+fn software_scroll_inversion_skips_native_and_receiver_paired_devices() {
+    use std::collections::BTreeSet;
+
+    let mut config = Config::default();
+    for key in ["native", "software", "receiver"] {
+        config.set_invert_scroll(key, true);
+    }
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        // Native inversion goes to the firmware; rewriting on top would cancel.
+        direct_dev("native", 0xb034, true),
+        direct_dev("software", 0xb020, false),
+        // A receiver route reports ids shared by every device on that dongle.
+        dev("receiver", 1, true),
+    ];
+
+    assert_eq!(
+        orch.software_scroll_inversion(),
+        BTreeSet::from([(0x046d_u32, 0xb020_u32)])
+    );
+}
+
+#[test]
+fn identical_devices_disagreeing_on_inversion_invert_neither() {
+    use std::collections::BTreeSet;
+
+    // The hook sees only vendor/product, so it cannot honour one setting without
+    // also applying it to the twin. Inverting a wheel nobody asked for is worse.
+    let mut config = Config::default();
+    config.set_invert_scroll("left-hand", true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        direct_dev("left-hand", 0xb020, false),
+        direct_dev("right-hand", 0xb020, false),
+    ];
+
+    assert_eq!(orch.software_scroll_inversion(), BTreeSet::new());
+}
+
+#[test]
+fn identical_devices_agreeing_on_inversion_yield_one_entry() {
+    use std::collections::BTreeSet;
+
+    let mut config = Config::default();
+    config.set_invert_scroll("left-hand", true);
+    config.set_invert_scroll("right-hand", true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        direct_dev("left-hand", 0xb020, false),
+        direct_dev("right-hand", 0xb020, false),
+    ];
+
+    assert_eq!(
+        orch.software_scroll_inversion(),
+        BTreeSet::from([(0x046d_u32, 0xb020_u32)])
+    );
+}
+
+#[test]
+fn disabling_the_selected_device_keeps_another_devices_software_inversion() {
+    use std::collections::BTreeSet;
+
+    // Inversion is keyed per device, so muting one cannot stop inverting another.
+    let mut config = Config::default();
+    config.set_invert_scroll("other", true);
+    config.set_device_enabled("selected", false);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        direct_dev("selected", 0xb034, false),
+        direct_dev("other", 0xb020, false),
+    ];
+
+    let maps = orch.hook_maps_for(Some("selected"), None);
+    assert!(
+        maps.bindings.is_empty(),
+        "a disabled selection remaps nothing"
+    );
+    assert_eq!(
+        maps.invert_scroll,
+        BTreeSet::from([(0x046d_u32, 0xb020_u32)])
+    );
+}

@@ -17,19 +17,29 @@ impl AppState {
             .and_then(DeviceRecord::persistent_config_key)
             .is_some_and(|key| self.config.invert_scroll(key))
     }
-    /// Whether the active device reports native HID++ wheel inversion support.
+    /// Whether the active device's wheel can be inverted at all — natively over
+    /// HID++ `0x2121`, or in software where the hook can rewrite scroll deltas.
+    ///
+    /// macOS rewrites the `CGEvent`, so inversion is offered for any pointing
+    /// device there, including firmware with no `0x2121` (MX Vertical, whose
+    /// toggle would otherwise read "Unavailable" forever). evdev and
+    /// `WH_MOUSE_LL` have no rewrite path, so there this stays gated on the
+    /// native capability. No capability snapshot yet means `false` everywhere.
     #[must_use]
     pub fn current_scroll_inversion_supported(&self) -> bool {
         self.current_record()
             .and_then(|record| record.capabilities)
-            .is_some_and(|capabilities| capabilities.scroll_inversion)
+            .is_some_and(|capabilities| {
+                capabilities.scroll_inversion || (cfg!(target_os = "macos") && capabilities.pointer)
+            })
     }
-    /// Set the active device's scroll-wheel inversion, persist it, and reload
-    /// the agent so it writes the device's native HID++ wheel inversion. No-op
-    /// when no device is selected or the active device does not report support.
+    /// Set the active device's scroll-wheel inversion, persist it, and reload the
+    /// agent so it either writes the device's native HID++ wheel inversion or
+    /// republishes the hook's software-inversion set. No-op when no device is
+    /// selected or the active device does not support inversion either way.
     pub fn commit_invert_scroll(&mut self, invert: bool) {
         if !self.current_scroll_inversion_supported() {
-            debug!("active device does not support native scroll inversion");
+            debug!("active device supports neither native nor software scroll inversion");
             return;
         }
         let Some(key) = self
