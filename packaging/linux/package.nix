@@ -217,6 +217,25 @@ rustPlatform.buildRustPackage {
     grep -Fqx \
       "ExecStart=$out/bin/openlogi-agent" \
       "$out/share/systemd/user/openlogi-agent.service"
+
+    # GPUI dlopens its graphics backends, so a missing RUNPATH entry is not a
+    # link error the build can catch: the process panics with `NoWaylandLib`
+    # the instant it starts. Two GPUI processes ship here, and the agent
+    # restarts the overlay indefinitely, so an unpatched overlay degrades into
+    # a restart loop rather than into a visible failure. Assert the RUNPATH of
+    # every GPUI binary instead of trusting postFixup to have listed them all.
+    for binary in openlogi-desktop openlogi-overlay; do
+      rpath=$(patchelf --print-rpath "$out/bin/$binary")
+      for entry in $(echo "${runtimeLibs}" | tr ':' ' '); do
+        case ":$rpath:" in
+          *":$entry:"*) ;;
+          *)
+            echo "$binary lacks $entry in its RUNPATH ($rpath)" >&2
+            exit 1
+            ;;
+        esac
+      done
+    done
   '';
 
   meta = {
