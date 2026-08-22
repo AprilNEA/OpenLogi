@@ -69,9 +69,24 @@ let
   # materialising the filtered build source first.
   version = (builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"))).workspace.package.version;
 
+  # The packaged binaries, defined once: install, fixup, and the install check
+  # all iterate these lists, so adding a binary in one place cannot leave it
+  # unpatched or unchecked. GPUI binaries are the ones that need the runtime
+  # graphics backends on their RUNPATH.
+  gpuiBinaries = [
+    "openlogi-desktop"
+    "openlogi-overlay"
+  ];
+  binaries = [
+    "openlogi"
+    "openlogi-agent"
+  ]
+  ++ gpuiBinaries;
+
   # GPUI discovers these graphics backends at runtime instead of linking them,
   # so normal fixup cannot infer their store paths. Add only those paths to the
-  # GUI's RUNPATH; linked xkbcommon/xcb/font libraries are fixed up normally.
+  # RUNPATH of every GPUI binary; linked xkbcommon/xcb/font libraries are fixed
+  # up normally.
   runtimeLibs = lib.makeLibraryPath [
     libGL
     wayland
@@ -177,7 +192,7 @@ rustPlatform.buildRustPackage {
     runHook preInstall
 
     releaseDir=target/${stdenv.hostPlatform.rust.rustcTarget}/release
-    for binary in openlogi openlogi-agent openlogi-desktop openlogi-overlay; do
+    for binary in ${toString binaries}; do
       install -Dm755 "$releaseDir/$binary" "$out/bin/$binary"
     done
 
@@ -200,14 +215,20 @@ rustPlatform.buildRustPackage {
     runHook postInstall
   '';
 
+  # The desktop app and the Actions Ring overlay are siblings: both are GPUI
+  # processes, so both need the runtime backends on their RUNPATH. Patching
+  # only the desktop app left the overlay panicking on `NoWaylandLib` at
+  # startup, which the agent's supervisor turned into a restart loop.
   postFixup = ''
-    patchelf --add-rpath "${runtimeLibs}" "$out/bin/openlogi-desktop"
+    for binary in ${toString gpuiBinaries}; do
+      patchelf --add-rpath "${runtimeLibs}" "$out/bin/$binary"
+    done
   '';
 
   doInstallCheck = true;
   nativeInstallCheckInputs = [ versionCheckHook ];
   preInstallCheck = ''
-    for binary in openlogi openlogi-agent openlogi-desktop openlogi-overlay; do
+    for binary in ${toString binaries}; do
       test -x "$out/bin/$binary"
     done
     test ! -e "$out/bin/openlogi-agent-mock"
@@ -217,6 +238,25 @@ rustPlatform.buildRustPackage {
     grep -Fqx \
       "ExecStart=$out/bin/openlogi-agent" \
       "$out/share/systemd/user/openlogi-agent.service"
+
+    # GPUI dlopens its graphics backends, so a missing RUNPATH entry is not a
+    # link error the build can catch: the process panics with `NoWaylandLib`
+    # the instant it starts. Two GPUI processes ship here, and the agent
+    # restarts the overlay indefinitely, so an unpatched overlay degrades into
+    # a restart loop rather than into a visible failure. Assert the RUNPATH of
+    # every GPUI binary instead of trusting postFixup to have listed them all.
+    for binary in ${toString gpuiBinaries}; do
+      rpath=$(patchelf --print-rpath "$out/bin/$binary")
+      for entry in $(echo "${runtimeLibs}" | tr ':' ' '); do
+        case ":$rpath:" in
+          *":$entry:"*) ;;
+          *)
+            echo "$binary lacks $entry in its RUNPATH ($rpath)" >&2
+            exit 1
+            ;;
+        esac
+      done
+    done
   '';
 
   meta = {
