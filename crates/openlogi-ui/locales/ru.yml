@@ -394,6 +394,6 @@ _version: 1
 "Palette": "Палитра"
 "Book": "Книга"
 "Custom shortcut": "Пользовательское сочетание клавиш"
-"Shortcut, e.g. Cmd+Shift+P": "Сочетание, например Cmd+Shift+P"
+"e.g. Cmd+Shift+P": "напр. Cmd+Shift+P"
 "Application, folder path, or URL": "Приложение, путь к папке или URL"
 "Open application or folder": "Открыть приложение или папку"

@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, Context, ElementId, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, RenderOnce, Role, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb, svg,
+    Anchor, AnyElement, App, AppContext as _, Context, ElementId, Entity, Hsla, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, RenderOnce, Role,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
+use gpui_component::{
+    Icon, IconName, Selectable, h_flex, input::InputState, popover::Popover, v_flex,
+};
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
@@ -60,6 +63,11 @@ pub struct MouseModelView {
     /// state, so the popover's `on_open_change` — which runs outside paint — can
     /// reset it without tripping gpui's render-only guard.
     gesture_active_dir: Option<GestureDirection>,
+    /// Lazily-created text field backing the "Custom shortcut" row every
+    /// binding popover shows. One field for the whole view: only one popover is
+    /// open at a time, and it must outlive each popover's render closure —
+    /// re-creating it per render would clear whatever the user had typed.
+    shortcut_input: Option<Entity<InputState>>,
     _state_obs: Subscription,
 }
 
@@ -72,6 +80,7 @@ impl MouseModelView {
             hovered: None,
             open_binding_popover: None,
             gesture_active_dir: None,
+            shortcut_input: None,
             _state_obs: state_obs,
         }
     }
@@ -83,15 +92,46 @@ impl MouseModelView {
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
     /// `cx.notify()` to re-render.
-    pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
+    ///
+    /// Switching direction keeps the same popover open, so this — not
+    /// [`Self::set_binding_popover_open`] — is where the shortcut field has to
+    /// be reset: the flyout is rebuilt with `on_pick` aimed at the new
+    /// direction, and retained text would commit there instead.
+    pub(crate) fn set_gesture_selected_dir(
+        &mut self,
+        dir: Option<GestureDirection>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         self.gesture_active_dir = dir;
+        self.clear_shortcut_input(window, cx);
     }
 
-    fn set_binding_popover_open(&mut self, popover: BindingPopover, open: bool) {
+    fn set_binding_popover_open(
+        &mut self,
+        popover: BindingPopover,
+        open: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         if open {
             self.open_binding_popover = Some(popover);
         } else if self.open_binding_popover == Some(popover) {
             self.open_binding_popover = None;
+        }
+        self.clear_shortcut_input(window, cx);
+    }
+
+    /// Empty the shared shortcut field.
+    ///
+    /// One field serves every binding popover and every gesture direction, so
+    /// without this a chord typed against one target — committed or not —
+    /// would still be sitting there, ready to commit, once the user moves to
+    /// the next. Safe from these callers because all of them run outside paint
+    /// (see [`Self::gesture_active_dir`]).
+    fn clear_shortcut_input(&self, window: &mut Window, cx: &mut App) {
+        if let Some(input) = &self.shortcut_input {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
         }
     }
 }
@@ -149,6 +189,13 @@ impl Render for MouseModelView {
         let canvas_h = mouse_h;
         let mouse_left = gutter;
 
+        let shortcut_input = self
+            .shortcut_input
+            .get_or_insert_with(|| {
+                cx.new(|cx| InputState::new(window, cx).placeholder(tr!("e.g. Cmd+Shift+P")))
+            })
+            .clone();
+
         let highlight = self.hovered.or(active);
         let view = cx.entity();
         let hovered = self.hovered;
@@ -168,6 +215,7 @@ impl Render for MouseModelView {
             &gesture_buttons,
             self.open_binding_popover,
             &view,
+            &shortcut_input,
         );
         let canvas = div()
             .relative()
@@ -192,6 +240,7 @@ impl Render for MouseModelView {
                         .filter(|button| gesture_buttons.contains(button)),
                     self.open_binding_popover == Some(BindingPopover::Label(label.id)),
                     &view,
+                    &shortcut_input,
                 )
             }))
             .child(hotspots_layer);
@@ -318,6 +367,7 @@ fn hotspots_layer(
     gesture_buttons: &[ButtonId],
     open_popover: Option<BindingPopover>,
     view: &Entity<MouseModelView>,
+    shortcut_input: &Entity<InputState>,
 ) -> impl IntoElement {
     div()
         .absolute()
@@ -337,6 +387,7 @@ fn hotspots_layer(
                     .filter(|button| gesture_buttons.contains(button)),
                 open_popover == Some(BindingPopover::Hotspot(hotspot.id)),
                 view,
+                shortcut_input,
             )
         }))
 }
@@ -347,6 +398,11 @@ fn hotspots_layer(
 /// stays on so an outside click dismisses and re-clicking the trigger toggles.
 /// Closing resets the activated direction (scratch state on the view) so the
 /// next open starts on the plus.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "popover placement + trigger state + the shared shortcut field; \
+bundling would just hide the dependency"
+)]
 fn gesture_overview_popover<Tr>(
     popover_id: impl Into<ElementId>,
     anchor: Anchor,
@@ -355,6 +411,7 @@ fn gesture_overview_popover<Tr>(
     binding_popover: BindingPopover,
     open: bool,
     view: Entity<MouseModelView>,
+    shortcut_input: Entity<InputState>,
 ) -> impl IntoElement
 where
     Tr: Selectable + IntoElement + 'static,
@@ -366,16 +423,16 @@ where
         .anchor(anchor)
         .trigger(trigger)
         .open(open)
-        .on_open_change(move |open, _window, cx| {
+        .on_open_change(move |open, window, cx| {
             view_state.update(cx, |v, vcx| {
-                v.set_binding_popover_open(binding_popover, *open);
+                v.set_binding_popover_open(binding_popover, *open, window, vcx);
                 if !*open {
-                    v.set_gesture_selected_dir(None);
+                    v.set_gesture_selected_dir(None, window, vcx);
                 }
                 vcx.notify();
             });
         })
-        .content(move |_state, _window, cx| gesture_overview(btn, &view, cx))
+        .content(move |_state, _window, cx| gesture_overview(btn, &view, &shortcut_input, cx))
 }
 
 /// Position the popover wrapper at the label's slot in the side gutter and
@@ -401,6 +458,7 @@ fn label_popover(
     gesture_button: Option<ButtonId>,
     open: bool,
     view: &Entity<MouseModelView>,
+    shortcut_input: &Entity<InputState>,
 ) -> AnyElement {
     let x = match label.side {
         Side::Left => mouse_left - SIDE_GAP - SIDE_W,
@@ -425,11 +483,13 @@ fn label_popover(
             binding_popover,
             open,
             view.clone(),
+            shortcut_input.clone(),
         )
         .into_any_element()
     } else {
         let view_state = view.clone();
         let view_content = view.clone();
+        let shortcut_input = shortcut_input.clone();
         Popover::new(("label-popover", idx))
             // `action_picker` draws its own `menu_card` surface, matching the
             // gesture menu — so suppress the framework popover surface.
@@ -438,14 +498,16 @@ fn label_popover(
             .mouse_button(MouseButton::Left)
             .trigger(trigger)
             .open(open)
-            .on_open_change(move |open, _window, cx| {
+            .on_open_change(move |open, window, cx| {
                 view_state.update(cx, |v, vcx| {
-                    v.set_binding_popover_open(binding_popover, *open);
+                    v.set_binding_popover_open(binding_popover, *open, window, vcx);
                     vcx.notify();
                 });
             })
             .content(move |_state, _window, cx| match label.id {
-                MouseControlId::Button(button) => action_picker(button, &view_content, cx),
+                MouseControlId::Button(button) => {
+                    action_picker(button, &view_content, &shortcut_input, cx)
+                }
                 MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
             })
             .into_any_element()
@@ -708,6 +770,11 @@ fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
         )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "hotspot position + hover/active/gesture state + the shared shortcut \
+field; bundling would just hide the dependency"
+)]
 fn hotspot_popover(
     idx: usize,
     hotspot: Hotspot,
@@ -718,6 +785,7 @@ fn hotspot_popover(
     gesture_button: Option<ButtonId>,
     open: bool,
     view: &Entity<MouseModelView>,
+    shortcut_input: &Entity<InputState>,
 ) -> AnyElement {
     let view = view.clone();
     let binding_popover = BindingPopover::Hotspot(hotspot.id);
@@ -740,11 +808,13 @@ fn hotspot_popover(
             binding_popover,
             open,
             view.clone(),
+            shortcut_input.clone(),
         )
         .into_any_element()
     } else {
         let view_state = view.clone();
         let view_content = view.clone();
+        let shortcut_input = shortcut_input.clone();
         Popover::new(("hotspot-popover", idx))
             // `action_picker` draws its own `menu_card` surface, matching the
             // gesture menu — so suppress the framework popover surface.
@@ -753,14 +823,16 @@ fn hotspot_popover(
             .mouse_button(MouseButton::Left)
             .trigger(trigger)
             .open(open)
-            .on_open_change(move |open, _window, cx| {
+            .on_open_change(move |open, window, cx| {
                 view_state.update(cx, |v, vcx| {
-                    v.set_binding_popover_open(binding_popover, *open);
+                    v.set_binding_popover_open(binding_popover, *open, window, vcx);
                     vcx.notify();
                 });
             })
             .content(move |_state, _window, cx| match hotspot.id {
-                MouseControlId::Button(button) => action_picker(button, &view_content, cx),
+                MouseControlId::Button(button) => {
+                    action_picker(button, &view_content, &shortcut_input, cx)
+                }
                 MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
             })
             .into_any_element()
