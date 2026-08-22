@@ -54,6 +54,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/list-checks.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/list-checks.svg"))),
     ("action-icons/lock.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/lock.svg"))),
     ("action-icons/monitor.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/monitor.svg"))),
+    ("action-icons/moon.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/moon.svg"))),
     ("action-icons/mouse-pointer-click.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-pointer-click.svg"))),
     ("action-icons/mouse.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse.svg"))),
     ("action-icons/move.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/move.svg"))),
@@ -108,6 +109,9 @@ impl AssetSource for ActionIcons {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use openlogi_core::binding::ActionRingIcon;
 
     use super::*;
@@ -119,6 +123,28 @@ mod tests {
             assert!(
                 matches!(loaded, Ok(Some(_))),
                 "missing embedded asset for {icon:?}"
+            );
+        }
+    }
+
+    /// A glyph dropped into `action-icons/` but left out of [`ACTION_ICONS`]
+    /// resolves to no bytes, which GPUI draws as an empty slot rather than
+    /// reporting — the failure has no error path to catch it at runtime. The
+    /// button picker's `moon.svg` shipped that way from the day it was added.
+    #[test]
+    fn every_bundled_glyph_is_embedded() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("action-icons");
+        let entries = fs::read_dir(&dir).expect("action-icons/ is readable");
+        for entry in entries {
+            let name = entry.expect("readable directory entry").file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".svg") {
+                continue;
+            }
+            let path = format!("action-icons/{name}");
+            assert!(
+                matches!(ActionIcons.load(&path), Ok(Some(_))),
+                "{path} is on disk but missing from ACTION_ICONS"
             );
         }
     }
