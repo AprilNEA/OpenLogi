@@ -273,7 +273,9 @@ pub(super) fn post_zoom(delta: i32) {
 /// where direction-keyed banks would emit two contradicting detents.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "whole-detent extraction truncates by design; the remainder stays banked"
+    clippy::cast_precision_loss,
+    reason = "whole-detent extraction truncates by design (the remainder stays banked); \
+              the i32→f32 narrowing loses nothing below 2^24, far past any real rotation"
 )]
 pub(super) fn post_zoom_continuous(delta_lines: f32) {
     static PENDING_LINES: Mutex<f32> = Mutex::new(0.0);
@@ -286,7 +288,7 @@ pub(super) fn post_zoom_continuous(delta_lines: f32) {
     if whole == 0 {
         return;
     }
-    *pending -= f32::from(whole);
+    *pending -= whole as f32;
     drop(pending);
     post_zoom(whole);
 }
