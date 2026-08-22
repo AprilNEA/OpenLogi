@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "此攝影機沒有可調整的影像控制項。"
 "Focus": "對焦"
 "Exposure": "曝光"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "白平衡"
 "Tint": "色調"
 "Auto": "自動"

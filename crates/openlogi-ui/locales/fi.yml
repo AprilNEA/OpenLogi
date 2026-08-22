@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "Tässä kamerassa ei ole säädettäviä kuva-asetuksia."
 "Focus": "Tarkennus"
 "Exposure": "Valotus"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "Valkotasapaino"
 "Tint": "Sävy"
 "Auto": "Auto"

@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "Αυτή η κάμερα δεν διαθέτει ρυθμιζόμενα στοιχεία ελέγχου εικόνας."
 "Focus": "Εστίαση"
 "Exposure": "Έκθεση"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "Ισορροπία λευκού"
 "Tint": "Απόχρωση"
 "Auto": "Αυτόματο"
