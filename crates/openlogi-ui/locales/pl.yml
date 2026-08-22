@@ -394,6 +394,6 @@ _version: 1
 "Palette": "Paleta"
 "Book": "Książka"
 "Custom shortcut": "Własny skrót"
-"Shortcut, e.g. Cmd+Shift+P": "Skrót, np. Cmd+Shift+P"
+"e.g. Cmd+Shift+P": "np. Cmd+Shift+P"
 "Application, folder path, or URL": "Aplikacja, ścieżka folderu lub URL"
 "Open application or folder": "Otwórz aplikację lub folder"

@@ -29,9 +29,17 @@ use gpui::{
     ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
+use gpui_component::{
+    Disableable as _, Icon, IconName, Sizable as _,
+    button::Button,
+    h_flex,
+    input::{Input, InputState},
+    popover::PopoverState,
+    v_flex,
+};
 use openlogi_core::binding::{
-    Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
+    Action, ButtonId, Category, GestureDirection, KeyCombo, default_binding,
+    default_gesture_binding,
 };
 
 use super::thumbwheel::ThumbwheelPreset;
@@ -45,6 +53,11 @@ use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography a
 /// gpui-component's own `PopupMenu` floor (`min_w(rems(8.))`).
 pub(crate) const POPOVER_W: f32 = 128.;
 
+/// Floor width for the "Custom shortcut" field. Without it the field is free to
+/// shrink under its own placeholder whenever the popover title is the widest
+/// thing in the card, which is most buttons.
+const SHORTCUT_FIELD_W: f32 = 168.;
+
 /// Cap the scrollable action list height. The catalog has 29+ entries across
 /// half a dozen categories; without a cap the list overflows the window.
 pub(crate) const POPOVER_LIST_MAX_H: f32 = 360.;
@@ -57,6 +70,7 @@ pub(crate) const POPOVER_LIST_MAX_H: f32 = 360.;
 pub fn action_picker<T: 'static>(
     btn: ButtonId,
     observer: &Entity<T>,
+    shortcut_input: &Entity<InputState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let current = cx
@@ -93,10 +107,18 @@ pub fn action_picker<T: 'static>(
             card.child(gesture_mode_row(btn, &observer, &popover, pal))
                 .child(divider(pal))
         })
-        .child(scroll_list(
-            "picker-scroll",
-            action_rows("action-item", current.as_ref(), &on_pick, pal),
-        ))
+        .child(scroll_list("picker-scroll", {
+            let mut rows = shortcut_rows(
+                "picker-add-shortcut",
+                current.as_ref(),
+                &on_pick,
+                shortcut_input,
+                pal,
+                cx,
+            );
+            rows.extend(action_rows("action-item", current.as_ref(), &on_pick, pal));
+            rows
+        }))
         .into_any_element()
 }
 
@@ -238,6 +260,7 @@ const GESTURE_CELL_W: f32 = 104.;
 pub fn gesture_overview(
     btn: ButtonId,
     view: &Entity<MouseModelView>,
+    shortcut_input: &Entity<InputState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let pal = theme::palette(cx);
@@ -248,7 +271,7 @@ pub fn gesture_overview(
         .child(plus_card(btn, view, active, pal, cx))
         // The flyout card only appears once a direction is activated.
         .when_some(active, |row, dir| {
-            row.child(flyout_card(btn, dir, view, pal, cx))
+            row.child(flyout_card(btn, dir, view, shortcut_input, pal, cx))
         })
         .into_any_element()
 }
@@ -442,6 +465,7 @@ fn flyout_card(
     btn: ButtonId,
     dir: GestureDirection,
     view: &Entity<MouseModelView>,
+    shortcut_input: &Entity<InputState>,
     pal: Palette,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -466,10 +490,18 @@ fn flyout_card(
         .min_w(px(POPOVER_W))
         .child(title(format!("{}  {}", dir.glyph(), tr!(dir.label())), pal))
         .child(divider(pal))
-        .child(scroll_list(
-            "gesture-dir-scroll",
-            action_rows("gesture-action", Some(&current), &on_pick, pal),
-        ))
+        .child(scroll_list("gesture-dir-scroll", {
+            let mut rows = shortcut_rows(
+                "gesture-add-shortcut",
+                Some(&current),
+                &on_pick,
+                shortcut_input,
+                pal,
+                cx,
+            );
+            rows.extend(action_rows("gesture-action", Some(&current), &on_pick, pal));
+            rows
+        }))
         .into_any_element()
 }
 
@@ -611,6 +643,93 @@ pub(crate) fn action_rows(
         }
     }
     children
+}
+
+/// The "Custom shortcut" rows: the chord already bound (if any), a text field,
+/// and an Add button that commits it through `on_pick`.
+///
+/// [`Action::CustomShortcut`] is deliberately absent from [`Action::catalog`],
+/// so this is the only way to reach it from a picker. Mirrors the Actions Ring
+/// editor's field of the same name and shares its placeholder string, but keeps
+/// Add disabled until the text parses as a [`KeyCombo`] — an unparseable chord
+/// would otherwise commit nothing with no visible reason why.
+fn shortcut_rows(
+    id_prefix: &'static str,
+    current: Option<&Action>,
+    on_pick: &PickFn,
+    input: &Entity<InputState>,
+    pal: Palette,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let can_add = input.read(cx).value().parse::<KeyCombo>().is_ok();
+    let submit = input.clone();
+    let on_pick = on_pick.clone();
+
+    let mut rows = vec![popover_section(tr!("Custom shortcut"), pal)];
+    // The bound chord has no catalog row to check, so state it here instead —
+    // without this the picker looks unbound whenever a shortcut is in use.
+    if let Some(bound @ Action::CustomShortcut(combo)) = current {
+        rows.push(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .pb_1()
+                .text_body()
+                .text_color(pal.text_primary)
+                .child(
+                    svg()
+                        .path(action_icon_path(bound))
+                        .size_4()
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                )
+                .child(div().flex_1().min_w_0().child(combo.rendered_label()))
+                .child(
+                    Icon::new(IconName::Check)
+                        .size_3()
+                        .text_color(rgb(ACCENT_BLUE)),
+                )
+                .into_any_element(),
+        );
+    }
+    rows.push(
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .pb_1()
+            .child(
+                // `cleanable` is deliberately off: the field already clears
+                // itself on commit and whenever a popover opens, and its glyph
+                // ate enough of the row to truncate the placeholder. The floor
+                // keeps the hint readable when the title is the widest thing in
+                // the card.
+                div()
+                    .flex_1()
+                    .min_w(px(SHORTCUT_FIELD_W))
+                    .child(Input::new(input).small()),
+            )
+            .child(
+                Button::new(id_prefix)
+                    .compact()
+                    .label(tr!("Add"))
+                    .disabled(!can_add)
+                    .on_click(move |_event, window, cx| {
+                        if let Ok(combo) = submit.read(cx).value().parse::<KeyCombo>() {
+                            (on_pick)(Action::CustomShortcut(combo), window, cx);
+                            // The gesture flyout's `on_pick` deliberately stays
+                            // open, so the committed chord would sit in the
+                            // field while the row above already shows it bound.
+                            submit.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                    }),
+            )
+            .into_any_element(),
+    );
+    rows
 }
 
 /// A clickable, full-width menu row: `text-sm`, children spread left/right.

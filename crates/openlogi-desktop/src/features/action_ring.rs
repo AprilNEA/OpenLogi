@@ -59,7 +59,7 @@ impl Render for ActionRingPanel {
         );
         let shortcut_input = editor_input(
             &mut self.shortcut_input,
-            tr!("Shortcut, e.g. Cmd+Shift+P"),
+            tr!("e.g. Cmd+Shift+P"),
             window,
             cx,
         );
