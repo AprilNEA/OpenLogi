@@ -236,3 +236,24 @@ fn packaged_probe_ignores_a_unit_for_another_binary() {
         Path::new("/usr/bin/openlogi-agent")
     ));
 }
+
+/// A unit the user wrote themselves means the service name is theirs: reconcile
+/// must not withdraw an enablement it never made. Guards the predicate that
+/// gates `disable` when nothing of ours is on disk.
+#[test]
+fn a_hand_authored_unit_is_recognised_as_the_users() {
+    let ours = render_unit("/usr/bin/openlogi-agent");
+    assert!(
+        is_generated_unit(&ours),
+        "our own rendering is not the user's"
+    );
+
+    let theirs = ours.replace(
+        "Restart=on-failure",
+        "Environment=RUST_LOG=debug\nRestart=on-failure",
+    );
+    assert!(
+        !is_generated_unit(&theirs),
+        "an edited unit is the user's, so its enablement is theirs to withdraw"
+    );
+}

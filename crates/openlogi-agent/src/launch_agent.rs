@@ -290,9 +290,18 @@ fn reconcile_linux(enabled: bool) -> io::Result<()> {
         }
         (None, None) => {
             debug!("systemd user unit already absent");
-            // The packaged unit, if any, may still be enabled from an earlier
-            // run; disabling is cheap and idempotent when it is not.
-            run_systemctl(&["disable", UNIT_NAME]);
+            // Nothing of ours is on disk, so `disable` would act on whatever
+            // else claims this unit name. Withdraw only an enablement this app
+            // could have made: a packaged unit for this binary, and only while
+            // the user has not authored their own.
+            //
+            // Deliberately asymmetric with the enable path above, which does
+            // run against a hand-authored unit — enabling is what the user just
+            // asked for, whereas the enablement being withdrawn here may be one
+            // they made outside OpenLogi and never asked it to touch.
+            if packaged_unit_for(&exe).is_some() && !user_authored_unit_present() {
+                run_systemctl(&["disable", UNIT_NAME]);
+            }
         }
     }
     Ok(())
@@ -357,6 +366,18 @@ fn migrate_legacy_unit() {
             warn!(error = %e, path = %path.display(), "could not remove the legacy systemd user unit");
         }
     }
+}
+
+/// Whether the user's own config tier holds a unit this app did not render.
+///
+/// Such a file outranks everything else, so the service name belongs to them:
+/// its enablement is theirs to withdraw, not this app's.
+#[cfg(target_os = "linux")]
+fn user_authored_unit_present() -> bool {
+    legacy_unit_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|contents| !is_generated_unit(&contents))
 }
 
 /// Whether `contents` is a unit this app rendered, for *any* executable path.
