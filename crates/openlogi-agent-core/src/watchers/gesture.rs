@@ -27,17 +27,18 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
-use tokio::sync::{mpsc, oneshot};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, run_capture_session_with_registry_spec,
+};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
-/// How often to re-read the active device target + thumb-wheel arming so a
-/// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
-/// It also paces the respawn of a session that ended on its own (see `manage`).
+/// Fallback interval for reconciling a missed plan notification and pacing the
+/// respawn of a session that ended on its own (see `manage`).
 const TARGET_POLL: Duration = Duration::from_secs(1);
 
 /// Idle gap after which a partly-accumulated *custom* wheel action is forgotten,
@@ -53,8 +54,10 @@ const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 /// captured input.
 pub fn spawn(
     capture_plans: SharedCapturePlans,
+    capture_plan_changed: Arc<Notify>,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    channel_registry: openlogi_hid::ChannelRegistry,
     dispatcher: ActionDispatcher,
 ) {
     thread::spawn(move || {
@@ -70,8 +73,10 @@ pub fn spawn(
         };
         runtime.block_on(manage(
             capture_plans,
+            capture_plan_changed,
             capture_channel,
             receiver_access,
+            channel_registry,
             dispatcher,
         ));
     });
@@ -97,6 +102,7 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
             .filter(|(_, button)| plan.gesture_bindings.contains_key(button))
             .map(|(cid, _)| cid)
             .collect(),
+        divert_gesture_buttons: plan.divert_gesture_buttons.clone(),
         divert_buttons: plan.divert_buttons.clone(),
     }
 }
@@ -146,13 +152,22 @@ fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
     }
 }
 
+async fn wait_for_reconcile(ticker: &mut tokio::time::Interval, changed: &Notify) {
+    tokio::select! {
+        _ = ticker.tick() => {}
+        () = changed.notified() => {}
+    }
+}
+
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(
     capture_plans: SharedCapturePlans,
+    capture_plan_changed: Arc<Notify>,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    channel_registry: openlogi_hid::ChannelRegistry,
     dispatcher: ActionDispatcher,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
@@ -184,7 +199,7 @@ async fn manage(
                     &dispatcher,
                 );
             }
-            _ = ticker.tick() => {
+            () = wait_for_reconcile(&mut ticker, &capture_plan_changed) => {
                 // While pairing is waiting or active, release every capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
@@ -219,7 +234,9 @@ async fn manage(
                 // be mid-restore could interleave its divert writes with the
                 // restore writes on the same device, leaving a control
                 // un-diverted while the new session believes it owns it,
-                // however many ticks the restore takes.
+                // however many ticks the restore takes. Its hold state stays
+                // live until completion so an already-diverted edge can still
+                // resolve against the retiring plan during teardown.
                 for (key, session) in &mut sessions {
                     let keep = want.get(key).is_some_and(|(route, spec, rearm)| {
                         *route == session.route
@@ -258,6 +275,7 @@ async fn manage(
                         &tx,
                         &done_tx,
                         &capture_channel,
+                        &channel_registry,
                     );
                     sessions.insert(key, session);
                 }
@@ -297,6 +315,7 @@ fn spawn_session(
     inputs: &mpsc::UnboundedSender<(String, CapturedInput)>,
     done: &mpsc::UnboundedSender<(String, u64)>,
     capture_channel: &CaptureChannel,
+    channel_registry: &openlogi_hid::ChannelRegistry,
 ) -> RunningSession {
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
@@ -313,10 +332,18 @@ fn spawn_session(
     let session_route = route.clone();
     let session_spec = spec.clone();
     let slot = Arc::clone(capture_channel);
+    let registry = channel_registry.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        if let Err(e) =
-            run_capture_session(session_route, session_spec, session_tx, stop_rx, slot).await
+        if let Err(e) = run_capture_session_with_registry_spec(
+            session_route,
+            session_spec,
+            session_tx,
+            stop_rx,
+            slot,
+            &registry,
+        )
+        .await
         {
             debug!(error = %e, "capture session ended");
         }
@@ -387,6 +414,7 @@ fn dispatch(
             if let Some(action) = plan
                 .gesture_bindings
                 .get(&button)
+                .or_else(|| plan.side_gesture_bindings.get(&button))
                 .and_then(|map| map.get(&direction))
             {
                 debug!(key, %button, ?direction, action = %action.label(), "gesture → action");

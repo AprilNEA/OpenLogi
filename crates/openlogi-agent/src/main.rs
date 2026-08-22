@@ -145,8 +145,10 @@ fn main() {
 fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
+        Arc::clone(&shared.capture_plan_changed),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
         dispatcher.clone(),
     );
     watchers::host_switch::spawn(
@@ -205,6 +207,13 @@ fn start_hook(
         dispatcher.clone(),
         Arc::clone(event_monitor),
     )
+}
+
+async fn set_hook_availability(orchestrator: &Mutex<Orchestrator>, available: bool) {
+    orchestrator
+        .lock()
+        .await
+        .set_os_mouse_hook_available(available);
 }
 
 async fn begin_action_ring(
@@ -294,7 +303,6 @@ async fn run(
     )));
     let shared = orchestrator.lock().await.shared();
     let (action_ring, mut action_ring_rx, dispatcher) = action_ring_runtime(&shared);
-
     // Live event monitor: shared between the hook callback (which mirrors events
     // into it) and the IPC server (which the GUI polls). The janitor turns it
     // back off once the GUI stops polling.
@@ -392,6 +400,8 @@ async fn run(
             Some(granted) = accessibility_rx.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
+                    // Begin restoring native controls before dropping their movement hook.
+                    set_hook_availability(&orchestrator, false).await;
                     hook = None;
                 }
                 if granted && hook.is_none() {
@@ -401,6 +411,7 @@ async fn run(
                         &dispatcher,
                         &event_monitor,
                     );
+                    set_hook_availability(&orchestrator, hook.is_some()).await;
                 }
                 // One publish for every path above: revoked, installed, kept,
                 // or never installed because capture is off.
