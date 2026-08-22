@@ -60,6 +60,14 @@ impl HidEndpoint {
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut writer = self.writer.lock().await;
         if let Err(e) = writer.write_output_report(src).await {
+            // The native fallback works around async-hid write quirks on a
+            // *live* device; reopening a device that is gone can only fail, and
+            // its `NativeWriteError` would replace the typed `Disconnected`
+            // that `is_permanent_disconnect` needs to retire the channel.
+            if matches!(e, async_hid::HidError::Disconnected) {
+                return Err(Box::new(e));
+            }
+
             if let Some(native_writer) = &self.native_writer {
                 debug!(
                     error = %e,
