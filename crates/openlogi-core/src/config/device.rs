@@ -58,6 +58,11 @@ pub struct DeviceIdentity {
     /// not a physical-device key and never contains a serial or OS node id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_model_id: Option<String>,
+    /// Wireless product ID from the receiver pairing table. Persisted so
+    /// HID++ 1.0 devices (which lack `model_info` and may lack `codename`
+    /// during early probing) can still be distinguished after a re-pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wpid: Option<u16>,
 }
 
 impl DeviceIdentity {

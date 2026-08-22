@@ -717,6 +717,7 @@ mod tests {
             slot: 1,
             online: true,
             battery: None,
+            wpid: None,
         }
     }
 

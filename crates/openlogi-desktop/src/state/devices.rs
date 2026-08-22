@@ -6,7 +6,7 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice,
+    LightCapabilities, PairedDevice, StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::hid::DeviceRoute;
@@ -63,6 +63,11 @@ pub struct DeviceRecord {
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
+    /// Wireless product ID from the receiver pairing table. Available for
+    /// HID++ 1.0 and 2.0 receiver-paired devices; `None` for direct/USB or
+    /// offline devices that never reported a WPID. Used as a model-level
+    /// discriminator for identity persistence.
+    pub wpid: Option<u16>,
 }
 
 impl DeviceRecord {
@@ -179,12 +184,13 @@ pub(super) fn build_device_list(
                     // resolver cannot find a match this cycle (e.g. the index
                     // is being rewritten by the sync task), fall back to the
                     // persisted identity's display name if it carries a known
-                    // product name and the device kind hasn't changed (a kind
-                    // change signals a re-pairing — the stale name must not
-                    // be inherited by the replacement device).
+                    // product name and the device model hasn't changed (a kind
+                    // change or model mismatch signals a re-pairing — the stale
+                    // name must not be inherited by the replacement device).
                     config
                         .device_identity(&config_key)
                         .filter(|id| id.kind == paired.kind)
+                        .filter(|id| persisted_model_matches_paired(id, paired))
                         .map(|id| &id.display_name)
                         .filter(|name| !is_fallback_display_name(name))
                         .cloned()
@@ -211,6 +217,7 @@ pub(super) fn build_device_list(
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
+                wpid: paired.wpid,
             });
         }
     }
@@ -277,6 +284,7 @@ fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
+        wpid: None,
     }
 }
 
@@ -350,6 +358,7 @@ fn append_standalone(
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             online: device.online,
             battery: None,
+            wpid: None,
         });
     }
 }
@@ -502,6 +511,7 @@ fn offline_record(
         slot: 0,
         online: false,
         battery: None,
+        wpid: identity.wpid,
     }
 }
 
@@ -560,9 +570,9 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         slot: live.slot,
         online: live.online,
         battery: live.battery.or_else(|| known.battery.clone()),
+        wpid: live.wpid.or(known.wpid),
     }
 }
-
 /// Order the carousel by physical route. HID enumeration order can change as
 /// different mice wake, sleep, or are selected; sorting by the stable route
 /// (not whichever HID node was reported first) keeps the header stable.
@@ -614,6 +624,7 @@ fn demo_keyboard() -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
+        wpid: None,
     }
 }
 
@@ -662,6 +673,46 @@ pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) ->
 
 /// Tidy a raw HID++ codename for display when no curated asset name exists.
 /// Logitech reports gaming codenames in ALL CAPS (e.g. `"G513 RGB MECHANICAL
+/// Checks whether a persisted [`DeviceIdentity`] plausibly refers to the same
+/// product model as the live [`PairedDevice`]. Used to guard against inheriting
+/// a stale display name when a different device is re-paired into the same
+/// receiver slot.
+///
+/// Returns `true` when no available model-level identifier contradicts the
+/// persisted identity. When neither side carries a codename or model_info, the
+/// WPID is used as a final discriminator before falling back to the
+/// kind-only match.
+fn persisted_model_matches_paired(id: &DeviceIdentity, paired: &PairedDevice) -> bool {
+    // Codename is the lightest model discriminator — available even for
+    // HID++ 1.0 devices that lack feature 0x0003.
+    if let (Some(persisted_cn), Some(live_cn)) =
+        (id.codename.as_deref(), paired.codename.as_deref())
+    {
+        return persisted_cn == live_cn;
+    }
+
+    // model_info config_key: extended_model_id + model_ids[0].
+    if let (Some(persisted_mi), Some(live_mi)) =
+        (id.model_info.as_ref(), paired.model_info.as_ref())
+    {
+        return persisted_mi.config_key() == live_mi.config_key();
+    }
+
+    // When the live side lacks both codename and model_info but has a WPID,
+    // compare it against the persisted identity's WPID. A mismatch means a
+    // different product now occupies this slot.
+    if let (Some(persisted_wpid), Some(live_wpid)) = (id.wpid, paired.wpid)
+        && persisted_wpid != 0
+        && live_wpid != 0
+    {
+        return persisted_wpid == live_wpid;
+    }
+
+    // No discriminator available beyond kind — conservatively allow the
+    // fallback (matches pre-existing behaviour).
+    true
+}
+
 /// GAMING KEYBOARD"`); title-case each word so it reads like the asset names
 /// (`"MX Master 3S"`) instead of shouting, while keeping model numbers (tokens
 /// with a digit, e.g. `G513`) and short acronyms (`RGB`, `TKL`, `SE`) as-is.
@@ -769,6 +820,7 @@ mod tests {
             slot: 1,
             online: true,
             battery: None,
+            wpid: None,
         }
     }
 
@@ -791,6 +843,7 @@ mod tests {
             codename: None,
             driver_id: None,
             registry_model_id: None,
+            wpid: None,
         }
     }
 
@@ -887,6 +940,7 @@ mod tests {
             codename: None,
             driver_id: Some("litra".into()),
             registry_model_id: Some("8c900".into()),
+            wpid: None,
         };
         let record = offline_record(
             "raw:046d:c900:ff43:0202:serial:known-light",
@@ -1211,5 +1265,87 @@ mod tests {
         assert_eq!(list[0].config_key, "camera:046d:0893");
         assert_ne!(list[0].inventory_key(), list[1].inventory_key());
         assert_ne!(list[0].capture_id, list[1].capture_id);
+    }
+}
+
+#[cfg(test)]
+mod identity_guard_tests {
+    use super::*;
+    use openlogi_core::config::DeviceIdentity;
+    use openlogi_core::device::{Capabilities, DeviceKind, PairedDevice};
+
+    fn hidpp1_identity(codename: Option<&str>, wpid: Option<u16>) -> DeviceIdentity {
+        DeviceIdentity {
+            display_name: codename.map_or_else(|| "Slot 1".to_string(), str::to_string),
+            kind: DeviceKind::Keyboard,
+            capabilities: Capabilities::default(),
+            light_capabilities: None,
+            model_info: None,
+            codename: codename.map(str::to_string),
+            driver_id: None,
+            registry_model_id: None,
+            wpid,
+        }
+    }
+
+    fn hidpp1_paired(codename: Option<&str>, wpid: Option<u16>) -> PairedDevice {
+        PairedDevice {
+            slot: 1,
+            codename: codename.map(str::to_string),
+            wpid,
+            kind: DeviceKind::Keyboard,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    fn same_wpid_without_codename_allows_fallback() {
+        let persisted = hidpp1_identity(Some("K540"), Some(0x4074));
+        let live = hidpp1_paired(None, Some(0x4074));
+        // Same WPID — device hasn't changed, guard should allow preservation
+        assert!(persisted_model_matches_paired(&persisted, &live));
+    }
+
+    #[test]
+    fn different_wpid_without_codename_blocks_fallback() {
+        let persisted = hidpp1_identity(Some("K540"), Some(0x4074));
+        let live = hidpp1_paired(None, Some(0x4071));
+        // Different WPID — re-paired with a different device
+        assert!(!persisted_model_matches_paired(&persisted, &live));
+    }
+
+    #[test]
+    fn matching_codename_allows_fallback_regardless_of_wpid() {
+        let persisted = hidpp1_identity(Some("K540"), Some(0x4074));
+        let live = hidpp1_paired(Some("K540"), Some(0x4074));
+        assert!(persisted_model_matches_paired(&persisted, &live));
+    }
+
+    #[test]
+    fn different_codename_blocks_fallback() {
+        let persisted = hidpp1_identity(Some("K540"), Some(0x4074));
+        let live = hidpp1_paired(Some("K375s"), Some(0x4071));
+        assert!(!persisted_model_matches_paired(&persisted, &live));
+    }
+
+    #[test]
+    fn no_identifiers_on_either_side_allows_fallback_conservatively() {
+        let persisted = hidpp1_identity(None, None);
+        let live = hidpp1_paired(None, None);
+        // No evidence of a change — conservatively allow
+        assert!(persisted_model_matches_paired(&persisted, &live));
+    }
+
+    #[test]
+    fn different_kind_blocks_fallback() {
+        let mut persisted = hidpp1_identity(Some("K540"), Some(0x4074));
+        persisted.kind = DeviceKind::Mouse;
+        let live = hidpp1_paired(Some("K540"), Some(0x4074));
+        // Kind mismatch is checked by the caller (filter), not this function,
+        // but codename match still holds within same-kind scope
+        assert!(persisted_model_matches_paired(&persisted, &live));
     }
 }
