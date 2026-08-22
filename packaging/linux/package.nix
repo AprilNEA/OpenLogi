@@ -69,6 +69,20 @@ let
   # materialising the filtered build source first.
   version = (builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"))).workspace.package.version;
 
+  # The packaged binaries, defined once: install, fixup, and the install check
+  # all iterate these lists, so adding a binary in one place cannot leave it
+  # unpatched or unchecked. GPUI binaries are the ones that need the runtime
+  # graphics backends on their RUNPATH.
+  gpuiBinaries = [
+    "openlogi-desktop"
+    "openlogi-overlay"
+  ];
+  binaries = [
+    "openlogi"
+    "openlogi-agent"
+  ]
+  ++ gpuiBinaries;
+
   # GPUI discovers these graphics backends at runtime instead of linking them,
   # so normal fixup cannot infer their store paths. Add only those paths to the
   # RUNPATH of every GPUI binary; linked xkbcommon/xcb/font libraries are fixed
@@ -178,7 +192,7 @@ rustPlatform.buildRustPackage {
     runHook preInstall
 
     releaseDir=target/${stdenv.hostPlatform.rust.rustcTarget}/release
-    for binary in openlogi openlogi-agent openlogi-desktop openlogi-overlay; do
+    for binary in ${toString binaries}; do
       install -Dm755 "$releaseDir/$binary" "$out/bin/$binary"
     done
 
@@ -206,7 +220,7 @@ rustPlatform.buildRustPackage {
   # only the desktop app left the overlay panicking on `NoWaylandLib` at
   # startup, which the agent's supervisor turned into a restart loop.
   postFixup = ''
-    for binary in openlogi-desktop openlogi-overlay; do
+    for binary in ${toString gpuiBinaries}; do
       patchelf --add-rpath "${runtimeLibs}" "$out/bin/$binary"
     done
   '';
@@ -214,7 +228,7 @@ rustPlatform.buildRustPackage {
   doInstallCheck = true;
   nativeInstallCheckInputs = [ versionCheckHook ];
   preInstallCheck = ''
-    for binary in openlogi openlogi-agent openlogi-desktop openlogi-overlay; do
+    for binary in ${toString binaries}; do
       test -x "$out/bin/$binary"
     done
     test ! -e "$out/bin/openlogi-agent-mock"
@@ -231,7 +245,7 @@ rustPlatform.buildRustPackage {
     # restarts the overlay indefinitely, so an unpatched overlay degrades into
     # a restart loop rather than into a visible failure. Assert the RUNPATH of
     # every GPUI binary instead of trusting postFixup to have listed them all.
-    for binary in openlogi-desktop openlogi-overlay; do
+    for binary in ${toString gpuiBinaries}; do
       rpath=$(patchelf --print-rpath "$out/bin/$binary")
       for entry in $(echo "${runtimeLibs}" | tr ':' ' '); do
         case ":$rpath:" in
