@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "向下捲動"
 "Scroll Left": "向左捲動"
 "Scroll Right": "向右捲動"
+"Zoom In": "放大"
+"Zoom Out": "縮小"
 "Add Device": "新增裝置"
 "Add Device…": "新增裝置…"
 "Put the device in pairing mode, then start searching.": "先讓裝置進入配對模式，然後開始搜尋。"

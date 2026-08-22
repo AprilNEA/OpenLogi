@@ -127,7 +127,7 @@ pub(crate) fn thumbwheel_picker<T: 'static>(
         .enumerate()
         .map(|(idx, preset)| {
             let selected = current == Some(preset);
-            let label = tr!(preset.label());
+            let label = preset.label();
             let observer = observer.clone();
             let popover = popover.clone();
             menu_row(("thumbwheel-preset", idx), pal, selected)
@@ -550,6 +550,8 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
+        Action::ZoomIn => "action-icons/zoom-in.svg",
+        Action::ZoomOut => "action-icons/zoom-out.svg",
         // Power-user actions (M1 function-key remapper). TypeText shares the
         // keyboard glyph with CustomShortcut; shell/script arms share terminal.
         Action::CustomShortcut(_) | Action::TypeText(_) => "action-icons/keyboard.svg",
