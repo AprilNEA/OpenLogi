@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "이 카메라에는 조정 가능한 이미지 컨트롤이 없습니다."
 "Focus": "초점"
 "Exposure": "노출"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "화이트 밸런스"
 "Tint": "틴트"
 "Auto": "자동"

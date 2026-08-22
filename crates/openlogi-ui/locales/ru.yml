@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "Эта камера не имеет регулируемых параметров изображения."
 "Focus": "Фокус"
 "Exposure": "Экспозиция"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "Баланс белого"
 "Tint": "Оттенок"
 "Auto": "Авто"

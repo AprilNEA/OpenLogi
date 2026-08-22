@@ -9,6 +9,8 @@ pub enum CameraControl {
     Zoom,
     Focus,
     Exposure,
+    PowerLineFrequency,
+    LowLightCompensation,
     Brightness,
     Contrast,
     Saturation,
@@ -19,10 +21,12 @@ pub enum CameraControl {
 
 impl CameraControl {
     /// Every control, in the order the UI lists them (lens first, then image).
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Zoom,
         Self::Focus,
         Self::Exposure,
+        Self::PowerLineFrequency,
+        Self::LowLightCompensation,
         Self::Brightness,
         Self::Contrast,
         Self::Saturation,
@@ -38,6 +42,8 @@ impl CameraControl {
             Self::Zoom => "zoom",
             Self::Focus => "focus",
             Self::Exposure => "exposure",
+            Self::PowerLineFrequency => "power_line_frequency",
+            Self::LowLightCompensation => "low_light_compensation",
             Self::Brightness => "brightness",
             Self::Contrast => "contrast",
             Self::Saturation => "saturation",

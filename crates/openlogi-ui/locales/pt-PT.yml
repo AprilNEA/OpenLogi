@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "Esta câmara não oferece controlos de imagem ajustáveis."
 "Focus": "Focagem"
 "Exposure": "Exposição"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "Equilíbrio de brancos"
 "Tint": "Tonalidade"
 "Auto": "Auto"

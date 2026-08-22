@@ -349,6 +349,8 @@ _version: 1
 "This camera exposes no adjustable image controls.": "Dette kameraet har ingen justerbare bildekontroller."
 "Focus": "Fokus"
 "Exposure": "Eksponering"
+"Anti-flicker": "Anti-flicker"
+"Low light compensation": "Low light compensation"
 "White balance": "Hvitbalanse"
 "Tint": "Fargetone"
 "Auto": "Auto"
