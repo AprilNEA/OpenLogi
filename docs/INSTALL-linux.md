@@ -173,6 +173,10 @@ ranks it above both locations, so a unit you write there overrides whatever
 OpenLogi does. Use `systemctl --user edit openlogi-agent.service` for a drop-in
 that survives package upgrades.
 
+OpenLogi never overwrites or deletes a unit it did not generate, at either
+location, and it only turns off an autostart it turned on. Enabling the service
+yourself with the command above keeps working regardless of the GUI toggle.
+
 ## Verify the installation
 
 ```sh

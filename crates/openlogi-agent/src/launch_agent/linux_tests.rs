@@ -237,11 +237,11 @@ fn packaged_probe_ignores_a_unit_for_another_binary() {
     ));
 }
 
-/// A unit the user wrote themselves means the service name is theirs: reconcile
-/// must not withdraw an enablement it never made. Guards the predicate that
-/// gates `disable` when nothing of ours is on disk.
+/// A unit this app did not render is never overwritten or deleted, at either
+/// user-writable tier. The same round-trip check gates the config-tier
+/// migration, the data-tier delete, and the decision to leave a file alone.
 #[test]
-fn a_hand_authored_unit_is_recognised_as_the_users() {
+fn a_unit_this_app_did_not_render_is_not_ours() {
     let ours = render_unit("/usr/bin/openlogi-agent");
     assert!(
         is_generated_unit(&ours),
@@ -254,6 +254,25 @@ fn a_hand_authored_unit_is_recognised_as_the_users() {
     );
     assert!(
         !is_generated_unit(&theirs),
-        "an edited unit is the user's, so its enablement is theirs to withdraw"
+        "an edited unit belongs to whoever wrote it"
     );
+}
+
+/// The marker is what distinguishes an enablement this app made from one the
+/// documented `systemctl --user enable --now` step made. It lives beside the
+/// config, not among the units, so it cannot collide with a unit file.
+#[test]
+fn the_enablement_marker_sits_outside_the_unit_directories() {
+    let marker = enablement_marker_path().expect("marker path resolves");
+    let generated = generated_unit_path().expect("generated path resolves");
+    let legacy = legacy_unit_path().expect("legacy path resolves");
+
+    assert_ne!(marker, generated);
+    assert_ne!(marker, legacy);
+    assert_ne!(
+        marker.parent(),
+        generated.parent(),
+        "the marker must not share a directory with the generated unit"
+    );
+    assert!(!marker.to_string_lossy().contains("systemd/user"));
 }

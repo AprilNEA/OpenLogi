@@ -41,9 +41,18 @@
 //! semantics. A clean `exit(0)` leaves the unit enabled but stopped until the
 //! next session login.
 //!
-//! Earlier versions wrote into `$XDG_CONFIG_HOME/systemd/user` directly; such a
-//! file is removed on reconcile, but only when it round-trips through the
-//! renderer and is therefore provably one of ours.
+//! Neither user-writable tier is exclusively this app's, so nothing is written
+//! over or deleted unless it round-trips through the renderer and is therefore
+//! provably one of ours — including the file earlier versions wrote into
+//! `$XDG_CONFIG_HOME/systemd/user`, which is cleaned up on reconcile. A unit
+//! anything else installed under the same name is left alone, and the setting
+//! is honoured through enablement alone.
+//!
+//! Enablement is tracked separately, because `systemctl --user enable` records
+//! only that a unit is enabled, never who asked. Without that record,
+//! reconciling a disabled setting would withdraw the enablement made by the
+//! documented `systemctl --user enable --now` install step. A marker beside the
+//! config notes an enablement this app made; `disable` runs only against one.
 
 use tracing::debug;
 
@@ -250,6 +259,28 @@ fn reconcile_linux(enabled: bool) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     migrate_legacy_unit();
 
+    let path = generated_unit_path()?;
+    let current = std::fs::read_to_string(&path).ok();
+
+    // A unit at a user-writable tier that this app did not render belongs to
+    // whoever wrote it — another installer, or the user. Never overwrite it and
+    // never delete it; the toggle is honoured through enablement alone.
+    if current
+        .as_deref()
+        .is_some_and(|have| !is_generated_unit(have))
+    {
+        warn!(
+            path = %path.display(),
+            "leaving a systemd user unit this app did not write in place",
+        );
+        if enabled {
+            enable_unit();
+        } else {
+            disable_unit_if_ours();
+        }
+        return Ok(());
+    }
+
     // A packaged unit that already launches this exact binary makes a generated
     // copy pure redundancy — identical directives, one tier higher. Writing one
     // would shadow the package (later changes to the packaged unit would never
@@ -258,20 +289,17 @@ fn reconcile_linux(enabled: bool) -> io::Result<()> {
     if enabled && let Some(packaged) = packaged_unit_for(&exe) {
         remove_generated_unit()?;
         info!(path = %packaged.display(), "enabling the packaged systemd user unit");
-        run_systemctl(&["enable", UNIT_NAME]);
+        enable_unit();
         return Ok(());
     }
 
-    let path = generated_unit_path()?;
     let desired = enabled.then(|| render_unit(&exe.to_string_lossy()));
-
-    let current = std::fs::read_to_string(&path).ok();
     match (desired.as_deref(), current.as_deref()) {
         (Some(want), Some(have)) if want == have => {
             debug!(path = %path.display(), "systemd user unit already current");
             // Re-enable unconditionally: the unit file is current but the user
             // may have manually disabled the service since the last reconcile.
-            run_systemctl(&["enable", UNIT_NAME]);
+            enable_unit();
         }
         (Some(want), _) => {
             if let Some(parent) = path.parent() {
@@ -280,31 +308,73 @@ fn reconcile_linux(enabled: bool) -> io::Result<()> {
             std::fs::write(&path, want)?;
             info!(path = %path.display(), "systemd user unit written");
             run_systemctl(&["daemon-reload"]);
-            run_systemctl(&["enable", UNIT_NAME]);
+            enable_unit();
         }
         (None, Some(_)) => {
-            run_systemctl(&["disable", UNIT_NAME]);
-            std::fs::remove_file(&path)?;
-            run_systemctl(&["daemon-reload"]);
-            info!(path = %path.display(), "systemd user unit removed");
+            disable_unit_if_ours();
+            remove_generated_unit()?;
         }
         (None, None) => {
             debug!("systemd user unit already absent");
-            // Nothing of ours is on disk, so `disable` would act on whatever
-            // else claims this unit name. Withdraw only an enablement this app
-            // could have made: a packaged unit for this binary, and only while
-            // the user has not authored their own.
-            //
-            // Deliberately asymmetric with the enable path above, which does
-            // run against a hand-authored unit — enabling is what the user just
-            // asked for, whereas the enablement being withdrawn here may be one
-            // they made outside OpenLogi and never asked it to touch.
-            if packaged_unit_for(&exe).is_some() && !user_authored_unit_present() {
-                run_systemctl(&["disable", UNIT_NAME]);
-            }
+            disable_unit_if_ours();
         }
     }
     Ok(())
+}
+
+/// Path to the marker recording that *this app* enabled the unit.
+///
+/// `systemctl --user enable` writes a symlink that carries no record of who
+/// asked for it, and the unit name is shared with whatever a package or the
+/// user installs. Without this, reconciling a disabled setting would withdraw
+/// an enablement made by the documented `systemctl --user enable --now`
+/// install step, silently turning off autostart the user asked for.
+#[cfg(target_os = "linux")]
+fn enablement_marker_path() -> io::Result<PathBuf> {
+    let data_dir = openlogi_core::paths::data_dir().map_err(io::Error::other)?;
+    Ok(data_dir.join("autostart.enabled"))
+}
+
+/// Enable the unit and record that this app is the one that did.
+#[cfg(target_os = "linux")]
+fn enable_unit() {
+    run_systemctl(&["enable", UNIT_NAME]);
+    if let Err(e) = record_enablement() {
+        warn!(error = %e, "could not record the autostart enablement");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn record_enablement() -> io::Result<()> {
+    let path = enablement_marker_path()?;
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, b"")
+}
+
+/// Withdraw the enablement only when this app recorded making it.
+///
+/// A missing marker means the enablement came from somewhere else — the
+/// install instructions, another tool, the user — and is not ours to remove.
+/// Losing the marker therefore fails safe: autostart keeps working, and the
+/// user can still turn it off the way they turned it on.
+#[cfg(target_os = "linux")]
+fn disable_unit_if_ours() {
+    let Ok(marker) = enablement_marker_path() else {
+        return;
+    };
+    if !marker.exists() {
+        debug!("autostart enablement was not made by OpenLogi; leaving it alone");
+        return;
+    }
+    run_systemctl(&["disable", UNIT_NAME]);
+    if let Err(e) = std::fs::remove_file(&marker) {
+        warn!(error = %e, path = %marker.display(), "could not clear the autostart marker");
+    }
 }
 
 /// Path to the generated unit:
@@ -366,18 +436,6 @@ fn migrate_legacy_unit() {
             warn!(error = %e, path = %path.display(), "could not remove the legacy systemd user unit");
         }
     }
-}
-
-/// Whether the user's own config tier holds a unit this app did not render.
-///
-/// Such a file outranks everything else, so the service name belongs to them:
-/// its enablement is theirs to withdraw, not this app's.
-#[cfg(target_os = "linux")]
-fn user_authored_unit_present() -> bool {
-    legacy_unit_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_some_and(|contents| !is_generated_unit(&contents))
 }
 
 /// Whether `contents` is a unit this app rendered, for *any* executable path.
@@ -452,19 +510,27 @@ fn same_executable(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Delete the generated unit if present. Absent is success, not an error.
+/// Delete the generated unit if present, and only if this app rendered it.
+///
+/// The data tier is where OpenLogi writes, but it is not exclusively its own —
+/// another tool can install a unit under the same name. Absent is success.
 #[cfg(target_os = "linux")]
 fn remove_generated_unit() -> io::Result<()> {
     let path = generated_unit_path()?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => {
-            info!(path = %path.display(), "removed the redundant generated systemd user unit");
-            run_systemctl(&["daemon-reload"]);
-            Ok(())
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    if !is_generated_unit(&contents) {
+        warn!(
+            path = %path.display(),
+            "leaving a systemd user unit this app did not write in place",
+        );
+        return Ok(());
     }
+    std::fs::remove_file(&path)?;
+    info!(path = %path.display(), "removed the generated systemd user unit");
+    run_systemctl(&["daemon-reload"]);
+    Ok(())
 }
 
 /// Render the systemd user unit for the given executable path.
