@@ -680,3 +680,17 @@ pub(crate) fn scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoE
         .overflow_y_scroll()
         .children(rows)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gesture_action_catalog_includes_actions_ring() {
+        let actions = grouped_catalog()
+            .into_iter()
+            .flat_map(|(_, actions)| actions)
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&Action::ShowActionsRing));
+    }
+}

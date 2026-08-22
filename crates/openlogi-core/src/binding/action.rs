@@ -260,7 +260,7 @@ macro_rules! for_each_unit_action {
             Screenshot "Screenshot" System Camera,
             CaptureRegion "Capture Region" System Camera,
             Sleep "Sleep" System Monitor,
-            ShowActionsRing "Actions Ring" System Grid not_pickable,
+            ShowActionsRing "Actions Ring" System Grid,
             // Media
             PlayPause "Play / Pause" Media Play,
             NextTrack "Next Track" Media NextTrack,
@@ -327,9 +327,7 @@ macro_rules! derive_action_core {
             ///
             /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
             /// "Record shortcut…" (P1.3), not selected from the catalog. Table rows
-            /// tagged `not_pickable` (currently only [`Action::ShowActionsRing`], the
-            /// fixed default for [`ButtonId::HapticPanel`](super::ButtonId::HapticPanel))
-            /// are excluded from the catalog the same way.
+            /// tagged `not_pickable` are excluded from the catalog the same way.
             #[must_use]
             pub fn catalog() -> Vec<Action> {
                 [ $( derive_action_core!(@item $variant $( $tag )?) ),* ]

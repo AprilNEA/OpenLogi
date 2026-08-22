@@ -94,12 +94,15 @@ pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
         let Some(ring) = handle.downcast::<RingView>() else {
             continue;
         };
-        let _ = ring.update(cx, |view, window, _| {
-            if !click_away_targets(session_id, view.session_id()) {
+        let _ = ring.update(cx, |view, window, cx| {
+            let Some(open_session) = view.current_session() else {
+                return;
+            };
+            if !click_away_targets(session_id, open_session) {
                 return;
             }
             view.cancel();
-            window.remove_window();
+            view.dismiss(open_session, window, cx);
         });
     }
 }
