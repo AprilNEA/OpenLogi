@@ -71,7 +71,8 @@ let
 
   # GPUI discovers these graphics backends at runtime instead of linking them,
   # so normal fixup cannot infer their store paths. Add only those paths to the
-  # GUI's RUNPATH; linked xkbcommon/xcb/font libraries are fixed up normally.
+  # RUNPATH of every GPUI binary; linked xkbcommon/xcb/font libraries are fixed
+  # up normally.
   runtimeLibs = lib.makeLibraryPath [
     libGL
     wayland
@@ -200,8 +201,14 @@ rustPlatform.buildRustPackage {
     runHook postInstall
   '';
 
+  # The desktop app and the Actions Ring overlay are siblings: both are GPUI
+  # processes, so both need the runtime backends on their RUNPATH. Patching
+  # only the desktop app left the overlay panicking on `NoWaylandLib` at
+  # startup, which the agent's supervisor turned into a restart loop.
   postFixup = ''
-    patchelf --add-rpath "${runtimeLibs}" "$out/bin/openlogi-desktop"
+    for binary in openlogi-desktop openlogi-overlay; do
+      patchelf --add-rpath "${runtimeLibs}" "$out/bin/$binary"
+    done
   '';
 
   doInstallCheck = true;
