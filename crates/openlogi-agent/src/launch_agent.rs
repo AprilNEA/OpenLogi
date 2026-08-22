@@ -336,9 +336,19 @@ fn enablement_marker_path() -> io::Result<PathBuf> {
 }
 
 /// Enable the unit and record that this app is the one that did.
+///
+/// The marker is written only once `systemctl` reports success. Recording an
+/// enablement that never happened — no session bus, unit not found — would let
+/// a later reconcile disable something this app never turned on.
+///
+/// Claiming an enablement the user made by hand is deliberate: reaching the
+/// toggle at all is an explicit request for this app to manage autostart, and
+/// the setting has to mean what it says when it is switched back off.
 #[cfg(target_os = "linux")]
 fn enable_unit() {
-    run_systemctl(&["enable", UNIT_NAME]);
+    if !run_systemctl(&["enable", UNIT_NAME]) {
+        return;
+    }
     if let Err(e) = record_enablement() {
         warn!(error = %e, "could not record the autostart enablement");
     }
@@ -371,7 +381,11 @@ fn disable_unit_if_ours() {
         debug!("autostart enablement was not made by OpenLogi; leaving it alone");
         return;
     }
-    run_systemctl(&["disable", UNIT_NAME]);
+    if !run_systemctl(&["disable", UNIT_NAME]) {
+        // Keep the marker so the next reconcile retries rather than stranding
+        // an enablement this app is still responsible for.
+        return;
+    }
     if let Err(e) = std::fs::remove_file(&marker) {
         warn!(error = %e, path = %marker.display(), "could not clear the autostart marker");
     }
@@ -585,12 +599,15 @@ fn escape_systemd_exec(s: &str) -> String {
 /// the unit file write is the authoritative record; enable/disable is
 /// best-effort (e.g. the session D-Bus may be unavailable in some environments).
 #[cfg(target_os = "linux")]
-fn run_systemctl(args: &[&str]) {
+fn run_systemctl(args: &[&str]) -> bool {
     let label = SystemctlArgsDisplay(args);
     let mut cmd = std::process::Command::new("systemctl");
     cmd.arg("--user").args(args);
     match cmd.output() {
-        Ok(out) if out.status.success() => debug!("systemctl --user {label} succeeded"),
+        Ok(out) if out.status.success() => {
+            debug!("systemctl --user {label} succeeded");
+            true
+        }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             warn!(
@@ -598,8 +615,12 @@ fn run_systemctl(args: &[&str]) {
                 out.status,
                 stderr.trim()
             );
+            false
         }
-        Err(e) => warn!("systemctl --user {label} failed to spawn: {e}"),
+        Err(e) => {
+            warn!("systemctl --user {label} failed to spawn: {e}");
+            false
+        }
     }
 }
 
