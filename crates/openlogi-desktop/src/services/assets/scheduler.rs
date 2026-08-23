@@ -47,7 +47,6 @@ pub(crate) struct AssetSync {
     last_at: Option<Instant>,
     index_refreshed: bool,
     synced_keys: HashSet<String>,
-    dirty: bool,
 }
 
 impl AssetSync {
@@ -59,24 +58,12 @@ impl AssetSync {
             last_at: None,
             index_refreshed: false,
             synced_keys: HashSet::new(),
-            dirty: false,
         }
     }
 
     /// Whether a fetch is writing the cache right now.
     pub(crate) fn is_running(&self) -> bool {
         matches!(self.state, SyncState::Running { .. })
-    }
-
-    /// Take the "a fetch landed new art" flag, which asks the next merge to
-    /// push past the unchanged-device-list early return so the fresh records
-    /// become visible.
-    ///
-    /// Only call this on a merge that will actually run: consuming the flag on
-    /// a skipped merge strands the device on its silhouette until the next
-    /// inventory change (#218).
-    pub(crate) fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
     }
 
     /// The automatic path, offered every merged snapshot: fetch the index once
@@ -159,7 +146,6 @@ impl AssetSync {
             self.last_at = None;
             self.index_refreshed = true;
             self.synced_keys.extend(keys);
-            self.dirty = true;
         }
         deferred
     }
@@ -335,22 +321,5 @@ mod tests {
             sync.poll_auto(vec![target("a")], true, now),
             Some(vec![target("a")])
         );
-    }
-
-    #[test]
-    fn only_a_successful_fetch_asks_for_a_repaint_and_only_once() {
-        let mut sync = AssetSync::new(true);
-        let now = Instant::now();
-        assert!(sync.poll_auto(Vec::new(), true, now).is_some());
-        assert!(sync.finish(false).is_none());
-        assert!(!sync.take_dirty());
-
-        assert!(
-            sync.poll_auto(Vec::new(), true, now + Duration::from_secs(1))
-                .is_some()
-        );
-        assert!(sync.finish(true).is_none());
-        assert!(sync.take_dirty());
-        assert!(!sync.take_dirty());
     }
 }

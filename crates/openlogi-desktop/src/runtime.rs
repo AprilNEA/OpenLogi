@@ -149,7 +149,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     // this moment: re-issue it now that the cache is no longer
                     // being written. The command arm runs it (the sync is idle
                     // again) — or re-defers if a new sync already started.
-                    if let Some(cmd) = rt.on_sync_finished(ok) {
+                    if let Some(cmd) = rt.on_sync_finished(ok, cx) {
                         let _ = asset_self_tx.send(cmd);
                     }
                 }
@@ -261,17 +261,6 @@ impl Runtime {
             self.inventories.clone_from(&snapshot.inventory);
             self.standalone.clone_from(&snapshot.standalone);
         }
-        // A completed sync may have put real photos where silhouettes were
-        // resolved: the resolver was rebuilt when its outcome landed; force
-        // this merge through the unchanged-list early-return so the fresh
-        // records become visible. Only consume the flag on a `Ready` snapshot
-        // that will actually run the merge below — `refresh_inventories` is
-        // skipped while the agent is still `Scanning`, so taking it there would
-        // drop the repaint and strand the device on its silhouette until the
-        // next inventory change or a restart (seen after an update relaunches
-        // GUI and agent together: the agent's Scanning window overlaps the
-        // first sync's completion).
-        let force_refresh = inventory_ready && self.sync.take_dirty();
         let pairing_changed =
             cx.update(|cx| windows::add_device::apply_state(cx, snapshot.pairing.clone()));
         let (auto_download, asset_source, models) = cx.update(|cx| {
@@ -285,7 +274,7 @@ impl Runtime {
                             &snapshot.inventory,
                             &snapshot.standalone,
                             &self.cache,
-                            force_refresh,
+                            false,
                             &self.cams,
                         );
                     if inventory_ready {
@@ -397,10 +386,11 @@ impl Runtime {
 
     /// A background fetch finished. Returns the manual command that was waiting
     /// on it, if any.
-    fn on_sync_finished(&mut self, ok: bool) -> Option<AssetCommand> {
+    fn on_sync_finished(&mut self, ok: bool, cx: &AsyncApp) -> Option<AssetCommand> {
         let deferred = self.sync.finish(ok);
         if ok {
             self.cache = assets::AssetResolver::new();
+            self.refresh_devices(cx);
         }
         deferred
     }
