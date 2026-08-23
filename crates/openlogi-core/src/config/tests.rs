@@ -53,7 +53,9 @@ fn migrated_load_backs_up_the_pre_migration_source_exactly_once() {
     // the same `ConfigFile` (`migrated_from` is consumed with `Option::take`).
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
-    let backup = path.with_extension("v4.bak");
+    // Appended to the full file name, not substituted for its extension:
+    // `config.toml` + `.v4.bak`, never `config.v4.bak`.
+    let backup = dir.path().join("config.toml.v4.bak");
     let original =
         b"schema_version = 4\n\n[devices.\"direct:046d:c08d:unit:6be9d300\"]\ninvert_scroll = true\n";
     fs::write(&path, original).expect("write v4 config");
@@ -1879,7 +1881,9 @@ fn a_failed_backup_write_leaves_the_migration_backup_still_owed() {
     // ever exists.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
-    let backup = path.with_extension("v4.bak");
+    // Appended to the full file name, not substituted for its extension:
+    // `config.toml` + `.v4.bak`, never `config.v4.bak`.
+    let backup = dir.path().join("config.toml.v4.bak");
     let original =
         b"schema_version = 4\n\n[devices.\"direct:046d:c08d:unit:6be9d300\"]\ninvert_scroll = true\n";
     fs::write(&path, original).expect("write v4 config");

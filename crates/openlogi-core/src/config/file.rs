@@ -174,7 +174,12 @@ impl ConfigFile {
         // pre-migration file, and the next save that *did* succeed would
         // overwrite it with migrated content and no backup anywhere.
         if let Some((version, original)) = self.migrated_from.as_ref() {
-            let backup = self.path.with_extension(format!("v{version}.bak"));
+            let backup = migration_backup_path(&self.path, *version).map_err(|source| {
+                ConfigError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
             // Atomic like the config write itself: this is the only copy of
             // the pre-migration file, so an interrupted write must not be
             // able to leave a truncated one behind.
@@ -381,6 +386,23 @@ pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
         }
     }
     write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
+}
+
+/// Path of the pre-migration copy: the config's own name with
+/// `.v<version>.bak` appended, so `config.toml` yields
+/// `config.toml.v4.bak`. Appended, not substituted — `with_extension` would
+/// replace `.toml` and hand back `config.v4.bak`, which no longer names the
+/// file it is a copy of.
+pub(super) fn migration_backup_path(path: &Path, version: u32) -> io::Result<PathBuf> {
+    let Some(file_name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config path has no file name",
+        ));
+    };
+    let mut backup_name = OsString::from(file_name);
+    backup_name.push(format!(".v{version}.bak"));
+    Ok(path.with_file_name(backup_name))
 }
 
 pub(super) fn config_backup_path(path: &Path, generation: usize) -> io::Result<PathBuf> {
