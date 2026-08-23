@@ -329,6 +329,7 @@ _version: 1
 "Scrolls once per physical ratchet step.": "Ruller én gang pr. fysisk rastertrin."
 "Detects finer movement between ratchet steps.": "Registrerer finere bevægelser mellem rastertrin."
 "This device does not support wheel resolution control.": "Denne enhed understøtter ikke styring af hjulopløsning."
+"This device supports wheel resolution on its other connection, but not this one.": "This device supports wheel resolution on its other connection, but not this one."
 "About": "Om"
 "Updates": "Opdateringer"
 "Off by default — checking for updates is OpenLogi's only optional outbound network request.": "Off by default — checking for updates is OpenLogi's only optional outbound network request."

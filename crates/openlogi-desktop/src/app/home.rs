@@ -97,7 +97,7 @@ pub(crate) fn keyboard_glow(
         return None;
     }
     let lighting = state
-        .lighting_for(&record.config_key)
+        .lighting_for(&record.config_key, &record.route_key)
         .filter(|l| l.enabled)?;
     let geom = record.asset.as_ref()?.glow.clone()?;
     let (r, g, b) = lighting.color.components();

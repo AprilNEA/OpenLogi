@@ -329,6 +329,7 @@ _version: 1
 "Scrolls once per physical ratchet step.": "Vierittää kerran fyysistä pykälää kohti."
 "Detects finer movement between ratchet steps.": "Tunnistaa hienovaraisemman liikkeen pykälien välillä."
 "This device does not support wheel resolution control.": "Tämä laite ei tue vierityspyörän tarkkuuden hallintaa."
+"This device supports wheel resolution on its other connection, but not this one.": "This device supports wheel resolution on its other connection, but not this one."
 "About": "Tietoja"
 "Updates": "Päivitykset"
 "Off by default — checking for updates is OpenLogi's only optional outbound network request.": "Off by default — checking for updates is OpenLogi's only optional outbound network request."

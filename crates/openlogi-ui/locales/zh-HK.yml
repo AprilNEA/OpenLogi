@@ -329,6 +329,7 @@ _version: 1
 "Scrolls once per physical ratchet step.": "每個實體棘輪段落捲動一次。"
 "Detects finer movement between ratchet steps.": "偵測棘輪段落之間更細微的移動。"
 "This device does not support wheel resolution control.": "此裝置不支援滾輪解析度控制。"
+"This device supports wheel resolution on its other connection, but not this one.": "This device supports wheel resolution on its other connection, but not this one."
 "About": "關於"
 "Updates": "更新"
 "Off by default — checking for updates is OpenLogi's only optional outbound network request.": "預設關閉 —— 檢查更新是 OpenLogi 唯一可選的對外網路請求。"

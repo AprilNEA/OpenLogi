@@ -329,6 +329,7 @@ _version: 1
 "Scrolls once per physical ratchet step.": "Se desplaza una vez por cada paso físico del trinquete."
 "Detects finer movement between ratchet steps.": "Detecta movimientos más finos entre los pasos del trinquete."
 "This device does not support wheel resolution control.": "Este dispositivo no admite el control de resolución de la rueda."
+"This device supports wheel resolution on its other connection, but not this one.": "This device supports wheel resolution on its other connection, but not this one."
 "About": "Acerca de"
 "Updates": "Actualizaciones"
 "Off by default — checking for updates is OpenLogi's only optional outbound network request.": "Off by default — checking for updates is OpenLogi's only optional outbound network request."
