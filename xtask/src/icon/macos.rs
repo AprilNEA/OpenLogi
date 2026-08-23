@@ -7,6 +7,7 @@
 //! outputs of the same document.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
 use xshell::{Shell, cmd};
@@ -208,6 +209,16 @@ fn compile_document(root: &Path, output_dir: &Path, icon: AppIcon) -> Result<()>
     // and the artwork it names.
     ensure_dir(&source)?;
 
+    // `actool` costs seconds and every `cargo run` of the GUI comes through
+    // here, so a document that has not changed since it was last compiled is
+    // skipped — by age, not by presence: an edited layer must not leave the dev
+    // bundle testing an icon the release build would never produce.
+    let outputs = compiled_outputs(output_dir, icon);
+    if outputs_are_current(&source, &outputs)? {
+        println!("{icon} is up to date");
+        return Ok(());
+    }
+
     let work = tempfile::Builder::new()
         .prefix("openlogi-app-icon-")
         .tempdir()
@@ -274,6 +285,46 @@ fn compile_document(root: &Path, output_dir: &Path, icon: AppIcon) -> Result<()>
 
     println!("compiled {icon} from {}", document(icon));
     Ok(())
+}
+
+/// Everything compiling `icon` writes.
+fn compiled_outputs(output_dir: &Path, icon: AppIcon) -> Vec<PathBuf> {
+    let mut outputs = vec![
+        output_dir.join(format!("{}.icns", compiled_stem(icon))),
+        output_dir.join(PREVIEWS_DIR).join(preview_file(icon)),
+    ];
+    if icon.is_default() {
+        outputs.push(output_dir.join(CATALOG));
+    }
+    outputs
+}
+
+/// Whether every output is present and newer than everything in `source`.
+fn outputs_are_current(source: &Path, outputs: &[PathBuf]) -> Result<bool> {
+    let source_touched = newest_change(source)?;
+    for output in outputs {
+        let Ok(metadata) = fs_err::metadata(output) else {
+            return Ok(false);
+        };
+        if metadata.modified()? <= source_touched {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The most recent modification anywhere under `path`. A document is a
+/// directory, and editing a layer inside it leaves the directory's own
+/// timestamp untouched.
+fn newest_change(path: &Path) -> Result<SystemTime> {
+    let metadata = fs_err::metadata(path)?;
+    let mut newest = metadata.modified()?;
+    if metadata.is_dir() {
+        for entry in fs_err::read_dir(path)? {
+            newest = newest.max(newest_change(&entry?.path())?);
+        }
+    }
+    Ok(newest)
 }
 
 /// Move one compiled output into place, replacing whatever was there.

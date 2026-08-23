@@ -40,11 +40,10 @@ const CHANNEL: Channel = Channel::Dev;
 /// it.
 const APP_PLIST: &str = "crates/openlogi-desktop/bundle/desktop-dev/Info.plist";
 
-/// The shared app icon and the asset catalog beside it, both generated on
-/// demand by `macos icon`. Only the first is checked in, so a fresh clone has
-/// the icns and still needs a compile for the catalog.
+/// The shared app icon, compiled by [`AppBundle`] alongside the catalog and
+/// the alternates. Only this one is checked in; the rest a fresh clone
+/// compiles on its first bundle.
 const ICON: &str = "crates/openlogi-desktop/icon/AppIcon.icns";
-const ICON_CATALOG: &str = "crates/openlogi-desktop/icon/Assets.car";
 
 /// What the identity pass covers when the helpers were not embedded.
 const APP_ONLY: [Component; 1] = [Component::App];
@@ -65,10 +64,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     processes::reap_leftovers(&app, &root.join("target"))?;
 
+    AppBundle.compile()?;
     let icon = root.join(ICON);
-    if !icon.is_file() || !root.join(ICON_CATALOG).is_file() {
-        AppBundle.compile()?;
-    }
     ensure_file(&icon)?;
 
     let signing = signing::resolve(&app)?;

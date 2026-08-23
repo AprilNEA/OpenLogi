@@ -98,8 +98,12 @@ impl AppState {
             return;
         }
         self.config.app_settings.app_icon = icon;
-        self.persist_config("app icon setting");
-        crate::platform::app_icon::apply(icon);
+        // Only wear what the config kept: a failed write rolls the setting
+        // back, and an icon applied over that would outlive the choice it came
+        // from — Finder would show one thing and Settings another.
+        if self.persist_config("app icon setting") {
+            crate::platform::app_icon::apply(icon);
+        }
     }
     /// Persist the UI corner-radius override (`None` = each theme's own radius).
     /// No-op when unchanged.

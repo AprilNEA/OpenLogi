@@ -11,7 +11,8 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1", version = "0.1.0" }
+# Clearing the custom icon a run of the app may have left on a bundle.
+appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
 clap = { workspace = true }
 comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
