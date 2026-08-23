@@ -25,7 +25,7 @@ use crate::services::assets::{AssetResolver, ResolvedAsset};
 /// carousel can render straight from the device list — the list is the single
 /// source of truth for "which devices exist", keeping carousel order aligned
 /// with [`super::AppState::current_device`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
     /// Route-derived key used for runtime state and, when [`Self::persistent`]
     /// is true, persisted settings.

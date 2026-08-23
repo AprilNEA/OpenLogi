@@ -47,18 +47,16 @@ impl AppState {
     /// the previously-selected device disappeared, the selection falls back
     /// to index 0. Returns whether anything actually changed.
     ///
-    /// No-op (returning `false`) when the new list has the same `config_key`
-    /// sequence as the current one — the caller skips the window refresh, and
-    /// quiet polling cycles cause no spurious re-renders (P1.6). `force`
-    /// pushes through that early-return: the records embed resolved asset
-    /// paths, so a completed asset sync needs one rebuild even though the
-    /// device *set* is unchanged.
+    /// No-op (returning `false`) when the rebuilt list equals the current one,
+    /// so the caller skips the window refresh. The comparison is whole-record,
+    /// which is what lets every input tier — the agent snapshot, the camera
+    /// scan, and the asset cache — share one rebuild path without any of them
+    /// needing to announce which fields it might have touched.
     pub fn refresh_inventories(
         &mut self,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
         cache: &AssetResolver,
-        force: bool,
         cameras: &[openlogi_camera::Camera],
     ) -> bool {
         let new_list = build_device_list(inventories, standalone, cache, &self.config, cameras);
@@ -69,29 +67,13 @@ impl AppState {
         if persist_identities(&mut self.config, &merged_list) {
             self.persist_config("device identity");
         }
-        // Compare more than config_key: a device can reconnect on a new HID++
-        // index while keeping its physical config key, and the fresh route must
-        // replace the stale one so reads/writes don't target a dead index.
-        // `online` and `capabilities` are compared too, so a device waking up or
-        // a probe that resolves its feature table on a stable route still
-        // refreshes the carousel (and its config panels) instead of being
-        // swallowed by this guard.
-        let unchanged = merged_list.len() == self.device_list.len()
-            && merged_list
-                .iter()
-                .zip(self.device_list.iter())
-                .all(|(a, b)| {
-                    a.config_key == b.config_key
-                        && a.capture_id == b.capture_id
-                        && a.route == b.route
-                        && a.online == b.online
-                        && a.capabilities == b.capabilities
-                        && a.light_capabilities == b.light_capabilities
-                        && a.driver_id == b.driver_id
-                        && a.registry_model_id == b.registry_model_id
-                        && a.kind == b.kind
-                });
-        if unchanged && !force {
+        // Whole-record equality, not a field allowlist. Every field of a
+        // `DeviceRecord` is rendered somewhere, so any of them differing is a
+        // real change; an allowlist silently drops the fields nobody thought to
+        // add — `battery` and the resolved `asset` were both being swallowed
+        // here. Structural comparison also makes the guard immune to new
+        // fields, which is what an allowlist can never be.
+        if merged_list == self.device_list {
             return false;
         }
 

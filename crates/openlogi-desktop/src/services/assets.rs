@@ -102,7 +102,7 @@ fn open_in_file_manager(path: &Path) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAsset {
     pub depot: String,
     pub display_name: String,

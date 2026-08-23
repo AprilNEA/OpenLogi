@@ -274,7 +274,6 @@ impl Runtime {
                             &snapshot.inventory,
                             &snapshot.standalone,
                             &self.cache,
-                            false,
                             &self.cams,
                         );
                     if inventory_ready {
@@ -403,7 +402,6 @@ impl Runtime {
                     &self.inventories,
                     &self.standalone,
                     &self.cache,
-                    true,
                     &self.cams,
                 )
             });
