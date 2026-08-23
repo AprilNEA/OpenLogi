@@ -14,11 +14,13 @@
 //! for the device and config facts, the agent binary for the hook ones — so it
 //! is shared as an `Arc` and every setter takes `&self`.
 
+use openlogi_core::app::ForegroundApp;
+use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, FoundDevice, Generation, InventoryHealth, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingPhase,
+    AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
 };
 use tokio::sync::watch;
 
@@ -57,6 +59,7 @@ impl ObservableState {
                 standalone: Vec::new(),
                 camera_active: false,
                 pairing: None,
+                foreground: ForegroundApps::default(),
             },
         });
         Self { tx }
@@ -219,6 +222,32 @@ impl ObservableState {
         });
     }
 
+    /// Publish which application is frontmost, as observed by
+    /// [`watchers::foreground_app`](crate::watchers::foreground_app).
+    ///
+    /// `current` mirrors the matcher exactly, OpenLogi's own processes
+    /// included; the recent list filters them out, because a per-app profile
+    /// for OpenLogi is never what a user means. The list grows only here, so a
+    /// client that reconnects mid-session inherits whatever the agent has seen
+    /// since it started rather than an empty picker.
+    pub fn set_foreground(&self, app: Option<ForegroundApp>) {
+        self.update(|snapshot| {
+            if snapshot.foreground.current == app {
+                return false;
+            }
+            if let Some(app) = &app
+                && !is_openlogi_foreground_id(&app.id)
+            {
+                let recent = &mut snapshot.foreground.recent;
+                recent.retain(|seen| seen.id != app.id);
+                recent.insert(0, app.clone());
+                recent.truncate(RECENT_APPS);
+            }
+            snapshot.foreground.current = app;
+            true
+        });
+    }
+
     /// Publish whether the OS input hook is currently installed.
     pub fn set_hook_installed(&self, installed: bool) {
         self.update(|snapshot| {
@@ -234,9 +263,11 @@ impl ObservableState {
 #[cfg(test)]
 mod tests {
     use super::ObservableState;
+    use openlogi_core::app::ForegroundApp;
+    use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
-    use openlogi_ipc::InventoryHealth;
+    use openlogi_ipc::{InventoryHealth, RECENT_APPS};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -264,6 +295,82 @@ mod tests {
                 capabilities: None,
             }],
         }
+    }
+
+    /// Drive the watcher's edge for one application id.
+    fn front(state: &ObservableState, id: &str) {
+        state.set_foreground(Some(ForegroundApp::unnamed(id.to_string())));
+    }
+
+    /// Identifiers of the recent list, newest first.
+    fn recent(state: &ObservableState) -> Vec<String> {
+        state
+            .snapshot()
+            .foreground
+            .recent
+            .into_iter()
+            .map(|app| app.id)
+            .collect()
+    }
+
+    #[test]
+    fn revisiting_an_app_moves_it_to_the_front_instead_of_repeating_it() {
+        let state = state();
+        front(&state, "com.apple.Safari");
+        front(&state, "com.microsoft.VSCode");
+        front(&state, "com.apple.Safari");
+
+        assert_eq!(recent(&state), ["com.apple.Safari", "com.microsoft.VSCode"]);
+    }
+
+    #[test]
+    fn our_own_windows_never_become_a_profile_target() {
+        let state = state();
+        front(&state, "com.apple.Safari");
+        // The user clicked over to OpenLogi to edit Safari's profile: the
+        // matcher must see the switch, but the picker must still offer Safari.
+        front(&state, APP_ID);
+
+        assert_eq!(
+            state.snapshot().foreground.current.map(|app| app.id),
+            Some(APP_ID.to_string()),
+            "current mirrors the matcher, unfiltered"
+        );
+        assert_eq!(recent(&state), ["com.apple.Safari"]);
+    }
+
+    #[test]
+    fn the_recent_list_is_capped() {
+        let state = state();
+        for n in 0..RECENT_APPS + 5 {
+            front(&state, &format!("app.{n}"));
+        }
+        let recent = recent(&state);
+        assert_eq!(recent.len(), RECENT_APPS);
+        assert_eq!(
+            recent[0],
+            format!("app.{}", RECENT_APPS + 4),
+            "newest first"
+        );
+    }
+
+    #[test]
+    fn a_renamed_app_is_still_news_but_does_not_duplicate_the_entry() {
+        let state = state();
+        front(&state, "com.example.App");
+        let mut rx = state.subscribe();
+        rx.mark_unchanged();
+
+        state.set_foreground(Some(ForegroundApp {
+            id: "com.example.App".to_string(),
+            display_name: "Renamed".to_string(),
+        }));
+
+        assert!(
+            rx.has_changed().unwrap(),
+            "the name a client renders changed"
+        );
+        assert_eq!(recent(&state), ["com.example.App"]);
     }
 
     #[test]

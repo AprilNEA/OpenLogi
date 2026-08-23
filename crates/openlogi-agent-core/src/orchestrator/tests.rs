@@ -5,6 +5,7 @@ use super::{
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
     pick_current, plan_reapply, reapply_targets,
 };
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
@@ -772,6 +773,6 @@ fn app_switch_republishes_capture_plans() {
         Some(Action::Undo),
         "no per-app overlay while no app is in front"
     );
-    orch.set_current_app(Some("com.example.editor".into()));
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }

@@ -225,8 +225,9 @@ code on a bare thread does, because the framework still autoreleases internal
 temporaries. The three places that keep an explicit `objc2::rc::autoreleasepool`,
 and the only ones that should:
 
-- `openlogi-hook`'s `frontmost_bundle_id` — a watcher thread with no run loop,
-  and `to_str` borrows its UTF-8 view from the pool.
+- `openlogi-hook`'s `frontmost_application` — a watcher thread with no run loop,
+  and `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
+  localized name).
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is

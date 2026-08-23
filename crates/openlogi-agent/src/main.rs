@@ -480,8 +480,8 @@ async fn run(
                 warn!("camera watcher channel closed — disabling camera automation updates");
                 camera_open = false;
             },
-            Some(bundle) = app_rx.recv() => {
-                orchestrator.lock().await.set_current_app(bundle);
+            Some(app) = app_rx.recv() => {
+                orchestrator.lock().await.set_current_app(app);
             }
             Some(device_key) = action_ring_rx.recv() => {
                 begin_action_ring(&orchestrator, &action_ring, &ring_haptics, device_key.as_deref()).await;

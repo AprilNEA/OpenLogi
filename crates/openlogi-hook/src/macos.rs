@@ -30,8 +30,8 @@ use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptio
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, HookBackend, HookError,
-    HookEvent, KeyEvent, KeyModifiers, MouseEvent, TapLocation,
+    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, ForegroundApp,
+    HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, TapLocation,
 };
 use watchdog::{
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, RearmBudget,
@@ -616,8 +616,9 @@ impl HookBackend for Backend {
             .collect()
     }
 
-    /// Read the frontmost application's bundle identifier via `NSWorkspace`.
-    /// Returns `None` when no app is frontmost or the identifier is missing.
+    /// Read the frontmost application via `NSWorkspace`: its bundle identifier
+    /// (the profile-matching key) and its localized name (for the UI). Returns
+    /// `None` when no app is frontmost or it has no bundle identifier.
     ///
     /// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
     /// reads return owned `Retained` values (no leak by construction), but the
@@ -625,17 +626,28 @@ impl HookBackend for Backend {
     /// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
     /// the main thread, where no run loop drains one. (Without it the old raw path
     /// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
-    fn frontmost_app() -> Option<String> {
+    fn frontmost_app() -> Option<ForegroundApp> {
         use objc2::rc::autoreleasepool;
         use objc2_app_kit::NSWorkspace;
 
         autoreleasepool(|pool| {
             let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
             let bundle_id = app.bundleIdentifier()?;
-            // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime; we
-            // copy it into an owned `String` before the pool (and `bundle_id`) drop,
-            // so the borrow never escapes.
-            Some(unsafe { bundle_id.to_str(pool) }.to_owned())
+            let name = app.localizedName();
+            // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime.
+            // Both are copied into owned `String`s here, before the pool — and
+            // the `NSString`s borrowing from it — drop, so neither view escapes.
+            let (id, name) = unsafe {
+                (
+                    bundle_id.to_str(pool).to_owned(),
+                    name.as_ref().map(|name| name.to_str(pool).to_owned()),
+                )
+            };
+            // An app with no localized name is possible (a bare bundle, a
+            // background helper that briefly activates); the identifier is the
+            // only thing guaranteed, so it doubles as the name.
+            let display_name = name.unwrap_or_else(|| id.clone());
+            Some(ForegroundApp { id, display_name })
         })
     }
 

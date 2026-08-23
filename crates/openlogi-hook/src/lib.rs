@@ -27,6 +27,7 @@
 
 use std::cfg_select;
 
+pub use openlogi_core::app::ForegroundApp;
 pub use openlogi_core::binding::ButtonId;
 
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
@@ -352,8 +353,8 @@ trait HookBackend {
         Vec::new()
     }
 
-    /// See [`crate::frontmost_bundle_id`].
-    fn frontmost_app() -> Option<String> {
+    /// See [`crate::frontmost_application`].
+    fn frontmost_app() -> Option<ForegroundApp> {
         None
     }
 
@@ -494,20 +495,22 @@ impl Hook {
     }
 }
 
-/// Return an opaque string identifying the currently frontmost application.
+/// Return the currently frontmost application.
 ///
-/// On macOS this is the bundle identifier, e.g. `"com.microsoft.VSCode"`.
-/// On Linux (X11 / XWayland) this is the `WM_CLASS` class component,
-/// e.g. `"Code"` or `"Firefox"`. Pure Wayland windows (not running under
-/// XWayland) are not visible through this path and return `None`. On Windows
-/// this is the lower-cased executable path of the foreground process.
+/// [`ForegroundApp::id`] is the identifier per-app profiles match on: the
+/// bundle identifier on macOS (e.g. `"com.microsoft.VSCode"`), the `WM_CLASS`
+/// class component under X11 / XWayland (e.g. `"Code"`), the xdg-shell
+/// `app_id` under wlroots (e.g. `"org.mozilla.firefox"`), and the lower-cased
+/// executable path on Windows. [`ForegroundApp::display_name`] is whatever the
+/// platform can name it, falling back to the identifier.
 ///
-/// `None` when no app is frontmost, when reading fails, or on unsupported
-/// platforms. Costs one X11 round-trip on Linux, four `objc_msgSend`s on
-/// macOS — well under a millisecond at the 1 Hz polling cadence in
-/// `openlogi-desktop::app_watcher`.
+/// `None` when no app is frontmost, when reading fails, or on an unsupported
+/// platform — including a pure-Wayland session with no backend (see
+/// `linux::detect_frontmost_source`). Costs one X11 round-trip on Linux and a
+/// handful of `objc_msgSend`s on macOS — well under a millisecond at the
+/// agent's 1 Hz polling cadence (`openlogi_agent_core::watchers::foreground_app`).
 #[must_use]
-pub fn frontmost_bundle_id() -> Option<String> {
+pub fn frontmost_application() -> Option<ForegroundApp> {
     Backend::frontmost_app()
 }
 

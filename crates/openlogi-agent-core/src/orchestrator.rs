@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::Action;
 use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
@@ -716,11 +717,20 @@ impl Orchestrator {
     /// it into a single action for that app, dropping it from the OS-hook
     /// gesture set — so the gesture map is app-scoped too. The dedicated HID++
     /// gesture map is not app-scoped and stays untouched.
-    pub fn set_current_app(&mut self, bundle: Option<String>) {
-        if bundle == self.current_app {
+    ///
+    /// Only the identifier decides whether any of that runs: an application
+    /// that merely changed its localized name resolves to the same bindings,
+    /// and republishing for it could restart a capture session (a plan's
+    /// divert set is part of its identity) over nothing. The observable cell
+    /// still gets the whole value — it dedupes on its own, and its recent list
+    /// is the only source a client has for these identifiers.
+    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) {
+        let id = app.as_ref().map(|app| app.id.clone());
+        self.observable.set_foreground(app);
+        if id == self.current_app {
             return;
         }
-        self.current_app = bundle;
+        self.current_app = id;
         write_value(
             &self.shared.hook_maps,
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
