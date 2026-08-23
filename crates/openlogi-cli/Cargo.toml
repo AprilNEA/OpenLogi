@@ -11,10 +11,10 @@ keywords = ["logitech", "hidpp", "hid", "mouse", "cli"]
 categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.7.8" }
-openlogi-hid = { path = "../openlogi-hid", version = "0.7.8" }
-openlogi-camera = { path = "../openlogi-camera", version = "0.7.8" }
-openlogi-assets = { path = "../openlogi-assets", version = "0.7.8" }
+openlogi-core = { path = "../openlogi-core", version = "0.7.9" }
+openlogi-hid = { path = "../openlogi-hid", version = "0.7.9" }
+openlogi-camera = { path = "../openlogi-camera", version = "0.7.9" }
+openlogi-assets = { path = "../openlogi-assets", version = "0.7.9" }
 openlogi-ipc = { path = "../openlogi-ipc", version = "0.7.7" }
 tarpc = { workspace = true }
 png = "0.17"
