@@ -5,7 +5,18 @@
 set -uo pipefail
 
 app=${OPENLOGI_APP:-/Applications/OpenLogi.app}
-agent="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
+# The helper is named after its display name; bundles built before that rename
+# spell it without the space. Same identity (org.openlogi.agent) either way.
+helper_bundle() {
+  for name in "OpenLogi Agent.app" "OpenLogiAgent.app"; do
+    [ -d "$1/Contents/Library/LoginItems/$name" ] && {
+      printf '%s\n' "$1/Contents/Library/LoginItems/$name"
+      return
+    }
+  done
+  printf '%s\n' "$1/Contents/Library/LoginItems/OpenLogi Agent.app"
+}
+agent=$(helper_bundle "$app")
 
 say() { printf '\n== %s\n' "$1"; }
 
@@ -82,9 +93,20 @@ done
 say "5. Designated requirement recorded against the agent's grant"
 [ -d "$agent" ] && codesign -d --requirements - "$agent" 2>&1 | grep '^designated' | sed 's/^/   /'
 
-say "6. Next step: the agent's own log"
+say "6. The agent's own log"
+# Names are agent.<ISO date>.log, so the lexically last one is the newest.
+logs=("$HOME"/.local/state/openlogi/agent.*.log)
+latest_log=${logs[${#logs[@]} - 1]}
+if [ -f "$latest_log" ]; then
+  echo "   $latest_log"
+  echo "   attach this file — it holds the classified open errors and any panic"
+else
+  echo "   none under ~/.local/state/openlogi (agent predates the log file, or never ran)"
+fi
 cat <<TXT
-   launchd discards the agent's output, so run it in the foreground:
+
+   launchd discards the agent's stderr, so if the file above is missing or
+   predates the failure, reproduce it in the foreground:
 
      OPENLOGI_LOG=debug "$agent/Contents/MacOS/openlogi-agent"
 
@@ -93,11 +115,14 @@ cat <<TXT
    copy launchd runs, and a denial here may only mean the terminal has no
    grant.
 
-   Then classify the first failure you see:
+   Then classify the first failure you see. The open error names its own
+   cause; the identity it speaks about is the one in the caveat above:
      "HID++ candidate interfaces count=0"      -> device not matched; not a permission problem
-     "failed to open HID++ channel ... Failed to open device"
-                                               -> open denied (or exclusive access) — for the
-                                                  identity named in the caveat above
+     "Failed to open device: Input Monitoring is NOT granted ..."
+                                               -> grant it to OpenLogi Agent
+     "Failed to open device: Input Monitoring is granted ..."
+                                               -> another app holds the device (quit Logi
+                                                  Options+), or log out and back in
      "opened HID++ channel" then a probe error -> the async-hid write bug is present; this
                                                   run's permission was fine, but the launchd
                                                   copy's grant is still unproven
