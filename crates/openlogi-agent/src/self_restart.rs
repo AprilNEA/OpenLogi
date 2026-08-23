@@ -118,13 +118,18 @@ impl Watch {
     ///
     /// Absence is the ambiguous observation — mid-replace the old inode is
     /// unlinked before the new file lands — so it only becomes a verdict after
-    /// [`MISSING_TICKS_UNTIL_GONE`] ticks of it. A [`Sighting::Unknown`] tick
-    /// carries no information at all and so changes nothing: a stat that fails
-    /// for a reason other than absence must never condemn a live install.
+    /// [`MISSING_TICKS_UNTIL_GONE`] *consecutive* ticks of it. A
+    /// [`Sighting::Unknown`] tick breaks that run rather than extending it: it
+    /// could not establish that the file was missing, and in a real uninstall
+    /// the following ticks are absent anyway, so starting the count over costs
+    /// one tick and removes a way to shut down a live install.
     fn tick(&mut self, baseline: Fingerprint, now: Sighting) -> Tick {
         let now = match now {
             Sighting::Seen(now) => now,
-            Sighting::Unknown => return Tick::Watch,
+            Sighting::Unknown => {
+                self.missing = 0;
+                return Tick::Watch;
+            }
             Sighting::Absent => {
                 self.pending = None;
                 self.missing += 1;
@@ -423,11 +428,18 @@ mod tests {
         for _ in 0..MISSING_TICKS_UNTIL_GONE * 3 {
             assert_eq!(watch.tick(baseline, Sighting::Unknown), Tick::Watch);
         }
-        // And it does not erase what absence had already established.
+        // And it breaks a run of absences rather than extending it: the run
+        // has to be consecutive, or a stat that never answers could add up to
+        // a shutdown one uncertain tick at a time.
         for _ in 1..MISSING_TICKS_UNTIL_GONE {
             assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
         }
         assert_eq!(watch.tick(baseline, Sighting::Unknown), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
+        // Absent from a clean start still condemns.
+        for _ in 2..MISSING_TICKS_UNTIL_GONE {
+            assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
+        }
         assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Uninstalled);
     }
 
