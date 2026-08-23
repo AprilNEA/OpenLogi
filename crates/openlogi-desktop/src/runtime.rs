@@ -180,7 +180,7 @@ struct Runtime {
     /// One live cache subscription per device model, keyed by
     /// [`sync::model_key`]. Holding the task is what holds the subscription;
     /// dropping it unsubscribes.
-    asset_subs: HashMap<String, Task<()>>,
+    asset_subs: Subscriptions<Task<()>>,
     /// The registry's own subscription, which no device owns.
     index_sub: Option<Task<()>>,
     sync_tx: UnboundedSender<bool>,
@@ -204,7 +204,7 @@ impl Runtime {
             cache,
             swr,
             auto_sync,
-            asset_subs: HashMap::new(),
+            asset_subs: Subscriptions::new(),
             index_sub: None,
             sync_tx,
             inventories: Vec::new(),
@@ -421,11 +421,10 @@ impl Runtime {
         });
     }
 
-    /// Ask the cache for every model in `targets`, and for the registry alone
-    /// when there are none.
+    /// Keep exactly one cache subscription per device model we want art for.
     ///
-    /// One task per model rather than one per batch: each key carries its own
-    /// in-flight state, so a slow depot no longer holds up the rest, and a
+    /// One subscription per model rather than one batch: each key carries its
+    /// own in-flight state, so a slow depot no longer holds up the rest and a
     /// failure retries on its own schedule instead of stalling every model
     /// behind one shared backoff. The fetchers run on the background executor —
     /// the HTTP layer blocks, and must never do so on the UI thread.
@@ -435,24 +434,11 @@ impl Runtime {
         targets: impl Iterator<Item = AssetTarget>,
         cx: &AsyncApp,
     ) {
-        let mut wanted = HashSet::new();
-        for target in targets {
-            let key = sync::model_key(&target);
-            if !self.asset_subs.contains_key(&key) {
-                let watcher = assets::queries::watch_model(
-                    &self.swr,
-                    source,
-                    target,
-                    self.sync_tx.clone(),
-                    cx,
-                );
-                self.asset_subs.insert(key.clone(), watcher);
-            }
-            wanted.insert(key);
-        }
-        // Dropping the task cancels the watcher, which drops the handle and
-        // unsubscribes; the entry then ages out on its own.
-        self.asset_subs.retain(|key, _| wanted.contains(key));
+        let (swr, tx) = (&self.swr, &self.sync_tx);
+        self.asset_subs.reconcile(
+            targets.map(|target| (sync::model_key(&target), target)),
+            |target| assets::queries::watch_model(swr, source, target, tx.clone(), cx),
+        );
         // Nothing above keeps the registry warm before the first device
         // appears, and resolution needs it the moment one does.
         if self.index_sub.is_none() {
@@ -463,6 +449,43 @@ impl Runtime {
                 cx,
             ));
         }
+    }
+}
+
+/// Live cache subscriptions, one per key, opened on demand and dropped once
+/// their key stops being wanted.
+///
+/// Generic over the handle so the reconciliation can be tested without a GPUI
+/// context or a real fetch: what matters is that a repeated key keeps its one
+/// subscription and a vanished key has its handle *dropped*, since dropping is
+/// what unsubscribes.
+struct Subscriptions<H> {
+    live: HashMap<String, H>,
+}
+
+impl<H> Subscriptions<H> {
+    fn new() -> Self {
+        Self {
+            live: HashMap::new(),
+        }
+    }
+
+    /// Make the live set match `wanted`: open what is missing, keep what is
+    /// already there, and drop the rest.
+    fn reconcile<T>(
+        &mut self,
+        wanted: impl Iterator<Item = (String, T)>,
+        mut open: impl FnMut(T) -> H,
+    ) {
+        let mut keep = HashSet::new();
+        for (key, item) in wanted {
+            if !self.live.contains_key(&key) {
+                let handle = open(item);
+                self.live.insert(key.clone(), handle);
+            }
+            keep.insert(key);
+        }
+        self.live.retain(|key, _| keep.contains(key));
     }
 }
 
@@ -484,5 +507,113 @@ fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
     let changed = cx.update_global::<AppState, _>(|state, _| state.set_agent_link(link));
     if changed {
         cx.refresh_windows();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use openlogi_camera::Camera;
+
+    use super::{Subscriptions, camera_targets};
+    use crate::services::assets::sync::model_key;
+
+    /// Stands in for a live subscription. Dropping a real one unsubscribes, so
+    /// the tests below assert on drops rather than on any handle contents.
+    struct DropSpy {
+        key: String,
+        dropped: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Drop for DropSpy {
+        fn drop(&mut self) {
+            self.dropped.borrow_mut().push(self.key.clone());
+        }
+    }
+
+    /// Reconcile `keys`, recording every key a subscription was opened for.
+    fn reconcile(
+        subs: &mut Subscriptions<DropSpy>,
+        keys: &[&str],
+        opened: &Rc<RefCell<Vec<String>>>,
+        dropped: &Rc<RefCell<Vec<String>>>,
+    ) {
+        let wanted = keys.iter().map(|k| ((*k).to_string(), (*k).to_string()));
+        subs.reconcile(wanted, |key: String| {
+            opened.borrow_mut().push(key.clone());
+            DropSpy {
+                key,
+                dropped: Rc::clone(dropped),
+            }
+        });
+    }
+
+    #[test]
+    fn a_repeated_target_keeps_its_one_subscription() {
+        // The event loop offers the whole known set on every snapshot, so
+        // re-subscribing per snapshot would refetch every model forever.
+        let (opened, dropped) = (Rc::default(), Rc::default());
+        let mut subs = Subscriptions::new();
+
+        reconcile(&mut subs, &["a", "b"], &opened, &dropped);
+        reconcile(&mut subs, &["a", "b"], &opened, &dropped);
+
+        assert_eq!(opened.borrow().len(), 2, "each model subscribes once");
+        assert!(dropped.borrow().is_empty(), "nothing was given up");
+    }
+
+    #[test]
+    fn a_target_that_disappears_drops_its_subscription() {
+        // Dropping the handle is what unsubscribes and lets the entry age out;
+        // leaking it would pin every device ever seen for the session.
+        let (opened, dropped) = (Rc::default(), Rc::default());
+        let mut subs = Subscriptions::new();
+
+        reconcile(&mut subs, &["a", "b"], &opened, &dropped);
+        reconcile(&mut subs, &["b"], &opened, &dropped);
+
+        assert_eq!(*dropped.borrow(), ["a"]);
+        assert_eq!(opened.borrow().len(), 2, "`b` was not reopened");
+    }
+
+    #[test]
+    fn a_returning_target_subscribes_again() {
+        let (opened, dropped) = (Rc::default(), Rc::default());
+        let mut subs = Subscriptions::new();
+
+        reconcile(&mut subs, &["a"], &opened, &dropped);
+        reconcile(&mut subs, &[], &opened, &dropped);
+        reconcile(&mut subs, &["a"], &opened, &dropped);
+
+        assert_eq!(*opened.borrow(), ["a", "a"]);
+        assert_eq!(*dropped.borrow(), ["a"]);
+    }
+
+    fn camera(product_id: u16, unique_id: &str) -> Camera {
+        Camera {
+            name: "MX Brio".into(),
+            unique_id: unique_id.into(),
+            serial_number: None,
+            vendor_id: 0x046d,
+            product_id,
+            max_resolution: None,
+            max_fps: None,
+        }
+    }
+
+    #[test]
+    fn a_camera_keeps_one_subscription_across_snapshots() {
+        // A camera's asset key must depend only on model-level identity. Fold
+        // anything per-connection into it — the OS capture id changes across a
+        // port change — and every snapshot would drop and reopen the
+        // subscription, refetching art the cache already holds.
+        let moved_ports = [camera(0x0944, "0x2031"), camera(0x0944, "0x2042")];
+        let keys: Vec<_> = camera_targets(&moved_ports)
+            .map(|t| model_key(&t))
+            .collect();
+
+        assert_eq!(keys[0], keys[1]);
     }
 }
