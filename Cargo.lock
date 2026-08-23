@@ -410,9 +410,9 @@ dependencies = [
 
 [[package]]
 name = "async-hid"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3633346d0989f6a13133ebce8cbd7b17d8f971513172397c452d438e1e0841e6"
+checksum = "9f70c6f427f9dc3942b5863b2677a34dfcdd5ec46fe3c21a57883c50403269c5"
 dependencies = [
  "async-io",
  "atomic-waker",

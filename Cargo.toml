@@ -42,7 +42,7 @@ description = "Lightweight, local-first alternative to Logitech Options+ for HID
 
 [workspace.dependencies]
 hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.4" }
-async-hid = "0.5.2"
+async-hid = "0.5.3"
 # Cross-platform local IPC for the agent <-> GUI tarpc transport: a Unix-domain
 # socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
 # Stream/Listener used by serde_transport.
