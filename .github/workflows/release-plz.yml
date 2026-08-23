@@ -53,65 +53,73 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
       # release-plz skips release=false app crates; git-cliff covers the whole repo.
+      - name: Find open release PR
+        id: open_release_pr
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const openPulls = await github.paginate(github.rest.pulls.list, {
+              ...context.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const pull = openPulls.find(({ head }) => head.ref.startsWith("release-plz/"));
+            if (pull) {
+              core.setOutput("branch", pull.head.ref);
+              core.setOutput("number", pull.number);
+            }
+      - name: Build changelog writer
+        if: steps.open_release_pr.outputs.branch != ''
+        run: cargo build -p xtask
+      - name: Check out release PR
+        if: steps.open_release_pr.outputs.branch != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.open_release_pr.outputs.branch }}
+          fetch-depth: 0
+          path: release-pr
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install git-cliff
+        if: steps.open_release_pr.outputs.branch != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.13.1
+          fallback: none
       - name: Write root changelog with git-cliff
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          branch="$(
-            gh pr list \
-              --repo "${{ github.repository }}" \
-              --state open \
-              --json headRefName \
-              --jq '.[] | select(.headRefName | startswith("release-plz/")) | .headRefName' \
-              | head -n1
-          )"
-          if [[ -z "${branch}" ]]; then
-            echo "No open release-plz PR — nothing to write."
-            exit 0
-          fi
-          git config user.name "aprilnea[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # Build tools from master; xtask reads the bumped version after checkout.
-          cp cliff.toml "${RUNNER_TEMP}/cliff.toml"
-          cargo build -p xtask
-          cp target/debug/xtask "${RUNNER_TEMP}/xtask"
-          git fetch origin "${branch}"
-          git checkout --force "origin/${branch}"
-          cp "${RUNNER_TEMP}/cliff.toml" cliff.toml
-          curl -sL "https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C "${RUNNER_TEMP}"
-          export PATH="${RUNNER_TEMP}/git-cliff-2.13.1:${PATH}"
-          "${RUNNER_TEMP}/xtask" release changelog
-          if git diff --quiet -- CHANGELOG.md; then
-            echo "CHANGELOG already complete."
-            exit 0
-          fi
-          git add CHANGELOG.md cliff.toml 2>/dev/null || git add CHANGELOG.md
-          git commit -m "chore(release): write whole-repo changelog"
-          git push origin "HEAD:refs/heads/${branch}"
+        if: steps.open_release_pr.outputs.branch != ''
+        working-directory: release-pr
+        run: ../target/debug/xtask release changelog --config ../cliff.toml
+      - name: Commit root changelog
+        if: steps.open_release_pr.outputs.branch != ''
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          branch: ${{ steps.open_release_pr.outputs.branch }}
+          commit_message: "chore(release): write whole-repo changelog"
+          file_pattern: CHANGELOG.md
+          repository: release-pr
+          commit_user_name: "aprilnea[bot]"
+          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+          commit_author: "aprilnea[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
       # OpenLogi's whole-repo changelog is the release PR body.
       - name: Replace release PR body with changelog
+        if: steps.open_release_pr.outputs.number != ''
         uses: actions/github-script@v8
+        env:
+          RELEASE_PR_NUMBER: ${{ steps.open_release_pr.outputs.number }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const { readFileSync } = require("node:fs");
             const { owner, repo } = context.repo;
-            const openPulls = await github.paginate(github.rest.pulls.list, {
+            const pullNumber = Number(process.env.RELEASE_PR_NUMBER);
+            const { data: pull } = await github.rest.pulls.get({
               owner,
               repo,
-              state: "open",
-              per_page: 100,
+              pull_number: pullNumber,
             });
-            const pull = openPulls.find(({ head }) => head.ref.startsWith("release-plz/"));
-            if (!pull) {
-              core.info("No open release-plz PR — nothing to update.");
-              return;
-            }
 
-            const changelog = readFileSync("CHANGELOG.md", "utf8");
+            const changelog = readFileSync("release-pr/CHANGELOG.md", "utf8");
             const heading = /^## \[(?!Unreleased\])[^\]]+\][^\n]*$/m.exec(changelog);
             if (!heading) {
               core.setFailed("CHANGELOG.md has no release section.");
@@ -124,27 +132,18 @@ jobs:
               core.info("Release PR body changelog already complete.");
               return;
             }
-            await github.rest.pulls.update({ owner, repo, pull_number: pull.number, body });
+            await github.rest.pulls.update({ owner, repo, pull_number: pullNumber, body });
       # release-plz/action may swallow HTTP 422 and report a false no-op.
       - name: Guard against a silently stalled release
-        if: steps.release_pr.outputs.prs_created == 'false'
+        if: >-
+          steps.release_pr.outputs.prs_created == 'false' &&
+          steps.open_release_pr.outputs.number == ''
         uses: actions/github-script@v8
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const { readFileSync } = require("node:fs");
             const { owner, repo } = context.repo;
-
-            const openPulls = await github.paginate(github.rest.pulls.list, {
-              owner,
-              repo,
-              state: "open",
-              per_page: 100,
-            });
-            if (openPulls.some((pull) => pull.head.ref.startsWith("release-plz/"))) {
-              core.info("A release PR is already open — nothing to flag.");
-              return;
-            }
 
             const tags = await github.paginate(github.rest.repos.listTags, {
               owner,
