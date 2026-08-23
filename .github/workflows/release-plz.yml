@@ -8,13 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Match CI so shared-key linux-stable-debug restore hits the env hash.
+  # Keep rust-cache's environment hash aligned with CI.
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Opens/updates a release PR that bumps the shared workspace version and writes
-  # changelogs from the conventional commits since the last release. Merging that
-  # PR is what triggers the actual release in the job below.
   release-pr:
     name: release-plz PR
     runs-on: ubuntu-latest
@@ -34,16 +31,13 @@ jobs:
         with:
           prefix-key: v1-rust
           shared-key: linux-stable-debug
-          # CI master is the canonical writer; release-plz only restores.
           save-if: false
       - name: Install Linux build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libudev-dev pkg-config gcc g++ clang libssl-dev libzstd-dev
-      # GitHub App token (not a PAT) so the release PR / tag trigger CI and the
-      # DMG release workflow — the default GITHUB_TOKEN cannot trigger workflows.
-      # App credentials come from the same 1Password item as release.yml.
+      # GITHUB_TOKEN pushes do not trigger downstream workflows.
       - name: Mint GitHub App token
         id: app-token
         uses: ./.github/actions/github-app-token-from-1password
@@ -58,9 +52,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
-      # Whole-repo CHANGELOG via git-cliff (cliff.toml). release-plz is
-      # package-path-scoped and skips release=false app crates; git-cliff is the
-      # GoReleaser-style "every conventional commit since last tag" path.
+      # release-plz skips release=false app crates; git-cliff covers the whole repo.
       - name: Write root changelog with git-cliff
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -81,16 +73,13 @@ jobs:
           git config user.name "aprilnea[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # Config/tool may not be on the release-plz branch yet — take both
-          # from master. The tool reads the version out of the checked-out tree
-          # at run time, so building it here still writes the bumped version.
+          # Build tools from master; xtask reads the bumped version after checkout.
           cp cliff.toml "${RUNNER_TEMP}/cliff.toml"
           cargo build -p xtask
           cp target/debug/xtask "${RUNNER_TEMP}/xtask"
           git fetch origin "${branch}"
           git checkout --force "origin/${branch}"
           cp "${RUNNER_TEMP}/cliff.toml" cliff.toml
-          # git-cliff: same binary release-plz uses under the hood for formatting.
           curl -sL "https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xz -C "${RUNNER_TEMP}"
           export PATH="${RUNNER_TEMP}/git-cliff-2.13.1:${PATH}"
@@ -102,8 +91,7 @@ jobs:
           git add CHANGELOG.md cliff.toml 2>/dev/null || git add CHANGELOG.md
           git commit -m "chore(release): write whole-repo changelog"
           git push origin "HEAD:refs/heads/${branch}"
-      # OpenLogi ships as one application, so the whole-repo changelog is the
-      # release PR body; per-crate version and API-break summaries are noise.
+      # OpenLogi's whole-repo changelog is the release PR body.
       - name: Replace release PR body with changelog
         uses: actions/github-script@v8
         with:
@@ -137,14 +125,7 @@ jobs:
               return;
             }
             await github.rest.pulls.update({ owner, repo, pull_number: pull.number, body });
-      # `release-plz/action` swallows a release-pr HTTP 422 as a warning and
-      # reports no PR, which silently stalls releases (it looks identical to a
-      # quiet week of commits). Fail loudly when release-plz opened/updated no
-      # release PR, none is already open, yet release-worthy commits exist since
-      # the last tag — that combination means a swallowed failure, not a no-op.
-      # (The blanket 422-swallow is an acknowledged action hack: release-plz/action#264
-      # added it to fix that action's own CI; #427 aims to remove it. Once #427
-      # lands and we pin an action release that includes it, this guard can go.)
+      # release-plz/action may swallow HTTP 422 and report a false no-op.
       - name: Guard against a silently stalled release
         if: steps.release_pr.outputs.prs_created == 'false'
         uses: actions/github-script@v8
@@ -154,7 +135,6 @@ jobs:
             const { readFileSync } = require("node:fs");
             const { owner, repo } = context.repo;
 
-            // An already-open release PR is the normal "updated, not created" path.
             const openPulls = await github.paginate(github.rest.pulls.list, {
               owner,
               repo,
@@ -176,14 +156,8 @@ jobs:
               .filter((tag) => /^v\d+\.\d+\.\d+/.test(tag))
               .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }))[0] ?? "";
 
-            // The release job runs in parallel and cuts the `v{version}` tag only
-            // after publishing, so that tag is usually absent from this job's
-            // checkout — never trust the local tag list to decide "did a release
-            // just happen". Read the manifest instead: merging a release PR bumps
-            // the workspace version, so a manifest version ahead of the last tag
-            // means the release already landed (the parallel job is tagging it),
-            // not a stall. Only when the manifest still sits at the last released
-            // tag can leftover release-worthy commits mean a swallowed release-pr.
+            // The tag may lag this parallel job; a newer manifest means the release
+            // PR already merged, not that release-pr stalled.
             const manifestVersion = readFileSync("Cargo.toml", "utf8")
               .match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1] ?? "";
             if (lastTag && manifestVersion && `v${manifestVersion}` !== lastTag) {
@@ -210,11 +184,7 @@ jobs:
             }
             core.info(`No release PR and no release-worthy commits since ${lastTag || "repo start"}; nothing to release.`);
 
-  # Publishes crates + cuts `v{version}` only from the release PR merge commit
-  # (`chore: release v*`). release_always=false in release-plz.toml is the primary
-  # gate; this job-level filter is defense in depth so a later feature push cannot
-  # tag HEAD after a failed-then-retried crates.io publish. On publish failure,
-  # re-run this workflow on the release commit SHA — never on a later master tip.
+  # Never publish or tag a master tip newer than the version-bump commit.
   release:
     name: release-plz release
     if: >-
@@ -229,8 +199,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Pin to the version-bump commit even if workflow_dispatch is fired from a
-      # later master tip (or a re-run that somehow resolves to the wrong SHA).
       - name: Check out the version-bump commit
         shell: bash
         run: |
@@ -254,8 +222,6 @@ jobs:
             echo "skip=true" >> "$GITHUB_ENV"
             exit 0
           fi
-          # Prefer the conventional release-PR squash subject; fall back to the
-          # first commit that set this workspace version in Cargo.toml.
           bump_sha="$(git log -1 --format=%H --grep="^chore: release v${version}" || true)"
           if [[ -z "${bump_sha}" ]]; then
             bump_sha="$(
@@ -276,10 +242,7 @@ jobs:
             exit 1
           fi
           echo "Checking out version-bump commit ${bump_sha} for ${tag}"
-          # Stay on a real branch with @{upstream} set. A bare SHA checkout
-          # detaches HEAD and release-plz aborts with "cannot determine current
-          # branch". Pin master to the bump commit only for this job's workspace
-          # (does not push, does not bump versions).
+          # release-plz requires an attached branch with an upstream.
           git switch --force -C master "${bump_sha}"
           git branch --set-upstream-to=origin/master master
           echo "skip=false" >> "$GITHUB_ENV"
@@ -291,7 +254,6 @@ jobs:
         with:
           prefix-key: v1-rust
           shared-key: linux-stable-debug
-          # CI master is the canonical writer; release-plz only restores.
           save-if: false
       - name: Install Linux build deps
         if: env.skip != 'true'
