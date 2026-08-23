@@ -25,6 +25,8 @@ devenv shell -- cargo run -p xtask -- <command>
   `.pkg.tar.zst` artifacts with nfpm.
 - `release changelog` — write the next workspace version's section into
   `CHANGELOG.md` with git-cliff.
+- `release checkout-version-bump` — pin a release job to the commit that
+  introduced the current workspace version.
 - `release latest-json` — generate the static updater manifest for the stable channel.
 
 ### Bundle identity
@@ -115,6 +117,8 @@ xtask/
       release/
         changelog.rs
         changelog/tests.rs
+        checkout_version_bump.rs
+        checkout_version_bump/tests.rs
         latest_json.rs
         latest_json/tests.rs
     icon.rs                  # the icon set, and the pipeline a platform implements

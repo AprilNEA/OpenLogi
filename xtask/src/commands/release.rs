@@ -1,4 +1,5 @@
 pub(crate) mod changelog;
+pub(crate) mod checkout_version_bump;
 pub(crate) mod latest_json;
 
 use anyhow::Result;
@@ -8,6 +9,8 @@ use clap::Subcommand;
 pub(crate) enum Command {
     /// Write the next workspace version's section into CHANGELOG.md with git-cliff.
     Changelog(changelog::Args),
+    /// Pin the release job to the commit that introduced the workspace version.
+    CheckoutVersionBump,
     /// Generate the static latest.json updater manifest consumed by gpui-updater.
     LatestJson(latest_json::Args),
 }
@@ -15,6 +18,7 @@ pub(crate) enum Command {
 pub(crate) fn run(command: Command) -> Result<()> {
     match command {
         Command::Changelog(args) => changelog::run(&args),
+        Command::CheckoutVersionBump => checkout_version_bump::run(),
         Command::LatestJson(args) => latest_json::run(&args),
     }
 }

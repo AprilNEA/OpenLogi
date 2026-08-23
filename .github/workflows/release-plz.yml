@@ -198,77 +198,31 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Check out the version-bump commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(
-            python3 - <<'PY'
-          import pathlib, re, sys
-          text = pathlib.Path("Cargo.toml").read_text()
-          m = re.search(
-              r'(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"',
-              text,
-          )
-          if not m:
-              sys.exit("workspace.package version not found in Cargo.toml")
-          print(m.group(1))
-          PY
-          )"
-          tag="v${version}"
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "Tag ${tag} already exists — nothing to release."
-            echo "skip=true" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          bump_sha="$(git log -1 --format=%H --grep="^chore: release v${version}" || true)"
-          if [[ -z "${bump_sha}" ]]; then
-            bump_sha="$(
-              git log -G '^version = "' --format=%H -- Cargo.toml \
-                | while read -r sha; do
-                    if git show "${sha}:Cargo.toml" \
-                      | python3 -c "import pathlib,re,sys; t=sys.stdin.read(); m=re.search(r'(?ms)^\[workspace\.package\].*?^version\s*=\s*\"([^\"]+)\"', t); sys.exit(0 if m and m.group(1)==sys.argv[1] else 1)" \
-                      "${version}"
-                    then
-                      echo "${sha}"
-                      break
-                    fi
-                  done
-            )"
-          fi
-          if [[ -z "${bump_sha}" ]]; then
-            echo "::error::Could not locate the version-bump commit for ${tag}"
-            exit 1
-          fi
-          echo "Checking out version-bump commit ${bump_sha} for ${tag}"
-          # release-plz requires an attached branch with an upstream.
-          git switch --force -C master "${bump_sha}"
-          git branch --set-upstream-to=origin/master master
-          echo "skip=false" >> "$GITHUB_ENV"
-          echo "release_sha=${bump_sha}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
-        if: env.skip != 'true'
+      - name: Check out the version-bump commit
+        id: release_commit
+        run: cargo xtask release checkout-version-bump
       - uses: Swatinem/rust-cache@v2
-        if: env.skip != 'true'
+        if: steps.release_commit.outputs.skip != 'true'
         with:
           prefix-key: v1-rust
           shared-key: linux-stable-debug
           save-if: false
       - name: Install Linux build deps
-        if: env.skip != 'true'
+        if: steps.release_commit.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libudev-dev pkg-config gcc g++ clang libssl-dev libzstd-dev
       - name: Mint GitHub App token
-        if: env.skip != 'true'
+        if: steps.release_commit.outputs.skip != 'true'
         id: app-token
         uses: ./.github/actions/github-app-token-from-1password
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
       - name: Run release-plz (release)
-        if: env.skip != 'true'
+        if: steps.release_commit.outputs.skip != 'true'
         uses: release-plz/action@v0.5
         with:
           command: release
