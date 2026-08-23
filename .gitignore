@@ -35,6 +35,11 @@ devenv.local.yaml
 # The path-scoped agent rules in .claude/rules/ are project config and stay tracked.
 /.claude/*
 !/.claude/rules/
+# Project skills are named explicitly and tracked; everything else under
+# .claude/skills/ is the per-developer symlink farm into .agents/skills/.
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/openlogi-macos-permissions/
 
 # Node dependencies for the JS helper scripts under .github/scripts/.
 node_modules/
