@@ -276,3 +276,259 @@ fn the_enablement_marker_sits_outside_the_unit_directories() {
     );
     assert!(!marker.to_string_lossy().contains("systemd/user"));
 }
+
+/// Scratch directory for tests that need real files. Removed on drop so a
+/// failing assertion cannot leave state behind for the next run.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "openlogi-launch-agent-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        Self(dir)
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A claim held from an earlier reconcile must survive a transient enable
+/// failure — no session bus yet at login, say. Dropping it would leave an
+/// enablement this app owns with nothing able to withdraw it, so `Launch at
+/// login: off` would never turn autostart back off.
+#[test]
+fn a_held_claim_survives_a_failed_re_enable() {
+    let dir = TempDir::new("held-claim");
+    let marker = dir.path("autostart.enabled");
+    std::fs::write(&marker, b"").expect("pre-existing claim");
+
+    enable_unit_with(&marker, || false);
+
+    assert!(
+        marker.exists(),
+        "a claim from an earlier reconcile must not be dropped by a failed enable"
+    );
+}
+
+/// A claim created by this call is rolled back when the enable fails, so no
+/// marker outlives an enablement that never happened.
+#[test]
+fn a_claim_made_now_is_rolled_back_when_enable_fails() {
+    let dir = TempDir::new("fresh-claim");
+    let marker = dir.path("autostart.enabled");
+
+    enable_unit_with(&marker, || false);
+
+    assert!(
+        !marker.exists(),
+        "a claim this call created must not outlive a failed enable"
+    );
+}
+
+#[test]
+fn a_claim_is_kept_when_enable_succeeds() {
+    let dir = TempDir::new("ok-claim");
+    let marker = dir.path("autostart.enabled");
+
+    enable_unit_with(&marker, || true);
+    assert!(marker.exists(), "a successful enable is recorded");
+
+    // A second reconcile finds the claim already held and keeps it.
+    enable_unit_with(&marker, || true);
+    assert!(marker.exists());
+}
+
+#[test]
+fn recording_reports_whether_the_claim_is_new() {
+    let dir = TempDir::new("record");
+    let marker = dir.path("nested/autostart.enabled");
+
+    assert!(
+        record_enablement_at(&marker).expect("first claim"),
+        "the first call creates the claim"
+    );
+    assert!(
+        !record_enablement_at(&marker).expect("second claim"),
+        "a claim already held is not created again"
+    );
+}
+
+/// systemd resolves a unit name to the highest-precedence file that exists, so
+/// a lower entry must never be matched past a higher one naming a different
+/// executable — enabling on the strength of a shadowed entry would start a
+/// binary this app never verified.
+#[test]
+fn only_the_effective_system_unit_is_considered() {
+    let dir = TempDir::new("precedence");
+    let high = dir.path("high");
+    let low = dir.path("low");
+    std::fs::create_dir_all(&high).expect("high dir");
+    std::fs::create_dir_all(&low).expect("low dir");
+
+    let ours = std::env::current_exe().expect("current exe");
+    std::fs::write(low.join(UNIT_NAME), render_unit(&ours.to_string_lossy())).expect("low unit");
+
+    let dirs = [high.clone(), low.clone()];
+
+    // Only the lower entry exists: it is the effective unit, and it matches.
+    assert_eq!(
+        packaged_unit_in(&dirs, &ours).as_deref(),
+        Some(low.join(UNIT_NAME).as_path()),
+        "the sole existing unit is the effective one"
+    );
+
+    // A higher-precedence unit for a different binary now shadows it.
+    std::fs::write(
+        high.join(UNIT_NAME),
+        render_unit("/usr/bin/some-other-agent"),
+    )
+    .expect("high unit");
+    assert_eq!(
+        packaged_unit_in(&dirs, &ours),
+        None,
+        "a shadowed match must not be reported"
+    );
+
+    // The effective unit naming this binary is reported, shadowing or not.
+    std::fs::write(high.join(UNIT_NAME), render_unit(&ours.to_string_lossy()))
+        .expect("high unit rewritten");
+    assert_eq!(
+        packaged_unit_in(&dirs, &ours).as_deref(),
+        Some(high.join(UNIT_NAME).as_path()),
+        "the highest-precedence unit is the one reported"
+    );
+}
+
+/// The load path is environment dependent, so it is read from systemd rather
+/// than assumed. Parsing keeps precedence order and ignores blank padding.
+#[test]
+fn the_reported_load_path_is_parsed_in_order() {
+    let listing = "\
+/home/u/.config/systemd/user.control
+/home/u/.config/systemd/user
+
+/etc/systemd/user
+   /usr/lib/systemd/user   
+";
+    assert_eq!(
+        parse_unit_paths(listing),
+        vec![
+            PathBuf::from("/home/u/.config/systemd/user.control"),
+            PathBuf::from("/home/u/.config/systemd/user"),
+            PathBuf::from("/etc/systemd/user"),
+            PathBuf::from("/usr/lib/systemd/user"),
+        ]
+    );
+    assert!(parse_unit_paths("").is_empty());
+}
+
+/// The two tiers this app writes to are removed, so the probe only ever sees
+/// directories a unit could arrive in from somewhere else. Order survives.
+#[test]
+fn our_own_tiers_are_excluded_from_the_load_path() {
+    let dirs = vec![
+        PathBuf::from("/home/u/.config/systemd/user"),
+        PathBuf::from("/etc/systemd/user"),
+        PathBuf::from("/home/u/.local/share/systemd/user"),
+        PathBuf::from("/home/u/.local/share/flatpak/exports/share/systemd/user"),
+        PathBuf::from("/usr/lib/systemd/user"),
+    ];
+    let ours = [
+        PathBuf::from("/home/u/.config/systemd/user"),
+        PathBuf::from("/home/u/.local/share/systemd/user"),
+    ];
+
+    assert_eq!(
+        exclude_dirs(dirs, &ours),
+        vec![
+            PathBuf::from("/etc/systemd/user"),
+            PathBuf::from("/home/u/.local/share/flatpak/exports/share/systemd/user"),
+            PathBuf::from("/usr/lib/systemd/user"),
+        ],
+        "a tier this app writes to is never treated as somebody else's"
+    );
+}
+
+/// The resolved path must keep the tiers the old static list omitted — the
+/// runtime directory, the session's exports — and must not contain ours.
+#[test]
+fn the_resolved_load_path_excludes_our_tiers() {
+    let dirs = user_unit_dirs();
+    assert!(!dirs.is_empty(), "the fallback alone is non-empty");
+
+    let generated = generated_unit_path().expect("generated path");
+    let legacy = legacy_unit_path().expect("legacy path");
+    for ours in [generated.parent(), legacy.parent()].into_iter().flatten() {
+        assert!(
+            !dirs.iter().any(|dir| dir == ours),
+            "{} must not be probed as a packaged tier",
+            ours.display()
+        );
+    }
+}
+
+/// The fallback stands in when systemd cannot be asked, so it has to mirror the
+/// documented load path — including the tiers a fixed list of absolute paths
+/// misses. The runtime tier matters most: a unit there outranks the one this
+/// app generates.
+#[test]
+fn the_fallback_covers_the_xdg_derived_tiers() {
+    let dirs = fallback_unit_dirs();
+    let has = |needle: &str| dirs.iter().any(|dir| dir == Path::new(needle));
+
+    assert!(has("/etc/systemd/user"), "{dirs:?}");
+    assert!(has("/run/systemd/user"), "{dirs:?}");
+    assert!(has("/usr/lib/systemd/user"), "{dirs:?}");
+    assert!(has("/usr/local/lib/systemd/user"), "{dirs:?}");
+
+    // $XDG_DATA_DIRS defaults, appended with systemd/user.
+    assert!(
+        has("/usr/share/systemd/user") || std::env::var_os("XDG_DATA_DIRS").is_some(),
+        "the data-dirs default must be expanded: {dirs:?}"
+    );
+
+    // The runtime tier is present whenever the session exports one.
+    if std::env::var_os("XDG_RUNTIME_DIR").is_some() {
+        assert!(
+            dirs.iter()
+                .any(|dir| dir.ends_with("systemd/user") && dir.starts_with("/run")),
+            "the runtime tier outranks the generated unit and must be probed: {dirs:?}"
+        );
+    }
+}
+
+/// Colon-separated XDG base lists expand to one unit directory each, in order,
+/// and relative entries are ignored the way systemd ignores them.
+#[test]
+fn xdg_base_lists_expand_in_order() {
+    let mut dirs = Vec::new();
+    push_xdg_dirs(&mut dirs, "OPENLOGI_TEST_UNSET_VAR", "/one:/two");
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/one/systemd/user"),
+            PathBuf::from("/two/systemd/user"),
+        ],
+        "an unset variable falls back to the default list"
+    );
+
+    let mut dirs = Vec::new();
+    push_xdg_dirs(&mut dirs, "PATH", "/unused");
+    assert!(
+        dirs.iter()
+            .all(|dir| dir.is_absolute() && dir.ends_with("systemd/user")),
+        "every expanded entry is an absolute unit directory: {dirs:?}"
+    );
+}

@@ -238,21 +238,102 @@ fn reconcile_windows(enabled: bool) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 const UNIT_NAME: &str = "openlogi-agent.service";
 
-/// Unit directories outside the two user-writable tiers, in systemd's own
-/// precedence order (`systemd.unit(5)`, "Load path when running in user mode").
+/// Unit directories to fall back on when systemd cannot be asked for the real
+/// load path, highest precedence first.
 ///
-/// Probed to answer one question: has something outside this app's control —
-/// a distribution package, `install.sh`, or an administrator — already
-/// installed this unit? The user tiers are deliberately absent: a file there
-/// is either ours or the user's, never a package's.
+/// Mirrors the user-mode load path in `systemd.unit(5)` rather than a fixed set
+/// of absolute paths: `$XDG_CONFIG_DIRS`, `$XDG_RUNTIME_DIR`, and
+/// `$XDG_DATA_DIRS` all contribute directories that differ per session, and a
+/// unit in the runtime tier outranks the one this app generates. The two tiers
+/// this app writes to are omitted here and filtered again by [`user_unit_dirs`].
 #[cfg(target_os = "linux")]
-const SYSTEM_UNIT_DIRS: &[&str] = &[
-    "/etc/systemd/user",
-    "/usr/local/share/systemd/user",
-    "/usr/share/systemd/user",
-    "/usr/local/lib/systemd/user",
-    "/usr/lib/systemd/user",
-];
+fn fallback_unit_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    push_xdg_dirs(&mut dirs, "XDG_CONFIG_DIRS", "/etc/xdg");
+    dirs.push(PathBuf::from("/etc/systemd/user"));
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        dirs.push(Path::new(&runtime).join("systemd").join("user"));
+    }
+    dirs.push(PathBuf::from("/run/systemd/user"));
+    push_xdg_dirs(&mut dirs, "XDG_DATA_DIRS", "/usr/local/share:/usr/share");
+    dirs.push(PathBuf::from("/usr/local/lib/systemd/user"));
+    dirs.push(PathBuf::from("/usr/lib/systemd/user"));
+    dirs
+}
+
+/// Append `systemd/user` under each entry of a colon-separated XDG base list,
+/// falling back to `default` when the variable is unset or empty.
+#[cfg(target_os = "linux")]
+fn push_xdg_dirs(dirs: &mut Vec<PathBuf>, var: &str, default: &str) {
+    let value = std::env::var(var).unwrap_or_default();
+    let list = if value.trim().is_empty() {
+        default
+    } else {
+        &value
+    };
+    dirs.extend(
+        list.split(':')
+            .map(str::trim)
+            .filter(|base| base.starts_with('/'))
+            .map(|base| Path::new(base).join("systemd").join("user")),
+    );
+}
+
+/// The user unit load path, highest precedence first, minus the two tiers this
+/// app writes to.
+///
+/// Asked of systemd rather than assumed. The real path is environment
+/// dependent — `$XDG_CONFIG_DIRS`, `/run`, custom `$XDG_DATA_DIRS`, and the
+/// Flatpak export directories all appear in it — so enumerating it by hand
+/// would answer for a machine nobody is running. What remains after the filter
+/// is every directory a unit could arrive in from somewhere other than here.
+#[cfg(target_os = "linux")]
+fn user_unit_dirs() -> Vec<PathBuf> {
+    let ours: Vec<PathBuf> = [generated_unit_path(), legacy_unit_path()]
+        .into_iter()
+        .filter_map(|path| {
+            path.ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        })
+        .collect();
+    let dirs = systemd_unit_paths().unwrap_or_else(fallback_unit_dirs);
+    exclude_dirs(dirs, &ours)
+}
+
+/// The load path as `systemd-analyze` reports it, or `None` when it cannot be
+/// run — not installed, or no session bus to query.
+#[cfg(target_os = "linux")]
+fn systemd_unit_paths() -> Option<Vec<PathBuf>> {
+    let output = std::process::Command::new("systemd-analyze")
+        .args(["--user", "unit-paths"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8(output.stdout).ok()?;
+    let dirs = parse_unit_paths(&listing);
+    (!dirs.is_empty()).then_some(dirs)
+}
+
+/// One directory per non-empty line, order preserved.
+#[cfg(target_os = "linux")]
+fn parse_unit_paths(listing: &str) -> Vec<PathBuf> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Drop `exclude` from `dirs`, preserving precedence order.
+#[cfg(target_os = "linux")]
+fn exclude_dirs(dirs: Vec<PathBuf>, exclude: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.into_iter()
+        .filter(|dir| !exclude.contains(dir))
+        .collect()
+}
 
 #[cfg(target_os = "linux")]
 fn reconcile_linux(enabled: bool) -> io::Result<()> {
@@ -350,25 +431,40 @@ fn enablement_marker_path() -> io::Result<PathBuf> {
 /// the setting has to mean what it says when it is switched back off.
 #[cfg(target_os = "linux")]
 fn enable_unit() {
-    if let Err(e) = record_enablement() {
-        warn!(
-            error = %e,
-            "could not record the autostart enablement; leaving autostart unchanged",
-        );
+    let Ok(marker) = enablement_marker_path() else {
         return;
-    }
-    if !run_systemctl(&["enable", UNIT_NAME]) {
-        clear_enablement_marker();
+    };
+    enable_unit_with(&marker, || run_systemctl(&["enable", UNIT_NAME]));
+}
+
+/// The ordering and rollback rules of [`enable_unit`], over an injectable
+/// marker path and enable step so the state transitions can be tested.
+///
+/// A claim that already existed is left alone when `enable` fails: the failure
+/// may be transient (no session bus yet at login), and dropping a claim made by
+/// an earlier reconcile would leave an enablement this app owns with nothing
+/// able to withdraw it. Only a claim *this* call created is rolled back.
+#[cfg(target_os = "linux")]
+fn enable_unit_with(marker: &Path, enable: impl FnOnce() -> bool) {
+    let claimed_now = match record_enablement_at(marker) {
+        Ok(claimed_now) => claimed_now,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "could not record the autostart enablement; leaving autostart unchanged",
+            );
+            return;
+        }
+    };
+    if !enable() && claimed_now {
+        clear_marker_at(marker);
     }
 }
 
 /// Drop this app's claim on the enablement. Absent is success.
 #[cfg(target_os = "linux")]
-fn clear_enablement_marker() {
-    let Ok(marker) = enablement_marker_path() else {
-        return;
-    };
-    match std::fs::remove_file(&marker) {
+fn clear_marker_at(marker: &Path) {
+    match std::fs::remove_file(marker) {
         Ok(()) => debug!(path = %marker.display(), "cleared the autostart marker"),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -378,15 +474,18 @@ fn clear_enablement_marker() {
 }
 
 #[cfg(target_os = "linux")]
-fn record_enablement() -> io::Result<()> {
-    let path = enablement_marker_path()?;
+/// Record this app's claim on the enablement, reporting whether the claim was
+/// created by this call rather than already held from an earlier reconcile.
+#[cfg(target_os = "linux")]
+fn record_enablement_at(path: &Path) -> io::Result<bool> {
     if path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, b"")
+    std::fs::write(path, b"")?;
+    Ok(true)
 }
 
 /// Withdraw the enablement only when this app recorded making it.
@@ -409,7 +508,7 @@ fn disable_unit_if_ours() {
         // an enablement this app is still responsible for.
         return;
     }
-    clear_enablement_marker();
+    clear_marker_at(&marker);
 }
 
 /// Path to the generated unit:
@@ -499,15 +598,25 @@ fn exec_start_value(contents: &str) -> Option<&str> {
 /// so in that case the normal write path must still run.
 #[cfg(target_os = "linux")]
 fn packaged_unit_for(exe: &Path) -> Option<PathBuf> {
-    SYSTEM_UNIT_DIRS
+    packaged_unit_in(&user_unit_dirs(), exe)
+}
+
+/// [`packaged_unit_for`] over an injectable set of directories, listed highest
+/// precedence first.
+///
+/// Only the *effective* unit is considered — the first one that exists. A lower
+/// entry is never matched past a higher one that names a different executable,
+/// because systemd would resolve the name to that higher unit: enabling on the
+/// strength of a shadowed entry would start a binary this app never verified.
+#[cfg(target_os = "linux")]
+fn packaged_unit_in(dirs: &[PathBuf], exe: &Path) -> Option<PathBuf> {
+    let effective = dirs
         .iter()
-        .map(|dir| Path::new(dir).join(UNIT_NAME))
-        .find(|path| {
-            std::fs::read_to_string(path)
-                .ok()
-                .and_then(|contents| exec_start_value(&contents).map(unescape_systemd_exec))
-                .is_some_and(|packaged| same_executable(Path::new(&packaged), exe))
-        })
+        .map(|dir| dir.join(UNIT_NAME))
+        .find(|path| path.is_file())?;
+    let contents = std::fs::read_to_string(&effective).ok()?;
+    let packaged = exec_start_value(&contents).map(unescape_systemd_exec)?;
+    same_executable(Path::new(&packaged), exe).then_some(effective)
 }
 
 /// Recover the executable path from a rendered `ExecStart` value.
