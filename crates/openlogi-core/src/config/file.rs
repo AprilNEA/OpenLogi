@@ -175,7 +175,10 @@ impl ConfigFile {
         // overwrite it with migrated content and no backup anywhere.
         if let Some((version, original)) = self.migrated_from.as_ref() {
             let backup = self.path.with_extension(format!("v{version}.bak"));
-            fs::write(&backup, original).map_err(|source| ConfigError::Write {
+            // Atomic like the config write itself: this is the only copy of
+            // the pre-migration file, so an interrupted write must not be
+            // able to leave a truncated one behind.
+            write_atomic(&backup, original.as_bytes()).map_err(|source| ConfigError::Write {
                 path: backup,
                 source,
             })?;
