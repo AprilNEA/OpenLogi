@@ -280,6 +280,10 @@ impl EventTapInfo {
 }
 
 /// Errors that [`Hook::start`] and related functions can produce.
+///
+/// The same shape on every target: a platform-conditional enum would compile on
+/// the maintainer's macOS and break an exhaustive `match` on Linux, and one
+/// unreachable variant costs nothing.
 #[derive(Debug, thiserror::Error)]
 pub enum HookError {
     /// This platform has no hook implementation (neither macOS, Linux, nor
@@ -299,7 +303,6 @@ pub enum HookError {
     /// No mouse device was found under `/dev/input`. Either no pointing device
     /// is connected, or the process lacks read permission on the device nodes
     /// (add the user to the `input` group, or add a `udev` rule).
-    #[cfg(target_os = "linux")]
     #[error(
         "no mouse device found under /dev/input; \
          ensure a pointing device is connected and the process has read permission \
@@ -307,7 +310,6 @@ pub enum HookError {
     )]
     NoDeviceFound,
     /// A Linux-specific I/O error occurred while setting up or running the hook.
-    #[cfg(target_os = "linux")]
     #[error("Linux input error: {0}")]
     Linux(#[source] std::io::Error),
     /// `SetWindowsHookExW` failed, or the hook thread could not be started.
