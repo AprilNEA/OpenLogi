@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
@@ -189,6 +190,11 @@ async fn observe_loop(
     let mut seen: Generation = 0;
     let mut inflight: Option<ObserveFuture> = None;
     let mut dpi_write: Option<DpiWriteFuture> = None;
+    // Every live connection generation owns a distinct token. A DPI future
+    // keeps the token of the client it was started on, so a late completion
+    // from a retired client cannot tear down its replacement or discard work
+    // queued for that replacement.
+    let mut client_generation = Arc::new(());
     let mut queued_dpi = PendingDpiWrites::default();
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
@@ -221,7 +227,7 @@ async fn observe_loop(
             // The connection dropped (agent self-exec on update, or a crash).
             // Reconnecting re-reads the whole state, so nothing is lost.
             Woken::Observed(Err(())) => {
-                client = None;
+                invalidate_client(&mut client, &mut client_generation);
                 seen = 0;
                 connected_since = None;
                 dpi_write = pending_dpi_write;
@@ -236,21 +242,17 @@ async fn observe_loop(
                 inflight = pending;
                 dpi_write = pending_dpi_write;
                 if handle(&mut client, update_tx, cmd).await.is_err() {
-                    client = None;
+                    invalidate_client(&mut client, &mut client_generation);
                     seen = 0;
                     connected_since = None;
                 }
             }
-            Woken::DpiWritten(result) => {
+            Woken::DpiWritten(completion) => {
                 inflight = pending;
-                if result.is_err() {
-                    client = None;
+                if complete_dpi_write(&client_generation, &mut queued_dpi, &completion) {
+                    invalidate_client(&mut client, &mut client_generation);
                     seen = 0;
                     connected_since = None;
-                    // Match the existing fire-and-forget semantics: a transport
-                    // failure drops writes that never reached the agent rather
-                    // than replaying stale pointer speeds after reconnect.
-                    queued_dpi.clear();
                 }
             }
             Woken::Reconnect => {
@@ -265,7 +267,7 @@ async fn observe_loop(
             }
         }
         if dpi_write.is_none() {
-            match start_next_dpi_write(&mut client, &mut queued_dpi).await {
+            match start_next_dpi_write(&mut client, &client_generation, &mut queued_dpi).await {
                 Ok(next) => dpi_write = next,
                 Err(ConnectFailure::Unreachable) => {}
                 Err(ConnectFailure::NewerAgent) => {
@@ -295,7 +297,7 @@ enum Woken {
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// The one DPI write allowed in flight at a time completed.
-    DpiWritten(Result<(), ()>),
+    DpiWritten(DpiWriteCompletion),
     /// Time to try connecting again.
     Reconnect,
 }
@@ -308,7 +310,12 @@ type ObserveFuture = Pin<Box<dyn Future<Output = Result<Observation, ()>> + Send
 /// An in-flight DPI write. Keeping it outside [`handle`] lets the command loop
 /// continue receiving newer slider values while the receiver acknowledges the
 /// current one.
-type DpiWriteFuture = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
+type DpiWriteFuture = Pin<Box<dyn Future<Output = DpiWriteCompletion> + Send>>;
+
+struct DpiWriteCompletion {
+    connection: Arc<()>,
+    result: Result<(), ()>,
+}
 
 #[derive(Default)]
 struct PendingDpiWrites(VecDeque<(DeviceRoute, Dpi)>);
@@ -346,25 +353,65 @@ fn observe(client: &AgentClient, seen: Generation) -> ObserveFuture {
     })
 }
 
-fn write_dpi(client: &AgentClient, route: DeviceRoute, dpi: Dpi) -> DpiWriteFuture {
+fn write_dpi(
+    client: &AgentClient,
+    connection: Arc<()>,
+    route: DeviceRoute,
+    dpi: Dpi,
+) -> DpiWriteFuture {
     let client = client.clone();
-    Box::pin(async move { log_apply(client.set_dpi(context::current(), route, dpi).await) })
+    Box::pin(async move {
+        let result = log_apply(client.set_dpi(context::current(), route, dpi).await);
+        DpiWriteCompletion { connection, result }
+    })
 }
 
 async fn start_next_dpi_write(
     client: &mut Option<AgentClient>,
+    connection: &Arc<()>,
     queued: &mut PendingDpiWrites,
 ) -> Result<Option<DpiWriteFuture>, ConnectFailure> {
     let Some((route, dpi)) = queued.pop() else {
         return Ok(None);
     };
     match ensure(client).await {
-        Ok(client) => Ok(Some(write_dpi(client, route, dpi))),
+        Ok(client) => Ok(Some(write_dpi(client, Arc::clone(connection), route, dpi))),
         Err(error) => {
             queued.clear();
             Err(error)
         }
     }
+}
+
+/// Retire the current IPC client and advance the generation even when a clone
+/// remains alive inside an in-flight request.
+fn invalidate_client(client: &mut Option<AgentClient>, generation: &mut Arc<()>) {
+    *client = None;
+    *generation = Arc::new(());
+}
+
+/// Apply a DPI completion only when it belongs to the current client.
+///
+/// Returns whether the current connection failed and must be retired. A stale
+/// failure is ignored: another failure path already retired that client, and
+/// clearing here would destroy writes accepted for its healthy replacement.
+fn complete_dpi_write(
+    current_connection: &Arc<()>,
+    queued: &mut PendingDpiWrites,
+    completion: &DpiWriteCompletion,
+) -> bool {
+    if !Arc::ptr_eq(current_connection, &completion.connection) {
+        debug!("stale DPI write completion ignored after IPC reconnect");
+        return false;
+    }
+    if completion.result.is_ok() {
+        return false;
+    }
+    // Match the existing fire-and-forget semantics for the *current*
+    // connection: do not replay pointer speeds that may have reached the agent
+    // before the transport failed to acknowledge them.
+    queued.clear();
+    true
 }
 
 fn notify_outdated(update_tx: &mpsc::UnboundedSender<GuiUpdate>, notified: &mut bool) {
@@ -787,6 +834,53 @@ mod tests {
 
         assert_eq!(pending.pop(), Some((first, Dpi::new(2_400))));
         assert_eq!(pending.pop(), Some((second, Dpi::new(3_200))));
+        assert_eq!(pending.pop(), None);
+    }
+
+    #[test]
+    fn stale_dpi_failure_keeps_the_new_client_and_its_queue() {
+        let stale_connection = Arc::new(());
+        let current_connection = Arc::new(());
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc09b,
+        };
+        let mut pending = PendingDpiWrites::default();
+        pending.push(route.clone(), Dpi::new(1_600));
+
+        let retire_current = complete_dpi_write(
+            &current_connection,
+            &mut pending,
+            &DpiWriteCompletion {
+                connection: stale_connection,
+                result: Err(()),
+            },
+        );
+
+        assert!(!retire_current);
+        assert_eq!(pending.pop(), Some((route, Dpi::new(1_600))));
+    }
+
+    #[test]
+    fn current_dpi_failure_retires_the_client_and_drops_ambiguous_writes() {
+        let current_connection = Arc::new(());
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc09b,
+        };
+        let mut pending = PendingDpiWrites::default();
+        pending.push(route, Dpi::new(1_600));
+
+        let retire_current = complete_dpi_write(
+            &current_connection,
+            &mut pending,
+            &DpiWriteCompletion {
+                connection: Arc::clone(&current_connection),
+                result: Err(()),
+            },
+        );
+
+        assert!(retire_current);
         assert_eq!(pending.pop(), None);
     }
 
