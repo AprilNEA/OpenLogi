@@ -11,7 +11,10 @@ hooks = [
     { id = "check-yaml" },
     { id = "check-toml" },
     { id = "check-merge-conflict" },
-    { id = "check-added-large-files" },
+    # Design masters are hand-authored sources, not build output: a 1024² icon
+    # layer is legitimately over the 500 KB default. The guard still covers
+    # everything else, which is where an accidental blob would land.
+    { id = "check-added-large-files", exclude = "^design/" },
 ]
 
 [[repos]]

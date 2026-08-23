@@ -1,7 +1,7 @@
 //! Assembling `OpenLogi.app`: the order the pieces go in, and why.
 
+mod app_icon;
 mod embed;
-mod icns;
 pub(crate) mod identity;
 mod info_plist;
 mod signing;
@@ -18,8 +18,8 @@ use identity::{Channel, Component};
 
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
+pub(crate) use app_icon::{generate_app_icon, install_app_icon};
 pub(super) use embed::{HELPERS, Helper};
-pub(crate) use icns::generate_icns;
 pub(super) use signing::quoted_identity;
 
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
@@ -41,7 +41,7 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
     let xcode_env = xcode_env()?;
 
     println!("==> app icon");
-    generate_icns()?;
+    generate_app_icon()?;
 
     if env::var("OPENLOGI_BUNDLE_ASSETS").as_deref() == Ok("1") {
         println!("==> device assets: bundling (offline build)");
@@ -77,6 +77,7 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
+    install_app_icon(&app)?;
     embed::embed_helpers(&root, &app, &xcode_env, channel)?;
     embed::embed_cli(&root, &app, &xcode_env)?;
     embed::verify_bundle_binaries(&app, channel)?;

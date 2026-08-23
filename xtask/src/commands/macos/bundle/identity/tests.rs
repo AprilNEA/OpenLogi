@@ -151,3 +151,54 @@ fn missing_icons_are_reported_per_component() {
         "got: {error}"
     );
 }
+
+/// Give every component the icon the per-component pass wants, so what a
+/// [`verify_icons`] failure names is whatever the app alone is missing.
+fn give_components_icons(app: &Path) {
+    stamp(app, Channel::Production, Component::VARIANTS).unwrap();
+    for &component in Component::VARIANTS {
+        let icon = component.icon(app, Channel::Production);
+        fs_err::create_dir_all(icon.parent().unwrap()).unwrap();
+        fs_err::write(&icon, []).unwrap();
+        stamp_plist_strings(
+            &component.info_plist(app, Channel::Production),
+            &[("CFBundleIconFile", ICON_NAME)],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn an_app_missing_the_icon_catalog_is_rejected() {
+    let app = bundle();
+    give_components_icons(app.path());
+
+    let error = verify_icons(app.path(), Channel::Production, Component::VARIANTS)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("missing the icon asset catalog"),
+        "got: {error}"
+    );
+}
+
+/// A bundle whose Settings would offer an icon it does not carry is a picker
+/// pointing at nothing.
+#[test]
+fn an_app_missing_an_alternate_icon_is_rejected() {
+    let app = bundle();
+    give_components_icons(app.path());
+    fs_err::write(app.path().join("Contents/Resources").join(CATALOG), []).unwrap();
+    stamp_plist_strings(
+        &Component::App.info_plist(app.path(), Channel::Production),
+        &[("CFBundleIconName", ICON_NAME)],
+    )
+    .unwrap();
+
+    let error = verify_icons(app.path(), Channel::Production, Component::VARIANTS)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("missing the midnight icon"), "got: {error}");
+}

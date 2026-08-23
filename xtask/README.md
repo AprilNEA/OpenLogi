@@ -13,7 +13,8 @@ devenv shell -- cargo run -p xtask -- <command>
 
 - `ci [--list] [--dry-run] [JOB…]` — reproduce the `ci.yml` jobs this host can
   run; a job it cannot is skipped with a reason, never passed.
-- `macos icns` — generate `crates/openlogi-desktop/icon/AppIcon.icns` from the master PNG.
+- `macos icon` — compile `design/icon/openlogi.icon` into the `AppIcon.icns` and
+  `Assets.car` under `crates/openlogi-desktop/icon/`.
 - `macos bundle [--channel dev|production]` — build `OpenLogi.app` and embed the
   agent and overlay helpers.
 - `macos dev-bundle --binary <path>` — wrap a freshly built desktop binary in
@@ -96,7 +97,7 @@ xtask/
         bundle/
           embed.rs             # login-item helpers, the CLI, required binaries
           embed/tests.rs
-          icns.rs              # the app icon
+          app_icon.rs          # the app icon, compiled by actool
           identity.rs          # bundle ids, names, icons per channel
           identity/tests.rs
           info_plist.rs        # reading and stamping plist keys

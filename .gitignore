@@ -46,5 +46,13 @@ node_modules/
 # the macOS bundle task before `cargo bundle`, not checked in.
 /crates/openlogi-gui/assets/
 
+# Compiled icons — `cargo xtask macos icon` rebuilds them from the Icon
+# Composer documents in `design/icon` on every bundle build. `AppIcon.icns` is
+# the exception: `cargo bundle` reads it straight from the manifest, so it stays
+# tracked and a plain `cargo bundle` still produces an app with an icon.
+/crates/openlogi-desktop/icon/*.icns
+!/crates/openlogi-desktop/icon/AppIcon.icns
+/crates/openlogi-desktop/icon/Assets.car
+
 # Packaging output.
 *.dmg
