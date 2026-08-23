@@ -18,14 +18,17 @@
     reason = "objc2 calls: super-init, action targets, and selector-based workspace notifications"
 )]
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
+use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
     NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification,
@@ -33,9 +36,47 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSNotification, NSNotificationName, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
+use openlogi_core::config::AppIcon;
 use tracing::{info, warn};
 
 use crate::status_item;
+
+thread_local! {
+    /// The installed status item, kept where a later config reload can find it.
+    /// A `thread_local` rather than a global: everything that touches it runs
+    /// on the main thread, which is the same thread that installed it, so the
+    /// affinity AppKit demands is the affinity the storage already has.
+    static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
+}
+
+/// The menu-bar glyph for `icon`: a monochrome template the system tints for
+/// the current menu bar, not the app icon itself — which is why these are
+/// hand-drawn silhouettes rather than renders of the Icon Composer documents.
+const fn glyph(icon: AppIcon) -> &'static [u8] {
+    match icon {
+        AppIcon::Openlogi => include_bytes!("../assets/tray-icon@2x.png"),
+        AppIcon::Prism => include_bytes!("../assets/tray-icon-prism@2x.png"),
+    }
+}
+
+/// Point the menu-bar item at `icon`'s glyph, so picking an app icon changes
+/// every surface that shows one rather than all but this.
+///
+/// Callable from anywhere: the work hops to the main queue, where AppKit lives
+/// and where the status item was installed. A no-op when the item is hidden or
+/// the loop never started.
+pub fn set_icon(icon: AppIcon) {
+    DispatchQueue::main().exec_async(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        STATUS_ITEM.with_borrow(|item| {
+            if let Some(item) = item.as_ref() {
+                status_item::set_png_icon(item, mtm, glyph(icon), "OpenLogi");
+            }
+        });
+    });
+}
 
 struct ResumeTargetIvars {
     pending: Arc<AtomicBool>,
@@ -172,7 +213,11 @@ fn gui_is_running() -> bool {
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
 /// `resume_pending` forwards coalesced workspace resume notifications to that core.
-pub fn run_app_loop(show_in_menu_bar: bool, resume_pending: Arc<AtomicBool>) -> ! {
+pub fn run_app_loop(
+    show_in_menu_bar: bool,
+    app_icon: AppIcon,
+    resume_pending: Arc<AtomicBool>,
+) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         #[expect(
@@ -186,7 +231,7 @@ pub fn run_app_loop(show_in_menu_bar: bool, resume_pending: Arc<AtomicBool>) -> 
 
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
-    let _tray = show_in_menu_bar.then(|| install_status_item(mtm));
+    let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
     let _resume_target = install_resume_observer(resume_pending);
     info!(show_in_menu_bar, "agent AppKit loop started");
 
@@ -235,6 +280,7 @@ fn resume_notification_names() -> [&'static NSNotificationName; 3] {
 /// menu items weakly reference, and the menu itself).
 fn install_status_item(
     mtm: MainThreadMarker,
+    app_icon: AppIcon,
 ) -> (
     Retained<objc2_app_kit::NSStatusItem>,
     Retained<MenuTarget>,
@@ -242,12 +288,8 @@ fn install_status_item(
 ) {
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
-    status_item::set_png_icon(
-        &status_item,
-        mtm,
-        include_bytes!("../assets/tray-icon@2x.png"),
-        "OpenLogi",
-    );
+    status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
+    STATUS_ITEM.with_borrow_mut(|slot| *slot = Some(status_item.clone()));
     let menu = status_item::new_menu(mtm);
 
     let show =

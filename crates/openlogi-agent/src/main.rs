@@ -111,6 +111,7 @@ fn main() {
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
+        let app_icon = config.app_settings.app_icon;
         let resume_pending = Arc::new(AtomicBool::new(false));
         let core_resume_pending = Arc::clone(&resume_pending);
         if let Err(e) = std::thread::Builder::new()
@@ -120,7 +121,7 @@ fn main() {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        tray::run_app_loop(show_in_menu_bar, resume_pending);
+        tray::run_app_loop(show_in_menu_bar, app_icon, resume_pending);
     }
     #[cfg(not(target_os = "macos"))]
     {

@@ -5167,6 +5167,7 @@ dependencies = [
 name = "openlogi-agent"
 version = "0.7.7"
 dependencies = [
+ "dispatch2",
  "embed-resource",
  "futures",
  "interprocess",

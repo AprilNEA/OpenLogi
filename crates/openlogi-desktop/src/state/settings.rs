@@ -91,8 +91,10 @@ impl AppState {
         self.persist_config("theme setting");
     }
     /// Persist the chosen app icon and wear it now. Unlike the theme settings
-    /// this one leaves the process: the icon is written onto the app bundle so
-    /// it survives a quit. No-op when unchanged.
+    /// this one leaves the process twice over: the icon is written onto the app
+    /// bundle so it survives a quit, and the agent is told so it can restyle the
+    /// menu-bar item — the one surface showing an icon that the GUI cannot
+    /// reach. No-op when unchanged.
     pub fn set_app_icon(&mut self, icon: AppIcon) {
         if self.config.app_settings.app_icon == icon {
             return;
@@ -101,7 +103,7 @@ impl AppState {
         // Only wear what the config kept: a failed write rolls the setting
         // back, and an icon applied over that would outlive the choice it came
         // from — Finder would show one thing and Settings another.
-        if self.persist_config("app icon setting") {
+        if self.persist_and_reload("app icon setting") {
             crate::platform::app_icon::apply(icon);
         }
     }

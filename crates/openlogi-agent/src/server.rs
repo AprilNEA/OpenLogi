@@ -110,10 +110,16 @@ impl Agent for AgentServer {
         match Config::load_or_default() {
             Ok(config) => {
                 let launch_at_login = config.app_settings.launch_at_login;
+                #[cfg(target_os = "macos")]
+                let app_icon = config.app_settings.app_icon;
                 self.orchestrator.lock().await.reload_config(config);
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::launch_agent::reconcile(launch_at_login);
+                // So does the app icon, and the menu-bar item is ours to
+                // restyle — the GUI can only reach the Dock and the bundle.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_icon(app_icon);
                 Ok(())
             }
             Err(error) => {

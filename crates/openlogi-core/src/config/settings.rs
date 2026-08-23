@@ -140,9 +140,11 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
     /// Which app icon the user picked. Applied at launch, and whenever it
-    /// changes, by the frontend that can — on macOS the GUI hands the choice to
-    /// the Dock and writes it onto the bundle, so the icon survives a quit;
-    /// elsewhere it is inert. Defaults to the icon the app is signed with.
+    /// changes, by whichever process owns a surface showing one — on macOS the
+    /// GUI hands the choice to the Dock and writes it onto the bundle (so the
+    /// icon survives a quit), and the agent restyles the menu-bar item, which
+    /// is its own glyph and no one else's to set. Elsewhere it is inert.
+    /// Defaults to the icon the app is signed with.
     #[serde(default)]
     pub app_icon: AppIcon,
     /// Whether the GUI automatically downloads device images from
