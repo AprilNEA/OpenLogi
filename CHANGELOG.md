@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-08-23
+
+### Added
+
+- *(cli)* read the running agent's inventory in openlogi list ([#823](https://github.com/AprilNEA/OpenLogi/pull/823))
+- *(ipc)* surface HID open failures in agent status ([#822](https://github.com/AprilNEA/OpenLogi/pull/822))
+
+### Fixed
+
+- *(overlay,agent)* stop the anonymous overlay tenant from wedging the Actions Ring ([#848](https://github.com/AprilNEA/OpenLogi/pull/848))
+- *(gui)* stop discarding correctly rebuilt device records ([#868](https://github.com/AprilNEA/OpenLogi/pull/868))
+- *(thumbwheel)* stop the tap firing App Exposé, and scroll by the wheel's native amount ([#857](https://github.com/AprilNEA/OpenLogi/pull/857))
+- *(agent)* follow the picked app icon in the menu bar ([#846](https://github.com/AprilNEA/OpenLogi/pull/846))
+- *(nix)* provide git to the sandboxed test phase ([#833](https://github.com/AprilNEA/OpenLogi/pull/833))
+- *(gui)* check the open helper's exit status when launching the agent ([#820](https://github.com/AprilNEA/OpenLogi/pull/820))
+
 ## [0.7.8] - 2026-08-23
 
 ### Added
