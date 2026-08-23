@@ -19,14 +19,14 @@ paths:
   trust read is the cheap short-circuit, the probe is the truth. Never probe with
   `ListenOnly`: that asks about Input Monitoring, a different grant.
 - Re-enabling the tap each slice is idempotent and recovers a disable the OS never
-  reported — but an OS-initiated disable (`TapDisabledBy*`) is answered on
-  `RearmBudget`, so a tap the system keeps disabling is let go instead of fought
-  over. Fighting it is what turns a tap we may no longer service into a permanent
-  gate on the HID stream.
-- No exit path may leave an armed tap behind. `process::exit` runs no destructors, so
-  `ARMED_TAP` is detached from an `atexit` handler (covers the tray's Quit, the
-  post-update self-restart, both watchdogs) and the agent handles SIGTERM/SIGINT
-  rather than dying with the tap installed.
+  reported. Charge `RearmBudget` from both `TapDisabledBy*` and
+  `CGEventTapIsEnabled`: a tap the system keeps disabling must be let go instead of
+  fought over, even when CoreGraphics omits the callback.
+- Keep the `CGEventTap` owned by its run-loop thread. Normal teardown disables it
+  synchronously there and `Drop` invalidates its Mach port; a watchdog whose tap
+  thread is wedged force-exits so the OS destroys that process-owned port. Do not
+  add cross-thread tap ownership solely to pre-invalidate it during process exit —
+  Core Graphics does not document that operation as thread-safe.
 - The tap callback must never block and never panic: use `try_read`/`try_lock` only,
   queue bound actions off-thread, wrap the user callback in `catch_unwind`, and keep
   the stuck-callback watchdog that force-exits the agent if the budget is exceeded.
