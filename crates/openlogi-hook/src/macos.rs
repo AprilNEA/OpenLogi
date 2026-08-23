@@ -30,8 +30,8 @@ use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptio
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, HookError, HookEvent,
-    KeyEvent, KeyModifiers, MouseEvent, TapLocation,
+    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, HookBackend, HookError,
+    HookEvent, KeyEvent, KeyModifiers, MouseEvent, TapLocation,
 };
 use watchdog::{
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, RearmBudget,
@@ -215,23 +215,6 @@ fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
     })
 }
 
-/// Check whether this process can still install the hook's event tap.
-///
-/// `AXIsProcessTrusted()` alone is not that answer: it keeps returning `true`
-/// after the user *deletes* the app's row from System Settings → Privacy &
-/// Security → Accessibility, so a hook that believes it would never learn it
-/// had been revoked, would keep re-arming a tap macOS no longer lets it
-/// service, and would wedge clicks machine-wide until reboot (#674). Only
-/// creating a filtering tap tracks the live grant, so both are consulted: the
-/// trust read short-circuits the probe for a process that was never granted,
-/// which keeps a denied agent from asking `WindowServer` twice a second.
-pub(crate) fn has_accessibility() -> bool {
-    // SAFETY: takes no arguments and only reads the current trust state — the
-    // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
-    let trusted = unsafe { AXIsProcessTrusted() };
-    trusted && can_filter_events()
-}
-
 /// Can this process create an *active* (event-filtering) tap right now?
 ///
 /// The probe mirrors the real tap's location, placement and options — that is
@@ -247,59 +230,6 @@ fn can_filter_events() -> bool {
         |_proxy: CGEventTapProxy, _etype: CGEventType, _event: &CGEvent| CallbackResult::Keep,
     )
     .is_ok()
-}
-
-/// Raise the Accessibility prompt + register the process. See
-/// [`super::Hook::prompt_accessibility`].
-///
-/// The `kAXTrustedCheckOptionPrompt = true` option is what makes macOS surface
-/// the dialog and list the process in System Settings; without it this is just
-/// [`has_accessibility`].
-pub(crate) fn prompt_accessibility() {
-    use objc2_application_services::kAXTrustedCheckOptionPrompt;
-    use objc2_core_foundation::{CFDictionary, kCFBooleanTrue};
-
-    // SAFETY: both are framework-provided constants, live for the process
-    // lifetime; reading them copies a `&'static` reference.
-    let (key, value) = unsafe { (kAXTrustedCheckOptionPrompt, kCFBooleanTrue) };
-    let Some(value) = value else { return };
-    let options = CFDictionary::from_slices(&[key], &[value]);
-    // SAFETY: the dictionary holds exactly the documented key/value types
-    // (`kAXTrustedCheckOptionPrompt` → `CFBoolean`). The returned trust state is
-    // observed separately via the watcher, so it is deliberately dropped here.
-    let _trusted = unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
-}
-
-/// Read the frontmost application's bundle identifier via `NSWorkspace`.
-/// Returns `None` when no app is frontmost or the identifier is missing.
-///
-/// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
-/// reads return owned `Retained` values (no leak by construction), but the
-/// framework still autoreleases internal temporaries and `to_str` borrows its
-/// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
-/// the main thread, where no run loop drains one. (Without it the old raw path
-/// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
-pub(crate) fn cursor_position() -> Option<CursorPosition> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
-    let point = CGEvent::new(source).ok()?.location();
-    Some(CursorPosition {
-        x: point.x,
-        y: point.y,
-    })
-}
-
-pub(crate) fn frontmost_bundle_id() -> Option<String> {
-    use objc2::rc::autoreleasepool;
-    use objc2_app_kit::NSWorkspace;
-
-    autoreleasepool(|pool| {
-        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-        let bundle_id = app.bundleIdentifier()?;
-        // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime; we
-        // copy it into an owned `String` before the pool (and `bundle_id`) drop,
-        // so the borrow never escapes.
-        Some(unsafe { bundle_id.to_str(pool) }.to_owned())
-    })
 }
 
 /// Translate a raw OS button number to a [`ButtonId`].
@@ -522,70 +452,211 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     event.get_integer_value_field(axis.line) as f64
 }
 
-/// Create the event tap and run loop on a dedicated thread.
-pub(crate) fn start(
-    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
-) -> Result<HookInner, HookError> {
-    if !has_accessibility() {
-        return Err(HookError::AccessibilityDenied);
-    }
-
-    // Wrap in Arc so the closure handed to CGEventTap::new captures it by
-    // clone rather than by move — avoids a second Box allocation.
-    let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
-
-    let signals = Arc::new(WatchdogSignals::default());
-    let lifecycle_watchdog = spawn_lifecycle_watchdog(Arc::clone(&signals))?;
-    let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
-
-    let thread = {
-        let thread_signals = Arc::clone(&signals);
-        match thread::Builder::new()
-            .name("openlogi-hook".into())
-            .spawn(move || thread_main(cb, rl_tx, thread_signals))
-        {
-            Ok(thread) => thread,
-            Err(error) => {
-                signals.set_phase(TapPhase::ThreadExited);
-                lifecycle_watchdog.thread().unpark();
-                let _ = lifecycle_watchdog.join();
-                return Err(HookError::MacOsTap(error.to_string()));
-            }
-        }
-    };
-
-    // Block until the background thread confirms the run loop is live, or
-    // reports failure by dropping its sender.
-    let Ok(run_loop) = rl_rx.recv() else {
-        let error = HookError::MacOsTap(
-            "background thread exited before the run loop started; \
-             CGEventTapCreate likely returned null"
-                .into(),
-        );
-        if let Err(panic) = thread.join() {
-            error!(?panic, "hook thread panicked during startup");
-        }
-        lifecycle_watchdog.thread().unpark();
-        if let Err(panic) = lifecycle_watchdog.join() {
-            error!(?panic, "hook lifecycle watchdog panicked during startup");
-        }
-        return Err(error);
-    };
-
-    Ok(HookInner {
-        thread,
-        lifecycle_watchdog,
-        run_loop,
-        signals,
-    })
-}
-
 const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
 /// Event types the HID tap observes. Pointer *Dragged variants are required
 /// because a held button makes the OS emit those instead of `MouseMoved`.
+/// The macOS backend: a `CGEventTap` serviced by a private run-loop thread.
+pub(crate) struct Backend;
+
+impl HookBackend for Backend {
+    type Running = HookInner;
+
+    /// Create the event tap and run loop on a dedicated thread.
+    fn start(
+        cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
+    ) -> Result<HookInner, HookError> {
+        if !Self::has_accessibility() {
+            return Err(HookError::AccessibilityDenied);
+        }
+
+        // Wrap in Arc so the closure handed to CGEventTap::new captures it by
+        // clone rather than by move — avoids a second Box allocation.
+        let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+
+        let signals = Arc::new(WatchdogSignals::default());
+        let lifecycle_watchdog = spawn_lifecycle_watchdog(Arc::clone(&signals))?;
+        let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
+
+        let thread = {
+            let thread_signals = Arc::clone(&signals);
+            match thread::Builder::new()
+                .name("openlogi-hook".into())
+                .spawn(move || thread_main(cb, rl_tx, thread_signals))
+            {
+                Ok(thread) => thread,
+                Err(error) => {
+                    signals.set_phase(TapPhase::ThreadExited);
+                    lifecycle_watchdog.thread().unpark();
+                    let _ = lifecycle_watchdog.join();
+                    return Err(HookError::MacOsTap(error.to_string()));
+                }
+            }
+        };
+
+        // Block until the background thread confirms the run loop is live, or
+        // reports failure by dropping its sender.
+        let Ok(run_loop) = rl_rx.recv() else {
+            let error = HookError::MacOsTap(
+                "background thread exited before the run loop started; \
+                 CGEventTapCreate likely returned null"
+                    .into(),
+            );
+            if let Err(panic) = thread.join() {
+                error!(?panic, "hook thread panicked during startup");
+            }
+            lifecycle_watchdog.thread().unpark();
+            if let Err(panic) = lifecycle_watchdog.join() {
+                error!(?panic, "hook lifecycle watchdog panicked during startup");
+            }
+            return Err(error);
+        };
+
+        Ok(HookInner {
+            thread,
+            lifecycle_watchdog,
+            run_loop,
+            signals,
+        })
+    }
+
+    /// Signal the run loop to stop and join the background thread.
+    fn stop(inner: HookInner) {
+        // Latch stop before waking either thread. The lifecycle watchdog stays
+        // armed across the blocking join and accepts only `ThreadExited` as proof
+        // that explicit shutdown completed.
+        inner.signals.request_stop();
+        inner.lifecycle_watchdog.thread().unpark();
+        inner.run_loop.stop();
+        if let Err(e) = inner.thread.join() {
+            error!("hook thread panicked on shutdown: {e:?}");
+        }
+        inner.lifecycle_watchdog.thread().unpark();
+        if let Err(e) = inner.lifecycle_watchdog.join() {
+            error!("hook lifecycle watchdog panicked on shutdown: {e:?}");
+        }
+    }
+
+    /// Check whether this process can still install the hook's event tap.
+    ///
+    /// `AXIsProcessTrusted()` alone is not that answer: it keeps returning `true`
+    /// after the user *deletes* the app's row from System Settings → Privacy &
+    /// Security → Accessibility, so a hook that believes it would never learn it
+    /// had been revoked, would keep re-arming a tap macOS no longer lets it
+    /// service, and would wedge clicks machine-wide until reboot (#674). Only
+    /// creating a filtering tap tracks the live grant, so both are consulted: the
+    /// trust read short-circuits the probe for a process that was never granted,
+    /// which keeps a denied agent from asking `WindowServer` twice a second.
+    fn has_accessibility() -> bool {
+        // SAFETY: takes no arguments and only reads the current trust state — the
+        // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
+        let trusted = unsafe { AXIsProcessTrusted() };
+        trusted && can_filter_events()
+    }
+
+    /// Raise the Accessibility prompt + register the process. See
+    /// [`super::Hook::prompt_accessibility`].
+    ///
+    /// The `kAXTrustedCheckOptionPrompt = true` option is what makes macOS surface
+    /// the dialog and list the process in System Settings; without it this is just
+    /// [`Self::has_accessibility`].
+    fn prompt_accessibility() {
+        use objc2_application_services::kAXTrustedCheckOptionPrompt;
+        use objc2_core_foundation::{CFDictionary, kCFBooleanTrue};
+
+        // SAFETY: both are framework-provided constants, live for the process
+        // lifetime; reading them copies a `&'static` reference.
+        let (key, value) = unsafe { (kAXTrustedCheckOptionPrompt, kCFBooleanTrue) };
+        let Some(value) = value else { return };
+        let options = CFDictionary::from_slices(&[key], &[value]);
+        // SAFETY: the dictionary holds exactly the documented key/value types
+        // (`kAXTrustedCheckOptionPrompt` → `CFBoolean`). The returned trust state is
+        // observed separately via the watcher, so it is deliberately dropped here.
+        let _trusted = unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
+    }
+
+    /// See [`super::Hook::list_event_taps`].
+    fn list_event_taps() -> Vec<EventTapInfo> {
+        let mut count: u32 = 0;
+        // SAFETY: a null `tap_list` with `max == 0` is the documented count-probe
+        // form; it only writes `count`.
+        let err = unsafe { CGGetEventTapList(0, std::ptr::null_mut(), &raw mut count) };
+        if err != 0 || count == 0 {
+            return Vec::new();
+        }
+
+        // SAFETY: `CGEventTapInformation` is a plain `repr(C)` POD; an all-zero bit
+        // pattern is a valid instance (`enabled = false`, all numeric fields 0).
+        // `CGGetEventTapList` overwrites each slot it fills.
+        let mut taps: Vec<CGEventTapInformation> =
+            vec![unsafe { std::mem::zeroed() }; count as usize];
+        // SAFETY: `taps` holds exactly `count` initialised, correctly aligned slots
+        // and stays alive for the call, and that same `count` is the maximum passed
+        // in, so the C side cannot write past the allocation; the out-parameter
+        // points at a live local it may only overwrite.
+        let err = unsafe { CGGetEventTapList(count, taps.as_mut_ptr(), &raw mut count) };
+        if err != 0 {
+            return Vec::new();
+        }
+        // The second call may report fewer taps than the probe; never read past it.
+        taps.truncate(count as usize);
+
+        taps.into_iter()
+            .map(|t| EventTapInfo {
+                tap_id: t.event_tap_id,
+                location: match t.tap_point {
+                    0 => TapLocation::Hid,
+                    1 => TapLocation::Session,
+                    2 => TapLocation::AnnotatedSession,
+                    other => TapLocation::Other(other),
+                },
+                // kCGEventTapOptionDefault == 0 (active); kCGEventTapOptionListenOnly == 1.
+                active: t.options == 0,
+                enabled: t.enabled,
+                owner_pid: t.tapping_process,
+                owner_name: process_name(t.tapping_process),
+                target_pid: (t.process_being_tapped != 0).then_some(t.process_being_tapped),
+            })
+            .collect()
+    }
+
+    /// Read the frontmost application's bundle identifier via `NSWorkspace`.
+    /// Returns `None` when no app is frontmost or the identifier is missing.
+    ///
+    /// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
+    /// reads return owned `Retained` values (no leak by construction), but the
+    /// framework still autoreleases internal temporaries and `to_str` borrows its
+    /// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
+    /// the main thread, where no run loop drains one. (Without it the old raw path
+    /// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
+    fn frontmost_app() -> Option<String> {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::NSWorkspace;
+
+        autoreleasepool(|pool| {
+            let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+            let bundle_id = app.bundleIdentifier()?;
+            // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime; we
+            // copy it into an owned `String` before the pool (and `bundle_id`) drop,
+            // so the borrow never escapes.
+            Some(unsafe { bundle_id.to_str(pool) }.to_owned())
+        })
+    }
+
+    /// Read the global cursor position from a HID-state event source, which
+    /// needs no tap and no permission.
+    fn cursor_position() -> Option<CursorPosition> {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+        let point = CGEvent::new(source).ok()?.location();
+        Some(CursorPosition {
+            x: point.x,
+            y: point.y,
+        })
+    }
+}
+
 fn hooked_event_types() -> Vec<CGEventType> {
     vec![
         CGEventType::LeftMouseDown,
@@ -813,7 +884,7 @@ fn service_tap(tap: &SharedTap, signals: &WatchdogSignals, tap_disabled: &Atomic
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
         signals.mark_tap_progress();
-        if !has_accessibility() {
+        if !Backend::has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
                  disabling the tap to avoid wedging system input"
@@ -1104,50 +1175,6 @@ unsafe extern "C" {
     fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
 }
 
-/// See [`super::Hook::list_event_taps`].
-pub(crate) fn list_event_taps() -> Vec<EventTapInfo> {
-    let mut count: u32 = 0;
-    // SAFETY: a null `tap_list` with `max == 0` is the documented count-probe
-    // form; it only writes `count`.
-    let err = unsafe { CGGetEventTapList(0, std::ptr::null_mut(), &raw mut count) };
-    if err != 0 || count == 0 {
-        return Vec::new();
-    }
-
-    // SAFETY: `CGEventTapInformation` is a plain `repr(C)` POD; an all-zero bit
-    // pattern is a valid instance (`enabled = false`, all numeric fields 0).
-    // `CGGetEventTapList` overwrites each slot it fills.
-    let mut taps: Vec<CGEventTapInformation> = vec![unsafe { std::mem::zeroed() }; count as usize];
-    // SAFETY: `taps` holds exactly `count` initialised, correctly aligned slots
-    // and stays alive for the call, and that same `count` is the maximum passed
-    // in, so the C side cannot write past the allocation; the out-parameter
-    // points at a live local it may only overwrite.
-    let err = unsafe { CGGetEventTapList(count, taps.as_mut_ptr(), &raw mut count) };
-    if err != 0 {
-        return Vec::new();
-    }
-    // The second call may report fewer taps than the probe; never read past it.
-    taps.truncate(count as usize);
-
-    taps.into_iter()
-        .map(|t| EventTapInfo {
-            tap_id: t.event_tap_id,
-            location: match t.tap_point {
-                0 => TapLocation::Hid,
-                1 => TapLocation::Session,
-                2 => TapLocation::AnnotatedSession,
-                other => TapLocation::Other(other),
-            },
-            // kCGEventTapOptionDefault == 0 (active); kCGEventTapOptionListenOnly == 1.
-            active: t.options == 0,
-            enabled: t.enabled,
-            owner_pid: t.tapping_process,
-            owner_name: process_name(t.tapping_process),
-            target_pid: (t.process_being_tapped != 0).then_some(t.process_being_tapped),
-        })
-        .collect()
-}
-
 /// Best-effort PID → executable file name via libproc.
 fn process_name(pid: i32) -> Option<String> {
     // PROC_PIDPATHINFO_MAXSIZE is 4 * MAXPATHLEN (4 * 1024).
@@ -1167,23 +1194,6 @@ fn process_name(pid: i32) -> Option<String> {
     buf.truncate(len.unsigned_abs() as usize);
     let path = String::from_utf8_lossy(&buf);
     Some(path.rsplit('/').next().unwrap_or(&path).to_string())
-}
-
-/// Signal the run loop to stop and join the background thread.
-pub(crate) fn stop(inner: HookInner) {
-    // Latch stop before waking either thread. The lifecycle watchdog stays
-    // armed across the blocking join and accepts only `ThreadExited` as proof
-    // that explicit shutdown completed.
-    inner.signals.request_stop();
-    inner.lifecycle_watchdog.thread().unpark();
-    inner.run_loop.stop();
-    if let Err(e) = inner.thread.join() {
-        error!("hook thread panicked on shutdown: {e:?}");
-    }
-    inner.lifecycle_watchdog.thread().unpark();
-    if let Err(e) = inner.lifecycle_watchdog.join() {
-        error!("hook lifecycle watchdog panicked on shutdown: {e:?}");
-    }
 }
 
 #[cfg(test)]
