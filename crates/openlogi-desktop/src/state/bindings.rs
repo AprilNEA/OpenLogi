@@ -99,12 +99,18 @@ impl AppState {
         self.config.set_keyboard_binding(trigger, action);
         self.persist_and_reload("keyboard binding");
     }
+    /// The active device's bindings as this window edits them.
+    ///
+    /// Deliberately the *global* profile, not the one the agent has live: this
+    /// is an editor, and following the foreground app would rewrite the panel
+    /// every time the user tabbed away. What is live is reported separately —
+    /// see [`AppState::active_profile_name`].
     pub(crate) fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
         bindings_for(
             &self.config,
             self.current_record()
                 .and_then(DeviceRecord::persistent_config_key),
-            self.current_app_bundle.as_deref(),
+            None,
         )
     }
     /// Per-direction display maps for every gesture-mode button of the current

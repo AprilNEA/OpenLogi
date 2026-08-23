@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Context, Entity, EventEmitter, Global};
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, ButtonId, GestureDirection,
     RingAction,
@@ -19,6 +20,7 @@ use openlogi_core::binding::{
 use openlogi_core::config::{Config, ConfigFile, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
+use openlogi_ipc::ForegroundApps;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -79,6 +81,8 @@ pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
 pub(crate) enum StateEvent {
     /// Agent connection or permission state changed.
     AgentChanged,
+    /// The foreground application or recent-application list changed.
+    ForegroundChanged,
     /// Cached diagnostics/event-monitor data changed.
     #[cfg_attr(
         not(all(target_os = "macos", debug_assertions)),
@@ -184,10 +188,11 @@ pub struct AppState {
     /// be out of bounds briefly while inventories re-enumerate; views must
     /// bounds-check via [`Self::current_record`].
     pub current_device: usize,
-    /// Bundle identifier of the frontmost macOS app (P1.4), or `None` on
-    /// non-macOS / no frontmost app. Used to overlay per-app bindings on
-    /// top of the per-device global map.
-    pub current_app_bundle: Option<String>,
+    /// Which application the agent is resolving per-app profiles against, and
+    /// the ones it recently saw in front. Read-only: the agent owns it, and
+    /// these identifiers are the only ones guaranteed to match what its matcher
+    /// compares — see [`ForegroundApps`].
+    foreground: ForegroundApps,
     /// Aggregate host-camera activity reported by the agent. Runtime only.
     camera_active: bool,
     /// Per-device UI state outside the persisted config and the lazily-loaded
@@ -340,7 +345,7 @@ impl AppState {
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let mut state = Self {
             current_device,
-            current_app_bundle: None,
+            foreground: ForegroundApps::default(),
             camera_active: false,
             device_ui: BTreeMap::new(),
             light_command_status: None,
@@ -499,6 +504,41 @@ impl AppState {
     #[must_use]
     pub fn current_record(&self) -> Option<&DeviceRecord> {
         self.device_list.get(self.current_device)
+    }
+
+    /// Adopt the agent's view of the foreground application. Returns whether
+    /// anything changed, so the caller can decide to repaint.
+    pub fn set_foreground(&mut self, foreground: ForegroundApps) -> bool {
+        let changed = self.foreground != foreground;
+        self.foreground = foreground;
+        changed
+    }
+
+    /// The application whose profile the user is asking about.
+    ///
+    /// Not [`ForegroundApps::current`]: while this window has focus *OpenLogi*
+    /// is the frontmost application, so the app the user means is the one they
+    /// came from. The recent list is exactly that — it excludes OpenLogi's own
+    /// processes, so its head is the frontmost application whenever one is, and
+    /// the previous one whenever this window is.
+    #[must_use]
+    fn profile_app(&self) -> Option<&ForegroundApp> {
+        self.foreground.recent.first()
+    }
+
+    /// The name of the per-app profile the active device runs under, or `None`
+    /// when it falls back to the device's global bindings — which is also what
+    /// a device with no saved config, or a host with no readable foreground
+    /// app, reports.
+    #[must_use]
+    pub fn active_profile_name(&self) -> Option<&str> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        let app = self.profile_app()?;
+        self.config
+            .has_app_override(key, &app.id)
+            .then_some(app.display_name.as_str())
     }
 
     /// Actions Ring settings for the active device, including its implicit

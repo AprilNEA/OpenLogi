@@ -233,6 +233,7 @@ impl AppView {
                 StateEvent::AgentChanged
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
+                StateEvent::ForegroundChanged => !on_home,
                 StateEvent::BindingsChanged(key) | StateEvent::DpiChanged(key) => {
                     !on_home
                         && view.active_tab == DetailTab::Device

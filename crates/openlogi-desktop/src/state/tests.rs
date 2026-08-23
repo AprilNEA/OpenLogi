@@ -13,6 +13,9 @@ use openlogi_core::hid::{
     Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, WriteError,
 };
 
+use openlogi_core::app::ForegroundApp;
+use openlogi_ipc::ForegroundApps;
+
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
 
@@ -68,6 +71,9 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
     assert!(state.apply_config_reload_result(Ok(())));
     assert_eq!(state.config_issue(), None);
 }
+
+/// Config key of the mouse [`direct_inventory`] builds with a real unit id.
+const KNOWN_MOUSE_KEY: &str = "direct:046d:b023:unit:a393cae0";
 
 fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     DeviceInventory {
@@ -180,6 +186,89 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
     ));
     assert_eq!(bindings.len(), 2);
     assert!(config.bindings_for("missing").is_empty());
+}
+
+/// A state holding the one persistent mouse, so per-device config has a key.
+fn state_with_a_known_mouse() -> AppState {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    AppState::with_runtime(
+        Config::ephemeral(),
+        &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    )
+}
+
+fn app(id: &str, display_name: &str) -> ForegroundApp {
+    ForegroundApp {
+        id: id.to_string(),
+        display_name: display_name.to_string(),
+    }
+}
+
+#[test]
+fn the_active_profile_is_the_default_until_the_app_in_front_is_overridden() {
+    let mut state = state_with_a_known_mouse();
+    let safari = app("com.apple.Safari", "Safari");
+    state.set_foreground(ForegroundApps {
+        current: Some(safari.clone()),
+        recent: vec![safari],
+    });
+
+    assert_eq!(
+        state.active_profile_name(),
+        None,
+        "an app with no overrides runs the device's global bindings"
+    );
+
+    state.config.set_per_app_binding(
+        KNOWN_MOUSE_KEY,
+        "com.apple.Safari",
+        ButtonId::Back,
+        Some(Action::Undo),
+    );
+    assert_eq!(state.active_profile_name(), Some("Safari"));
+}
+
+#[test]
+fn the_profile_shown_is_the_apps_even_while_this_window_has_focus() {
+    // The frontmost application is OpenLogi whenever the user is looking at
+    // this panel, so keying off `current` would report "Default profile" for
+    // exactly the moment the row is on screen (issue: the row had no content
+    // at all before). The recent list excludes our own windows, so its head is
+    // the app the user came from.
+    let mut state = state_with_a_known_mouse();
+    state.config.set_per_app_binding(
+        KNOWN_MOUSE_KEY,
+        "com.apple.Safari",
+        ButtonId::Back,
+        Some(Action::Undo),
+    );
+    state.set_foreground(ForegroundApps {
+        current: Some(app(openlogi_core::brand::APP_ID, "OpenLogi")),
+        recent: vec![app("com.apple.Safari", "Safari")],
+    });
+
+    assert_eq!(state.active_profile_name(), Some("Safari"));
+}
+
+#[test]
+fn a_host_with_no_readable_foreground_app_reports_the_default_profile() {
+    let mut state = state_with_a_known_mouse();
+    state.config.set_per_app_binding(
+        KNOWN_MOUSE_KEY,
+        "com.apple.Safari",
+        ButtonId::Back,
+        Some(Action::Undo),
+    );
+    // A pure-Wayland session with no usable backend, or a watcher that could
+    // not start: the agent reports nothing and no profile can be in effect.
+    assert!(!state.set_foreground(ForegroundApps::default()));
+    assert_eq!(state.active_profile_name(), None);
 }
 
 #[test]

@@ -590,9 +590,8 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         .sum::<usize>(),
                     state.dpi_presets().len(),
                     state
-                        .current_app_bundle
-                        .clone()
-                        .unwrap_or_else(|| tr!("Default profile").to_string()),
+                        .active_profile_name()
+                        .map_or_else(|| tr!("Default profile").to_string(), str::to_owned),
                 )
             },
         );

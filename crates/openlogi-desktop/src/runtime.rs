@@ -294,6 +294,7 @@ impl Runtime {
                     let agent_changed =
                         state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
                     let camera_changed = state.set_camera_active(snapshot.camera_active);
+                    let foreground_changed = state.set_foreground(snapshot.foreground.clone());
                     if merged {
                         cx.emit(StateEvent::InventoryChanged);
                     }
@@ -302,6 +303,9 @@ impl Runtime {
                     }
                     if camera_changed {
                         cx.emit(StateEvent::CameraChanged);
+                    }
+                    if foreground_changed {
+                        cx.emit(StateEvent::ForegroundChanged);
                     }
                     let settings = state.app_settings();
                     (
