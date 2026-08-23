@@ -258,6 +258,7 @@ _version: 1
 "Grant": "Toestaan"
 "Needed for gesture and button remapping (event tap).": "Vereist voor het opnieuw toewijzen van gebaren en knoppen (event tap)."
 "Needed to read HID++ data, including Bluetooth-direct mice.": "Vereist om HID++-gegevens te lezen, inclusief Bluetooth-directe muizen."
+"Granted, but devices still fail to open — another app may hold them exclusively, or macOS needs a log out and back in.": "Toegestaan, maar apparaten kunnen nog steeds niet worden geopend — een andere app houdt ze mogelijk exclusief vast, of macOS vereist uit- en opnieuw inloggen."
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "Staat OpenLogi toe CoreBluetooth te gebruiken (niet vereist voor HID-toegang)."
 "Scanning for devices…": "Apparaten zoeken…"
 "Connecting to the background service…": "Verbinden met de achtergrondservice…"

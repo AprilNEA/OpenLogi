@@ -627,6 +627,7 @@ fn agent_status() -> AgentStatus {
         // version, so a mock session can't be mistaken for a live one.
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
         input_monitoring_granted: true,
+        hid_open_failures: false,
     }
 }
 

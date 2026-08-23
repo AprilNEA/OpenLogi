@@ -258,6 +258,7 @@ _version: 1
 "Grant": "Przyznaj"
 "Needed for gesture and button remapping (event tap).": "Wymagane do zmiany przypisań gestów i przycisków (event tap)."
 "Needed to read HID++ data, including Bluetooth-direct mice.": "Wymagane do odczytu danych HID++, w tym myszy podłączonych bezpośrednio przez Bluetooth."
+"Granted, but devices still fail to open — another app may hold them exclusively, or macOS needs a log out and back in.": "Przyznano, ale urządzenia nadal nie dają się otworzyć — inna aplikacja może je zajmować na wyłączność albo macOS wymaga wylogowania i ponownego zalogowania."
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "Pozwala aplikacji OpenLogi używać CoreBluetooth (niewymagane do dostępu HID)."
 "Scanning for devices…": "Wyszukiwanie urządzeń…"
 "Connecting to the background service…": "Łączenie z usługą działającą w tle…"

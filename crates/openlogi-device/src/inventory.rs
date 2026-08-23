@@ -153,6 +153,8 @@ pub struct Enumerator {
     /// Whether the persistable cache content changed since the last save —
     /// fresh full probes and evictions, not per-tick battery refreshes.
     cache_dirty: bool,
+    /// Whether the most recent tick failed to open at least one HID++ node.
+    open_failures_last_tick: bool,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -401,6 +403,18 @@ fn append_live_cached_channels(
 }
 
 impl Enumerator {
+    /// Whether the most recent [`enumerate`](Self::enumerate) tick failed to
+    /// open at least one HID++ node. `false` before the first tick.
+    ///
+    /// On macOS a run of ticks with this set is the observable signature of a
+    /// denied Input Monitoring grant or a stale permission session — paired
+    /// with the grant state it separates "grant it" from "log out", which the
+    /// bare open error cannot (the denial is silent).
+    #[must_use]
+    pub fn open_failures_last_tick(&self) -> bool {
+        self.open_failures_last_tick
+    }
+
     /// An enumerator that walks `backend` — this host's HID stack, a scripted
     /// device tree in tests, or another host's.
     #[must_use]
@@ -415,6 +429,7 @@ impl Enumerator {
             tick: 0,
             store: None,
             cache_dirty: false,
+            open_failures_last_tick: false,
         }
     }
 
@@ -565,6 +580,7 @@ impl Enumerator {
             open_failures,
             retiring: retiring_nodes,
         } = self.prepare_nodes(&*backend, candidates).await;
+        self.open_failures_last_tick = !open_failures.is_empty();
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`).

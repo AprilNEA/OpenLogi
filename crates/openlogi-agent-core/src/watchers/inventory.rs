@@ -54,6 +54,10 @@ pub enum InventoryEvent {
         inventories: Vec<DeviceInventory>,
         /// Recognized standalone raw-HID devices.
         standalone: Vec<StandaloneDevice>,
+        /// Whether this tick failed to open at least one HID++ node — on
+        /// macOS the observable signature of a missing or stale Input
+        /// Monitoring grant (the open denial itself is silent).
+        hid_open_failures: bool,
     },
     /// Enumeration has never succeeded and won't be treated as "still
     /// starting" any longer; without this the GUI would show its scanning
@@ -156,6 +160,7 @@ impl WatchState {
         &mut self,
         inventories: Vec<DeviceInventory>,
         standalone: Result<Vec<StandaloneDevice>, openlogi_hid::InventoryError>,
+        hid_open_failures: bool,
     ) -> InventoryEvent {
         self.succeeded = true;
         let standalone = match standalone {
@@ -171,6 +176,7 @@ impl WatchState {
         InventoryEvent::Snapshot {
             inventories,
             standalone,
+            hid_open_failures,
         }
     }
 
@@ -192,7 +198,9 @@ impl WatchState {
         result: Result<(Vec<DeviceInventory>, Vec<StandaloneDevice>), openlogi_hid::InventoryError>,
     ) -> Option<InventoryEvent> {
         match result {
-            Ok((inventories, standalone)) => Some(self.classify_parts(inventories, Ok(standalone))),
+            Ok((inventories, standalone)) => {
+                Some(self.classify_parts(inventories, Ok(standalone), false))
+            }
             Err(e) => {
                 warn!(error = ?e, "enumerate failed during watch tick — keeping last snapshot");
                 if self.succeeded {
@@ -286,7 +294,8 @@ fn spawn_inner(
                 let event = match rt.block_on(enumerator.enumerate()) {
                     Ok(inventories) => {
                         let standalone = rt.block_on(openlogi_hid::enumerate_standalone());
-                        Some(state.classify_parts(inventories, standalone))
+                        let open_failures = enumerator.open_failures_last_tick();
+                        Some(state.classify_parts(inventories, standalone, open_failures))
                     }
                     Err(error) => state.classify(Err(error)),
                 };
@@ -363,7 +372,7 @@ mod tests {
         // the resilience must not swallow a real empty.
         assert_matches!(
             state.classify(Ok((vec![], vec![]))),
-            Some(InventoryEvent::Snapshot { inventories, standalone }) if inventories.is_empty() && standalone.is_empty()
+            Some(InventoryEvent::Snapshot { inventories, standalone, .. }) if inventories.is_empty() && standalone.is_empty()
         );
         assert!(state.succeeded);
     }
@@ -388,8 +397,8 @@ mod tests {
         let _ = state.classify(Ok((vec![], vec![raw_light("serial:glow-1")])));
 
         assert_matches!(
-            state.classify_parts(vec![], Err(enumerate_failed())),
-            InventoryEvent::Snapshot { inventories, standalone }
+            state.classify_parts(vec![], Err(enumerate_failed()), false),
+            InventoryEvent::Snapshot { inventories, standalone, .. }
                 if inventories.is_empty()
                     && standalone.len() == 1
                     && standalone[0].online

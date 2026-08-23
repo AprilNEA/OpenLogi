@@ -51,6 +51,7 @@ impl ObservableState {
                     protocol_version: PROTOCOL_VERSION,
                     agent_version,
                     input_monitoring_granted: openlogi_hid::permissions::has_access(),
+                    hid_open_failures: false,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -177,6 +178,21 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.input_monitoring_granted = granted;
+            true
+        });
+    }
+
+    /// Publish whether the last enumeration tick failed to open HID++
+    /// nodes, as reported by
+    /// [`watchers::inventory`](crate::watchers::inventory) — with the grant
+    /// state this is what separates "grant Input Monitoring" from "the grant
+    /// exists but another app or a stale permission session is in the way".
+    pub fn set_hid_open_failures(&self, failing: bool) {
+        self.update(|snapshot| {
+            if snapshot.status.hid_open_failures == failing {
+                return false;
+            }
+            snapshot.status.hid_open_failures = failing;
             true
         });
     }

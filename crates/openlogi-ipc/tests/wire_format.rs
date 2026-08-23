@@ -100,7 +100,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 25);
+    assert_eq!(PROTOCOL_VERSION, 26);
 }
 
 #[test]
@@ -271,8 +271,9 @@ fn agent_status() {
         protocol_version: 7,
         agent_version: "0.6.6".into(),
         input_monitoring_granted: true,
+        hid_open_failures: false,
     };
-    assert_wire(&status, "010001010705302e362e3601");
+    assert_wire(&status, "010001010705302e362e360100");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
@@ -290,20 +291,21 @@ fn agent_snapshot() {
             protocol_version: 7,
             agent_version: "0.6.6".into(),
             input_monitoring_granted: true,
+            hid_open_failures: false,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
         camera_active: false,
         pairing: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000");
 }
 
 /// The pairing session is state, so its phases are wire format like any enum.

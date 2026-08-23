@@ -54,7 +54,8 @@ pub use succession::Identity;
 /// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
 /// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
 /// v25: `AgentStatus::input_monitoring_granted` appended.
-pub const PROTOCOL_VERSION: u32 = 25;
+/// v26: `AgentStatus::hid_open_failures` appended.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -107,6 +108,10 @@ pub struct AgentStatus {
     pub agent_version: String,
     /// Whether the agent process holds Input Monitoring (HID) access.
     pub input_monitoring_granted: bool,
+    /// Whether the last enumeration tick failed to open at least one HID++
+    /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
+    /// a missing grant from an exclusive open or a stale permission session.
+    pub hid_open_failures: bool,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never

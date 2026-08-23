@@ -684,6 +684,13 @@ impl Orchestrator {
         }
     }
 
+    /// Record whether the last enumeration tick failed to open HID++ nodes.
+    /// Straight onto the observable status: no orchestration depends on it,
+    /// it exists for the GUI's permission diagnostics.
+    pub fn set_hid_open_failures(&self, failing: bool) {
+        self.observable.set_hid_open_failures(failing);
+    }
+
     /// Record that enumeration has never worked and has stopped being treated
     /// as "still starting" (persistent initial failure, or the watcher died).
     /// Downgrades only the pending state: once a snapshot exists the
