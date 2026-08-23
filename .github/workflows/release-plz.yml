@@ -52,7 +52,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
       # release-plz skips release=false app crates; git-cliff covers the whole repo.
-      - name: Find open release PR
+      - name: Find current release PR
         id: open_release_pr
         uses: actions/github-script@v8
         with:
@@ -63,7 +63,22 @@ jobs:
               state: "open",
               per_page: 100,
             });
-            const pull = openPulls.find(({ head }) => head.ref.startsWith("release-plz/"));
+            const releasePulls = openPulls.filter(({ head }) =>
+              head.ref.startsWith("release-plz/") &&
+              head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`
+            );
+            let pull;
+            for (const candidate of releasePulls) {
+              const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+                ...context.repo,
+                basehead: `${context.sha}...${candidate.head.sha}`,
+              });
+              if (comparison.status === "ahead" || comparison.status === "identical") {
+                pull = candidate;
+                break;
+              }
+              core.info(`Ignoring stale release PR #${candidate.number}: ${comparison.status}`);
+            }
             if (pull) {
               core.setOutput("branch", pull.head.ref);
               core.setOutput("number", pull.number);
