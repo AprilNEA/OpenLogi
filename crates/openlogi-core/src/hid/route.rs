@@ -94,11 +94,12 @@ pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc537];
 /// G502 LIGHTSPEED and the G Pro Wireless — its USB product string is
 /// literally `LIGHTSPEED Receiver`; `0xc53f` is the nano receiver of wireless
 /// mice such as the G305; `0xc547` ships with newer G-series devices such as
-/// the G915 keyboard and the G502 X LIGHTSPEED.
+/// the G915 keyboard and the G502 X LIGHTSPEED; `0xc54d` ships with the
+/// PRO X SUPERLIGHT 2 DEX.
 /// They speak the same HID++ 1.0 receiver register protocol as Unifying, so
 /// they are enumerated, routed, and paired through the Unifying code path;
 /// only the user-facing receiver name (see [`receiver_display_name`]) differs.
-pub const LIGHTSPEED_PIDS: &[u16] = &[0xc539, 0xc53f, 0xc547];
+pub const LIGHTSPEED_PIDS: &[u16] = &[0xc539, 0xc53f, 0xc547, 0xc54d];
 
 /// Whether `product_id` is a receiver that speaks the Unifying HID++ 1.0
 /// register protocol — a Unifying receiver proper, or a protocol-compatible
@@ -292,6 +293,7 @@ mod tests {
         assert_eq!(receiver_display_name(0xc539), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
         assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }
