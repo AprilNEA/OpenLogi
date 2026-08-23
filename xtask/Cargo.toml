@@ -24,8 +24,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2_hasher = { version = "0.3.2", features = ["sync"] }
 strum = { version = "0.27", features = ["derive"] }
-# Matching the agent's feature set: only process enumeration, so the dev
-# bundler can stop the leftovers an earlier `cargo run` detached.
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }

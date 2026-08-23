@@ -12,14 +12,9 @@ categories = ["hardware-support", "config"]
 
 [features]
 default = ["fs"]
-# Reading and writing the user's config file, and the paths it lives at.
-#
-# Everything else here is data: the device model, the action catalogue, the
-# binding types, the TOML *shapes* of the config. Those describe a device and a
-# user's choices and need no host at all, which is what lets them be checked
-# against `wasm32-unknown-unknown` (see xtask's `WASM_PORTABLE_CRATES`). This
-# feature is the line between the two, and it is on by default so every
-# consumer in this workspace is unaffected.
+# The line between the host-touching config I/O and everything else here, which
+# is pure data and stays checkable against `wasm32-unknown-unknown` (see xtask's
+# `WASM_PORTABLE_CRATES`). On by default, so no consumer here is affected.
 fs = ["dep:atomic-write-file", "dep:etcetera", "dep:toml_edit"]
 
 [dependencies]
