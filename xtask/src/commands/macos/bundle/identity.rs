@@ -19,8 +19,8 @@ use clap::ValueEnum;
 use openlogi_core::brand;
 use strum::{Display, VariantArray};
 
-use super::app_icon::{AppIcon, CATALOG, ICON_NAME, alternate};
-use super::info_plist::{read_plist_string, stamp_plist_strings};
+use crate::icon::macos::ICON_NAME;
+use crate::support::info_plist::{read_plist_string, stamp_plist_strings};
 
 /// Which identity family a bundle carries.
 ///
@@ -194,10 +194,9 @@ pub(crate) fn verify(app: &Path, channel: Channel, components: &[Component]) -> 
 /// no surface that lists OpenLogi's processes — System Settings' privacy panes,
 /// Login Items — shows a blank icon for one of them.
 ///
-/// The app additionally carries the asset catalog macOS 26 composes its layered
-/// icon from, plus every alternate a user can switch to. Only the app: the
-/// helpers are listed by surfaces that read the `.icns`, and a catalog each
-/// would cost more than their binaries do.
+/// What the app carries beyond that `.icns` — the asset catalog, the alternates
+/// — belongs to the icon pipeline, and
+/// [`IconPipeline::verify`](crate::icon::IconPipeline::verify) checks it.
 pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component]) -> Result<()> {
     for &component in components {
         let icon = component.icon(app, channel);
@@ -219,39 +218,6 @@ pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component
                 plist.display()
             );
         }
-    }
-    if components.contains(&Component::App) {
-        verify_app_icons(app, channel)?;
-    }
-    Ok(())
-}
-
-/// Fail unless the app ships the compiled asset catalog, names its entry, and
-/// carries every alternate icon it offers.
-fn verify_app_icons(app: &Path, channel: Channel) -> Result<()> {
-    let root = Component::App.root(app, channel);
-    let catalog = root.join("Contents/Resources").join(CATALOG);
-    if !catalog.is_file() {
-        bail!(
-            "app: missing the icon asset catalog at {}",
-            catalog.display()
-        );
-    }
-    for &icon in AppIcon::VARIANTS {
-        let Some(path) = alternate(&root, icon) else {
-            continue;
-        };
-        if !path.is_file() {
-            bail!("app: missing the {icon} icon at {}", path.display());
-        }
-    }
-    let plist = Component::App.info_plist(app, channel);
-    let declared = read_plist_string(&plist, "CFBundleIconName")?;
-    if declared.as_deref() != Some(ICON_NAME) {
-        bail!(
-            "app: CFBundleIconName is {declared:?}, expected {ICON_NAME:?} ({})",
-            plist.display()
-        );
     }
     Ok(())
 }

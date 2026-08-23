@@ -5,6 +5,8 @@ pub(crate) mod dmg;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::icon::IconPipeline as _;
+use crate::icon::macos::AppBundle;
 use bundle::identity::Channel;
 
 #[derive(Subcommand)]
@@ -34,7 +36,7 @@ pub(crate) struct BundleArgs {
 
 pub(crate) fn run(command: Command) -> Result<()> {
     match command {
-        Command::Icon => bundle::generate_app_icon(),
+        Command::Icon => AppBundle.compile(),
         Command::Bundle(args) => bundle::run(args.channel),
         Command::DevBundle(args) => dev_bundle::run(&args),
         Command::Dmg(args) => dmg::run(&args),

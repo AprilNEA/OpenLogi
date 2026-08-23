@@ -97,10 +97,8 @@ xtask/
         bundle/
           embed.rs             # login-item helpers, the CLI, required binaries
           embed/tests.rs
-          app_icon.rs          # the app icon, compiled by actool
           identity.rs          # bundle ids, names, icons per channel
           identity/tests.rs
-          info_plist.rs        # reading and stamping plist keys
           signing.rs           # codesign, inside out
           signing/tests.rs
         dev_bundle.rs
@@ -119,9 +117,14 @@ xtask/
         changelog/tests.rs
         latest_json.rs
         latest_json/tests.rs
+    icon.rs                  # the icon set, and the pipeline a platform implements
+    icon/
+      macos.rs               # Icon Composer documents -> icns + asset catalog
+      macos/tests.rs
     support/
       mod.rs
       fs.rs                  # shared filesystem/process guards only
+      info_plist.rs          # reading and stamping plist keys
       manifest.rs            # the root Cargo.toml's [workspace.package]
 ```
 

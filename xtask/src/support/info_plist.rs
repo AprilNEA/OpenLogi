@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result};
 use plist::Value;
 
 /// Stamp `NSCameraUsageDescription` (cargo-bundle can't; matches the dev plist) so camera requests prompt instead of killing the app.
-pub(super) fn stamp_privacy_usage_descriptions(app: &Path) -> Result<()> {
+pub(crate) fn stamp_privacy_usage_descriptions(app: &Path) -> Result<()> {
     println!("==> privacy usage descriptions");
     stamp_plist_strings(
         &app.join("Contents/Info.plist"),
@@ -20,7 +20,7 @@ pub(super) fn stamp_privacy_usage_descriptions(app: &Path) -> Result<()> {
     )
 }
 
-pub(super) fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
+pub(crate) fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
     let mut plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
     let dict = plist
@@ -35,7 +35,7 @@ pub(super) fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<(
 }
 
 /// Read one string value from an `Info.plist`; `None` when the key is absent.
-pub(super) fn read_plist_string(info_plist: &Path, key: &str) -> Result<Option<String>> {
+pub(crate) fn read_plist_string(info_plist: &Path, key: &str) -> Result<Option<String>> {
     let plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
     let dict = plist
@@ -44,7 +44,7 @@ pub(super) fn read_plist_string(info_plist: &Path, key: &str) -> Result<Option<S
     Ok(dict.get(key).and_then(Value::as_string).map(str::to_owned))
 }
 
-pub(super) fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
+pub(crate) fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
     let mut plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
     let dict = plist

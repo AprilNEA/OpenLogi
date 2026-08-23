@@ -23,7 +23,11 @@ paths:
   not). `actool` names its outputs after the document, so the compile stages a
   copy called `AppIcon.icon`; it ships with Xcode, not the command line tools.
   `design/icon/openlogi.png` stays the master for Linux packaging and the GUI's
-  embedded logo, and `openlogi.ico` for the Windows executables. The build never
+  embedded logo, and `openlogi.ico` for the Windows executables. The icon set
+  itself lives in `xtask/src/icon.rs` (`AppIcon` plus the `IconPipeline` trait a
+  platform implements); `icon/macos.rs` is the only implementation so far — add
+  one there rather than growing a second icon vocabulary when Windows or Linux
+  needs a build step. The build never
   fetches the icon from the CDN — a build-time fetch was tried and deliberately
   reverted; don't reintroduce it. After changing the icon, macOS caches by bundle
   path: `touch target/dev/OpenLogi.app && killall Dock` to see it.
