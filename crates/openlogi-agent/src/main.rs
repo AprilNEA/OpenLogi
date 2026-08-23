@@ -83,7 +83,7 @@ fn main() {
     // Watch our own executable and restart as the new image when an app update
     // replaces it — see `self_restart`. Only the lock-holding (real) agent
     // watches, so a losing duplicate can't restart anything.
-    self_restart::spawn();
+    let uninstalled = self_restart::spawn();
     overlay::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
@@ -115,7 +115,7 @@ fn main() {
         let core_resume_pending = Arc::clone(&resume_pending);
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
-            .spawn(move || runtime.block_on(run(config, core_resume_pending)))
+            .spawn(move || runtime.block_on(run(config, core_resume_pending, uninstalled)))
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
@@ -134,10 +134,10 @@ fn main() {
             // when the flag is set.
             let resume_pending = Arc::new(AtomicBool::new(false));
             resume_windows::register(Arc::clone(&resume_pending));
-            runtime.block_on(run(config, resume_pending));
+            runtime.block_on(run(config, resume_pending, uninstalled));
         }
         #[cfg(not(target_os = "windows"))]
-        runtime.block_on(run(config));
+        runtime.block_on(run(config, uninstalled));
     }
 }
 
@@ -286,11 +286,12 @@ fn shutdown_signals() -> (Option<()>, Option<()>) {
 /// Release the input hook, then end the process.
 ///
 /// Dropping the hook detaches the macOS event tap; a signal's default
-/// disposition would have killed the process with the tap still armed. The
-/// agent's run loop is not the process — macOS keeps the AppKit tray loop on
-/// the main thread — so the exit has to be explicit.
-fn release_hook_and_exit(hook: Option<Hook>) -> ! {
-    info!("shutdown signal — releasing the input hook and exiting");
+/// disposition would have killed the process with the tap still armed, and so
+/// would any other way of leaving that skips destructors. The agent's run loop
+/// is not the process — macOS keeps the AppKit tray loop on the main thread —
+/// so the exit has to be explicit.
+fn release_hook_and_exit(hook: Option<Hook>, reason: &str) -> ! {
+    info!(reason, "releasing the input hook and exiting");
     drop(hook);
     #[expect(
         clippy::exit,
@@ -373,6 +374,7 @@ async fn apply_inventory_event(
 async fn run(
     config: Config,
     #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+    mut uninstalled: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -498,7 +500,14 @@ async fn run(
                 // or never installed because capture is off.
                 observable.set_hook_installed(hook.is_some());
             }
-            () = shutdown_signal(&mut sigterm, &mut sigint) => release_hook_and_exit(hook.take()),
+            () = shutdown_signal(&mut sigterm, &mut sigint) => {
+                release_hook_and_exit(hook.take(), "shutdown signal")
+            }
+            // The app was removed while we kept running from its bundle. Leave
+            // through the same door, so the event tap goes with us (#807).
+            Some(()) = uninstalled.recv() => {
+                release_hook_and_exit(hook.take(), "the app was uninstalled")
+            }
             else => break,
         }
     }
