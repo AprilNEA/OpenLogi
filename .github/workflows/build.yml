@@ -135,6 +135,21 @@ jobs:
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
 
+      # The two macOS legs run on different images, and their default Xcode is
+      # whatever `/Applications/Xcode.app` happens to point at — 26.x on the
+      # arm64 image, 16.4 on the Intel one. Compiling the app icon needs an
+      # Icon Composer-capable actool (Xcode 26+), and a bundle should not be
+      # built by two different toolchains depending on which leg produced it.
+      - name: Select the Xcode both legs build with
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$xcode" ]; then
+            echo "No Xcode 26 on this runner; the app icon cannot be compiled." >&2
+            exit 1
+          fi
+          echo "OPENLOGI_DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Building with $xcode"
+
       - name: Load release secrets from 1Password
         id: load_secrets
         if: ${{ inputs.sign }}

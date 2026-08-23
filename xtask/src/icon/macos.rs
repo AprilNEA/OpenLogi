@@ -15,6 +15,7 @@ use xshell::{Shell, cmd};
 use super::{AppIcon, IconPipeline};
 use crate::support::fs::{ensure_dir, ensure_file, repo_root};
 use crate::support::info_plist::{read_plist_string, stamp_plist_strings};
+use crate::support::xcode;
 
 /// `OpenLogi.app`'s icons: the one it wears, and the alternates it can switch
 /// to at runtime.
@@ -236,6 +237,10 @@ fn compile_document(root: &Path, output_dir: &Path, icon: AppIcon) -> Result<()>
         .with_context(|| format!("could not create {}", compiled.display()))?;
     let partial_plist = work.path().join("icon.plist");
 
+    // Under the build's own Xcode, not whichever one the machine happens to
+    // have selected: a runner can carry several, and an Icon Composer document
+    // needs 26 or newer.
+    //
     // `actool` reports everything — errors included — as a plist on stdout and
     // nothing on stderr, so its output is only worth showing when it fails.
     let run = cmd!(
@@ -248,12 +253,14 @@ fn compile_document(root: &Path, output_dir: &Path, icon: AppIcon) -> Result<()>
          --app-icon {stem}
          --output-partial-info-plist {partial_plist}"
     )
+    .envs(xcode::env()?.iter().map(|(key, value)| (key, value)))
     .ignore_status()
     .output()
     .context("could not run actool (it ships with Xcode, not the command line tools)")?;
     if !run.status.success() {
         bail!(
-            "actool could not compile {}:\n{}",
+            "actool could not compile {}: an Icon Composer document needs Xcode 26 \
+             or newer, and OPENLOGI_DEVELOPER_DIR picks which Xcode is used.\n{}",
             source.display(),
             String::from_utf8_lossy(&run.stdout)
         );

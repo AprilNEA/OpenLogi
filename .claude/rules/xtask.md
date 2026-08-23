@@ -21,7 +21,11 @@ paths:
   macOS 13–25 draw, and what every helper bundle ships) and `Assets.car` (what
   macOS 26 composes the layered icon from — the app carries it, the helpers do
   not). `actool` names its outputs after the document, so the compile stages a
-  copy called `AppIcon.icon`; it ships with Xcode, not the command line tools.
+  copy called `AppIcon.icon`; it ships with Xcode (not the command line tools)
+  and has to be **Xcode 26 or newer**, since that is where Icon Composer
+  documents arrived. `OPENLOGI_DEVELOPER_DIR` picks which Xcode every macOS
+  build command runs under — `build.yml` sets it per leg, because the Intel
+  runner image still defaults to Xcode 16.
   `design/icon/openlogi.png` stays the master for Linux packaging and the GUI's
   embedded logo, and `openlogi.ico` for the Windows executables. The icon set
   itself lives in `xtask/src/icon.rs` (`AppIcon` plus the `IconPipeline` trait a

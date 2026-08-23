@@ -15,6 +15,7 @@ use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{command_exists, ensure_dir, repo_root};
 use crate::support::info_plist;
+use crate::support::xcode;
 use identity::{Channel, Component};
 
 // The rest of the macOS domain reaches these through `bundle::`, which is the
@@ -38,7 +39,7 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
-    let xcode_env = xcode_env()?;
+    let xcode_env = xcode::env()?;
 
     println!("==> app icon");
     AppBundle.compile()?;
@@ -112,17 +113,4 @@ fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub(super) fn xcode_env() -> Result<Vec<(String, String)>> {
-    let sh = Shell::new()?;
-    let developer_dir = env::var("OPENLOGI_DEVELOPER_DIR")
-        .unwrap_or_else(|_| "/Applications/Xcode.app/Contents/Developer".to_string());
-    let sdkroot = cmd!(sh, "/usr/bin/xcrun --sdk macosx --show-sdk-path")
-        .env("DEVELOPER_DIR", &developer_dir)
-        .read()?;
-    Ok(vec![
-        ("DEVELOPER_DIR".to_string(), developer_dir),
-        ("SDKROOT".to_string(), sdkroot.trim().to_string()),
-    ])
 }

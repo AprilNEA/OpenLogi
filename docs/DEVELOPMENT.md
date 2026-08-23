@@ -6,8 +6,11 @@ build instructions, see the [README](../README.md).
 ## Toolchain
 
 - Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
-- macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
-  GPUI's `gpui_macos` build script to compile shaders)
+- macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
+  Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
+  version floor is `actool`, which packaging uses to compile the app icon from
+  its Icon Composer document. `OPENLOGI_DEVELOPER_DIR` overrides which Xcode is
+  used when several are installed.
 - Linux: system libraries — on Debian/Ubuntu:
   `sudo apt-get install libudev-dev gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev pkg-config`
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
@@ -22,7 +25,7 @@ Nix/devenv is optional. A normal Rust toolchain is enough.
 ```sh
 # rustup installs the stable toolchain pinned in rust-toolchain.toml
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# macOS: full Xcode 16+ with the Metal Toolchain (not only Command Line Tools)
+# macOS: full Xcode 26+ with the Metal Toolchain (not only Command Line Tools)
 # Linux: see system libraries under Toolchain above
 # optional helpers: brew install cmake create-dmg sccache
 git clone https://github.com/AprilNEA/OpenLogi
