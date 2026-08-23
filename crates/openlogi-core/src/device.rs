@@ -407,7 +407,7 @@ pub struct StandaloneDevice {
     ///
     /// This is deliberately appended: `StandaloneDevice` crosses the
     /// append-only GUI↔agent bincode wire format.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub registry_model_id: Option<String>,
 }
 
