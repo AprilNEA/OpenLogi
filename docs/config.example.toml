@@ -13,6 +13,8 @@ asset_source = "automatic"
 language = "en"
 thumbwheel_sensitivity = 14
 appearance = "system"
+# macOS only: "openlogi" (the signed icon) or "midnight".
+app_icon = "openlogi"
 
 [devices."receiver:aabbccdd:slot:1"]
 dpi = 1600

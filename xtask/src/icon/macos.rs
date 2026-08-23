@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::{AppIcon, IconPipeline};
@@ -52,7 +51,7 @@ impl IconPipeline for AppBundle {
                 output_dir.display()
             )
         })?;
-        for &icon in AppIcon::VARIANTS {
+        for icon in AppIcon::ALL {
             compile_document(&root, &output_dir, icon)?;
         }
         Ok(())
@@ -77,7 +76,7 @@ impl IconPipeline for AppBundle {
         fs_err::copy(&catalog, resources.join(CATALOG))
             .with_context(|| format!("could not copy {CATALOG} into the bundle"))?;
 
-        for &icon in AppIcon::VARIANTS {
+        for icon in AppIcon::ALL {
             let Some(target) = alternate(app, icon) else {
                 continue;
             };
@@ -103,7 +102,7 @@ impl IconPipeline for AppBundle {
                 catalog.display()
             );
         }
-        for &icon in AppIcon::VARIANTS {
+        for icon in AppIcon::ALL {
             let Some(path) = alternate(app, icon) else {
                 continue;
             };

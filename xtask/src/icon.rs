@@ -17,40 +17,14 @@ pub(crate) mod macos;
 use std::path::Path;
 
 use anyhow::Result;
-use strum::{Display, VariantArray};
 
-/// An icon the app can wear.
-///
-/// The set lives here because every pass over it — compiling the sources,
-/// putting the alternates where the app can find them, checking they arrived —
-/// has to cover a newly added icon without anyone remembering to extend a list.
-/// `Display` renders the name the icon is known by outside the build: the file
-/// it ships as, and the value the app persists once a user picks it.
-///
-/// What an icon is *made of* is the platform's business, not this type's: macOS
-/// compiles an Icon Composer document, Windows would want a `.ico`. Each
-/// [`IconPipeline`] maps a variant to its own source.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, VariantArray)]
-#[strum(serialize_all = "kebab-case")]
-pub(crate) enum AppIcon {
-    /// What the app wears out of the box, and the only one a platform draws
-    /// without being told to.
-    Openlogi,
-    /// The dark alternate.
-    Midnight,
-}
-
-impl AppIcon {
-    /// The icon a package wears until something switches it.
-    pub(crate) const DEFAULT: Self = Self::Openlogi;
-
-    /// Whether this is the icon the package already wears, which is the one
-    /// case a pipeline never has to install anywhere: going back to it clears
-    /// the override instead of applying a file.
-    pub(crate) fn is_default(self) -> bool {
-        self == Self::DEFAULT
-    }
-}
+/// The set itself is [`openlogi_core::config::AppIcon`]: the app persists the
+/// user's choice, so the build and the running app have to agree on which icons
+/// exist and what each is called. Packaging only adds how they are made — which
+/// is the platform's business, not the type's: macOS compiles an Icon Composer
+/// document, Windows would want a `.ico`. Each [`IconPipeline`] maps a variant
+/// to its own source.
+pub(crate) use openlogi_core::config::AppIcon;
 
 /// What one platform's packaging does with [`AppIcon`].
 pub(crate) trait IconPipeline {

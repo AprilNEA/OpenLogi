@@ -44,7 +44,7 @@ fn a_bundle_missing_an_alternate_icon_is_rejected() {
 fn a_bundle_that_does_not_name_the_catalog_entry_is_rejected() {
     let app = bundle();
     with_catalog(app.path());
-    for &icon in AppIcon::VARIANTS {
+    for icon in AppIcon::ALL {
         if let Some(path) = alternate(app.path(), icon) {
             fs_err::create_dir_all(path.parent().unwrap()).unwrap();
             fs_err::write(&path, []).unwrap();
@@ -62,9 +62,9 @@ fn a_bundle_that_does_not_name_the_catalog_entry_is_rejected() {
 fn only_the_alternates_ship_a_second_copy() {
     let app = bundle();
 
-    assert_eq!(alternate(app.path(), AppIcon::DEFAULT), None);
+    assert_eq!(alternate(app.path(), AppIcon::default()), None);
     assert!(
-        AppIcon::VARIANTS
+        AppIcon::ALL
             .iter()
             .any(|&icon| alternate(app.path(), icon).is_some()),
         "a set with no alternate would make the whole pipeline pointless"
