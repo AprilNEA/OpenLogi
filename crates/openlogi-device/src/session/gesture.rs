@@ -487,6 +487,18 @@ async fn arm_controls_into(
             if armed.gesture_cids.contains(&cid) {
                 continue;
             }
+            // A non-default single DpiToggle binding is delivered by the
+            // generic button path below. Arming the dedicated DPI path too
+            // would emit the same press twice.
+            if spec
+                .divert_buttons
+                .iter()
+                .any(|&(button_cid, button)| {
+                    button_cid == cid && button == ButtonId::DpiToggle
+                })
+            {
+                continue;
+            }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 let reporting = arm_reprog_control(&rc, cid, false).await?;
                 armed.reporting.push(reporting);

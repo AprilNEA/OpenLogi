@@ -119,7 +119,9 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::Binding;
-    use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
+    use openlogi_hid::reprog_controls::{
+        DPI_MODE_SHIFT_CIDS, GESTURE_BUTTON_CID, HAPTIC_PANEL_CID,
+    };
 
     use super::*;
 
@@ -136,6 +138,24 @@ mod tests {
         assert!(GESTURE_SOURCE_BUTTONS.iter().any(|(_, button)| {
             *button == ButtonId::DpiToggle
         }));
+    }
+
+    #[test]
+    fn single_bound_dpi_toggle_uses_one_plain_capture_path() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::DpiToggle,
+            Binding::Single(Action::Copy),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            plan.divert_buttons.iter().any(|&(cid, button)| {
+                DPI_MODE_SHIFT_CIDS.contains(&cid) && button == ButtonId::DpiToggle
+            }),
+            "a non-default DPI binding must use the generic button capture"
+        );
     }
 
     #[test]
