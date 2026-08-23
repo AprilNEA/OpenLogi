@@ -5,6 +5,7 @@ use hidpp::feature::smartshift::WheelMode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::SharedChannel;
+use crate::channel::DeviceCacheIdentity;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
@@ -366,6 +367,64 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     // Lift-off distance is read back and rewritten unchanged — the packet has
     // no "leave alone" encoding, so writing a bare 0 would retune the sensor.
     assert_eq!(write[9], u8::from(Lod::Medium));
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacing_a_mouse_in_one_receiver_slot_reprobes_dpi_capabilities() -> Result<(), WriteError>
+{
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "AABB".into(),
+        slot: 2,
+    };
+    let first_identity = DeviceCacheIdentity::Physical {
+        unit_id: Some([1, 2, 3, 4]),
+        serial_number: None,
+    };
+    let first_mouse = SharedChannel::with_cache_identity(
+        Arc::clone(&channel),
+        route.clone(),
+        Some(first_identity.clone()),
+    );
+    get_dpi_info_on(&first_mouse).await?;
+
+    let reports_before_refresh = handle.written_reports().len();
+    let refreshed_handle = SharedChannel::with_cache_identity(
+        Arc::clone(&channel),
+        route.clone(),
+        Some(first_identity),
+    );
+    get_dpi_info_on(&refreshed_handle).await?;
+    assert_eq!(
+        handle.written_reports().len() - reports_before_refresh,
+        1,
+        "a normal inventory refresh for the same mouse should keep the fast path"
+    );
+
+    let reports_before_replacement = handle.written_reports().len();
+    let replacement = SharedChannel::with_cache_identity(
+        channel,
+        route,
+        Some(DeviceCacheIdentity::Physical {
+            unit_id: Some([5, 6, 7, 8]),
+            serial_number: None,
+        }),
+    );
+    get_dpi_info_on(&replacement).await?;
+    let replacement_reports = &handle.written_reports()[reports_before_replacement..];
+
+    assert!(
+        replacement_reports
+            .iter()
+            .any(|report| report[2] == 0x00 && report[3] >> 4 == 0x00),
+        "a replacement device must resolve its DPI feature instead of inheriting the old index"
+    );
+    assert!(
+        replacement_reports.len() > 1,
+        "a replacement device must reload its range instead of reading only current DPI"
+    );
     Ok(())
 }
 

@@ -158,10 +158,31 @@ fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
     }]
 }
 
+fn with_unit_id(mut inventories: Vec<DeviceInventory>, unit_id: [u8; 4]) -> Vec<DeviceInventory> {
+    inventories[0].paired[0].model_info = Some(DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id,
+        transports: DeviceTransports {
+            equad: true,
+            ..DeviceTransports::default()
+        },
+        model_ids: [0xb001, 0, 0],
+        extended_model_id: 0,
+    });
+    inventories
+}
+
 #[test]
 fn settled_inventories_publish_exact_receiver_routes() {
+    let routes = |inventories: &[DeviceInventory]| {
+        routes_for_inventories(inventories, true)
+            .into_iter()
+            .map(|published| published.route().clone())
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        routes_for_inventories(&inventory(&[1, 4])),
+        routes(&inventory(&[1, 4])),
         vec![
             DeviceRoute::Unifying {
                 receiver_uid: "receiver-1".into(),
@@ -175,13 +196,37 @@ fn settled_inventories_publish_exact_receiver_routes() {
     );
 
     assert_eq!(
-        routes_for_inventories(&inventory(&[4])),
+        routes(&inventory(&[4])),
         vec![DeviceRoute::Unifying {
             receiver_uid: "receiver-1".into(),
             slot: 4,
         }],
         "a vanished slot must not survive the next atomic node replacement"
     );
+}
+
+#[test]
+fn replayed_inventory_does_not_reuse_a_physical_device_cache_scope() {
+    let replayed = routes_for_inventories(&with_unit_id(inventory(&[1]), [1, 2, 3, 4]), false);
+
+    assert_eq!(
+        replayed.len(),
+        1,
+        "the device remains visible during replay"
+    );
+    assert!(
+        !replayed[0].has_cache_identity(),
+        "an unverified snapshot must not lend stale feature metadata to a replacement device"
+    );
+}
+
+#[test]
+fn physical_identity_changes_when_a_receiver_slot_is_repaired() {
+    let first = routes_for_inventories(&with_unit_id(inventory(&[1]), [1, 2, 3, 4]), true);
+    let replacement = routes_for_inventories(&with_unit_id(inventory(&[1]), [5, 6, 7, 8]), true);
+
+    assert!(first[0].has_cache_identity());
+    assert_ne!(first[0].cache_identity(), replacement[0].cache_identity());
 }
 
 #[test]
@@ -206,7 +251,10 @@ fn settled_direct_inventory_publishes_one_direct_route() {
     }];
 
     assert_eq!(
-        routes_for_inventories(&direct),
+        routes_for_inventories(&direct, true)
+            .into_iter()
+            .map(|published| published.route().clone())
+            .collect::<Vec<_>>(),
         vec![DeviceRoute::Direct {
             vendor_id: 0x046d,
             product_id: 0xb35b,

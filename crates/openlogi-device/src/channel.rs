@@ -23,6 +23,17 @@ pub(crate) mod scripted;
 pub use pool::ChannelPool;
 pub use registry::ChannelRegistry;
 
+/// Stable identity used to keep immutable metadata attached to one physical
+/// device rather than merely to its receiver slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceCacheIdentity {
+    Direct,
+    Physical {
+        unit_id: Option<[u8; 4]>,
+        serial_number: Option<String>,
+    },
+}
+
 /// An open HID++ channel to a device, shared so route-addressed reads and writes
 /// can reuse an inventory- or capture-owned connection instead of
 /// re-enumerating and opening a fresh channel each time (which costs ~100ms+).
@@ -33,13 +44,39 @@ pub use registry::ChannelRegistry;
 pub struct SharedChannel {
     channel: Arc<HidppChannel>,
     route: DeviceRoute,
+    cache_identity: Option<DeviceCacheIdentity>,
 }
 
 impl SharedChannel {
     /// Wrap an open channel that reaches `route`.
+    ///
+    /// Standalone direct channels are device-specific and may cache immutable
+    /// metadata. Receiver routes need inventory's physical identity, so they
+    /// deliberately remain uncached when built outside the registry.
     #[must_use]
     pub(crate) fn new(channel: Arc<HidppChannel>, route: DeviceRoute) -> Self {
-        Self { channel, route }
+        let cache_identity =
+            matches!(route, DeviceRoute::Direct { .. }).then_some(DeviceCacheIdentity::Direct);
+        Self {
+            channel,
+            route,
+            cache_identity,
+        }
+    }
+
+    /// Wrap a registry-owned channel with the identity of the physical device
+    /// currently occupying this route.
+    #[must_use]
+    pub(crate) fn with_cache_identity(
+        channel: Arc<HidppChannel>,
+        route: DeviceRoute,
+        cache_identity: Option<DeviceCacheIdentity>,
+    ) -> Self {
+        Self {
+            channel,
+            route,
+            cache_identity,
+        }
     }
 
     /// Whether this channel reaches `route` — so the write path only reuses it
@@ -55,5 +92,13 @@ impl SharedChannel {
 
     pub(crate) fn device_index(&self) -> u8 {
         self.route.device_index()
+    }
+
+    pub(crate) fn cache_identity(&self) -> Option<&DeviceCacheIdentity> {
+        self.cache_identity.as_ref()
+    }
+
+    pub(crate) fn cache_identity_matches(&self, current: Option<&DeviceCacheIdentity>) -> bool {
+        self.cache_identity() == current
     }
 }

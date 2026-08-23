@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
+use crate::channel::registry::PublishedRoute;
 use crate::channel::route::{DeviceRoute, is_receiver_pid};
 use ledger::NodeLedger;
 
@@ -246,14 +247,17 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
     }
 }
 
-fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
+fn routes_for_inventories(
+    inventories: &[DeviceInventory],
+    identities_are_current: bool,
+) -> Vec<PublishedRoute> {
     inventories
         .iter()
         .flat_map(|inventory| {
-            inventory
-                .paired
-                .iter()
-                .filter_map(|paired| DeviceRoute::device_route_for(inventory, paired.slot))
+            inventory.paired.iter().filter_map(|paired| {
+                DeviceRoute::device_route_for(inventory, paired.slot)
+                    .map(|route| PublishedRoute::for_device(route, paired, identities_are_current))
+            })
         })
         .collect()
 }
@@ -636,6 +640,7 @@ impl Enumerator {
             all_complete &= probe.complete;
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
+            let identities_are_current = probe.healthy;
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
@@ -664,7 +669,10 @@ impl Enumerator {
                     .inventory
                     .as_ref()
                     .map_or_else(Vec::new, |inventory| {
-                        routes_for_inventories(std::slice::from_ref(inventory))
+                        routes_for_inventories(
+                            std::slice::from_ref(inventory),
+                            identities_are_current,
+                        )
                     });
                 if routes.is_empty() {
                     registry.remove_node(&node);

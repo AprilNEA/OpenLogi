@@ -6,7 +6,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::backend::NodeId;
 use hidpp::channel::HidppChannel;
+use openlogi_core::device::PairedDevice;
 
+use crate::channel::DeviceCacheIdentity;
 use crate::{DeviceRoute, SharedChannel};
 
 struct Publication<Node, Channel> {
@@ -154,6 +156,69 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
     }
 }
 
+/// One route discovered during inventory, plus enough identity to decide
+/// whether immutable feature metadata can safely survive the next refresh.
+#[derive(Clone, Debug)]
+pub(crate) struct PublishedRoute {
+    route: DeviceRoute,
+    identity: Option<DeviceCacheIdentity>,
+}
+
+impl PublishedRoute {
+    pub(crate) fn for_device(
+        route: DeviceRoute,
+        paired: &PairedDevice,
+        identity_is_current: bool,
+    ) -> Self {
+        let identity = if identity_is_current {
+            match route {
+                DeviceRoute::Direct { .. } => Some(DeviceCacheIdentity::Direct),
+                DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } => {
+                    paired.model_info.as_ref().and_then(|model| {
+                        let unit_id = (model.unit_id != [0; 4]).then_some(model.unit_id);
+                        let serial_number = model
+                            .serial_number
+                            .as_deref()
+                            .filter(|serial| !serial.is_empty())
+                            .map(str::to_owned);
+                        (unit_id.is_some() || serial_number.is_some()).then_some(
+                            DeviceCacheIdentity::Physical {
+                                unit_id,
+                                serial_number,
+                            },
+                        )
+                    })
+                }
+                DeviceRoute::RawHid { .. } => None,
+            }
+        } else {
+            None
+        };
+        Self { route, identity }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cache_identity(&self) -> bool {
+        self.identity.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_identity(&self) -> Option<&DeviceCacheIdentity> {
+        self.identity.as_ref()
+    }
+}
+
+#[derive(Clone)]
+struct RegisteredChannel {
+    channel: Arc<HidppChannel>,
+    routes: Vec<PublishedRoute>,
+}
+
 /// Channels already opened and owned by the persistent inventory enumerator.
 ///
 /// Publications are keyed by OS HID node internally and selected by exact
@@ -161,7 +226,7 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
 /// oldest live node wins until it is removed.
 #[derive(Clone, Default)]
 pub struct ChannelRegistry {
-    inner: Registry<NodeId, Arc<HidppChannel>>,
+    inner: Registry<NodeId, RegisteredChannel>,
 }
 
 impl ChannelRegistry {
@@ -170,10 +235,16 @@ impl ChannelRegistry {
     pub(crate) fn replace_node(
         &self,
         node: NodeId,
-        routes: impl IntoIterator<Item = DeviceRoute>,
+        routes: impl IntoIterator<Item = PublishedRoute>,
         channel: Arc<HidppChannel>,
     ) {
-        self.inner.replace_node(node, routes, channel);
+        let routes = routes.into_iter().collect::<Vec<_>>();
+        let plain_routes = routes
+            .iter()
+            .map(|published| published.route.clone())
+            .collect::<Vec<_>>();
+        self.inner
+            .replace_node(node, plain_routes, RegisteredChannel { channel, routes });
     }
 
     /// Remove every route and channel reference owned by `node`.
@@ -189,17 +260,29 @@ impl ChannelRegistry {
     /// Clone the current exact-route winner.
     #[must_use]
     pub fn lookup(&self, route: &DeviceRoute) -> Option<SharedChannel> {
-        self.inner
-            .lookup(route)
-            .map(|channel| SharedChannel::new(channel, route.clone()))
+        self.inner.lookup(route).map(|registered| {
+            let cache_identity = registered
+                .routes
+                .iter()
+                .find(|published| published.route == *route)
+                .and_then(|published| published.identity.clone());
+            SharedChannel::with_cache_identity(registered.channel, route.clone(), cache_identity)
+        })
     }
 
-    /// Whether `shared` is still the winning publication for its exact route
-    /// and points to the same underlying connection.
+    /// Whether `shared` is still the winning publication for its exact route,
+    /// connection, and physical-device identity.
     #[must_use]
     pub fn is_current(&self, shared: &SharedChannel) -> bool {
-        self.inner.any_current(|route, channel| {
-            shared.matches(route) && Arc::ptr_eq(channel, shared.channel())
+        self.inner.any_current(|route, registered| {
+            let cache_identity = registered
+                .routes
+                .iter()
+                .find(|published| published.route == *route)
+                .and_then(|published| published.identity.as_ref());
+            shared.matches(route)
+                && Arc::ptr_eq(&registered.channel, shared.channel())
+                && shared.cache_identity_matches(cache_identity)
         })
     }
 }

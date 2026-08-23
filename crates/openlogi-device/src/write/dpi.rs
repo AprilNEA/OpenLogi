@@ -16,6 +16,7 @@ use tracing::debug;
 
 use crate::SharedChannel;
 use crate::backend::HidBackend;
+use crate::channel::DeviceCacheIdentity;
 use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
@@ -70,14 +71,16 @@ enum DpiFeatureAddress {
 
 struct DpiCacheEntry {
     channel: Weak<hidpp::channel::HidppChannel>,
+    identity: DeviceCacheIdentity,
     device_index: u8,
     feature: DpiFeatureAddress,
     capabilities: Option<DpiCapabilities>,
 }
 
-/// DPI feature addresses and ranges are immutable for one open HID++ channel.
-/// Keep them beside a weak channel reference so repeated UI reads and startup
-/// re-applies skip the root handshake without pinning a retired receiver.
+/// DPI feature addresses and ranges are immutable for one physical device.
+/// Keep them beside a weak channel and physical identity so repeated UI
+/// reads skip the root handshake without pinning a retired receiver or letting
+/// a newly paired mouse inherit the former occupant's metadata.
 static DPI_CACHE: LazyLock<Mutex<Vec<DpiCacheEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 impl DpiFeature {
@@ -236,14 +239,17 @@ impl DpiFeatureAddress {
 
 fn cached_dpi(
     channel: &Arc<hidpp::channel::HidppChannel>,
+    identity: Option<&DeviceCacheIdentity>,
     device_index: u8,
 ) -> Option<(DpiFeatureAddress, Option<DpiCapabilities>)> {
+    let identity = identity?;
     let mut cache = DPI_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|entry| entry.channel.strong_count() > 0);
     cache
         .iter()
         .find(|entry| {
             entry.device_index == device_index
+                && entry.identity == *identity
                 && entry
                     .channel
                     .upgrade()
@@ -254,13 +260,18 @@ fn cached_dpi(
 
 fn cache_dpi_feature(
     channel: &Arc<hidpp::channel::HidppChannel>,
+    identity: Option<&DeviceCacheIdentity>,
     device_index: u8,
     feature: DpiFeatureAddress,
 ) {
+    let Some(identity) = identity else {
+        return;
+    };
     let mut cache = DPI_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|entry| entry.channel.strong_count() > 0);
     if let Some(entry) = cache.iter_mut().find(|entry| {
         entry.device_index == device_index
+            && entry.identity == *identity
             && entry
                 .channel
                 .upgrade()
@@ -271,6 +282,7 @@ fn cache_dpi_feature(
     }
     cache.push(DpiCacheEntry {
         channel: Arc::downgrade(channel),
+        identity: identity.clone(),
         device_index,
         feature,
         capabilities: None,
@@ -279,12 +291,17 @@ fn cache_dpi_feature(
 
 fn cache_dpi_capabilities(
     channel: &Arc<hidpp::channel::HidppChannel>,
+    identity: Option<&DeviceCacheIdentity>,
     device_index: u8,
     capabilities: DpiCapabilities,
 ) {
+    let Some(identity) = identity else {
+        return;
+    };
     let mut cache = DPI_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(entry) = cache.iter_mut().find(|entry| {
         entry.device_index == device_index
+            && entry.identity == *identity
             && entry
                 .channel
                 .upgrade()
@@ -296,9 +313,10 @@ fn cache_dpi_capabilities(
 
 async fn open_dpi_feature(
     channel: &Arc<hidpp::channel::HidppChannel>,
+    identity: Option<&DeviceCacheIdentity>,
     device_index: u8,
 ) -> Result<(DpiFeature, Option<DpiCapabilities>), WriteError> {
-    if let Some((address, capabilities)) = cached_dpi(channel, device_index) {
+    if let Some((address, capabilities)) = cached_dpi(channel, identity, device_index) {
         return Ok((address.bind(channel, device_index), capabilities));
     }
     let mut device = Device::new(Arc::clone(channel), device_index)
@@ -307,7 +325,7 @@ async fn open_dpi_feature(
             index: device_index,
         })?;
     let feature = DpiFeature::open(&mut device).await?;
-    cache_dpi_feature(channel, device_index, feature.address());
+    cache_dpi_feature(channel, identity, device_index, feature.address());
     Ok((feature, None))
 }
 
@@ -369,7 +387,7 @@ async fn get_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
 ) -> Result<Dpi, WriteError> {
-    let (feature, _) = open_dpi_feature(channel, index).await?;
+    let (feature, _) = open_dpi_feature(channel, None, index).await?;
     feature
         .current_dpi()
         .await
@@ -407,7 +425,15 @@ pub(super) async fn get_dpi_info_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
 ) -> Result<DpiInfo, WriteError> {
-    let (feature, cached_capabilities) = open_dpi_feature(channel, index).await?;
+    get_dpi_info_on_identified_channel(channel, None, index).await
+}
+
+async fn get_dpi_info_on_identified_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    identity: Option<&DeviceCacheIdentity>,
+    index: u8,
+) -> Result<DpiInfo, WriteError> {
+    let (feature, cached_capabilities) = open_dpi_feature(channel, identity, index).await?;
     let feature_hex = feature.id();
     if let Some(capabilities) = cached_capabilities {
         let current = feature
@@ -437,7 +463,7 @@ pub(super) async fn get_dpi_info_on_channel(
         .await
         .map_err(|e| classify_dpi_error(feature_hex, e))?;
     let capabilities = DpiCapabilities::new(values)?;
-    cache_dpi_capabilities(channel, index, capabilities.clone());
+    cache_dpi_capabilities(channel, identity, index, capabilities.clone());
     Ok(DpiInfo {
         current,
         capabilities,
@@ -465,7 +491,16 @@ pub(super) async fn set_dpi_on_channel(
     index: u8,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
-    let (feature, _) = open_dpi_feature(channel, index).await?;
+    set_dpi_on_identified_channel(channel, None, index, dpi).await
+}
+
+async fn set_dpi_on_identified_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    identity: Option<&DeviceCacheIdentity>,
+    index: u8,
+    dpi: Dpi,
+) -> Result<(), WriteError> {
+    let (feature, _) = open_dpi_feature(channel, identity, index).await?;
     let wrote = feature
         .set_dpi(dpi)
         .await
@@ -500,10 +535,21 @@ pub(super) async fn set_dpi_on_channel(
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
 /// enumeration and channel setup.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteError> {
-    set_dpi_on_channel(shared.channel(), shared.device_index(), dpi).await
+    set_dpi_on_identified_channel(
+        shared.channel(),
+        shared.cache_identity(),
+        shared.device_index(),
+        dpi,
+    )
+    .await
 }
 
 /// Read current DPI and supported values on an already-open [`SharedChannel`].
 pub async fn get_dpi_info_on(shared: &SharedChannel) -> Result<DpiInfo, WriteError> {
-    get_dpi_info_on_channel(shared.channel(), shared.device_index()).await
+    get_dpi_info_on_identified_channel(
+        shared.channel(),
+        shared.cache_identity(),
+        shared.device_index(),
+    )
+    .await
 }
