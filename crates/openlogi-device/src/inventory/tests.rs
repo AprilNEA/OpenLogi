@@ -173,6 +173,13 @@ fn with_unit_id(mut inventories: Vec<DeviceInventory>, unit_id: [u8; 4]) -> Vec<
     inventories
 }
 
+fn bolt_inventory(unit_id: [u8; 4]) -> Vec<DeviceInventory> {
+    let mut inventories = with_unit_id(inventory(&[1]), unit_id);
+    inventories[0].receiver.name = "Bolt Receiver".into();
+    inventories[0].receiver.product_id = 0xc548;
+    inventories
+}
+
 #[test]
 fn settled_inventories_publish_exact_receiver_routes() {
     let routes = |inventories: &[DeviceInventory]| {
@@ -206,8 +213,8 @@ fn settled_inventories_publish_exact_receiver_routes() {
 }
 
 #[test]
-fn replayed_inventory_does_not_reuse_a_physical_device_cache_scope() {
-    let replayed = routes_for_inventories(&with_unit_id(inventory(&[1]), [1, 2, 3, 4]), false);
+fn replayed_inventory_does_not_reuse_a_physical_device_cache_identity() {
+    let replayed = routes_for_inventories(&bolt_inventory([1, 2, 3, 4]), false);
 
     assert_eq!(
         replayed.len(),
@@ -222,11 +229,28 @@ fn replayed_inventory_does_not_reuse_a_physical_device_cache_scope() {
 
 #[test]
 fn physical_identity_changes_when_a_receiver_slot_is_repaired() {
-    let first = routes_for_inventories(&with_unit_id(inventory(&[1]), [1, 2, 3, 4]), true);
-    let replacement = routes_for_inventories(&with_unit_id(inventory(&[1]), [5, 6, 7, 8]), true);
+    let first = routes_for_inventories(&bolt_inventory([1, 2, 3, 4]), true);
+    let replacement = routes_for_inventories(&bolt_inventory([5, 6, 7, 8]), true);
 
     assert!(first[0].has_cache_identity());
     assert_ne!(first[0].cache_identity(), replacement[0].cache_identity());
+}
+
+#[test]
+fn unifying_slot_identity_is_never_used_for_dpi_caching() {
+    let published = routes_for_inventories(&with_unit_id(inventory(&[1]), [1, 2, 3, 4]), true);
+
+    assert_eq!(
+        published[0].route(),
+        &DeviceRoute::Unifying {
+            receiver_uid: "receiver-1".into(),
+            slot: 1,
+        }
+    );
+    assert!(
+        !published[0].has_cache_identity(),
+        "slot-keyed Unifying model info can belong to the former occupant"
+    );
 }
 
 #[test]

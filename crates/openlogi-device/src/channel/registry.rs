@@ -173,23 +173,27 @@ impl PublishedRoute {
         let identity = if identity_is_current {
             match route {
                 DeviceRoute::Direct { .. } => Some(DeviceCacheIdentity::Direct),
-                DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } => {
-                    paired.model_info.as_ref().and_then(|model| {
-                        let unit_id = (model.unit_id != [0; 4]).then_some(model.unit_id);
-                        let serial_number = model
-                            .serial_number
-                            .as_deref()
-                            .filter(|serial| !serial.is_empty())
-                            .map(str::to_owned);
-                        (unit_id.is_some() || serial_number.is_some()).then_some(
-                            DeviceCacheIdentity::Physical {
-                                unit_id,
-                                serial_number,
-                            },
-                        )
-                    })
-                }
-                DeviceRoute::RawHid { .. } => None,
+                DeviceRoute::Bolt { .. } => paired.model_info.as_ref().and_then(|model| {
+                    let unit_id = (model.unit_id != [0; 4]).then_some(model.unit_id);
+                    let serial_number = model
+                        .serial_number
+                        .as_deref()
+                        .filter(|serial| !serial.is_empty())
+                        .map(str::to_owned);
+                    (unit_id.is_some() || serial_number.is_some()).then_some(
+                        DeviceCacheIdentity::Physical {
+                            unit_id,
+                            serial_number,
+                        },
+                    )
+                }),
+                // Unifying arrival events identify only receiver + slot +
+                // model-level WPID. Its inventory probe cache is slot-keyed,
+                // so model_info may still describe the former occupant just
+                // after re-pairing. Without a live per-unit discriminator, a
+                // same-model replacement cannot be told apart safely. Raw HID
+                // routes do not carry HID++ feature metadata at all.
+                DeviceRoute::Unifying { .. } | DeviceRoute::RawHid { .. } => None,
             }
         } else {
             None
