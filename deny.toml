@@ -15,6 +15,18 @@
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # bincode 1.3.3 is tarpc's wire codec, reached through tokio-serde 0.9 —
+    # it is the IPC protocol's own encoding, and the golden tests in
+    # `openlogi-ipc` pin its exact bytes. It entered this graph when
+    # `openlogi list` became an agent client; the GUI and agent have always
+    # carried it, outside this manifest's scope. The advisory is a maintenance
+    # notice rather than a vulnerability: the authors stopped work after a
+    # harassment incident and consider 1.3.3 complete, and no upgrade exists
+    # (tokio-serde 0.9 is current and binds bincode 1.x). Revisit if tarpc
+    # adopts another codec — which would be a breaking protocol change.
+    { id = "RUSTSEC-2025-0141", reason = "tarpc's wire codec; unmaintained-by-choice, no upgrade path" },
+]
 
 [licenses]
 # Additions here need a conscious decision; keep the list to what the graph
