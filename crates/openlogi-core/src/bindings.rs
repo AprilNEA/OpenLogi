@@ -48,7 +48,8 @@ pub fn bindings_for(
 }
 
 /// Per-direction maps for every HID++ gesture source (the dedicated gesture
-/// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
+/// button, the MX Master 4 haptic panel, or a compatible DPI / ModeShift
+/// control) in gesture mode on `config_key`,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI

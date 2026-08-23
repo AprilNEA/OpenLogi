@@ -28,7 +28,8 @@ pub struct DeviceCapturePlan {
     /// Per-button single actions for this device (per-app effective).
     pub bindings: BTreeMap<ButtonId, Action>,
     /// Per-direction map for each HID++ gesture source (the dedicated gesture
-    /// button, the MX Master 4 haptic panel) in gesture mode on this device,
+    /// button, the MX Master 4 haptic panel, or a compatible DPI / ModeShift
+    /// control) in gesture mode on this device,
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -127,6 +128,14 @@ mod tests {
             receiver_uid: "cafe".into(),
             slot: 2,
         }
+    }
+
+    #[test]
+    fn dpi_toggle_is_a_hidpp_gesture_source() {
+        assert!(ButtonId::DpiToggle.is_hidpp_gesture_source());
+        assert!(GESTURE_SOURCE_BUTTONS.iter().any(|(_, button)| {
+            *button == ButtonId::DpiToggle
+        }));
     }
 
     #[test]
