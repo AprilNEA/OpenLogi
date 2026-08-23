@@ -635,10 +635,12 @@ jobs:
         # Pinned exactly: a WiX point release can silently change the produced
         # MSI (validation, cab layout), and nothing in CI installs the MSI, so
         # drift would only surface on end-user machines. Bump deliberately.
-        # The Util extension (util:CloseApplication in OpenLogi.wxs) is pinned
-        # to the same version — WiX extensions release in lockstep with wix.
+        # The UI extension (the progress-only dialog flow) and Util extension
+        # (util:CloseApplication in OpenLogi.wxs) are pinned to the same version
+        # — WiX extensions release in lockstep with wix.
         run: |
           dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.UI.wixext/6.0.2
           wix extension add --global WixToolset.Util.wixext/6.0.2
 
       - name: Build the MSI
@@ -667,6 +669,7 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           wix build packaging\windows\OpenLogi.wxs `
+            -ext WixToolset.UI.wixext `
             -ext WixToolset.Util.wixext `
             -arch ${{ matrix.msi_platform }} `
             -d Version=$version `
