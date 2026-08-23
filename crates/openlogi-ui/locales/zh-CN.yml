@@ -329,6 +329,8 @@ _version: 1
 "Filter themes…": "筛选主题…"
 "No themes match “%{query}”.": "没有匹配“%{query}”的主题。"
 "Color theme": "配色主题"
+"App icon": "应用图标"
+"Pick the icon OpenLogi wears in the Dock, Finder and Launchpad.": "选择 OpenLogi 在程序坞、访达和启动台中显示的图标。"
 "Interface language": "界面语言"
 "Diagnostics": "诊断"
 "Input interception": "输入拦截"

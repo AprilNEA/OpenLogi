@@ -30,7 +30,7 @@ use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, WheelMode,
 };

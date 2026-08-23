@@ -1,6 +1,6 @@
 //! App-wide and per-device *value* settings: [`AppSettings`], [`Appearance`],
-//! [`Lighting`], [`ScrollResolution`], [`WheelMode`] / [`SmartShift`], and
-//! the legacy [`GestureOwner`], plus their serde helpers.
+//! [`AppIcon`], [`Lighting`], [`ScrollResolution`], [`WheelMode`] /
+//! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +26,41 @@ pub enum Appearance {
     Light,
     /// Always use the dark variant of the selected theme.
     Dark,
+}
+
+/// Which icon the app wears.
+///
+/// Variant names are one string doing three jobs, and all three are part of a
+/// contract: the value persisted in `config.toml`, the file each alternate
+/// ships as inside the macOS bundle, and the name the build compiles its source
+/// document under. Renaming one renames all three.
+///
+/// Platform-free, like [`Appearance`]: honouring it is the frontend's business,
+/// and today only macOS can — Windows embeds its icon in the executable at
+/// compile time and Linux installs a fixed one from the package.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum AppIcon {
+    /// The icon the app is signed with, and the one it wears until a user picks
+    /// another.
+    #[default]
+    Openlogi,
+    /// The geometric mark on a faceted, light-refracting fill.
+    Prism,
+}
+
+impl AppIcon {
+    /// Every icon, in the order Settings offers them.
+    pub const ALL: [Self; 2] = [Self::Openlogi, Self::Prism];
+
+    /// Whether this is the icon the installed bundle already wears — the one
+    /// case a frontend applies by clearing its override rather than by handing
+    /// the system a file.
+    #[must_use]
+    pub fn is_default(self) -> bool {
+        matches!(self, Self::Openlogi)
+    }
 }
 
 /// Preferred source for on-demand device assets.
@@ -104,6 +139,12 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
+    /// Which app icon the user picked. Applied at launch, and whenever it
+    /// changes, by the frontend that can — on macOS the GUI hands the choice to
+    /// the Dock and writes it onto the bundle, so the icon survives a quit;
+    /// elsewhere it is inert. Defaults to the icon the app is signed with.
+    #[serde(default)]
+    pub app_icon: AppIcon,
     /// Whether the GUI automatically downloads device images from
     /// `assets.openlogi.org` when a device appears. `true` (default) keeps
     /// the current behavior; `false` makes no asset network requests at all
@@ -264,6 +305,7 @@ impl Default for AppSettings {
             language: None,
             thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
             appearance: Appearance::System,
+            app_icon: AppIcon::Openlogi,
             theme_light: None,
             theme_dark: None,
             ui_radius: None,

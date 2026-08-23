@@ -43,17 +43,12 @@ description = "Lightweight, local-first alternative to Logitech Options+ for HID
 [workspace.dependencies]
 hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.4" }
 async-hid = "0.5.3"
-# Cross-platform local IPC for the agent <-> GUI tarpc transport: a Unix-domain
-# socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
-# Stream/Listener used by serde_transport.
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
 # 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
 # feature-gated — google/tarpc#564), which drags the vulnerable
 # opentelemetry_sdk 0.30 into the graph (GHSA-w9wp-h8wv-79jx).
 tarpc = { version = "0.38", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
-# Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
-# synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"
@@ -75,12 +70,8 @@ core-foundation = { version = "0.10", default-features = false, features = ["lin
 opener = "0.8.5"
 shellexpand = "3.1.2"
 evdev = "0.13"
-# macOS ObjC / C FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
-# bindings, and the framework crates give typed bindings for the C APIs (privacy
-# permissions included) instead of hand-written `#[link] extern "C"` blocks.
-# Feature lists are selected per crate — these crates are huge, so every entry is
-# `default-features = false`. The version stays unified so a resolve can't move
-# gpui's Cargo.lock pin out from under the GUI.
+# Kept on one version across the workspace (block2 included) so a resolve can't
+# move gpui's Cargo.lock pin out from under the GUI.
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
@@ -88,8 +79,6 @@ objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2-application-services = { version = "0.3.2", default-features = false }
 objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }
-# The block ABI crate objc2's generated bindings use for handler arguments;
-# same unified-version rationale as the objc2 crates above.
 block2 = "0.6.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component

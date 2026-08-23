@@ -6,6 +6,13 @@ use std::time::{Duration, Instant};
 
 pub(super) const CALLBACK_STUCK_BUDGET: Duration = Duration::from_millis(200);
 pub(super) const TAP_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1_500);
+/// How many re-arms the hook grants inside [`REARM_WINDOW`] before it gives
+/// the tap up.
+pub(super) const REARM_LIMIT: u32 = 10;
+/// The rolling window [`REARM_LIMIT`] applies to. Re-arming happens at most
+/// once per run-loop slice, so a spent budget means the OS has been disabling
+/// the tap for seconds on end.
+pub(super) const REARM_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -173,6 +180,33 @@ impl LifecycleWatchdog {
     }
 }
 
+/// Bounded re-arming of a tap the OS has disabled.
+///
+/// `TapDisabledByUserInput` fires during ordinary heavy input and self-heals,
+/// so a burst has to be re-armed or the hook goes deaf. A tap the OS disables
+/// again slice after slice is a different animal: nothing is servicing it, and
+/// re-enabling it keeps an active HID tap gating events it will never answer
+/// for. Give the burst room, then stop fighting and let the tap go.
+#[derive(Debug, Default)]
+pub(super) struct RearmBudget {
+    window_start: Option<Duration>,
+    used: u32,
+}
+
+impl RearmBudget {
+    /// Charge a re-arm at `now`; `false` once this window's budget is spent.
+    pub fn allow(&mut self, now: Duration) -> bool {
+        match self.window_start {
+            Some(start) if now.saturating_sub(start) < REARM_WINDOW => self.used += 1,
+            _ => {
+                self.window_start = Some(now);
+                self.used = 1;
+            }
+        }
+        self.used <= REARM_LIMIT
+    }
+}
+
 pub(super) fn stuck_callback(now_ms: u64, entered_at_ms: u64) -> Option<Duration> {
     let elapsed = Duration::from_millis(now_ms.saturating_sub(entered_at_ms));
     (elapsed >= CALLBACK_STUCK_BUDGET).then_some(elapsed)
@@ -323,6 +357,34 @@ mod tests {
             ),
             LifecycleDecision::Complete
         );
+    }
+
+    #[test]
+    fn a_burst_of_re_arms_is_allowed_and_then_bounded() {
+        let mut budget = RearmBudget::default();
+        for i in 0..REARM_LIMIT {
+            assert!(
+                budget.allow(Duration::from_millis(u64::from(i) * 500)),
+                "re-arm {i} is within the budget"
+            );
+        }
+        assert!(!budget.allow(Duration::from_millis(u64::from(REARM_LIMIT) * 500)));
+    }
+
+    #[test]
+    fn a_new_window_restores_the_budget() {
+        let mut budget = RearmBudget::default();
+        for _ in 0..=REARM_LIMIT {
+            let _ = budget.allow(Duration::ZERO);
+        }
+        assert!(!budget.allow(Duration::ZERO));
+        // A re-arm past the window opens a fresh one, anchored at that re-arm
+        // rather than at the first one ever charged.
+        for _ in 0..REARM_LIMIT {
+            assert!(budget.allow(REARM_WINDOW));
+        }
+        let just_inside = REARM_WINDOW + REARM_WINDOW.saturating_sub(Duration::from_millis(1));
+        assert!(!budget.allow(just_inside));
     }
 
     #[test]

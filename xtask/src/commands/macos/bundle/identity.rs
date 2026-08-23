@@ -19,11 +19,8 @@ use clap::ValueEnum;
 use openlogi_core::brand;
 use strum::{Display, VariantArray};
 
-use super::info_plist::{read_plist_string, stamp_plist_strings};
-
-/// The icon every component shares, as `CFBundleIconFile` spells it (the `.icns`
-/// extension is optional there, so it is trimmed before comparing).
-const ICON_STEM: &str = "AppIcon";
+use crate::icon::macos::ICON_NAME;
+use crate::support::info_plist::{read_plist_string, stamp_plist_strings};
 
 /// Which identity family a bundle carries.
 ///
@@ -62,24 +59,26 @@ pub(crate) enum Component {
 impl Component {
     /// Where this component lives inside the app bundle; `None` is the app itself.
     ///
-    /// The dev family spells "Dev" in the *directory* name as well as in
-    /// `CFBundleDisplayName`, because macOS privacy panes fall back to a
-    /// bundle's filename whenever its metadata is stale — a dev helper in a
-    /// directory named like the shipped one renders as a second row nobody can
-    /// tell from the real thing. The shipped spellings are frozen: the GUI's
-    /// `agent_binary_path` and the agent's `overlay_binary_path` look for both
-    /// families by name at runtime.
+    /// Each directory is named exactly like its `CFBundleDisplayName`, because
+    /// macOS privacy panes fall back to a bundle's filename whenever its
+    /// metadata is stale — a spelling that differs from the display name (or a
+    /// dev helper named like the shipped one) renders as a row nobody can
+    /// trust. The spellings are load-bearing: the GUI's `agent_binary_path`
+    /// and the agent's `overlay_binary_path` look the helpers up by name at
+    /// runtime, keeping the old no-space names (`OpenLogiAgent.app`,
+    /// `OpenLogiOverlay.app`) as fallbacks for bundles built before the
+    /// rename.
     pub(crate) fn nested_bundle(self, channel: Channel) -> Option<&'static str> {
         match (self, channel) {
             (Self::App, _) => None,
             (Self::Agent, Channel::Production) => {
-                Some("Contents/Library/LoginItems/OpenLogiAgent.app")
+                Some("Contents/Library/LoginItems/OpenLogi Agent.app")
             }
             (Self::Agent, Channel::Dev) => {
                 Some("Contents/Library/LoginItems/OpenLogi Agent Dev.app")
             }
             (Self::Overlay, Channel::Production) => {
-                Some("Contents/Library/LoginItems/OpenLogiOverlay.app")
+                Some("Contents/Library/LoginItems/OpenLogi Overlay.app")
             }
             (Self::Overlay, Channel::Dev) => {
                 Some("Contents/Library/LoginItems/OpenLogi Overlay Dev.app")
@@ -101,7 +100,7 @@ impl Component {
     /// This component's copy of the shared app icon.
     pub(crate) fn icon(self, app: &Path, channel: Channel) -> PathBuf {
         self.root(app, channel)
-            .join(format!("Contents/Resources/{ICON_STEM}.icns"))
+            .join(format!("Contents/Resources/{ICON_NAME}.icns"))
     }
 
     /// The shipped identity — the one macOS ties existing grants to.
@@ -196,6 +195,10 @@ pub(crate) fn verify(app: &Path, channel: Channel, components: &[Component]) -> 
 /// Fail unless every component ships the shared app icon *and* declares it, so
 /// no surface that lists OpenLogi's processes — System Settings' privacy panes,
 /// Login Items — shows a blank icon for one of them.
+///
+/// What the app carries beyond that `.icns` — the asset catalog, the alternates
+/// — belongs to the icon pipeline, and
+/// [`IconPipeline::verify`](crate::icon::IconPipeline::verify) checks it.
 pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component]) -> Result<()> {
     for &component in components {
         let icon = component.icon(app, channel);
@@ -210,10 +213,10 @@ pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component
         if declared
             .as_deref()
             .map(|file| file.trim_end_matches(".icns"))
-            != Some(ICON_STEM)
+            != Some(ICON_NAME)
         {
             bail!(
-                "{component}: CFBundleIconFile is {declared:?}, expected {ICON_STEM:?} ({})",
+                "{component}: CFBundleIconFile is {declared:?}, expected {ICON_NAME:?} ({})",
                 plist.display()
             );
         }

@@ -253,6 +253,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "appicon"
+version = "0.1.0"
+source = "git+https://github.com/AprilNEA/appicon?tag=v0.1.1#13f3df01e7efb8a977694ee5a45c4a0e4e96ac2d"
+dependencies = [
+ "libc",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "ar_archive_writer"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5256,6 +5267,7 @@ name = "openlogi-desktop"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "appicon",
  "backon",
  "derive_more",
  "disclaim",
@@ -7884,6 +7896,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -9968,6 +9981,7 @@ name = "xtask"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "appicon",
  "clap",
  "comfy-table",
  "fs-err",

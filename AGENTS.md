@@ -264,3 +264,17 @@ before editing that area.
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
 | macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |
+
+## Task skills — invoke when the task matches, not when a path matches
+
+The rules above load from the file you are editing. Some work has no file to key
+on: triaging a user report, or deciding what a symptom means. That lives in
+`.claude/skills/`, which Claude Code offers by task description; other agents
+should read the `SKILL.md` when the task matches.
+
+| Task | Skill |
+|---|---|
+| a macOS report of no devices / "Failed to open device" / which permission to grant, and any change to the permission, helper-launch, or bundle-signing code | `.claude/skills/openlogi-macos-permissions/SKILL.md` |
+
+Everything else under `.claude/skills/` is a per-developer symlink into
+`.agents/skills/` and is not part of the project — see `.gitignore`.

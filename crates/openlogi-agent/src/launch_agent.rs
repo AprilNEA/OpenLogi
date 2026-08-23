@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn rendered_plist_targets_the_agent_and_keeps_alive() {
         let body = render_plist(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
         )
         .expect("render plist");
         assert!(body.contains(LABEL));

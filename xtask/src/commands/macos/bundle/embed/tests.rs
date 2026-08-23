@@ -1,9 +1,9 @@
 use strum::VariantArray as _;
 
 use super::super::identity;
-use super::super::info_plist::read_plist_string;
 use super::*;
 use crate::support::fs::repo_root;
+use crate::support::info_plist::read_plist_string;
 
 /// Identity work iterates every `Component`, so a component added without a
 /// `Helper` to embed it would only surface as a stamping failure during a

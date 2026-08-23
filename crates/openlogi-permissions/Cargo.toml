@@ -14,9 +14,7 @@ publish = false
 # whoever owns the resource raises its prompt (see the crate docs).
 [target.'cfg(target_os = "macos")'.dependencies]
 openlogi-camera = { path = "../openlogi-camera" }
-# `+[CBManager authorization]` by class lookup; see the `macos` module.
 objc2 = { workspace = true }
-# Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums.
 objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 opener = { workspace = true }
 tracing = { workspace = true }

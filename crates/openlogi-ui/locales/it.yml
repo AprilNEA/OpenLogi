@@ -329,6 +329,8 @@ _version: 1
 "Filter themes…": "Filter themes…"
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
+"App icon": "Icona dell’app"
+"Pick the icon OpenLogi wears in the Dock, Finder and Launchpad.": "Scegli l’icona che OpenLogi mostra nel Dock, nel Finder e in Launchpad."
 "Interface language": "Interface language"
 "Diagnostics": "Diagnostica"
 "Input interception": "Intercettazione input"

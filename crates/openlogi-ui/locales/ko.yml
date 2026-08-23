@@ -329,6 +329,8 @@ _version: 1
 "Filter themes…": "Filter themes…"
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
+"App icon": "앱 아이콘"
+"Pick the icon OpenLogi wears in the Dock, Finder and Launchpad.": "Dock, Finder, Launchpad에 표시되는 OpenLogi 아이콘을 선택합니다."
 "Interface language": "Interface language"
 "Diagnostics": "진단"
 "Input interception": "입력 가로채기"

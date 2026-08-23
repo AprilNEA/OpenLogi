@@ -11,6 +11,8 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+# Clearing the custom icon a run of the app may have left on a bundle.
+appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
 clap = { workspace = true }
 comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
@@ -24,8 +26,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2_hasher = { version = "0.3.2", features = ["sync"] }
 strum = { version = "0.27", features = ["derive"] }
-# Matching the agent's feature set: only process enumeration, so the dev
-# bundler can stop the leftovers an earlier `cargo run` detached.
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }

@@ -7,8 +7,8 @@ use anyhow::{Context as _, Result};
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
-use super::info_plist::stamp_bundle_version;
 use crate::support::fs::ensure_file;
+use crate::support::info_plist::stamp_bundle_version;
 
 /// A nested login-item helper embedded under `Contents/Library/LoginItems`.
 pub(crate) struct Helper {

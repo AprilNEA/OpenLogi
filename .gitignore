@@ -35,6 +35,11 @@ devenv.local.yaml
 # The path-scoped agent rules in .claude/rules/ are project config and stay tracked.
 /.claude/*
 !/.claude/rules/
+# Project skills are named explicitly and tracked; everything else under
+# .claude/skills/ is the per-developer symlink farm into .agents/skills/.
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/openlogi-macos-permissions/
 
 # Node dependencies for the JS helper scripts under .github/scripts/.
 node_modules/
@@ -45,6 +50,15 @@ node_modules/
 # Bundle-time asset payload — fetched fresh from OpenLogi's asset mirrors by
 # the macOS bundle task before `cargo bundle`, not checked in.
 /crates/openlogi-gui/assets/
+
+# Compiled icons — `cargo xtask macos icon` rebuilds them from the Icon
+# Composer documents in `design/icon` on every bundle build. `AppIcon.icns` is
+# the exception: `cargo bundle` reads it straight from the manifest, so it stays
+# tracked and a plain `cargo bundle` still produces an app with an icon.
+/crates/openlogi-desktop/icon/*.icns
+!/crates/openlogi-desktop/icon/AppIcon.icns
+/crates/openlogi-desktop/icon/Assets.car
+/crates/openlogi-desktop/icon/previews/
 
 # Packaging output.
 *.dmg

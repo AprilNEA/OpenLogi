@@ -29,7 +29,7 @@ openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
 futures = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -37,25 +37,17 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 opener = { workspace = true }
 succession = { version = "0.1", features = ["supervision", "eviction"] }
 
-# Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
-# version already in Cargo.lock as gpui's own build-dependency, so the resolve
-# adds an edge, not a crate, and the pinned gpui rev cannot move.
+# Held at the version Cargo.lock already has for gpui's own build-dependency;
+# bumping it independently would move the pinned gpui rev.
 [build-dependencies]
 embed-resource = "3.0.9"
 
-# Menu-bar status item (NSStatusItem) — the agent hosts the tray now. objc2
-# gives Retained<T>-owned AppKit bindings (no #99-style leaks); versions match
-# the GUI's so the resolve doesn't move the gpui Cargo.lock pin.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
 plist = "1.10.0"
 
-# Autostart via the HKCU Run key (launch_agent.rs); winreg also answers the
-# taskbar light/dark theme read for the tray glyph (tray_windows.rs). The
-# notification-area icon and the suspend/resume listener (resume_windows.rs)
-# are raw win32 via the workspace windows-sys.
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
 windows-sys = { workspace = true, features = [
