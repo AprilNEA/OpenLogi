@@ -284,10 +284,19 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
 
     // Collections with no natural per-item override: take the legacy value
     // wholesale when the canonical side is empty (i.e. never configured).
+    // Merging two curated lists is not a safe default — a DPI cycle is
+    // ordered and a host-switch list is positional — so a populated
+    // canonical side wins, and the list it displaces is logged.
     macro_rules! fold_if_empty {
         ($field:ident) => {
             if device.$field.is_empty() {
                 device.$field = legacy.$field;
+            } else if !legacy.$field.is_empty() && device.$field != legacy.$field {
+                tracing::warn!(
+                    %route_key,
+                    field = stringify!($field),
+                    "list differs between merged entries; keeping the canonical one"
+                );
             }
         };
     }
