@@ -46,6 +46,10 @@ git_tag_name = "v{{ version }}"
 git_release_enable = false
 
 [[package]]
+name = "openlogi-device-registry"
+version_group = "openlogi"
+
+[[package]]
 name = "openlogi-core"
 version_group = "openlogi"
 

@@ -18,6 +18,7 @@ default = ["fs"]
 fs = ["dep:atomic-write-file", "dep:etcetera", "dep:toml_edit"]
 
 [dependencies]
+openlogi-device-registry = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }

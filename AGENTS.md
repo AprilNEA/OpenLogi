@@ -22,6 +22,7 @@ sits beneath both.
 |---|---|
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog. No I/O, no async |
+| `crates/openlogi-device-registry` | Pure hardware identity registry: receiver protocols and standalone-device driver metadata |
 | `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
 | `crates/openlogi-device` | The HID++ device layer: enumeration, probing, writes, sessions, pairing. Knows no host — expressed against `HidBackend` |
 | `crates/openlogi-hid` | That layer wired to this host: `async-hid` transport, macOS Input Monitoring, the on-disk probe cache |

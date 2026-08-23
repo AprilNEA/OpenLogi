@@ -1,9 +1,9 @@
 //! Raw HID driver for Logitech Litra lights.
 //!
 //! Litra is deliberately implemented beside, not inside, the HID++ feature
-//! writers. The driver owns product matching, semantic-range conversion, and
-//! the fixed report encoding; the generic transport only owns enumeration and
-//! opening the selected raw HID node.
+//! writers. The shared device registry owns product matching; this driver owns
+//! semantic-range conversion and fixed report encoding, while the generic
+//! transport only owns enumeration and opening the selected raw HID node.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -13,7 +13,6 @@ use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::debug;
 
-use crate::LOGITECH_VENDOR_ID;
 use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_writer};
 
@@ -23,17 +22,10 @@ use super::WriteError;
 // `openlogi_core::hid::light`; re-exported here unchanged so this module's
 // own API surface doesn't churn.
 pub use openlogi_core::hid::light::LightCommand;
-
-/// Stable driver-family identifier carried by standalone inventory records.
-pub const LITRA_DRIVER_ID: &str = "litra";
-/// Litra Glow product ID.
-pub const LITRA_GLOW_PRODUCT_ID: u16 = 0xc900;
-/// Litra Beam product ID.
-pub const LITRA_BEAM_PRODUCT_ID: u16 = 0xc901;
-/// Litra vendor usage page.
-pub const LITRA_USAGE_PAGE: u16 = 0xff43;
-/// Litra Glow usage ID.
-pub const LITRA_USAGE_ID: u16 = 0x0202;
+pub use openlogi_device_registry::litra::{
+    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LitraDescriptor, LitraModel, find_litra,
+    matches_litra,
+};
 
 const REPORT_LEN: usize = 20;
 const REPORT_ID: u8 = 0x11;
@@ -68,83 +60,33 @@ const GLOW_TEMPERATURE_RANGE: LightValueRange = validated_range(
     LightValueUnit::Kelvin,
 );
 
-/// A supported Litra product family variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LitraModel {
-    /// Logitech Litra Glow.
-    Glow,
-    /// Logitech Litra Beam.
-    Beam,
-}
-
-impl LitraModel {
-    /// Resolve a Litra model from its USB product ID.
-    #[must_use]
-    pub const fn from_product_id(product_id: u16) -> Option<Self> {
-        match product_id {
-            LITRA_GLOW_PRODUCT_ID => Some(Self::Glow),
-            LITRA_BEAM_PRODUCT_ID => Some(Self::Beam),
-            _ => None,
-        }
-    }
-
-    /// Resolve a model only when the complete raw-HID route matches a known
-    /// Litra interface. Product ID alone is insufficient protection against
-    /// writing a vendor report to an unrelated HID collection.
-    #[must_use]
-    pub fn from_route(route: &DeviceRoute) -> Option<Self> {
-        let DeviceRoute::RawHid {
-            vendor_id,
-            product_id,
-            usage_page,
-            usage_id,
-            ..
-        } = route
-        else {
-            return None;
-        };
-        matches_litra(*vendor_id, *product_id, *usage_page, *usage_id)
-            .then(|| Self::from_product_id(*product_id))
-            .flatten()
-    }
-
-    /// Stable driver-family identifier for this model.
-    #[must_use]
-    pub const fn driver_id(self) -> &'static str {
-        LITRA_DRIVER_ID
-    }
-
-    /// Exact model identifier used by the OpenLogi asset registry.
-    #[must_use]
-    pub const fn registry_model_id(self) -> Option<&'static str> {
-        match self {
-            Self::Glow => Some("8c900"),
-            Self::Beam => Some("8c901"),
-        }
-    }
-
-    /// Static capabilities exposed by the model.
-    #[must_use]
-    pub const fn capabilities(self) -> LightCapabilities {
-        match self {
-            Self::Glow | Self::Beam => LightCapabilities {
-                power: true,
-                brightness: Some(GLOW_BRIGHTNESS_RANGE),
-                temperature: Some(GLOW_TEMPERATURE_RANGE),
-                color: false,
-                zones: false,
-            },
-        }
-    }
-}
-
-/// Whether an HID descriptor identifies a supported Litra interface.
+/// Resolve a model only when the complete raw-HID route matches a registered
+/// Litra interface.
 #[must_use]
-pub fn matches_litra(vendor_id: u16, product_id: u16, usage_page: u16, usage_id: u16) -> bool {
-    vendor_id == LOGITECH_VENDOR_ID
-        && usage_page == LITRA_USAGE_PAGE
-        && usage_id == LITRA_USAGE_ID
-        && LitraModel::from_product_id(product_id).is_some()
+pub fn litra_model_for_route(route: &DeviceRoute) -> Option<LitraModel> {
+    let DeviceRoute::RawHid {
+        vendor_id,
+        product_id,
+        usage_page,
+        usage_id,
+        ..
+    } = route
+    else {
+        return None;
+    };
+    find_litra(*vendor_id, *product_id, *usage_page, *usage_id).map(|device| device.model)
+}
+
+pub(crate) const fn litra_capabilities(model: LitraModel) -> LightCapabilities {
+    match model {
+        LitraModel::Glow | LitraModel::Beam => LightCapabilities {
+            power: true,
+            brightness: Some(GLOW_BRIGHTNESS_RANGE),
+            temperature: Some(GLOW_TEMPERATURE_RANGE),
+            color: false,
+            zones: false,
+        },
+    }
 }
 
 /// Encode a semantic command into the exact fixed-width Litra report.
@@ -162,8 +104,7 @@ pub fn encode_command(
         }
         LightCommand::BrightnessPercent(percent) => {
             report[3] = COMMAND_BRIGHTNESS;
-            let range = model
-                .capabilities()
+            let range = litra_capabilities(model)
                 .brightness
                 .ok_or_else(|| unsupported("brightness"))?;
             let lumens = percent_to_native(percent, range)?;
@@ -171,8 +112,7 @@ pub fn encode_command(
         }
         LightCommand::TemperatureKelvin(kelvin) => {
             report[3] = COMMAND_TEMPERATURE;
-            let range = model
-                .capabilities()
+            let range = litra_capabilities(model)
                 .temperature
                 .ok_or_else(|| unsupported("temperature"))?;
             if !range.contains(kelvin) {
@@ -185,8 +125,7 @@ pub fn encode_command(
         }
         LightCommand::BrightnessNative(value) => {
             report[3] = COMMAND_BRIGHTNESS;
-            let range = model
-                .capabilities()
+            let range = litra_capabilities(model)
                 .brightness
                 .ok_or_else(|| unsupported("brightness"))?;
             if !range.contains(value) {
@@ -241,7 +180,7 @@ pub async fn apply(
     model: LitraModel,
     command: LightCommand,
 ) -> Result<(), WriteError> {
-    let Some(route_model) = LitraModel::from_route(route) else {
+    let Some(route_model) = litra_model_for_route(route) else {
         return Err(unsupported("raw_hid_route"));
     };
     if route_model != model {
@@ -266,8 +205,8 @@ mod tests {
     use std::assert_matches;
 
     use super::{
-        COMMAND_BRIGHTNESS, COMMAND_POWER, COMMAND_TEMPERATURE, LITRA_BEAM_PRODUCT_ID,
-        LightCommand, LitraModel, REPORT_ID, encode_command, matches_litra,
+        COMMAND_BRIGHTNESS, COMMAND_POWER, COMMAND_TEMPERATURE, LightCommand, LitraModel,
+        REPORT_ID, encode_command, litra_model_for_route,
     };
     use crate::{DeviceRoute, WriteError};
 
@@ -346,34 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn matcher_requires_the_full_identity_tuple() {
-        assert!(matches_litra(0x046d, 0xc900, 0xff43, 0x0202));
-        assert!(!matches_litra(0x046d, 0xc900, 0xff43, 0x0203));
-        assert!(!matches_litra(0x046d, 0xc902, 0xff43, 0x0202));
-        assert!(!matches_litra(0x1234, 0xc900, 0xff43, 0x0202));
-    }
-
-    #[test]
-    fn glow_descriptor_exposes_driver_identity() {
-        assert_eq!(LitraModel::Glow.driver_id(), "litra");
-    }
-
-    #[test]
-    fn registry_model_ids_match_the_asset_registry() {
-        assert_eq!(LitraModel::Glow.registry_model_id(), Some("8c900"));
-        assert_eq!(LitraModel::Beam.registry_model_id(), Some("8c901"));
-    }
-
-    #[test]
-    fn beam_is_matched_by_its_complete_route_tuple() {
-        assert!(matches_litra(0x046d, 0xc901, 0xff43, 0x0202));
-        assert_eq!(
-            LitraModel::from_product_id(LITRA_BEAM_PRODUCT_ID),
-            Some(LitraModel::Beam)
-        );
-    }
-
-    #[test]
     fn model_resolution_requires_the_complete_raw_route_tuple() {
         let valid = DeviceRoute::RawHid {
             vendor_id: 0x046d,
@@ -390,10 +301,10 @@ mod tests {
             identity: "serial:test".into(),
         };
 
-        assert_eq!(LitraModel::from_route(&valid), Some(LitraModel::Glow));
-        assert_eq!(LitraModel::from_route(&wrong_usage), None);
+        assert_eq!(litra_model_for_route(&valid), Some(LitraModel::Glow));
+        assert_eq!(litra_model_for_route(&wrong_usage), None);
         assert_eq!(
-            LitraModel::from_route(&DeviceRoute::Direct {
+            litra_model_for_route(&DeviceRoute::Direct {
                 vendor_id: 0x046d,
                 product_id: 0xc900,
             }),

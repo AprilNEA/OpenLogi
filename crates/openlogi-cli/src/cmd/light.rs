@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use openlogi_core::device::{LightValueUnit, StandaloneDevice};
-use openlogi_hid::{DeviceRoute, LightCommand, LitraModel};
+use openlogi_hid::{DeviceRoute, LightCommand, find_litra};
 
 #[derive(Debug, Subcommand)]
 pub enum LightCmd {
@@ -150,7 +150,14 @@ async fn set_temperature(args: TemperatureArgs) -> Result<()> {
 }
 
 async fn apply(device: &StandaloneDevice, command: LightCommand) -> Result<()> {
-    let model = LitraModel::from_product_id(device.address.product_id).ok_or_else(|| {
+    let model = find_litra(
+        device.address.vendor_id,
+        device.address.product_id,
+        device.address.usage_page,
+        device.address.usage_id,
+    )
+    .map(|descriptor| descriptor.model)
+    .ok_or_else(|| {
         anyhow!(
             "unsupported light product {:04x}",
             device.address.product_id

@@ -8,6 +8,18 @@ use hidpp::{
 };
 
 #[test]
+fn receiver_family_follows_the_shared_protocol_registry() {
+    for receiver in crate::RECEIVERS {
+        let expected = match receiver.protocol {
+            crate::ReceiverProtocol::Bolt => ReceiverFamily::Bolt,
+            crate::ReceiverProtocol::Unifying => ReceiverFamily::Unifying,
+        };
+        assert_eq!(family_for(receiver.product_id), Some(expected));
+    }
+    assert_eq!(family_for(0xc5ff), None);
+}
+
+#[test]
 fn passkey_clicks_are_msb_first_10_bits() {
     // 0b00_0000_0101 = 5 -> eight lefts then right, left, right.
     assert_eq!(
