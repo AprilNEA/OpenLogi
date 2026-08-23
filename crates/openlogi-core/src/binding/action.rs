@@ -178,6 +178,20 @@ pub enum Action {
     ShowActionsRing,
     /// Open an application, folder, filesystem path, or platform URL.
     OpenApplication(ApplicationTarget),
+
+    // ── Scroll (appended) ────────────────────────────────────────────────────
+    /// Synthesise one zoom step — a trackpad-pinch (magnify) micro-gesture on
+    /// macOS, a modifier-stamped vertical wheel tick on Linux/Windows. Bound
+    /// to a thumb-wheel rotation direction the watcher re-synthesises
+    /// continuous, sensitivity-scaled zoom like it does for horizontal
+    /// scroll; bound to a button it fires one zoom step per press.
+    ///
+    /// Appended after `OpenApplication` because the serde variant index is the
+    /// wire format (see the stability contract above) — new variants only ever
+    /// go at the end.
+    ZoomIn,
+    /// Zoom out: the downward counterpart of [`Action::ZoomIn`].
+    ZoomOut,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -276,6 +290,8 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" Scroll ScrollRight,
+            ZoomIn "Zoom In" Scroll ZoomIn,
+            ZoomOut "Zoom Out" Scroll ZoomOut,
         }
     };
 }

@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Vieritä alas"
 "Scroll Left": "Vieritä vasemmalle"
 "Scroll Right": "Vieritä oikealle"
+"Zoom In": "Suurenna"
+"Zoom Out": "Pienennä"
 "Add Device": "Lisää laite"
 "Add Device…": "Lisää laite…"
 "Put the device in pairing mode, then start searching.": "Aseta laite paritustilaan ja aloita sitten haku."

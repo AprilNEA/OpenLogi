@@ -116,6 +116,10 @@ pub enum ActionRingIcon {
     Book,
     /// Prohibited action glyph.
     Ban,
+    /// Zoom-in glyph.
+    ZoomIn,
+    /// Zoom-out glyph.
+    ZoomOut,
 }
 
 impl ActionRingIcon {
@@ -180,11 +184,13 @@ impl ActionRingIcon {
             Self::Palette => "action-icons/palette.svg",
             Self::Book => "action-icons/book-open.svg",
             Self::Ban => "action-icons/ban.svg",
+            Self::ZoomIn => "action-icons/zoom-in.svg",
+            Self::ZoomOut => "action-icons/zoom-out.svg",
         }
     }
 
     /// Every icon offered by the Actions Ring editor.
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 56] = [
         Self::Pointer,
         Self::Mouse,
         Self::Copy,
@@ -239,6 +245,8 @@ impl ActionRingIcon {
         Self::Palette,
         Self::Book,
         Self::Ban,
+        Self::ZoomIn,
+        Self::ZoomOut,
     ];
 
     /// Existing localization key used as this icon's accessible label.
@@ -297,6 +305,8 @@ impl ActionRingIcon {
             Self::Palette => "Palette",
             Self::Book => "Book",
             Self::Ban => "Do Nothing",
+            Self::ZoomIn => "Zoom In",
+            Self::ZoomOut => "Zoom Out",
         }
     }
 }

@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "아래로 스크롤"
 "Scroll Left": "왼쪽으로 스크롤"
 "Scroll Right": "오른쪽으로 스크롤"
+"Zoom In": "확대"
+"Zoom Out": "축소"
 "Add Device": "기기 추가"
 "Add Device…": "기기 추가…"
 "Put the device in pairing mode, then start searching.": "기기를 페어링 모드로 설정한 다음 검색을 시작하세요."

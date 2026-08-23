@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Przewiń w dół"
 "Scroll Left": "Przewiń w lewo"
 "Scroll Right": "Przewiń w prawo"
+"Zoom In": "Powiększ"
+"Zoom Out": "Pomniejsz"
 "Add Device": "Dodaj urządzenie"
 "Add Device…": "Dodaj urządzenie…"
 "Put the device in pairing mode, then start searching.": "Przełącz urządzenie w tryb parowania, a następnie rozpocznij wyszukiwanie."

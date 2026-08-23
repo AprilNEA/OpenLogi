@@ -10,8 +10,8 @@
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
 //! - thumb-wheel rotation through the [`ButtonId::ThumbwheelScrollUp`] /
 //!   [`ButtonId::ThumbwheelScrollDown`] bindings — either re-synthesised as
-//!   continuous, sensitivity-scaled horizontal scroll or accumulated into a
-//!   custom action,
+//!   continuous, sensitivity-scaled horizontal scroll or zoom, or accumulated
+//!   into a custom action,
 //!
 //! all via the common action path ([`crate::hook_runtime::dispatch_action`]).
 //!
@@ -370,6 +370,9 @@ enum WheelOutput {
     Idle,
     /// Post this many horizontal scroll lines (signed: + right, − left).
     Scroll(i32),
+    /// Stream this fractional zoom-lines delta into the ongoing pinch
+    /// (signed: + in, − out).
+    ZoomContinuous(f32),
     /// Fire the direction's bound custom action.
     FireAction,
 }
@@ -433,6 +436,9 @@ fn dispatch(
                 WheelOutput::Scroll(lines) => {
                     openlogi_inject::post_horizontal_scroll(lines);
                 }
+                WheelOutput::ZoomContinuous(lines) => {
+                    openlogi_inject::post_zoom_continuous(lines);
+                }
                 WheelOutput::FireAction => {
                     debug!(key, ?button, action = %action.label(), "thumb wheel → action");
                     dispatcher.dispatch(&action, Some(key));
@@ -462,7 +468,8 @@ fn advance(
         // Suppressed: captured but produces nothing.
         Action::None => WheelOutput::Idle,
         // Continuous, sensitivity-scaled horizontal scroll. Direction comes
-        // from the action; magnitude from the accumulated rotation.
+        // from the action; magnitude from the accumulated rotation, gated on
+        // whole lines because native wheel scrolling is line-quantised anyway.
         Action::HorizontalScrollRight | Action::HorizontalScrollLeft => {
             dir.scroll += magnitude as f32 * sensitivity.scroll_multiplier();
             let lines = dir.scroll.trunc();
@@ -473,10 +480,24 @@ fn advance(
                 } else {
                     -1
                 };
-                WheelOutput::Scroll(sign * lines as i32)
+                let magnitude = sign * lines as i32;
+                WheelOutput::Scroll(magnitude)
             } else {
                 WheelOutput::Idle
             }
+        }
+        // Zoom streams EVERY rotation increment as a fractional, signed delta —
+        // no whole-line gate — so the synthesised macOS pinch renders
+        // continuously (Logi Options+ feel) instead of stepping per detent.
+        // Total gain is unchanged: inject converts lines to magnification with
+        // the same per-step constant as before.
+        Action::ZoomIn | Action::ZoomOut => {
+            let sign = if matches!(action, Action::ZoomIn) {
+                1.0
+            } else {
+                -1.0
+            };
+            WheelOutput::ZoomContinuous(sign * magnitude as f32 * sensitivity.scroll_multiplier())
         }
         // Any other action: fire once per `action_threshold` increments, with
         // decay (forget stale partial progress) and cooldown (one flick = one
@@ -567,6 +588,31 @@ mod tests {
                 now
             ),
             WheelOutput::Scroll(-1)
+        );
+    }
+
+    #[test]
+    fn zoom_streams_every_increment_without_threshold_gating() {
+        let mut dir = WheelDirection::default();
+        let now = Instant::now();
+        // Multiplier 0.5: every increment streams its own fractional delta —
+        // none of the whole-line gating horizontal scroll applies.
+        let half = ThumbwheelSensitivity::from_rounded(7.0);
+        assert_eq!(
+            advance(&mut dir, &Action::ZoomIn, 1, half, now),
+            WheelOutput::ZoomContinuous(0.5)
+        );
+        // Zoom-out is the negative direction; DEFAULT sensitivity is unity,
+        // so a two-increment burst streams −2.0 in one go.
+        assert_eq!(
+            advance(
+                &mut dir,
+                &Action::ZoomOut,
+                2,
+                ThumbwheelSensitivity::DEFAULT,
+                now
+            ),
+            WheelOutput::ZoomContinuous(-2.0)
         );
     }
 

@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Défiler vers le bas"
 "Scroll Left": "Défiler vers la gauche"
 "Scroll Right": "Défiler vers la droite"
+"Zoom In": "Zoom avant"
+"Zoom Out": "Zoom arrière"
 "Add Device": "Ajouter un appareil"
 "Add Device…": "Ajouter un appareil…"
 "Put the device in pairing mode, then start searching.": "Mettez l'appareil en mode association, puis lancez la recherche."

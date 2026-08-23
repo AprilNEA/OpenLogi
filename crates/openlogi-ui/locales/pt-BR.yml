@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Rolar para Baixo"
 "Scroll Left": "Rolar para a Esquerda"
 "Scroll Right": "Rolar para a Direita"
+"Zoom In": "Ampliar"
+"Zoom Out": "Reduzir"
 "Add Device": "Adicionar Dispositivo"
 "Add Device…": "Adicionar Dispositivo…"
 "Put the device in pairing mode, then start searching.": "Coloque o dispositivo em modo de pareamento e inicie a busca."

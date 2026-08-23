@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Rul ned"
 "Scroll Left": "Rul til venstre"
 "Scroll Right": "Rul til højre"
+"Zoom In": "Zoom ind"
+"Zoom Out": "Zoom ud"
 "Add Device": "Tilføj enhed"
 "Add Device…": "Tilføj enhed…"
 "Put the device in pairing mode, then start searching.": "Sæt enheden i parringstilstand, og begynd derefter at søge."

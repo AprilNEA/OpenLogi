@@ -215,6 +215,8 @@ _version: 1
 "Scroll Down": "Прокрутити вниз"
 "Scroll Left": "Прокрутити ліворуч"
 "Scroll Right": "Прокрутити праворуч"
+"Zoom In": "Збільшити"
+"Zoom Out": "Зменшити"
 "Add Device": "Додати пристрій"
 "Add Device…": "Додати пристрій…"
 "Put the device in pairing mode, then start searching.": "Переведіть пристрій у режим підключення, після чого почніть пошук."

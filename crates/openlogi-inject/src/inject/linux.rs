@@ -27,6 +27,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom { delta } => post_zoom(i32::from(delta)),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
         Effect::Script(script) => dispatch_script(script),
@@ -167,6 +168,48 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     if dx != 0 {
         scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
     }
+}
+
+/// Inject a vertical wheel step of `delta` detents with Ctrl held — the
+/// native wheel-zoom gesture on Linux (Ctrl + wheel). Ctrl-down lands in its
+/// own SYN frame before the wheel event so the compositor already sees the
+/// modifier as held when the scroll arrives (same distinct-frame reasoning
+/// as the key/mouse helpers above).
+pub(super) fn post_zoom(delta: i32) {
+    let ctrl = KeyCode::KEY_LEFTCTRL;
+    emit(&[key_ev(ctrl, 1), syn()]);
+    emit(&[rel_ev(RelativeAxisCode::REL_WHEEL, delta), syn()]);
+    emit(&[key_ev(ctrl, 0), syn()]);
+}
+
+/// Buffered counterpart to macOS's streamed pinch: fractional deltas bank up
+/// until they form whole wheel detents, which then fire through [`post_zoom`].
+///
+/// The bank is a single *signed* process-global accumulator on purpose: the
+/// zoom output is focus-directed, so there is no per-device or per-direction
+/// stream identity for state to cross, and net-proportional semantics are what
+/// a wheel means — rolling up 0.4 lines then down 0.4 cancels to no zoom,
+/// where direction-keyed banks would emit two contradicting detents.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "whole-detent extraction truncates by design (the remainder stays banked); \
+              the i32→f32 narrowing loses nothing below 2^24, far past any real rotation"
+)]
+pub(super) fn post_zoom_continuous(delta_lines: f32) {
+    static PENDING_LINES: Mutex<f32> = Mutex::new(0.0);
+
+    let mut pending = PENDING_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *pending += delta_lines;
+    let whole = *pending as i32;
+    if whole == 0 {
+        return;
+    }
+    *pending -= whole as f32;
+    drop(pending);
+    post_zoom(whole);
 }
 
 fn run_shell_command_async(cmd: String) {
