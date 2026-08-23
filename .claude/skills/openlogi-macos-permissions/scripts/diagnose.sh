@@ -14,6 +14,14 @@ pid=$(pgrep -x openlogi-agent | head -1)
 if [ -z "${pid:-}" ]; then
   echo "   no openlogi-agent process — the GUI cannot show devices without it"
 else
+  count=$(pgrep -x openlogi-agent | wc -l | tr -d ' ')
+  if [ "$count" -gt 1 ]; then
+    echo "   WARNING: $count agent processes are running — each is its own TCC identity:"
+    pgrep -x openlogi-agent | while read -r p; do
+      echo "      pid $p: $(ps -o comm= -p "$p")"
+    done
+    echo "   the rest of this report inspects pid $pid only; quit the others first"
+  fi
   running=$(ps -o comm= -p "$pid")
   echo "   $running"
   # The identity that matters is the one actually running. A dev bundle, a
