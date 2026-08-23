@@ -331,12 +331,23 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     // check to the parent GUI and the grant flips with the launch path (#192).
     #[cfg(target_os = "macos")]
     if let Some(bundle) = helper_bundle(path) {
-        return std::process::Command::new("/usr/bin/open")
+        let mut child = std::process::Command::new("/usr/bin/open")
             .arg("-g")
             .arg("-n")
             .arg(bundle)
-            .spawn()
-            .map(|_| ());
+            .spawn()?;
+        // `open` exits as soon as it hands the bundle to LaunchServices, and
+        // its exit status is the only signal that the handoff failed (damaged
+        // bundle, LaunchServices refusal) — a successful spawn alone proves
+        // nothing. Reap it off-thread and log the failure the spawn hides.
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) if !status.success() => {
+                warn!(%status, "`open` could not launch the agent bundle");
+            }
+            Err(e) => warn!(error = %e, "could not reap the `open` helper"),
+            Ok(_) => {}
+        });
+        return Ok(());
     }
     // Any other layout (bare dev binary, Windows, Linux): exec the binary
     // directly while disclaiming the GUI's TCC responsibility (#214).
