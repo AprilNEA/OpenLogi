@@ -12,11 +12,12 @@ use super::cache::{
 };
 use super::features::ProbedFeatures;
 use super::probe::{
-    NodeProbe, assemble_bolt_probe, parse_codename_unifying, preferred_direct_codename,
+    NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
+    preferred_direct_codename, unifying_probe_budget,
 };
 use super::{
-    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, retained_nodes,
-    routes_for_inventories, settle_unhealthy_node,
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
+    one_shot_should_stop, retained_nodes, routes_for_inventories, settle_unhealthy_node,
 };
 use crate::channel::scripted::{ScriptedBackend, ScriptedNode, scripted_node_info};
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
@@ -131,6 +132,40 @@ fn cached_probe_is_reused_until_refresh_ticks() {
         is_stale(&cached, 10 + REFRESH_TICKS),
         "at the window the probe is refreshed"
     );
+}
+
+#[test]
+fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
+    let cached = cache_entry(10);
+    assert_eq!(
+        unifying_probe_budget(Some(&cached), 10),
+        UNIFYING_CACHED_SLOT_PROBE
+    );
+    assert_eq!(
+        unifying_probe_budget(Some(&cached), 10 + REFRESH_TICKS),
+        UNIFYING_SLOT_PROBE,
+        "stale entries still get enough time for a full feature walk"
+    );
+    assert_eq!(
+        unifying_probe_budget(None, 10),
+        UNIFYING_SLOT_PROBE,
+        "first sight still gets the full feature-walk budget"
+    );
+}
+
+#[test]
+fn unifying_arrival_liveness_survives_missing_feature_data() {
+    let device = assemble_unifying_device(
+        1,
+        None,
+        0x40b8,
+        DeviceKind::Mouse,
+        ProbedFeatures::default(),
+        true,
+    );
+    assert!(device.online);
+    assert_eq!(device.wpid, Some(0x40b8));
+    assert_eq!(device.kind, DeviceKind::Mouse);
 }
 
 fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {

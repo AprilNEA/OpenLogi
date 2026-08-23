@@ -146,7 +146,6 @@ impl Receiver {
     pub async fn set_wireless_notifications(&self, enabled: bool) -> Result<(), ReceiverError> {
         // Notification flags are a 3-byte big-endian word; the receiver-reporting
         // bits live in byte 1 (WIRELESS = 0x000100, SOFTWARE_PRESENT = 0x000800).
-        const WIRELESS: u8 = 0x01;
         let mut flags = self
             .chan
             .read_register(
@@ -155,10 +154,12 @@ impl Receiver {
                 [0; 3],
             )
             .await?;
-        if enabled {
-            flags[1] |= WIRELESS;
-        } else {
-            flags[1] &= !WIRELESS;
+        // This flag persists in receiver RAM. Avoid issuing an identical
+        // register write on every inventory tick: Lightspeed receiver c54d
+        // has been observed to occasionally omit the ACK for that no-op,
+        // parking the otherwise healthy shared channel until timeout.
+        if !update_wireless_notification_flag(&mut flags, enabled) {
+            return Ok(());
         }
         self.chan
             .write_register(RECEIVER_DEVICE_INDEX, Register::Notifications.into(), flags)
@@ -233,6 +234,20 @@ impl Receiver {
     pub async fn get_unique_id(&self) -> Result<String, ReceiverError> {
         self.get_receiver_info().await.map(|i| i.serial_number)
     }
+}
+
+/// Update the wireless-notification bit and report whether a register write is
+/// needed. Kept separate so the preservation of unrelated flags is testable
+/// without a receiver transport.
+fn update_wireless_notification_flag(flags: &mut [u8; 3], enabled: bool) -> bool {
+    const WIRELESS: u8 = 0x01;
+    let previous = *flags;
+    if enabled {
+        flags[1] |= WIRELESS;
+    } else {
+        flags[1] &= !WIRELESS;
+    }
+    *flags != previous
 }
 
 /// The sub-id of the only notification this receiver emits: a paired device
@@ -354,7 +369,9 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceConnection, DeviceKind, Event, decode_notification};
+    use super::{
+        DeviceConnection, DeviceKind, Event, decode_notification, update_wireless_notification_flag,
+    };
     use crate::protocol::v10::{Message, MessageHeader};
 
     /// Builds the long notification the receiver broadcasts, with `payload`
@@ -367,6 +384,18 @@ mod tests {
             },
             payload,
         )
+    }
+
+    #[test]
+    fn wireless_notification_flag_only_writes_on_a_real_change() {
+        let mut disabled = [0x00, 0x08, 0x55];
+        assert!(update_wireless_notification_flag(&mut disabled, true));
+        assert_eq!(disabled, [0x00, 0x09, 0x55]);
+        assert!(!update_wireless_notification_flag(&mut disabled, true));
+
+        assert!(update_wireless_notification_flag(&mut disabled, false));
+        assert_eq!(disabled, [0x00, 0x08, 0x55]);
+        assert!(!update_wireless_notification_flag(&mut disabled, false));
     }
 
     #[test]

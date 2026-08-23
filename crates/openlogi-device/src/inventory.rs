@@ -93,6 +93,15 @@ const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
 /// just lacks capabilities / battery until the next tick.
 const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 
+/// Per-slot budget when a Unifying device already has a fresh immutable probe.
+///
+/// This path normally performs just one battery read. Some Lightspeed devices
+/// occasionally omit that reply even though their receiver has just emitted a
+/// live device-arrival event. Do not let that optional refresh consume the
+/// full first-sight feature-walk budget or delay publication of a known-online
+/// mouse on every watcher tick.
+const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(750);
+
 /// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
 ///
 /// Bounds a single device that stops answering its feature-walk reads (seen on

@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Arc};
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
-    device::Device,
     receiver::{
         self, Receiver,
         bolt::{
@@ -23,9 +22,11 @@ use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 
-use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
+use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
+use super::{
+    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
+};
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
@@ -553,27 +554,47 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
-    // The receiver only re-broadcasts 0x41 arrival events while wireless
-    // notifications are on; without this the trigger below is ACK'd but emits
-    // nothing, so a paired online device never surfaces.
-    if let Err(e) = unifying.set_wireless_notifications(true).await {
-        debug!(error = ?e, "enable wireless notifications failed");
-    }
     let rx = unifying.listen();
+    // Newer Lightspeed receivers can already have notifications enabled (or
+    // emit the requested arrival event without changing the legacy Unifying
+    // flag). Ask first: c54d has been observed to answer this trigger while
+    // occasionally withholding the ACK for the notification-register setup,
+    // which otherwise stalls discovery before it reaches the useful request.
     if let Err(e) = unifying.trigger_device_arrival().await {
         debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
         return None;
     }
-
     let mut out = Vec::new();
     loop {
         match timeout(ARRIVAL_DRAIN, rx.recv()).await {
-            Ok(Ok(UnifyingEvent::DeviceConnection(c))) => out.push(c),
+            Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    Some(out)
+    if !out.is_empty() {
+        return Some(out);
+    }
+
+    // Classic Unifying receivers only re-broadcast 0x41 arrival events while
+    // wireless notifications are on. Fall back to enabling that flag when the
+    // direct trigger produced no device, then retry once on the same listener.
+    if let Err(error) = unifying.set_wireless_notifications(true).await {
+        debug!(?error, "enable wireless notifications failed");
+        return Some(Vec::new());
+    }
+    if let Err(error) = unifying.trigger_device_arrival().await {
+        debug!(?error, "arrival retry after enabling notifications failed");
+        return None;
+    }
+    out.clear();
+    loop {
+        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+            Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => return Some(out),
+        }
+    }
 }
 
 /// Probe a Unifying slot from a live device-connection event.
@@ -592,16 +613,6 @@ async fn probe_unifying_slot(
     tick: u64,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
-    let codename = read_codename_unifying(channel, slot).await;
-    debug!(
-        slot,
-        online = event.online,
-        wpid = format_args!("{:04x}", event.wpid),
-        kind = ?event.kind,
-        codename = ?codename,
-        "unifying paired slot"
-    );
-
     // Cache key: full receiver serial + slot so two Unifying receivers with
     // a device on the same slot number never share a cache entry.
     let id = CacheKey::UnifyingSlot {
@@ -611,53 +622,65 @@ async fn probe_unifying_slot(
     let cached = cache.get(&id);
     let register_kind = map_unifying_kind(event.kind);
 
-    // `trigger_device_arrival` re-broadcasts a 0x41 for *every* paired slot,
-    // online or not, and the crate's `event.online` reads the wrong notification
-    // byte (payload[1] bit6, always set here — wire-verified `04 62 69 40`), so
-    // neither tells us if the device is actually reachable on this receiver.
-    // A cache hit must therefore still do one live round-trip: otherwise cached
-    // capabilities keep an absent device "online" forever and its reconnect is
-    // invisible to the agent's volatile-state re-apply/capture re-arm path.
+    // A 0x41 event is itself the receiver's answer to TriggerDeviceArrival and
+    // is emitted for online devices. Keep the optional feature/battery refresh
+    // bounded, but don't turn a device that just announced itself offline when
+    // that follow-up read is the one reply the firmware happens to omit.
+    let probe_budget = unifying_probe_budget(cached, tick);
     let probe_result = timeout(
-        UNIFYING_SLOT_PROBE,
-        probe_unifying_features(channel, slot, &id, cached, tick),
+        probe_budget,
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick),
     )
     .await;
-    let (probe, outcome, online) = if let Ok(r) = probe_result {
-        r
+    let (probe, outcome) = if let Ok(result) = probe_result {
+        result
     } else {
-        debug!(slot, budget = ?UNIFYING_SLOT_PROBE,
+        debug!(slot, budget = ?probe_budget,
             "Unifying slot probe timed out; using cached data if available");
-        let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
-        (probe, CacheOutcome::Seen(id), false)
+        let probe = cached.map_or_else(ProbedFeatures::default, |entry| entry.probe.clone());
+        (probe, CacheOutcome::Seen(id))
     };
 
-    let device = assemble_unifying_device(slot, codename, event.wpid, register_kind, probe, online);
+    // HID++ 2.0's marketing name is the same identity we need for display and
+    // avoids another receiver-register round trip. Keep the legacy codename
+    // read only for a completed feature walk that did not expose a name; never
+    // put it in front of the feature probe, where one missing receiver ACK can
+    // otherwise starve a healthy Lightspeed mouse forever.
+    let codename = if let Some(name) = probe.marketing_name.clone() {
+        Some(name)
+    } else if probe.capabilities.is_some() {
+        read_codename_unifying(channel, slot).await
+    } else {
+        None
+    };
+    debug!(
+        slot,
+        online = event.online,
+        wpid = format_args!("{:04x}", event.wpid),
+        kind = ?event.kind,
+        codename = ?codename,
+        "unifying paired slot"
+    );
+
+    let device = assemble_unifying_device(
+        slot,
+        codename,
+        event.wpid,
+        register_kind,
+        probe,
+        event.online,
+    );
     Some((device, outcome))
 }
 
-/// Return cached immutable features together with a fresh reachability result.
-///
-/// A successful full probe ([`CacheOutcome::Fresh`]) confirms liveness on a
-/// cache miss/stale entry. A fresh cached entry normally refreshes its battery,
-/// whose successful response ([`CacheOutcome::Update`]) is the liveness check.
-/// A failed battery refresh, or a device without that feature, gets a root ping
-/// before being treated as offline.
-pub(super) async fn probe_unifying_features(
-    channel: &Arc<HidppChannel>,
-    slot: u8,
-    id: &CacheKey,
-    cached: Option<&Cached>,
-    tick: u64,
-) -> (ProbedFeatures, CacheOutcome, bool) {
-    let (probe, outcome) =
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick).await;
-    let online = if matches!(outcome, CacheOutcome::Fresh(..) | CacheOutcome::Update(..)) {
-        true
+/// A fresh cache hit needs only an optional battery refresh; first-sight and
+/// stale entries retain the larger budget needed for a complete feature walk.
+pub(super) fn unifying_probe_budget(cached: Option<&Cached>, tick: u64) -> std::time::Duration {
+    if cached.is_some_and(|entry| !is_stale(entry, tick)) {
+        UNIFYING_CACHED_SLOT_PROBE
     } else {
-        Device::new(Arc::clone(channel), slot).await.is_ok()
-    };
-    (probe, outcome, online)
+        UNIFYING_SLOT_PROBE
+    }
 }
 
 pub(super) fn assemble_unifying_device(
