@@ -148,6 +148,7 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
         shared.capture_plans.clone(),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
         dispatcher.clone(),
     );
     watchers::host_switch::spawn(

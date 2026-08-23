@@ -26,9 +26,9 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::SharedChannel;
 use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::{ChannelRegistry, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel};
@@ -184,13 +184,45 @@ pub async fn run_capture_session(
     let chan = open_route_channel(backend, &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
+    let shared = SharedChannel::new(chan, route.clone());
+    run_capture_session_on(route, shared, spec, sink, shutdown, channel_slot).await
+}
+
+/// Run control capture on the exact channel currently published by `registry`.
+///
+/// A registry miss returns [`GestureError::DeviceNotFound`] without falling
+/// back to route enumeration/opening; the agent watcher retries after a later
+/// inventory publication.
+pub async fn run_capture_session_with_registry(
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+    registry: &ChannelRegistry,
+) -> Result<(), GestureError> {
+    let shared = registry
+        .lookup(&route)
+        .ok_or(GestureError::DeviceNotFound)?;
+    run_capture_session_on(route, shared, spec, sink, shutdown, channel_slot).await
+}
+
+async fn run_capture_session_on(
+    route: DeviceRoute,
+    shared: SharedChannel,
+    spec: CaptureSpec,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+) -> Result<(), GestureError> {
+    let chan = Arc::clone(shared.channel());
     let device_index = route.device_index();
     let armed = arm_controls(&chan, device_index, &spec).await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
     if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(SharedChannel::new(Arc::clone(&chan), route.clone()));
+        *slot = Some(shared);
     }
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
