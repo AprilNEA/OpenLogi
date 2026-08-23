@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-08-23
+
+### Added
+
+- *(gui)* wear and pick the app icon
+- *(core)* persist which app icon the user picked
+- *(camera)* add anti-flicker and low-light controls ([#793](https://github.com/AprilNEA/OpenLogi/pull/793))
+- *(cli)* report feature flags and firmware entities in diag features ([#690](https://github.com/AprilNEA/OpenLogi/pull/690))
+- *(i18n)* add Ukrainian (uk) locale ([#715](https://github.com/AprilNEA/OpenLogi/pull/715))
+
+### Fixed
+
+- *(hid)* park the Windows HID read on a permanently dead handle ([#779](https://github.com/AprilNEA/OpenLogi/pull/779))
+- *(hid)* take async-hid 0.5.3 so a denied HID open stops leaking ([#804](https://github.com/AprilNEA/OpenLogi/pull/804))
+- *(ipc)* surface Input Monitoring via agent status and fix registry_model_id bincode ([#760](https://github.com/AprilNEA/OpenLogi/pull/760))
+- *(agent)* an unreadable stat breaks the absence run
+- *(agent)* only confirmed absence may condemn the agent
+- *(agent)* shut down when the app is uninstalled
+- address review — vendor hash, rollback, and stale icons
+- *(hook)* keep macOS tap lifecycle instance-owned
+- *(hook)* keep the idempotent re-enable, budget only the OS-driven one
+- *(agent)* release the input hook on SIGTERM and SIGINT
+- *(hook)* detect Accessibility revocation with a live tap probe
+- *(ci)* make the wasm job's drift check independent of the host
+- *(xtask)* skip the ci.yml drift tests where CI metadata is absent
+
 ## [0.7.4] - 2026-08-21
 
 ### Added
