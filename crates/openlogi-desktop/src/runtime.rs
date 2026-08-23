@@ -1,24 +1,27 @@
 //! The GUI's event loop: everything the app does that isn't a render.
 //!
 //! One task, spawned onto GPUI's executor, owning the state that outlives any
-//! single event — the merged device set, the asset resolver, the background
-//! sync's bookkeeping — and one `select!` arm per source that can change it:
-//! the agent's IPC updates, the camera scan, the Settings → Assets commands,
-//! finished sync runs, and `openlogi://` deeplinks.
+//! single event — the merged device set, the asset resolver, the asset cache —
+//! and one `select!` arm per source that can change it: the agent's IPC
+//! updates, the camera scan, the Settings → Assets commands, finished
+//! downloads, and `openlogi://` deeplinks.
 
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{AsyncApp, BorrowAppContext as _};
+use gpui::{App, AsyncApp, BorrowAppContext as _, Task};
 use openlogi_camera::Camera;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{AssetSourcePreference, Config};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_ipc::AgentSnapshot;
+use swr_core::SwrClient;
+use swr_gpui::GpuiRuntime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::warn;
 
-use crate::services::assets::scheduler::{AssetSync, ManualStep};
-use crate::services::assets::sync::{AssetCommand, AssetTarget, run_asset_sync};
+use crate::services::assets::sync::{AssetCommand, AssetTarget};
 use crate::services::assets::{self, sync};
 use crate::services::ipc;
 use crate::state::{self, AppState, ConfigPersistence};
@@ -39,9 +42,6 @@ pub(crate) struct Startup {
     pub(crate) updates: UnboundedReceiver<ipc::GuiUpdate>,
     /// Manual asset actions from Settings → Assets.
     pub(crate) asset_commands: UnboundedReceiver<AssetCommand>,
-    /// The loop's own handle on that channel, to re-issue a command it had to
-    /// defer while a sync was in flight.
-    pub(crate) asset_self_tx: UnboundedSender<AssetCommand>,
     /// `openlogi://` URLs, from the tray or another app.
     pub(crate) deeplinks: UnboundedReceiver<DeeplinkCommand>,
 }
@@ -56,7 +56,6 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             ipc_commands,
             mut updates,
             mut asset_commands,
-            asset_self_tx,
             mut deeplinks,
         } = startup;
 
@@ -107,7 +106,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
-        let mut rt = Runtime::new(cams, sync_tx);
+        let mut rt = cx.update(|cx| Runtime::new(cams, sync_tx, cx));
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
@@ -140,19 +139,12 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     rt.rescan_cameras(cx).await;
                 }
                 Some(cmd) = asset_commands.recv() => rt.on_asset_command(cmd, cx),
-                // Guarded so this branch is *disabled* while no sync is in
-                // flight — we hold a live `sync_tx`, so an unguarded recv would
-                // pend forever and keep the `else => break` exit from ever
-                // firing once the other channels close.
-                Some(ok) = sync_done.recv(), if rt.sync.is_running() => {
-                    // A manual Refresh / Clear that landed mid-sync waited for
-                    // this moment: re-issue it now that the cache is no longer
-                    // being written. The command arm runs it (the sync is idle
-                    // again) — or re-defers if a new sync already started.
-                    if let Some(cmd) = rt.on_sync_finished(ok, cx) {
-                        let _ = asset_self_tx.send(cmd);
-                    }
-                }
+                // Unguarded: we hold a live `sync_tx`, so this arm simply pends
+                // between downloads. The old guard existed to let `else => break`
+                // fire, which the always-armed camera timer above already makes
+                // unreachable. Manual commands no longer queue behind a sync —
+                // per-key in-flight state makes the exclusion the cache's job.
+                Some(ok) = sync_done.recv() => rt.on_sync_finished(ok, cx),
                 Some(cmd) = deeplinks.recv() => {
                     cx.update(|cx| app::deeplink::dispatch(cmd, cx));
                 }
@@ -179,7 +171,18 @@ struct Runtime {
     /// snapshot was pure waste: the unchanged-list early-return discarded the
     /// fresh records anyway.
     cache: assets::AssetResolver,
-    sync: AssetSync,
+    /// The asset tier's cache. Owns the mirror probe and every depot download
+    /// as keyed entries — see [`assets::queries`].
+    swr: SwrClient,
+    /// Whether the *automatic* download path runs in this build at all: a
+    /// release bundle already ships the art. Manual actions ignore it.
+    auto_sync: bool,
+    /// One live cache subscription per device model, keyed by
+    /// [`sync::model_key`]. Holding the task is what holds the subscription;
+    /// dropping it unsubscribes.
+    asset_subs: HashMap<String, Task<()>>,
+    /// The registry's own subscription, which no device owns.
+    index_sub: Option<Task<()>>,
     sync_tx: UnboundedSender<bool>,
     /// Most recent completed enumeration, kept so a manual Refresh / Clear can
     /// sync the current devices without waiting for the next snapshot.
@@ -188,15 +191,21 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>) -> Self {
+    fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>, cx: &App) -> Self {
         let cache = assets::AssetResolver::new();
-        let sync = AssetSync::new(sync::should_run(cache.has_bundle_root()));
+        let auto_sync = sync::should_run(cache.has_bundle_root());
+        let swr = SwrClient::builder()
+            .default_options(assets::queries::default_options())
+            .build(Arc::new(GpuiRuntime::new(cx)));
         Self {
             cams,
             camera_misses: 0,
             snapshot: None,
             cache,
-            sync,
+            swr,
+            auto_sync,
+            asset_subs: HashMap::new(),
+            index_sub: None,
             sync_tx,
             inventories: Vec::new(),
             standalone: Vec::new(),
@@ -301,16 +310,17 @@ impl Runtime {
             }
             (auto_download, asset_source, models)
         });
-        // Offer the merged set to the automatic sync: the index prefetch needs
-        // no devices, and depot fetches fire only for models not already synced
-        // this session. Use the UI's merged device set so persisted identities
-        // are covered when a live probe temporarily lacks model info.
-        let targets = models
-            .into_iter()
-            .chain(camera_targets(&self.cams))
-            .collect();
-        if let Some(pending) = self.sync.poll_auto(targets, auto_download, Instant::now()) {
-            self.start_fetch(asset_source, pending);
+        // Offer the merged set to the cache on every snapshot and let it decide:
+        // a model synced this session is fresh and answers instantly, and two
+        // snapshots racing the same model join one request. Use the UI's merged
+        // device set so persisted identities are covered when a live probe
+        // temporarily lacks model info.
+        if auto_download && self.auto_sync {
+            let targets: Vec<_> = models
+                .into_iter()
+                .chain(camera_targets(&self.cams))
+                .collect();
+            self.ensure_assets(asset_source, targets.into_iter(), cx);
         }
     }
 
@@ -351,26 +361,22 @@ impl Runtime {
         }
     }
 
-    /// A manual Refresh / Clear from Settings → Assets. Both force a fresh
-    /// fetch for the current devices — bypassing the auto-download setting and
-    /// the release-bundle sync gate — and Clear wipes the per-user cache first.
+    /// A manual Refresh / Clear from Settings → Assets. Both bypass the
+    /// auto-download setting and the release-bundle gate, and both mark the
+    /// tier stale so the refetch is real rather than a cache hit. Clear wipes
+    /// the per-user cache first.
+    ///
+    /// Clear does not wait for in-flight downloads to finish. A racing write
+    /// lands a registry-hashed file through the same atomic replace it always
+    /// used, and Clear's own semantics are "wipe, then fetch again" — so the
+    /// worst case is the wipe missing a file that was about to be re-fetched
+    /// anyway.
     fn on_asset_command(&mut self, cmd: AssetCommand, cx: &AsyncApp) {
         let (models, asset_source) = cx.update(|cx| {
             let state = cx.global::<AppState>();
             (state.asset_models(), state.app_settings().asset_source)
         });
-        let targets = models
-            .into_iter()
-            .chain(camera_targets(&self.cams))
-            .collect();
-        let ManualStep::Run {
-            clear_cache,
-            targets,
-        } = self.sync.command(cmd, targets)
-        else {
-            return;
-        };
-        if clear_cache {
+        if cmd == AssetCommand::ClearCache {
             if let Err(e) = assets::clear_cache() {
                 warn!(error = %e, "could not clear asset cache");
             }
@@ -380,18 +386,22 @@ impl Runtime {
             self.cache = assets::AssetResolver::new();
             self.refresh_devices(cx);
         }
-        self.start_fetch(asset_source, targets);
+        assets::queries::invalidate_all(&self.swr);
+        let targets: Vec<_> = models
+            .into_iter()
+            .chain(camera_targets(&self.cams))
+            .collect();
+        self.ensure_assets(asset_source, targets.into_iter(), cx);
     }
 
-    /// A background fetch finished. Returns the manual command that was waiting
-    /// on it, if any.
-    fn on_sync_finished(&mut self, ok: bool, cx: &AsyncApp) -> Option<AssetCommand> {
-        let deferred = self.sync.finish(ok);
+    /// A download landed. Re-resolve against the enlarged cache and repaint;
+    /// the whole-record comparison in `refresh_inventories` decides whether
+    /// anything actually changed.
+    fn on_sync_finished(&mut self, ok: bool, cx: &AsyncApp) {
         if ok {
             self.cache = assets::AssetResolver::new();
             self.refresh_devices(cx);
         }
-        deferred
     }
 
     /// Rebuild the UI's device records against the current resolver.
@@ -411,13 +421,48 @@ impl Runtime {
         });
     }
 
-    /// Hand a fetch to a dedicated background thread — the HTTP layer's
-    /// blocking retries are fine there, and must never run on the UI thread.
-    fn start_fetch(&self, source: AssetSourcePreference, targets: Vec<AssetTarget>) {
-        let tx = self.sync_tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(run_asset_sync(source, &targets));
-        });
+    /// Ask the cache for every model in `targets`, and for the registry alone
+    /// when there are none.
+    ///
+    /// One task per model rather than one per batch: each key carries its own
+    /// in-flight state, so a slow depot no longer holds up the rest, and a
+    /// failure retries on its own schedule instead of stalling every model
+    /// behind one shared backoff. The fetchers run on the background executor —
+    /// the HTTP layer blocks, and must never do so on the UI thread.
+    fn ensure_assets(
+        &mut self,
+        source: AssetSourcePreference,
+        targets: impl Iterator<Item = AssetTarget>,
+        cx: &AsyncApp,
+    ) {
+        let mut wanted = HashSet::new();
+        for target in targets {
+            let key = sync::model_key(&target);
+            if !self.asset_subs.contains_key(&key) {
+                let watcher = assets::queries::watch_model(
+                    &self.swr,
+                    source,
+                    target,
+                    self.sync_tx.clone(),
+                    cx,
+                );
+                self.asset_subs.insert(key.clone(), watcher);
+            }
+            wanted.insert(key);
+        }
+        // Dropping the task cancels the watcher, which drops the handle and
+        // unsubscribes; the entry then ages out on its own.
+        self.asset_subs.retain(|key, _| wanted.contains(key));
+        // Nothing above keeps the registry warm before the first device
+        // appears, and resolution needs it the moment one does.
+        if self.index_sub.is_none() {
+            self.index_sub = Some(assets::queries::watch_index(
+                &self.swr,
+                source,
+                self.sync_tx.clone(),
+                cx,
+            ));
+        }
     }
 }
 

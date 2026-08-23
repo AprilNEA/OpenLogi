@@ -98,10 +98,8 @@ fn main() -> Result<()> {
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
     // sender is published as a global so the Settings window can drive the
-    // sync that lives on the event loop; the loop keeps a second sender to
-    // re-issue a command it had to defer while a sync was in flight.
+    // sync that lives on the event loop.
     let (asset_ctrl_tx, asset_commands) = tokio::sync::mpsc::unbounded_channel::<AssetCommand>();
-    let asset_self_tx = asset_ctrl_tx.clone();
 
     // `with_assets` registers the embedded app logo
     // ([`app_assets`]) plus the lucide SVGs that back
@@ -165,7 +163,6 @@ fn main() -> Result<()> {
                 ipc_commands,
                 updates,
                 asset_commands,
-                asset_self_tx,
                 deeplinks,
             },
             cx,

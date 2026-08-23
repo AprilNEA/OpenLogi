@@ -92,6 +92,13 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 # that the `IconName` enum is macro-generated from, so the two must agree.
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 
+# swr-gpui declares gpui from crates.io. A registry dependency and a git one are
+# different crates to cargo even at the same version, so without the
+# `[patch.crates-io]` below the tree would carry two incompatible `gpui`s and
+# `swr_gpui::Query` would not accept this app's `App`.
+swr-core = "0.1"
+swr-gpui = "0.1"
+
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
 # needs FFI can opt in locally with `#[expect(unsafe_code, reason = "…")]`.
@@ -134,3 +141,10 @@ debug = false
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+# Redirect swr-gpui's registry `gpui` onto the git source the rest of the tree
+# uses, so one `gpui` reaches the lock instead of two. No rev here for the same
+# reason the dependency above carries none — the exact commit stays pinned in
+# Cargo.lock, and this patch must not fork the git source.
+[patch.crates-io]
+gpui = { git = "https://github.com/zed-industries/zed" }

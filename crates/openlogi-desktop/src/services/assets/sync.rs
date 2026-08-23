@@ -10,10 +10,8 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use backon::{BackoffBuilder, ExponentialBuilder};
 use openlogi_assets::http;
 use openlogi_assets::{
     AssetRegistry, AssetSource, BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome,
@@ -86,63 +84,62 @@ pub(crate) fn model_key(target: &AssetTarget) -> String {
 /// for every entry in `targets`. An empty `targets` is a valid call — it
 /// prefetches just the index so device resolution works the moment a device
 /// first appears.
-pub fn sync(source: Option<AssetSource>, targets: &[AssetTarget]) -> Result<()> {
+/// Probe the mirrors (or use the selected source), persist the winner's
+/// `index.json`, and hand back the registry.
+///
+/// Separate from [`sync_target`] because the registry is the one resource every
+/// target shares: probing three mirrors once per device would be the whole cost
+/// of the sync paid N times. Cached under its own key so the depot fetches
+/// depend on it instead of each redoing it.
+pub fn load_registry(source: Option<AssetSource>) -> Result<AssetRegistry> {
     let cache_root = super::paths::user_cache_root();
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
-
     let registry = AssetRegistry::load_source(source, &cache_root).context("fetch asset index")?;
-    let client = registry.client();
-    let index = registry.index();
-    // The index is the critical shared resource — if it can't be fetched
-    // (after the HTTP layer's own retries) bail with an error so the caller
-    // retries the whole sync on a later device snapshot, rather than latching
-    // success off a run that downloaded nothing. Per-depot failures below stay
-    // best-effort: an optional colour variant 404 shouldn't block everything.
-    // Each target carries the HID++ `extended_model_id` byte so the
-    // depot sync can fetch the right colour variant. `OPENLOGI_FORCE_DEPOT`
-    // doesn't correspond to a physical device, so we pass `ext = 0`
-    // and end up with the base PNG.
-    let mut depot_targets: Vec<(String, DeviceEntry, u8)> = Vec::new();
+    // `OPENLOGI_FORCE_DEPOT` names a depot with no device behind it, so it has
+    // no target to ride in on. It belongs to whoever loads the registry — and
+    // `ext = 0` gets its base PNG.
     if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
-        && let Some(entry) = index.devices.get(&forced)
+        && let Some(entry) = registry.index().devices.get(&forced).cloned()
+        && let Err(e) = sync_depot(registry.client(), &cache_root, &forced, &entry, 0)
     {
-        depot_targets.push((forced, entry.clone(), 0));
+        warn!(depot = %forced, error = %e, "forced depot sync failed");
     }
-    for target in targets {
-        let match_result = match target {
-            AssetTarget::Hidpp { model, codename } => {
-                super::resolve_in_index(index, model, codename.as_deref())
-                    .map(|(depot, entry)| (depot, entry, model.extended_model_id))
-            }
-            AssetTarget::Standalone { registry_model_id } => index
-                .find_by_model_id(registry_model_id)
-                .map(|(depot, entry)| (depot, entry, 0)),
-        };
-        if let Some((depot, entry, ext)) = match_result {
-            depot_targets.push((depot.to_string(), entry.clone(), ext));
-        } else if let AssetTarget::Standalone { registry_model_id } = target {
+    Ok(registry)
+}
+
+/// Download what one device model needs, against an already-loaded registry.
+///
+/// A model the registry doesn't list is not an error — that device renders from
+/// the fallback art. Per-depot failures stay best-effort for the same reason
+/// they always did: an optional colour variant 404 must not fail the model.
+pub fn sync_target(registry: &AssetRegistry, target: &AssetTarget) -> Result<()> {
+    let cache_root = super::paths::user_cache_root();
+    let index = registry.index();
+    // Each target carries the HID++ `extended_model_id` byte so the depot sync
+    // can fetch the right colour variant.
+    let resolved = match target {
+        AssetTarget::Hidpp { model, codename } => {
+            super::resolve_in_index(index, model, codename.as_deref())
+                .map(|(depot, entry)| (depot, entry, model.extended_model_id))
+        }
+        AssetTarget::Standalone { registry_model_id } => index
+            .find_by_model_id(registry_model_id)
+            .map(|(depot, entry)| (depot, entry, 0)),
+    };
+    let Some((depot, entry, ext)) = resolved else {
+        if let AssetTarget::Standalone { registry_model_id } = target {
             info!(
                 registry_model_id,
                 "standalone model is not registered — using fallback art"
             );
+        } else {
+            debug!("sync: no matching depot for this model");
         }
-    }
-    depot_targets.sort_by(|a, b| a.0.cmp(&b.0));
-    depot_targets.dedup_by(|a, b| a.0 == b.0);
-
-    if depot_targets.is_empty() {
-        debug!("sync: no matching depots for known devices");
         return Ok(());
-    }
-
-    for (depot, entry, ext) in &depot_targets {
-        if let Err(e) = sync_depot(client, &cache_root, depot, entry, *ext) {
-            warn!(depot, error = %e, "depot sync failed");
-        }
-    }
-    info!(devices = depot_targets.len(), "asset sync complete");
-    Ok(())
+    };
+    sync_depot(registry.client(), &cache_root, depot, entry, ext)
+        .with_context(|| format!("sync depot {depot}"))
 }
 
 fn sync_depot(
@@ -267,37 +264,11 @@ pub struct AssetControl(pub tokio::sync::mpsc::UnboundedSender<AssetCommand>);
 
 impl gpui::Global for AssetControl {}
 
-/// Minimum gap before re-attempting a failed sync, doubling with each
-/// consecutive attempt and capped at a minute. The first attempt is
-/// immediate (`last_sync_at` is `None`); after that a permanently-down host
-/// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
-/// while a recovered host still self-heals on the next attempt.
-pub(crate) fn sync_retry_delay(attempts: u32) -> Duration {
-    ExponentialBuilder::default()
-        .without_max_times()
-        .build()
-        .nth(attempts.saturating_sub(1).min(6) as usize)
-        .unwrap_or(Duration::from_mins(1))
-}
-
-/// Refresh the asset cache: the shared index always, plus the depots for
-/// `models`. Returns `true` when the sync completed and `false` when it
-/// failed and should be retried. Runs on a dedicated background thread —
-/// the HTTP layer's blocking retries are fine here. (Whether sync runs at
-/// all is the caller's gate: the automatic path checks `should_run` once at
-/// startup plus the auto-download setting; the Settings → Assets manual
-/// actions always fetch, even in a release build that would otherwise serve
-/// only bundled art.)
-pub(crate) fn run_asset_sync(preference: AssetSourcePreference, targets: &[AssetTarget]) -> bool {
+/// The source one sync session should use: an `OPENLOGI_ASSETS` override wins,
+/// otherwise the user's saved preference.
+pub(crate) fn selected_source(preference: AssetSourcePreference) -> Option<AssetSource> {
     let server = std::env::var("OPENLOGI_ASSETS").ok();
-    let source = source_for_sync(preference, server.as_deref());
-    match sync(source, targets) {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(error = ?e, "asset sync failed — will retry with backoff");
-            false
-        }
-    }
+    source_for_sync(preference, server.as_deref())
 }
 
 fn source_for_sync(
@@ -317,21 +288,9 @@ fn source_for_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::{AssetTarget, model_key, source_for_sync, sync_retry_delay};
+    use super::{AssetTarget, model_key, source_for_sync};
     use openlogi_assets::AssetSource;
     use openlogi_core::config::AssetSourcePreference;
-    use std::time::Duration;
-
-    #[test]
-    fn retry_delay_doubles_then_caps() {
-        assert_eq!(sync_retry_delay(1), Duration::from_secs(1));
-        assert_eq!(sync_retry_delay(2), Duration::from_secs(2));
-        assert_eq!(sync_retry_delay(3), Duration::from_secs(4));
-        assert_eq!(sync_retry_delay(5), Duration::from_secs(16));
-        // Caps at 60s and never overflows the shift for large attempt counts.
-        assert_eq!(sync_retry_delay(7), Duration::from_mins(1));
-        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_mins(1));
-    }
 
     #[test]
     fn automatic_preference_races_the_built_in_sources() {
