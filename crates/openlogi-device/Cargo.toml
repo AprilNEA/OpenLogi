@@ -16,7 +16,7 @@ categories = ["hardware-support"]
 # a dependency that cannot build for `wasm32-unknown-unknown` breaks that job.
 [dependencies]
 hidpp = { workspace = true }
-openlogi-core = { version = "0.7.6", path = "../openlogi-core", default-features = false }
+openlogi-core = { version = "0.7.7", path = "../openlogi-core", default-features = false }
 futures-lite = { workspace = true }
 futures-concurrency = "7"
 serde = { workspace = true }
