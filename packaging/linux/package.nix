@@ -28,6 +28,7 @@
   rustPlatform,
   fetchgit,
   src,
+  git,
   pkg-config,
   patchelf,
   versionCheckHook,
@@ -140,6 +141,11 @@ rustPlatform.buildRustPackage {
     patchelf
     rustPlatform.bindgenHook # `media` (a gpui dep) runs bindgen — needs libclang
   ];
+
+  # The xtask release tests exercise version-bump checkout against throwaway
+  # repositories they `git init` themselves, so the sandboxed `cargo test`
+  # needs a git binary even though the build does not.
+  nativeCheckInputs = [ git ];
 
   # Only libraries whose *-sys crates appear in Cargo.lock. TLS is rustls and
   # evdev/hidraw are opened directly. Runtime-selected graphics libraries also
