@@ -88,24 +88,86 @@ pub fn action_picker<T: 'static>(
 
     let pal = theme::palette(cx);
     let button = rust_i18n::t!(btn.label());
+    // The open profile's *display* name — the title says "Bind Back in Safari",
+    // never "in com.apple.Safari".
+    let (editing_app, overrides_this_button) = cx.try_global::<AppState>().map_or_else(
+        || (None, false),
+        |state| {
+            (
+                state
+                    .editing_app()
+                    .map(|app| state.recent_app_name(app).unwrap_or(app).to_string()),
+                state.editing_app_overrides().contains(&btn),
+            )
+        },
+    );
     // A control that can gesture (a HID++ gesture source, or an OS-hook button
     // the hook can hold-and-swipe) leads with a pinned mode entry above the
     // action list: picking it promotes THIS button into gesture mode — any
     // number of buttons may gesture at once — and the reopened popover then
     // shows the gesture menu.
-    let gesture_capable = btn.is_hidpp_gesture_source() || btn.is_os_hook_button();
+    //
+    // Not offered inside a per-app profile: a per-app entry holds one `Action`
+    // and has no per-direction shape, so the promotion would land in the global
+    // profile — changing every application from a menu titled with one.
+    let gesture_capable =
+        (btn.is_hidpp_gesture_source() || btn.is_os_hook_button()) && editing_app.is_none();
     menu_card(pal)
         .min_w(px(POPOVER_W))
-        .child(title(tr!("Bind %{name}", name => button), pal))
+        .child(title(
+            match &editing_app {
+                Some(app) => tr!("Bind %{name} in %{app}", name => button, app => app.clone()),
+                None => tr!("Bind %{name}", name => button),
+            },
+            pal,
+        ))
         .child(divider(pal))
         .when(gesture_capable, |card| {
             card.child(gesture_mode_row(btn, &observer, &popover, pal))
+                .child(divider(pal))
+        })
+        .when(overrides_this_button, |card| {
+            card.child(inherit_row(btn, &observer, &popover, pal))
                 .child(divider(pal))
         })
         .child(scroll_list(
             "picker-scroll",
             action_rows("action-item", current.as_ref(), &on_pick, pal),
         ))
+        .into_any_element()
+}
+
+/// The pinned "Use the default profile" entry, shown only for a button the open
+/// per-app profile overrides. Clicking drops the override so the button
+/// inherits the device's global binding in this application again — the only
+/// way back, since every action row writes an override.
+fn inherit_row<T: 'static>(
+    btn: ButtonId,
+    observer: &Entity<T>,
+    popover: &gpui::WeakEntity<PopoverState>,
+    pal: Palette,
+) -> AnyElement {
+    let observer = observer.clone();
+    let popover = popover.clone();
+    menu_row("inherit-row", pal, false)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::Undo)
+                        .size_4()
+                        .text_color(pal.text_muted),
+                )
+                .child(div().child(tr!("Use the default profile"))),
+        )
+        .on_click(move |_event, window, cx| {
+            cx.update_global::<AppState, _>(|state, _| state.clear_app_binding(btn));
+            observer.update(cx, |_, cx| cx.notify());
+            if let Some(p) = popover.upgrade() {
+                p.update(cx, |s, cx| s.dismiss(window, cx));
+            }
+        })
         .into_any_element()
 }
 

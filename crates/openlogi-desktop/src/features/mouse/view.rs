@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use gpui::{
@@ -118,10 +119,8 @@ enum BindingPopover {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = AppState::try_global(cx);
-        let (device_key, asset, active, bindings, gesture_buttons, glow, thumbwheel) = state
-            .as_ref()
-            .map(|state| state.read(cx))
+        let (device_key, asset, active, bindings, gesture_buttons, glow, thumbwheel, overridden) =
+            AppState::try_read(cx)
             .map(|state| {
                 (
                     state.current_record().map(|r| r.config_key.clone()),
@@ -134,6 +133,12 @@ impl Render for MouseModelView {
                         .current_record()
                         .and_then(|r| r.capabilities)
                         .is_some_and(|capabilities| capabilities.thumbwheel),
+                    // `Some` only inside a per-app profile — see
+                    // `binding_label_for_control`.
+                    state
+                        .editing_app()
+                        .is_some()
+                        .then(|| state.editing_app_overrides()),
                 )
             })
             .unwrap_or_default();
@@ -192,7 +197,12 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, &bindings, &gesture_buttons);
+                let binding = binding_label_for_control(
+                    label.id,
+                    &bindings,
+                    &gesture_buttons,
+                    overridden.as_ref(),
+                );
                 LabelPopover::new(idx, *label, binding, frame, view.clone())
                     .highlighted(highlight == Some(label.id))
                     .hovered(hovered)
@@ -708,10 +718,18 @@ impl RenderOnce for LabelTrigger {
     }
 }
 
+/// The label card's text, icon, and "is this customised" state for one control.
+///
+/// `overridden` is the set of buttons the open per-app profile overrides, and
+/// is empty in the device's global profile. Where it applies it *replaces* the
+/// factory-default comparison: inside an application's profile the distinction
+/// that matters is override versus inherited, and the card already carries it
+/// as muted-versus-primary text.
 fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
+    scope: Option<&BTreeSet<ButtonId>>,
 ) -> BindingLabel {
     if control
         .button()
@@ -732,7 +750,10 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(button));
             BindingLabel {
                 text: localized_action_label(&action),
-                is_default: action == default_binding(button),
+                is_default: scope.map_or_else(
+                    || action == default_binding(button),
+                    |overridden| !overridden.contains(&button),
+                ),
                 icon: Some(action_icon_path(&action)),
             }
         }
@@ -747,8 +768,13 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
-                    text: tr!(preset.label()),
-                    is_default: preset == ThumbwheelPreset::HorizontalScroll,
+                    text: preset.label().into(),
+                    // One visual target, two bindings: overriding the pair
+                    // writes both, so either one is enough to call it set.
+                    is_default: scope.map_or(preset == ThumbwheelPreset::HorizontalScroll, |o| {
+                        !o.contains(&ButtonId::ThumbwheelScrollDown)
+                            && !o.contains(&ButtonId::ThumbwheelScrollUp)
+                    }),
                     icon: Some(preset.icon()),
                 }
             } else {

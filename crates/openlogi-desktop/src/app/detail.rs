@@ -33,6 +33,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::profile_scope::profile_scope_bar;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
@@ -115,7 +116,7 @@ pub(super) fn detail_content(
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
     let content = match active {
-        DetailTab::Buttons => buttons_tab(panels.mouse_model).into_any_element(),
+        DetailTab::Buttons => buttons_tab(panels.mouse_model, pal, cx).into_any_element(),
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
@@ -185,7 +186,11 @@ fn detail_tabs(
 /// centre the fixed-height model. That left a tall header-to-content gap that
 /// collapsed to the top-aligned card tabs on switch — a visible vertical jump.
 /// Top-aligning every tab keeps the content's start fixed across switches.
-fn buttons_tab(mouse_model: &gpui::Entity<MouseModelView>) -> impl IntoElement {
+fn buttons_tab(
+    mouse_model: &gpui::Entity<MouseModelView>,
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     v_flex()
         .flex_1()
         .w_full()
@@ -193,7 +198,14 @@ fn buttons_tab(mouse_model: &gpui::Entity<MouseModelView>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .p(px(SCREEN_PAD))
-        .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
+        .child(
+            v_flex()
+                .w_full()
+                .max_w(px(760.))
+                .gap_3()
+                .children(profile_scope_bar(pal, cx))
+                .child(mouse_model.clone()),
+        )
 }
 
 /// Keys tab: the function-row remapper for a keyboard.
@@ -583,11 +595,9 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
             |state| {
                 (
                     state.button_bindings.len(),
-                    state
-                        .gesture_bindings
-                        .values()
-                        .map(std::collections::BTreeMap::len)
-                        .sum::<usize>(),
+                    // Device-level, not scope-level: this card describes the
+                    // device, and a per-app profile holds no gestures at all.
+                    state.device_gesture_binding_count(),
                     state.dpi_presets().len(),
                     state
                         .active_profile_name()
