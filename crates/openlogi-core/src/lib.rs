@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 
 pub mod action_ring;
+pub mod app;
 pub mod binding;
 pub mod bindings;
 pub mod brand;
