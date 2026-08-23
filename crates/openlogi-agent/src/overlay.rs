@@ -32,9 +32,6 @@ pub fn spawn() {
     };
     let mine = Run::mint();
     let mut supervisor = Supervisor::new(Role::new(directory, "overlay"), mine);
-    // The image an unidentified tenant is recognized by, kept beside the
-    // spawn closure that owns the original.
-    let helper = binary.clone();
     let result = std::thread::Builder::new()
         .name("openlogi-overlay-supervisor".into())
         .spawn(move || {
@@ -50,7 +47,7 @@ pub fn spawn() {
             let mut pressed_anonymous = false;
             loop {
                 if let Err(error) = supervisor.tick(&mut spawn, &mut |event| {
-                    report(&event, &helper, &mut pressed_anonymous);
+                    report(&event, &mut pressed_anonymous);
                 }) {
                     // A role that cannot be probed is treated as free by the
                     // next tick; refusing to look again would wait forever.
@@ -107,7 +104,7 @@ pub fn evict_on_quit() {
 /// against the live process ([`succession::Tenant::compare`]), and a tenant
 /// with no record at all is only ever recognized by the image we start the
 /// overlay from.
-fn report(event: &Event<'_>, helper: &Path, pressed_anonymous: &mut bool) {
+fn report(event: &Event<'_>, pressed_anonymous: &mut bool) {
     if !matches!(event, Event::SupersededAnonymously) {
         *pressed_anonymous = false;
     }
@@ -136,52 +133,97 @@ fn report(event: &Event<'_>, helper: &Path, pressed_anonymous: &mut bool) {
                 return;
             }
             warn!("{event}");
-            match eviction::evict_anonymous(helper, &Policy::default()) {
-                AnonymousOutcome::NoCandidate => warn!(
-                    helper = %helper.display(),
-                    "nothing is running our overlay binary — the role is held by something else"
-                ),
-                AnonymousOutcome::Ambiguous { running } => warn!(
-                    running,
-                    "several overlay processes are running — left them alone rather than \
-                     guess which one holds the role"
-                ),
-                outcome => info!(?outcome, "asked the unidentified overlay to leave"),
-            }
+            evict_unidentified_overlay();
         }
         Event::Occupied(_) => tracing::debug!("{event}"),
         _ => info!("{event}"),
     }
 }
 
-fn overlay_binary_path() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let sibling = executable
-        .parent()?
-        .join(format!("openlogi-overlay{}", std::env::consts::EXE_SUFFIX));
-    if sibling.is_file() {
-        return Some(sibling);
+/// Ask an unidentified tenant to leave, trying every image our overlay could
+/// be running from.
+///
+/// One path is not enough. A tenant started before an update runs the image
+/// that install shipped, and macOS keeps reporting that path for the life of
+/// the process even after the file is renamed or deleted — so the tenant most
+/// in need of evicting is precisely the one whose image is not the one we
+/// would launch today (#842).
+fn evict_unidentified_overlay() {
+    for image in overlay_images() {
+        match eviction::evict_anonymous(&image, &Policy::default()) {
+            // Not this image. The tenant may be running another of ours.
+            AnonymousOutcome::NoCandidate => {}
+            AnonymousOutcome::Ambiguous { running } => {
+                warn!(
+                    running,
+                    image = %image.display(),
+                    "several processes share this overlay image — left them alone rather \
+                     than guess which one holds the role"
+                );
+                return;
+            }
+            outcome => {
+                info!(
+                    ?outcome,
+                    image = %image.display(),
+                    "asked the unidentified overlay to leave"
+                );
+                return;
+            }
+        }
     }
+    warn!("no process is running any overlay image of ours — the role is held by something else");
+}
+
+/// Every path our overlay could be running from, in the order the launcher
+/// prefers them.
+///
+/// Existence is deliberately not a filter: a process outlives the file it was
+/// started from, and evicting one means recognizing the path it still reports.
+/// [`overlay_binary_path`] applies the filter, because launching does need a
+/// file that is there.
+fn overlay_images() -> Vec<PathBuf> {
+    let Ok(executable) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let mut images = overlay_images_beside(&executable);
+    images.extend(find_on_path("openlogi-overlay"));
+    images
+}
+
+/// The layout-derived half of [`overlay_images`], taking the agent's own path
+/// so the derivation can be tested against a bundle that is not this one.
+fn overlay_images_beside(executable: &Path) -> Vec<PathBuf> {
+    let mut images: Vec<PathBuf> = executable
+        .parent()
+        .map(|directory| {
+            directory.join(format!("openlogi-overlay{}", std::env::consts::EXE_SUFFIX))
+        })
+        .into_iter()
+        .collect();
 
     #[cfg(target_os = "macos")]
     for app in executable.ancestors().filter(|path| {
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
     }) {
-        for relative in [
-            "Contents/Library/LoginItems/OpenLogi Overlay Dev.app/Contents/MacOS/openlogi-overlay",
-            "Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay",
-            // Bundles built before the helpers were renamed to their display names.
-            "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
-        ] {
-            let candidate = app.join(relative);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
+        images.extend(
+            [
+                "Contents/Library/LoginItems/OpenLogi Overlay Dev.app/Contents/MacOS/openlogi-overlay",
+                "Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay",
+                // Bundles built before the helpers were renamed to their display names.
+                "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
+            ]
+            .into_iter()
+            .map(|relative| app.join(relative)),
+        );
     }
 
-    find_on_path("openlogi-overlay")
+    images
+}
+
+fn overlay_binary_path() -> Option<PathBuf> {
+    overlay_images().into_iter().find(|image| image.is_file())
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -197,6 +239,32 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// The tenant that wedges the role is one started before an update, and
+    /// after the helpers were renamed its image is a path that no longer
+    /// exists. macOS keeps reporting that path for the life of the process, so
+    /// dropping absent paths here would leave exactly that tenant
+    /// unrecognizable (#842).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn eviction_candidates_include_images_that_are_no_longer_installed() {
+        let agent = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+        );
+        let legacy = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
+        );
+        assert!(
+            !legacy.exists(),
+            "this test only means something while that path is absent"
+        );
+
+        let images = overlay_images_beside(agent);
+        assert!(
+            images.iter().any(|image| image == legacy),
+            "the pre-rename image must stay a candidate: {images:?}"
+        );
+    }
 
     #[test]
     fn path_search_returns_none_for_an_impossible_name() {
