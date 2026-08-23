@@ -24,9 +24,16 @@ pub(crate) struct AppBundle;
 /// alternates are installed into the bundle by [`IconPipeline::install`].
 const OUTPUT_DIR: &str = "crates/openlogi-desktop/icon";
 
-/// Where the alternates live inside the bundle, so the app can hand one to
-/// macOS at runtime.
-const ALTERNATES_DIR: &str = "Contents/Resources/Icons";
+/// Where the icons Settings offers live inside the bundle: a preview for each,
+/// and the `.icns` of every alternate for the app to hand to macOS at runtime.
+const ICONS_DIR: &str = "Contents/Resources/Icons";
+
+/// Where the previews are rendered to before the bundle is assembled.
+const PREVIEWS_DIR: &str = "previews";
+
+/// Preview edge length, in pixels: twice the point size Settings draws its icon
+/// cards at, so the picker stays crisp on a Retina display.
+const PREVIEW_PIXELS: &str = "128";
 
 /// The name every component's `Info.plist` gives the icon, in both spellings:
 /// `CFBundleIconFile` for the `.icns`, `CFBundleIconName` for the catalog
@@ -76,16 +83,21 @@ impl IconPipeline for AppBundle {
         fs_err::copy(&catalog, resources.join(CATALOG))
             .with_context(|| format!("could not copy {CATALOG} into the bundle"))?;
 
+        fs_err::create_dir_all(app.join(ICONS_DIR))
+            .with_context(|| format!("could not create {ICONS_DIR} in the bundle"))?;
         for icon in AppIcon::ALL {
-            let Some(target) = alternate(app, icon) else {
-                continue;
-            };
-            let source = compiled.join(format!("{}.icns", compiled_stem(icon)));
-            ensure_file(&source)?;
-            fs_err::create_dir_all(app.join(ALTERNATES_DIR))
-                .with_context(|| format!("could not create {ALTERNATES_DIR} in the bundle"))?;
-            fs_err::copy(&source, &target)
-                .with_context(|| format!("could not copy the {icon} icon into the bundle"))?;
+            // Every icon Settings offers needs a preview; only the alternates
+            // need an `.icns`, since the default is the bundle's own icon.
+            put(
+                &compiled.join(PREVIEWS_DIR).join(preview_file(icon)),
+                &preview(app, icon),
+            )?;
+            if let Some(target) = alternate(app, icon) {
+                put(
+                    &compiled.join(format!("{}.icns", compiled_stem(icon))),
+                    &target,
+                )?;
+            }
         }
 
         stamp_plist_strings(
@@ -103,10 +115,16 @@ impl IconPipeline for AppBundle {
             );
         }
         for icon in AppIcon::ALL {
-            let Some(path) = alternate(app, icon) else {
-                continue;
-            };
-            if !path.is_file() {
+            let preview = preview(app, icon);
+            if !preview.is_file() {
+                bail!(
+                    "app: missing the {icon} icon preview at {}",
+                    preview.display()
+                );
+            }
+            if let Some(path) = alternate(app, icon)
+                && !path.is_file()
+            {
                 bail!("app: missing the {icon} icon at {}", path.display());
             }
         }
@@ -140,10 +158,29 @@ fn compiled_stem(icon: AppIcon) -> String {
     }
 }
 
-/// Where `icon` ships inside `app` — `None` for the default, which *is* the
-/// bundle's icon and needs no second copy.
+/// Where `icon`'s `.icns` ships inside `app` — `None` for the default, which
+/// *is* the bundle's icon and needs no second copy.
 pub(crate) fn alternate(app: &Path, icon: AppIcon) -> Option<PathBuf> {
-    (!icon.is_default()).then(|| app.join(ALTERNATES_DIR).join(format!("{icon}.icns")))
+    (!icon.is_default()).then(|| app.join(ICONS_DIR).join(format!("{icon}.icns")))
+}
+
+/// Where `icon`'s preview ships inside `app`. Settings draws these, so every
+/// icon has one — the default included.
+pub(crate) fn preview(app: &Path, icon: AppIcon) -> PathBuf {
+    app.join(ICONS_DIR).join(preview_file(icon))
+}
+
+/// A preview's file name, the same in the build directory and in the bundle.
+fn preview_file(icon: AppIcon) -> String {
+    format!("{icon}.png")
+}
+
+/// Copy one compiled file into the bundle.
+fn put(from: &Path, to: &Path) -> Result<()> {
+    ensure_file(from)?;
+    fs_err::copy(from, to)
+        .map(|_| ())
+        .with_context(|| format!("could not copy {} into the bundle", from.display()))
 }
 
 /// Compile one document. The default keeps its catalog — the alternates are
@@ -198,10 +235,27 @@ fn compile_document(root: &Path, output_dir: &Path, icon: AppIcon) -> Result<()>
     // actool always calls the catalog `Assets.car`, so the icons are compiled
     // apart and only what each one contributes is kept.
     let icns = format!("{stem}.icns");
-    take(&compiled.join(&icns), &output_dir.join(&icns))?;
+    let installed_icns = output_dir.join(&icns);
+    take(&compiled.join(&icns), &installed_icns)?;
     if icon.is_default() {
         take(&compiled.join(CATALOG), &output_dir.join(CATALOG))?;
     }
+
+    // The picker in Settings draws a render of the compiled icon rather than
+    // the document's artwork, so what a user picks from is what macOS will
+    // actually draw — fill, material and all.
+    let previews = output_dir.join(PREVIEWS_DIR);
+    fs_err::create_dir_all(&previews)
+        .with_context(|| format!("could not create {}", previews.display()))?;
+    let preview = previews.join(preview_file(icon));
+    cmd!(
+        sh,
+        "/usr/bin/sips -s format png -z {PREVIEW_PIXELS} {PREVIEW_PIXELS} {installed_icns} --out {preview}"
+    )
+    .ignore_stdout()
+    .run()
+    .context("could not render the icon preview")?;
+
     println!("compiled {icon} from {}", document(icon));
     Ok(())
 }

@@ -53,6 +53,7 @@ node_modules/
 /crates/openlogi-desktop/icon/*.icns
 !/crates/openlogi-desktop/icon/AppIcon.icns
 /crates/openlogi-desktop/icon/Assets.car
+/crates/openlogi-desktop/icon/previews/
 
 # Packaging output.
 *.dmg

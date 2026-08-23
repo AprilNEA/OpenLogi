@@ -3,7 +3,7 @@
 use super::AppState;
 use gpui::App;
 use openlogi_core::config::{
-    AppSettings, Appearance, AssetSourcePreference, ThumbwheelSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, ThumbwheelSensitivity,
 };
 
 impl AppState {
@@ -89,6 +89,17 @@ impl AppState {
         }
         *slot = name;
         self.persist_config("theme setting");
+    }
+    /// Persist the chosen app icon and wear it now. Unlike the theme settings
+    /// this one leaves the process: the icon is written onto the app bundle so
+    /// it survives a quit. No-op when unchanged.
+    pub fn set_app_icon(&mut self, icon: AppIcon) {
+        if self.config.app_settings.app_icon == icon {
+            return;
+        }
+        self.config.app_settings.app_icon = icon;
+        self.persist_config("app icon setting");
+        crate::platform::app_icon::apply(icon);
     }
     /// Persist the UI corner-radius override (`None` = each theme's own radius).
     /// No-op when unchanged.

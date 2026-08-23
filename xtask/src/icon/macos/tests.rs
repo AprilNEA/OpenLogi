@@ -11,9 +11,18 @@ fn bundle() -> tempfile::TempDir {
     app
 }
 
-/// Everything [`IconPipeline::verify`] wants except the icons themselves.
+/// The catalog [`IconPipeline::verify`] looks for first.
 fn with_catalog(app: &Path) {
     fs_err::write(app.join("Contents/Resources").join(CATALOG), []).unwrap();
+}
+
+/// The preview every icon Settings offers has to ship.
+fn with_previews(app: &Path) {
+    for icon in AppIcon::ALL {
+        let path = preview(app, icon);
+        fs_err::create_dir_all(path.parent().unwrap()).unwrap();
+        fs_err::write(&path, []).unwrap();
+    }
 }
 
 #[test]
@@ -28,12 +37,23 @@ fn a_bundle_without_the_asset_catalog_is_rejected() {
     );
 }
 
-/// A bundle whose Settings would offer an icon it does not carry is a picker
-/// pointing at nothing.
+/// Both halves of "a picker that points at nothing": the render it draws, and
+/// the icon it would apply.
+#[test]
+fn a_bundle_missing_an_icon_preview_is_rejected() {
+    let app = bundle();
+    with_catalog(app.path());
+
+    let error = AppBundle.verify(app.path()).unwrap_err().to_string();
+
+    assert!(error.contains("icon preview"), "got: {error}");
+}
+
 #[test]
 fn a_bundle_missing_an_alternate_icon_is_rejected() {
     let app = bundle();
     with_catalog(app.path());
+    with_previews(app.path());
 
     let error = AppBundle.verify(app.path()).unwrap_err().to_string();
 
@@ -44,6 +64,7 @@ fn a_bundle_missing_an_alternate_icon_is_rejected() {
 fn a_bundle_that_does_not_name_the_catalog_entry_is_rejected() {
     let app = bundle();
     with_catalog(app.path());
+    with_previews(app.path());
     for icon in AppIcon::ALL {
         if let Some(path) = alternate(app.path(), icon) {
             fs_err::create_dir_all(path.parent().unwrap()).unwrap();
