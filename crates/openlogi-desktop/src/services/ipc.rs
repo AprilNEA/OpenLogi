@@ -318,8 +318,12 @@ fn spawn_agent() {
     // The packaged helper goes through LaunchServices so it is its own TCC
     // responsible process; everything else is a `disclaim` exec (a no-op
     // pass-through to `std::process::Command` off macOS).
+    // "started", not "launched": on the packaged path success here only means
+    // `open` was handed the bundle — the waiter inside `launch_agent` reports
+    // the definitive outcome, so a LaunchServices rejection is not preceded by
+    // a success claim it then contradicts.
     match launch_agent(&path) {
-        Ok(()) => info!(path = %path.display(), "agent not running — launched it"),
+        Ok(()) => info!(path = %path.display(), "agent not running — launch started"),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
     }
 }
