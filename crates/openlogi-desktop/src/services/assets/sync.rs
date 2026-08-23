@@ -271,6 +271,18 @@ pub(crate) fn selected_source(preference: AssetSourcePreference) -> Option<Asset
     source_for_sync(preference, server.as_deref())
 }
 
+/// A stable name for `preference`, for callers that key something on which
+/// source a fetch will use. Distinct per variant is the only requirement; the
+/// env override is not folded in because it cannot change while running.
+pub(crate) fn source_segment(preference: AssetSourcePreference) -> &'static str {
+    match preference {
+        AssetSourcePreference::Automatic => "automatic",
+        AssetSourcePreference::OpenLogi => "openlogi",
+        AssetSourcePreference::Cloudflare => "cloudflare",
+        AssetSourcePreference::Fastly => "fastly",
+    }
+}
+
 fn source_for_sync(
     preference: AssetSourcePreference,
     override_base: Option<&str>,

@@ -177,12 +177,10 @@ struct Runtime {
     /// Whether the *automatic* download path runs in this build at all: a
     /// release bundle already ships the art. Manual actions ignore it.
     auto_sync: bool,
-    /// One live cache subscription per device model, keyed by
-    /// [`sync::model_key`]. Holding the task is what holds the subscription;
-    /// dropping it unsubscribes.
+    /// One live cache subscription per [`AssetWatch`], keyed by [`watch_key`].
+    /// Holding the task is what holds the subscription; dropping it
+    /// unsubscribes.
     asset_subs: Subscriptions<Task<()>>,
-    /// The registry's own subscription, which no device owns.
-    index_sub: Option<Task<()>>,
     sync_tx: UnboundedSender<bool>,
     /// Most recent completed enumeration, kept so a manual Refresh / Clear can
     /// sync the current devices without waiting for the next snapshot.
@@ -205,7 +203,6 @@ impl Runtime {
             swr,
             auto_sync,
             asset_subs: Subscriptions::new(),
-            index_sub: None,
             sync_tx,
             inventories: Vec::new(),
             standalone: Vec::new(),
@@ -421,13 +418,18 @@ impl Runtime {
         });
     }
 
-    /// Keep exactly one cache subscription per device model we want art for.
+    /// Keep exactly one cache subscription per thing we want fetched: the
+    /// shared registry, plus every device model we want art for.
     ///
     /// One subscription per model rather than one batch: each key carries its
     /// own in-flight state, so a slow depot no longer holds up the rest and a
     /// failure retries on its own schedule instead of stalling every model
     /// behind one shared backoff. The fetchers run on the background executor —
     /// the HTTP layer blocks, and must never do so on the UI thread.
+    ///
+    /// The registry rides the same reconciliation rather than being held apart:
+    /// keeping it separate meant it also had to grow its own answer to the
+    /// source changing, and it has none of its own.
     fn ensure_assets(
         &mut self,
         source: AssetSourcePreference,
@@ -435,20 +437,38 @@ impl Runtime {
         cx: &AsyncApp,
     ) {
         let (swr, tx) = (&self.swr, &self.sync_tx);
-        self.asset_subs.reconcile(
-            targets.map(|target| (sync::model_key(&target), target)),
-            |target| assets::queries::watch_model(swr, source, target, tx.clone(), cx),
-        );
-        // Nothing above keeps the registry warm before the first device
-        // appears, and resolution needs it the moment one does.
-        if self.index_sub.is_none() {
-            self.index_sub = Some(assets::queries::watch_index(
-                &self.swr,
-                source,
-                self.sync_tx.clone(),
-                cx,
-            ));
-        }
+        // Nothing has a device behind the registry, so it is named here.
+        let wanted = std::iter::once(AssetWatch::Index)
+            .chain(targets.map(AssetWatch::Model))
+            .map(|watch| (watch_key(source, &watch), watch));
+        self.asset_subs.reconcile(wanted, |watch| match watch {
+            AssetWatch::Index => assets::queries::watch_index(swr, source, tx.clone(), cx),
+            AssetWatch::Model(target) => {
+                assets::queries::watch_model(swr, source, target, tx.clone(), cx)
+            }
+        });
+    }
+}
+
+/// What one asset subscription covers.
+enum AssetWatch {
+    /// The shared registry every model fetch reads.
+    Index,
+    /// One device model's download.
+    Model(AssetTarget),
+}
+
+/// Identity of one subscription, and the reason the source is part of it: a
+/// fetcher captures the source it was built with, so a subscription kept across
+/// a source change would keep fetching from the old mirror — the Settings
+/// dropdown would appear to do nothing until the process restarted. Naming the
+/// source here makes a change re-key every entry, which reconciliation already
+/// knows how to act on.
+fn watch_key(source: AssetSourcePreference, watch: &AssetWatch) -> String {
+    let source = sync::source_segment(source);
+    match watch {
+        AssetWatch::Index => format!("{source}/index"),
+        AssetWatch::Model(target) => format!("{source}/model/{}", sync::model_key(target)),
     }
 }
 
@@ -517,7 +537,9 @@ mod tests {
 
     use openlogi_camera::Camera;
 
-    use super::{Subscriptions, camera_targets};
+    use openlogi_core::config::AssetSourcePreference;
+
+    use super::{AssetWatch, Subscriptions, camera_targets, watch_key};
     use crate::services::assets::sync::model_key;
 
     /// Stands in for a live subscription. Dropping a real one unsubscribes, so
@@ -600,6 +622,26 @@ mod tests {
             product_id,
             max_resolution: None,
             max_fps: None,
+        }
+    }
+
+    #[test]
+    fn a_source_change_rekeys_every_subscription() {
+        // A fetcher captures the source it was built with, and reconciliation
+        // leaves an already-live key alone — so a subscription kept across a
+        // source change would go on fetching from the old mirror, and the
+        // Settings dropdown would appear to do nothing until a restart.
+        // Re-keying is what turns a source change into drop-and-reopen.
+        let target = camera_targets(&[camera(0x0944, "0x2031")])
+            .next()
+            .expect("one camera yields one target");
+        let watches = [AssetWatch::Index, AssetWatch::Model(target)];
+
+        for watch in &watches {
+            assert_ne!(
+                watch_key(AssetSourcePreference::OpenLogi, watch),
+                watch_key(AssetSourcePreference::Cloudflare, watch),
+            );
         }
     }
 
