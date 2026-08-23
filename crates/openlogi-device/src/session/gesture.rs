@@ -303,16 +303,23 @@ pub async fn run_capture_session(
 
 /// The single input one diverted thumb-wheel report stands for, if any.
 ///
-/// A report is a roll *or* a tap, never both: the wheel's touch sensor sets
-/// `single_tap` on the very contact that turned the wheel, so a report
-/// carrying rotation is a roll whose tap bit is an artifact of the finger that
-/// produced it. Forwarding both made a brisk flick fire the tap's action
-/// alongside the scroll. Taps that arrive in their *own* report right after a
-/// roll are the same artifact one report later; that half is the dispatcher's
-/// (see the roll lockout in `openlogi-agent-core`'s capture watcher).
+/// A report is a roll *or* a tap, never both, and `0x2150` says which: the
+/// wheel's touch sensor sets `single_tap` for the finger that turned the
+/// wheel, so every report from `Start` through `Stop` carries a tap bit that
+/// belongs to the roll rather than to the user. `Stop` is the one that needs
+/// the status field — it is the release, so it reports no rotation of its own
+/// and is otherwise indistinguishable from a tap on a settled wheel.
+///
+/// A report's own rotation is checked alongside the status rather than
+/// through it: both are direct statements that this report is part of a roll,
+/// and taking either keeps the roll recognised on a wheel whose firmware
+/// leaves byte 4 at zero.
 fn thumbwheel_input(event: thumbwheel::ThumbwheelEvent) -> Option<CapturedInput> {
     if event.rotation != 0 {
         return Some(CapturedInput::Scroll(event.rotation));
+    }
+    if event.rotation_status.is_rolling() {
+        return None;
     }
     event
         .single_tap

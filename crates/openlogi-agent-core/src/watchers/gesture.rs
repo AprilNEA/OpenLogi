@@ -48,16 +48,6 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// deliberate flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
-/// How long a rotation report keeps the wheel's tap suppressed.
-///
-/// The wheel's touch sensor flags a tap on the finger that rolled it, and the
-/// flag can land in its own report a beat after the rotation stops — so a
-/// brisk flick otherwise fires the tap's action on top of the scroll. The
-/// capture session already drops the tap a *rolling* report carries
-/// (`openlogi-device`'s `thumbwheel_input`); this covers the trailing one.
-/// Deliberate taps are unaffected: they follow a still wheel.
-const TAP_ROLL_LOCKOUT: Duration = Duration::from_millis(300);
-
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
@@ -358,9 +348,6 @@ fn spawn_session(
 struct WheelAccumulators {
     up: WheelDirection,
     down: WheelDirection,
-    /// When this wheel last reported rotation, in either direction — the
-    /// clock behind [`TAP_ROLL_LOCKOUT`].
-    last_rotation: Option<Instant>,
 }
 
 /// Running state for one rotation direction.
@@ -417,17 +404,6 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonPressed(button, _) => {
-            if button == ButtonId::Thumbwheel
-                && tap_is_roll_spillover(
-                    accumulators
-                        .get(key)
-                        .and_then(|wheels| wheels.last_rotation),
-                    Instant::now(),
-                )
-            {
-                debug!(key, "thumb-wheel tap inside the roll lockout — ignored");
-                return;
-            }
             if let Some(action) = plan.bindings.get(&button) {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
                 dispatcher.dispatch(action, Some(key));
@@ -449,12 +425,10 @@ fn dispatch(
                 .cloned()
                 .unwrap_or_else(|| default_binding(button));
             let sensitivity = plan.thumbwheel_sensitivity;
-            let now = Instant::now();
             let wheels = accumulators.entry(key.to_owned()).or_default();
-            wheels.last_rotation = Some(now);
             let dir = if up { &mut wheels.up } else { &mut wheels.down };
             let magnitude = i32::from(rotation).abs();
-            match advance(dir, &action, magnitude, sensitivity, now) {
+            match advance(dir, &action, magnitude, sensitivity, Instant::now()) {
                 WheelOutput::Idle => {}
                 WheelOutput::Scroll(lines) => {
                     openlogi_inject::post_horizontal_scroll(lines);
@@ -466,12 +440,6 @@ fn dispatch(
             }
         }
     }
-}
-
-/// Whether a tap arriving at `now` is spill-over from a roll that ended at
-/// `last_rotation` rather than a deliberate tap. Pure given `now`.
-fn tap_is_roll_spillover(last_rotation: Option<Instant>, now: Instant) -> bool {
-    last_rotation.is_some_and(|rolled| now.saturating_duration_since(rolled) < TAP_ROLL_LOCKOUT)
 }
 
 /// Advance one direction's accumulator by `magnitude` rotation increments and
@@ -544,30 +512,6 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A wheel whose last rotation was `ago` before `now`.
-    fn rolled(now: Instant, ago: Duration) -> Option<Instant> {
-        now.checked_sub(ago)
-    }
-
-    #[test]
-    fn a_tap_trailing_a_roll_is_spillover() {
-        let now = Instant::now();
-        assert!(
-            tap_is_roll_spillover(rolled(now, TAP_ROLL_LOCKOUT / 2), now),
-            "the touch sensor flags the finger that just rolled the wheel"
-        );
-    }
-
-    #[test]
-    fn a_tap_on_a_settled_wheel_is_deliberate() {
-        let now = Instant::now();
-        assert!(!tap_is_roll_spillover(rolled(now, TAP_ROLL_LOCKOUT), now));
-        assert!(
-            !tap_is_roll_spillover(None, now),
-            "a wheel that never rolled cannot be spilling over"
-        );
-    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {

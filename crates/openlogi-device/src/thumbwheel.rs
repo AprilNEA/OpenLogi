@@ -45,6 +45,64 @@ const EV_PROXY: u8 = 0x04;
 /// `touch` bit in `thumbwheelEvent` byte 5.
 const EV_TOUCH: u8 = 0x02;
 
+/// Where a `thumbwheelEvent` sits in the life cycle of one roll
+/// (`thumbwheelEvent` byte 4).
+///
+/// This is what separates a deliberate tap from the tap the wheel's touch
+/// sensor flags for the finger that rolled it: every report from `Start`
+/// through `Stop` belongs to a roll, so a tap bit inside that span is an
+/// artifact of the same contact. Only [`RotationStatus::Inactive`] means the
+/// wheel is at rest and a tap is the user's own.
+///
+/// [`RotationStatus::Stop`] is why this field is read rather than inferred
+/// from the report's own rotation. Observed on an MX Master 4 (Bolt) with
+/// `examples/thumbwheel_trace`, one nudge of the wheel:
+///
+/// ```text
+/// rot=  -1  byte4=0x02  byte5=0x02  touch=true   → Active
+/// rot=   0  byte4=0x03  byte5=0x00  touch=false  → Stop
+/// ```
+///
+/// The release reports no rotation at all, so rotation alone cannot tell it
+/// from a tap on a settled wheel — and on a wheel that does support
+/// `single_tap` that release is exactly where the artifact lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationStatus {
+    /// No rotation — the wheel is at rest.
+    Inactive,
+    /// The first rotation report of a roll.
+    Start,
+    /// A subsequent rotation report.
+    Active,
+    /// The roll ended: released, no touch.
+    Stop,
+}
+
+impl RotationStatus {
+    /// Decode `thumbwheelEvent` byte 4. Values outside the four the spec
+    /// defines decode as [`RotationStatus::Inactive`] — a firmware that
+    /// reports something else has said nothing about a roll, and the caller
+    /// still has the report's own `rotation` to go on. Claiming a roll here
+    /// instead would let one unrecognised value make the tap permanently
+    /// undeliverable.
+    #[must_use]
+    fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::Start,
+            2 => Self::Active,
+            3 => Self::Stop,
+            _ => Self::Inactive,
+        }
+    }
+
+    /// Whether this report belongs to a roll — including its `Stop`, which
+    /// carries no rotation of its own but is still the roll's own contact.
+    #[must_use]
+    pub fn is_rolling(self) -> bool {
+        !matches!(self, Self::Inactive)
+    }
+}
+
 /// Characteristics + capabilities returned by `getThumbwheelInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbwheelInfo {
@@ -65,6 +123,8 @@ pub struct ThumbwheelEvent {
     /// Relative wheel rotation since the last report (signed, in `diverted_res`
     /// increments). `+` follows `default_dir` unless inverted at divert time.
     pub rotation: i16,
+    /// Where this report sits in the life cycle of a roll.
+    pub rotation_status: RotationStatus,
     /// A single-tap gesture fired with this report.
     pub single_tap: bool,
     /// The user is touching the wheel.
@@ -96,6 +156,7 @@ pub fn decode_event(
     let p = msg.extend_payload();
     Some(ThumbwheelEvent {
         rotation: i16::from_be_bytes([p[0], p[1]]),
+        rotation_status: RotationStatus::from_byte(p[4]),
         single_tap: p[5] & EV_SINGLE_TAP != 0,
         touch: p[5] & EV_TOUCH != 0,
         proxy: p[5] & EV_PROXY != 0,
@@ -191,16 +252,48 @@ mod tests {
     fn decodes_rotation_and_tap() {
         let mut p = [0u8; 16];
         p[0..2].copy_from_slice(&(-7i16).to_be_bytes());
+        p[4] = 2;
         p[5] = EV_SINGLE_TAP | EV_TOUCH;
         assert_eq!(
             decode_event(&event(0, 0, p), 2, 6),
             Some(ThumbwheelEvent {
                 rotation: -7,
+                rotation_status: RotationStatus::Active,
                 single_tap: true,
                 touch: true,
                 proxy: false,
             })
         );
+    }
+
+    #[test]
+    fn decodes_every_rotation_status() {
+        let status = |byte| {
+            let mut p = [0u8; 16];
+            p[4] = byte;
+            decode_event(&event(0, 0, p), 2, 6)
+                .expect("event")
+                .rotation_status
+        };
+        assert_eq!(status(0), RotationStatus::Inactive);
+        assert_eq!(status(1), RotationStatus::Start);
+        assert_eq!(status(2), RotationStatus::Active);
+        assert_eq!(status(3), RotationStatus::Stop);
+        assert_eq!(
+            status(0xff),
+            RotationStatus::Inactive,
+            "an unrecognised value must not make the tap permanently undeliverable"
+        );
+    }
+
+    /// The roll's own `Stop` reports no rotation — it is the release — so
+    /// rotation alone cannot tell a settled wheel from one that just stopped.
+    #[test]
+    fn a_stop_report_is_still_part_of_the_roll() {
+        assert!(RotationStatus::Stop.is_rolling());
+        assert!(RotationStatus::Start.is_rolling());
+        assert!(RotationStatus::Active.is_rolling());
+        assert!(!RotationStatus::Inactive.is_rolling());
     }
 
     #[test]

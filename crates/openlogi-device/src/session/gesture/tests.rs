@@ -527,9 +527,14 @@ fn a_dpi_button_re_presses_after_a_release() {
     );
 }
 
-fn thumb_event(rotation: i16, single_tap: bool) -> thumbwheel::ThumbwheelEvent {
+fn thumb_event(
+    rotation: i16,
+    rotation_status: thumbwheel::RotationStatus,
+    single_tap: bool,
+) -> thumbwheel::ThumbwheelEvent {
     thumbwheel::ThumbwheelEvent {
         rotation,
+        rotation_status,
         single_tap,
         touch: true,
         proxy: true,
@@ -542,16 +547,37 @@ fn thumb_event(rotation: i16, single_tap: bool) -> thumbwheel::ThumbwheelEvent {
 #[test]
 fn a_rolling_report_is_a_roll_even_when_it_flags_a_tap() {
     assert_eq!(
-        thumbwheel_input(thumb_event(-3, true)),
+        thumbwheel_input(thumb_event(-3, thumbwheel::RotationStatus::Active, true)),
         Some(CapturedInput::Scroll(-3))
     );
 }
 
+/// The roll's closing report: the finger lifts, so it carries no rotation of
+/// its own while the sensor flags the contact that just rolled the wheel. Only
+/// `rotation_status` separates it from a deliberate tap.
 #[test]
-fn a_still_report_with_a_tap_is_a_tap() {
+fn the_release_that_ends_a_roll_is_not_a_tap() {
     assert_eq!(
-        thumbwheel_input(thumb_event(0, true)),
+        thumbwheel_input(thumb_event(0, thumbwheel::RotationStatus::Stop, true)),
+        None
+    );
+}
+
+#[test]
+fn a_tap_on_a_settled_wheel_is_a_tap() {
+    assert_eq!(
+        thumbwheel_input(thumb_event(0, thumbwheel::RotationStatus::Inactive, true)),
         Some(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None))
+    );
+}
+
+/// A wheel whose firmware leaves byte 4 at zero still has its own rotation to
+/// go on, so the roll is recognised without the status field.
+#[test]
+fn rotation_alone_still_marks_a_roll() {
+    assert_eq!(
+        thumbwheel_input(thumb_event(4, thumbwheel::RotationStatus::Inactive, true)),
+        Some(CapturedInput::Scroll(4))
     );
 }
 
@@ -559,5 +585,8 @@ fn a_still_report_with_a_tap_is_a_tap() {
 /// thumb rests near it.
 #[test]
 fn contact_without_rotation_or_a_tap_carries_no_input() {
-    assert_eq!(thumbwheel_input(thumb_event(0, false)), None);
+    assert_eq!(
+        thumbwheel_input(thumb_event(0, thumbwheel::RotationStatus::Inactive, false)),
+        None
+    );
 }
