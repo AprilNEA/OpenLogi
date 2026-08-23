@@ -2,6 +2,7 @@ use super::*;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
@@ -357,6 +358,62 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn extended_dpi_retries_a_transient_firmware_rejection() -> Result<(), WriteError> {
+    EXTENDED_DPI_TRANSIENT_WRITES.store(0, Ordering::SeqCst);
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(extended_dpi_transient_write_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(1200)).await?;
+
+    let write_count = handle
+        .written_reports()
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
+        .count();
+    assert_eq!(write_count, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_dpi_stops_after_the_bounded_transient_retries() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_rejected_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    let error = set_dpi_on(&shared, Dpi::new(1200))
+        .await
+        .expect_err("a persistently rejected write must still fail");
+    assert!(matches!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::WriteDpi,
+            kind: HidppFeatureErrorKind::LogitechInternal,
+            ..
+        }
+    ));
+    let write_count = handle
+        .written_reports()
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
+        .count();
+    assert_eq!(write_count, 3);
+}
+
 #[test]
 fn zone_presence_bits_decode_lsb_first_from_the_page_base() {
     let mut bitfield = [0u8; 14];
@@ -552,6 +609,23 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     let payload_len = response.len() - 4;
     response[4..].copy_from_slice(&payload[..payload_len]);
     Some(response)
+}
+
+static EXTENDED_DPI_TRANSIENT_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+fn extended_dpi_transient_write_response(request: &[u8]) -> Option<Vec<u8>> {
+    let is_set = request.len() == 20 && request[2] == 0x05 && request[3] >> 4 == 0x06;
+    if is_set && EXTENDED_DPI_TRANSIENT_WRITES.fetch_add(1, Ordering::SeqCst) == 0 {
+        return Some(feature_error(request, 0x05));
+    }
+    extended_dpi_scripted_response(request)
+}
+
+fn extended_dpi_rejected_response(request: &[u8]) -> Option<Vec<u8>> {
+    let is_set = request.len() == 20 && request[2] == 0x05 && request[3] >> 4 == 0x06;
+    is_set
+        .then(|| feature_error(request, 0x05))
+        .or_else(|| extended_dpi_scripted_response(request))
 }
 
 /// A keyboard that exposes `0x8081 PerKeyLighting2` and neither `0x8070`

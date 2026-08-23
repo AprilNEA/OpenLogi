@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use hidpp::{
     device::Device,
@@ -26,6 +26,16 @@ pub use openlogi_core::hid::dpi::{Dpi, DpiCapabilities, DpiInfo};
 /// per device, and every Logitech pointing device reports its pointer sensor
 /// first.
 const SENSOR: u8 = 0;
+
+/// Brief pause before retrying a valid DPI write that the firmware rejected as
+/// transiently busy/internal. The PRO X SUPERLIGHT 2 DEX has been observed to
+/// return either response while processing closely spaced host writes, then
+/// accept the identical request immediately afterward.
+const TRANSIENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// One initial write plus this many retries keeps the live control responsive
+/// without turning a genuinely wedged device into a long-running IPC call.
+const TRANSIENT_WRITE_RETRIES: u8 = 2;
 
 /// Whichever DPI feature a device actually exposes.
 ///
@@ -121,21 +131,31 @@ impl DpiFeature {
                 // not asked to change. Writing a bare `lod` would silently
                 // retune the sensor's lift-off height.
                 let current = feature.get_sensor_dpi_parameters(SENSOR).await?;
-                feature
-                    .set_sensor_dpi_parameters(
-                        SENSOR,
-                        SetDpiParameters {
-                            dpi_x: dpi,
-                            // The spec has the host send 0 for dpiY when the
-                            // sensor has no independent Y axis, and reports 0
-                            // on read in exactly that case. When it does have
-                            // one, keep the axes locked together — the UI
-                            // exposes a single DPI.
-                            dpi_y: if current.dpi_y == 0 { 0 } else { dpi },
-                            lod: current.lod,
-                        },
-                    )
-                    .await
+                let params = SetDpiParameters {
+                    dpi_x: dpi,
+                    // The spec has the host send 0 for dpiY when the sensor
+                    // has no independent Y axis, and reports 0 on read in
+                    // exactly that case. When it does have one, keep the axes
+                    // locked together — the UI exposes a single DPI.
+                    dpi_y: if current.dpi_y == 0 { 0 } else { dpi },
+                    lod: current.lod,
+                };
+                let mut retries = 0;
+                loop {
+                    let result = feature.set_sensor_dpi_parameters(SENSOR, params).await;
+                    let transient = matches!(
+                        &result,
+                        Err(Hidpp20Error::Feature(
+                            ErrorType::Busy | ErrorType::LogitechInternal
+                        ))
+                    );
+                    if !transient || retries >= TRANSIENT_WRITE_RETRIES {
+                        break result;
+                    }
+                    retries += 1;
+                    debug!(retries, %dpi, "retrying transient extended-DPI write");
+                    tokio::time::sleep(TRANSIENT_WRITE_RETRY_DELAY).await;
+                }
             }
         }
     }
