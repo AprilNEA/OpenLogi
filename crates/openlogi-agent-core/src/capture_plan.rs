@@ -39,6 +39,15 @@ pub struct DeviceCapturePlan {
     /// Whether any thumbwheel binding leaves its default. Combined with the
     /// sensitivity to decide thumb-wheel diversion.
     pub thumbwheel_bindings_nondefault: bool,
+    /// Whether the thumb-wheel *tap* is explicitly bound for this device/app.
+    ///
+    /// Presence in the stored effective bindings, never equality against
+    /// `default_binding`: the tap's default is `AppExpose`, so a user who binds
+    /// `Single(AppExpose)` on purpose is indistinguishable from an unset tap
+    /// under a value comparison. Diversion can stay value-based (it only has to
+    /// be conservative), but tap *delivery* must not drop an explicitly bound
+    /// tap that happens to match the seed.
+    pub thumbwheel_tap_bound: bool,
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
@@ -92,6 +101,9 @@ pub fn plan_for_device(
             })
         })
         .collect();
+    let thumbwheel_tap_bound = config
+        .effective_bindings(config_key, app)
+        .contains_key(&ButtonId::Thumbwheel);
     let thumbwheel_bindings_nondefault = [
         ButtonId::Thumbwheel,
         ButtonId::ThumbwheelScrollUp,
@@ -110,6 +122,7 @@ pub fn plan_for_device(
         gesture_bindings,
         divert_buttons,
         thumbwheel_bindings_nondefault,
+        thumbwheel_tap_bound,
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
         rearm_generation,
     }
@@ -127,6 +140,42 @@ mod tests {
             receiver_uid: "cafe".into(),
             slot: 2,
         }
+    }
+
+    #[test]
+    fn an_explicit_tap_binding_equal_to_the_default_still_counts_as_bound() {
+        // The thumb wheel's seeded default is AppExpose, so a user who binds
+        // AppExpose on purpose produces a binding that is byte-identical to the
+        // seed. Value comparison against `default_binding` cannot tell the two
+        // apart and silently drops the explicitly bound tap; presence in the
+        // stored effective bindings can.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Thumbwheel,
+            Binding::Single(default_binding(ButtonId::Thumbwheel)),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+
+        assert!(
+            plan.thumbwheel_tap_bound,
+            "an explicit tap binding must be bound even when it equals the seed"
+        );
+        assert!(
+            !plan.thumbwheel_bindings_nondefault,
+            "value comparison cannot see this binding, which is exactly the bug"
+        );
+    }
+
+    #[test]
+    fn an_unset_tap_is_not_bound() {
+        let cfg = Config::default();
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            !plan.thumbwheel_tap_bound,
+            "an untouched thumb wheel must not report an explicit tap binding"
+        );
     }
 
     #[test]

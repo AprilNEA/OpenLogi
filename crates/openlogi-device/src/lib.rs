@@ -48,8 +48,8 @@ pub use pairing::{
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
 pub use session::gesture::{
-    CaptureChannel, CaptureStop, CapturedInput, GestureError, run_capture_session,
-    run_capture_session_with_stop_reason,
+    CaptureChannel, CaptureStop, CapturedInput, GestureError, ThumbwheelCaptureMode,
+    run_capture_session, run_capture_session_with_stop_reason,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
