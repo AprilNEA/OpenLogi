@@ -43,9 +43,32 @@ const PERIOD: Duration = Duration::from_secs(10);
 /// buy nothing.
 type Fingerprint = (u64, SystemTime);
 
-fn fingerprint(path: &Path) -> Option<Fingerprint> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.len(), meta.modified().ok()?))
+/// What one stat of our own path saw.
+///
+/// Absence and failure are different answers, and only one of them may condemn
+/// the agent: a stat that fails for any other reason — a permission change on a
+/// parent directory, an I/O error, a filesystem that cannot report a
+/// modification time — says nothing about whether the app is still installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sighting {
+    /// The file is there, with this fingerprint.
+    Seen(Fingerprint),
+    /// The path confirmably does not exist.
+    Absent,
+    /// The stat did not answer the question.
+    Unknown,
+}
+
+fn sight(path: &Path) -> Sighting {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Sighting::Absent,
+        Err(_) => return Sighting::Unknown,
+    };
+    match meta.modified() {
+        Ok(modified) => Sighting::Seen((meta.len(), modified)),
+        Err(_) => Sighting::Unknown,
+    }
 }
 
 /// How many consecutive ticks with nothing at our path mean the app is gone
@@ -95,16 +118,22 @@ impl Watch {
     ///
     /// Absence is the ambiguous observation — mid-replace the old inode is
     /// unlinked before the new file lands — so it only becomes a verdict after
-    /// [`MISSING_TICKS_UNTIL_GONE`] ticks of it.
-    fn tick(&mut self, baseline: Fingerprint, now: Option<Fingerprint>) -> Tick {
-        let Some(now) = now else {
-            self.pending = None;
-            self.missing += 1;
-            return if self.condemn_on_absence && self.missing >= MISSING_TICKS_UNTIL_GONE {
-                Tick::Uninstalled
-            } else {
-                Tick::Watch
-            };
+    /// [`MISSING_TICKS_UNTIL_GONE`] ticks of it. A [`Sighting::Unknown`] tick
+    /// carries no information at all and so changes nothing: a stat that fails
+    /// for a reason other than absence must never condemn a live install.
+    fn tick(&mut self, baseline: Fingerprint, now: Sighting) -> Tick {
+        let now = match now {
+            Sighting::Seen(now) => now,
+            Sighting::Unknown => return Tick::Watch,
+            Sighting::Absent => {
+                self.pending = None;
+                self.missing += 1;
+                return if self.condemn_on_absence && self.missing >= MISSING_TICKS_UNTIL_GONE {
+                    Tick::Uninstalled
+                } else {
+                    Tick::Watch
+                };
+            }
         };
         self.missing = 0;
         if now == baseline {
@@ -143,7 +172,7 @@ pub fn spawn() -> mpsc::UnboundedReceiver<()> {
         warn!("could not resolve own executable — binary-update watch disabled");
         return uninstalled_rx;
     };
-    let Some(baseline) = fingerprint(&path) else {
+    let Sighting::Seen(baseline) = sight(&path) else {
         warn!(
             path = %path.display(),
             "could not stat own executable — binary-update watch disabled"
@@ -158,7 +187,7 @@ pub fn spawn() -> mpsc::UnboundedReceiver<()> {
         .spawn(move || {
             loop {
                 std::thread::sleep(PERIOD);
-                match watch.tick(baseline, fingerprint(&path)) {
+                match watch.tick(baseline, sight(&path)) {
                     Tick::Watch => {}
                     Tick::Restart => {
                         restart(&path);
@@ -301,11 +330,15 @@ fn restart(path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fingerprint, MISSING_TICKS_UNTIL_GONE, Tick, Watch, is_translocated};
+    use super::{Fingerprint, MISSING_TICKS_UNTIL_GONE, Sighting, Tick, Watch, is_translocated};
     use std::time::{Duration, SystemTime};
 
     fn fp(len: u64, secs: u64) -> Fingerprint {
         (len, SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    fn seen(len: u64, secs: u64) -> Sighting {
+        Sighting::Seen(fp(len, secs))
     }
 
     #[test]
@@ -314,9 +347,9 @@ mod tests {
         let new = fp(200, 2);
         let mut watch = Watch::new(true);
         // First differing sighting arms but does not restart…
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Watch);
         // …the same fingerprint on the next tick restarts.
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Restart);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Restart);
     }
 
     #[test]
@@ -324,19 +357,19 @@ mod tests {
         let baseline = fp(100, 1);
         let mut watch = Watch::new(true);
         // A still-growing file never matches its previous sighting.
-        assert_eq!(watch.tick(baseline, Some(fp(150, 2))), Tick::Watch);
-        assert_eq!(watch.tick(baseline, Some(fp(200, 3))), Tick::Watch);
+        assert_eq!(watch.tick(baseline, seen(150, 2)), Tick::Watch);
+        assert_eq!(watch.tick(baseline, seen(200, 3)), Tick::Watch);
     }
 
     #[test]
     fn a_reverted_file_disarms() {
         let baseline = fp(100, 1);
         let mut watch = Watch::new(true);
-        assert_eq!(watch.tick(baseline, Some(fp(200, 2))), Tick::Watch);
+        assert_eq!(watch.tick(baseline, seen(200, 2)), Tick::Watch);
         // Back at the baseline (e.g. a rollback): disarm, so a later sighting
         // of the same candidate has to settle again.
-        assert_eq!(watch.tick(baseline, Some(baseline)), Tick::Watch);
-        assert_eq!(watch.tick(baseline, Some(fp(200, 2))), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(baseline)), Tick::Watch);
+        assert_eq!(watch.tick(baseline, seen(200, 2)), Tick::Watch);
     }
 
     #[test]
@@ -347,14 +380,14 @@ mod tests {
         // The unlink half of a replace, for every tick but the last one that
         // would condemn it…
         for _ in 1..MISSING_TICKS_UNTIL_GONE {
-            assert_eq!(watch.tick(baseline, None), Tick::Watch);
+            assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
         }
         // …then the new file lands and settles: a restart, and the absence
         // count is forgotten.
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Watch);
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Restart);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Restart);
         for _ in 1..MISSING_TICKS_UNTIL_GONE {
-            assert_eq!(watch.tick(baseline, None), Tick::Watch);
+            assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
         }
     }
 
@@ -363,9 +396,9 @@ mod tests {
         let baseline = fp(100, 1);
         let mut watch = Watch::new(true);
         for _ in 1..MISSING_TICKS_UNTIL_GONE {
-            assert_eq!(watch.tick(baseline, None), Tick::Watch);
+            assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
         }
-        assert_eq!(watch.tick(baseline, None), Tick::Uninstalled);
+        assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Uninstalled);
     }
 
     #[test]
@@ -373,12 +406,29 @@ mod tests {
         let baseline = fp(100, 1);
         let new = fp(200, 2);
         let mut watch = Watch::new(true);
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Watch);
-        assert_eq!(watch.tick(baseline, None), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
         // The candidate has to settle again rather than restarting off a
         // sighting from before the gap.
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Watch);
-        assert_eq!(watch.tick(baseline, Some(new)), Tick::Restart);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Seen(new)), Tick::Restart);
+    }
+
+    #[test]
+    fn a_stat_that_fails_for_any_other_reason_never_condemns() {
+        let baseline = fp(100, 1);
+        let mut watch = Watch::new(true);
+        // Not absence: a permission change on a parent, an I/O error, a
+        // filesystem with no mtime. However long it lasts, the agent stays.
+        for _ in 0..MISSING_TICKS_UNTIL_GONE * 3 {
+            assert_eq!(watch.tick(baseline, Sighting::Unknown), Tick::Watch);
+        }
+        // And it does not erase what absence had already established.
+        for _ in 1..MISSING_TICKS_UNTIL_GONE {
+            assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
+        }
+        assert_eq!(watch.tick(baseline, Sighting::Unknown), Tick::Watch);
+        assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Uninstalled);
     }
 
     #[test]
@@ -386,7 +436,7 @@ mod tests {
         let baseline = fp(100, 1);
         let mut watch = Watch::new(false);
         for _ in 0..MISSING_TICKS_UNTIL_GONE * 3 {
-            assert_eq!(watch.tick(baseline, None), Tick::Watch);
+            assert_eq!(watch.tick(baseline, Sighting::Absent), Tick::Watch);
         }
     }
 
