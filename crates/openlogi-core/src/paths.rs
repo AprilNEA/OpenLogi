@@ -7,6 +7,7 @@
 //! |--------|---------------------|-------------------------------|
 //! | config | `$XDG_CONFIG_HOME`  | `~/.config/openlogi`          |
 //! | data   | `$XDG_DATA_HOME`    | `~/.local/share/openlogi`     |
+//! | state  | `$XDG_STATE_HOME`   | `~/.local/state/openlogi`     |
 //!
 //! On Windows `$HOME` falls back to `%USERPROFILE%`, so paths resolve to
 //! `%USERPROFILE%\.config\openlogi` etc.
@@ -142,6 +143,18 @@ pub fn config_path() -> Result<PathBuf, PathsError> {
 /// Local macOS dev builds use `openlogi-dev` instead.
 pub fn data_dir() -> Result<PathBuf, PathsError> {
     Ok(xdg()?.data_dir().join(app_dir()))
+}
+
+/// Directory for logs and other rebuildable process state — the agent's
+/// rotated log files live here.
+///
+/// `$XDG_STATE_HOME/openlogi`, default `~/.local/state/openlogi`.
+/// Local macOS dev builds use `openlogi-dev` instead.
+pub fn state_dir() -> Result<PathBuf, PathsError> {
+    let xdg = xdg()?;
+    Ok(xdg
+        .state_dir()
+        .map_or_else(|| xdg.data_dir().join(app_dir()), |dir| dir.join(app_dir())))
 }
 
 /// Directory for runtime sockets — the background agent's IPC endpoint.

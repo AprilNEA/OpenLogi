@@ -16,6 +16,7 @@
 )]
 
 mod launch_agent;
+mod logging;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "windows")]
@@ -47,12 +48,11 @@ use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::server::AgentServer;
 
 fn main() {
-    init_tracing();
+    logging::init();
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and
     // the IPC socket, so a second agent must never start — launchd's KeepAlive
@@ -515,13 +515,4 @@ async fn run(
             else => break,
         }
     }
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
 }
