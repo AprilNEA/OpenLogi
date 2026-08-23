@@ -315,6 +315,82 @@ pub enum HookError {
     WindowsHook(String),
 }
 
+/// Everything one operating system has to provide for [`Hook`] to work.
+///
+/// Exactly one backend is compiled in — see the `Backend` alias below — so this
+/// is a compile-time contract, not runtime polymorphism. It earns its place by
+/// keeping the crate's per-OS `cfg` down to that single site, and by making the
+/// platform surface a list the compiler checks instead of a naming convention.
+/// Everything only some platforms can answer carries its do-nothing default
+/// here, so a backend implements exactly what it has.
+trait HookBackend {
+    /// Whatever the platform holds on to while the hook runs; handed back to
+    /// [`Self::stop`] to tear it down.
+    type Running;
+
+    /// Install the hook. [`Hook::start`] documents the contract owed to callers.
+    fn start(
+        cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
+    ) -> Result<Self::Running, HookError>;
+
+    /// Stop the hook and join its threads.
+    fn stop(running: Self::Running);
+
+    /// See [`Hook::has_accessibility`]. Platforms that gate the hook below the
+    /// privacy layer answer `true`.
+    fn has_accessibility() -> bool {
+        true
+    }
+
+    /// See [`Hook::prompt_accessibility`]. Nothing to prompt for by default.
+    fn prompt_accessibility() {}
+
+    /// See [`Hook::list_event_taps`]. Empty where the OS keeps no tap registry.
+    fn list_event_taps() -> Vec<EventTapInfo> {
+        Vec::new()
+    }
+
+    /// See [`crate::frontmost_bundle_id`].
+    fn frontmost_app() -> Option<String> {
+        None
+    }
+
+    /// See [`crate::cursor_position`].
+    fn cursor_position() -> Option<CursorPosition> {
+        None
+    }
+}
+
+/// The backend for a platform with no hook: every default, and a
+/// [`HookBackend::start`] that can only fail. Compiled only where it is the
+/// one selected below, so it never sits unused in a real build.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+struct Unsupported;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+impl HookBackend for Unsupported {
+    /// Uninhabited, so [`Hook`] can never hold a running hook here.
+    type Running = std::convert::Infallible;
+
+    fn start(
+        _cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
+    ) -> Result<Self::Running, HookError> {
+        Err(HookError::Unsupported)
+    }
+
+    fn stop(running: Self::Running) {
+        match running {}
+    }
+}
+
+// The backend this build talks to — the crate's one platform switch.
+cfg_select! {
+    target_os = "macos" => { type Backend = macos::Backend; }
+    target_os = "linux" => { type Backend = linux::Backend; }
+    target_os = "windows" => { type Backend = windows::Backend; }
+    _ => { type Backend = Unsupported; }
+}
+
 /// A running OS-level mouse hook. Call [`Hook::stop`] to tear down.
 ///
 /// On macOS a dedicated thread runs a `CFRunLoop` draining a `CGEventTap`.
@@ -324,16 +400,7 @@ pub enum HookError {
 /// Call `stop` (or let the value drop) to shut down all threads and release
 /// grabbed devices.
 pub struct Hook {
-    #[cfg(target_os = "macos")]
-    inner: Option<macos::HookInner>,
-    #[cfg(target_os = "linux")]
-    inner: Option<linux::HookInner>,
-    #[cfg(target_os = "windows")]
-    inner: Option<windows::HookInner>,
-    /// Makes `Hook` uninhabited on unsupported targets so [`Hook::start`] can
-    /// only ever return `Err` there and the type can never be constructed.
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    never: std::convert::Infallible,
+    inner: Option<<Backend as HookBackend>::Running>,
 }
 
 impl Drop for Hook {
@@ -358,21 +425,7 @@ impl Hook {
     pub fn start(
         cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
-        cfg_select! {
-            target_os = "macos" => {
-                macos::start(cb).map(|inner| Self { inner: Some(inner) })
-            }
-            target_os = "linux" => {
-                linux::start(cb).map(|inner| Self { inner: Some(inner) })
-            }
-            target_os = "windows" => {
-                windows::start(cb).map(|inner| Self { inner: Some(inner) })
-            }
-            _ => {
-                let _ = cb;
-                Err(HookError::Unsupported)
-            }
-        }
+        Backend::start(cb).map(|inner| Self { inner: Some(inner) })
     }
 
     /// Stop the hook and release OS resources.
@@ -388,25 +441,8 @@ impl Hook {
     /// first call takes `inner`, so the `Drop` after an explicit [`Self::stop`]
     /// is a no-op.
     fn shutdown(&mut self) {
-        cfg_select! {
-            target_os = "macos" => {
-                if let Some(inner) = self.inner.take() {
-                    macos::stop(inner);
-                }
-            }
-            target_os = "linux" => {
-                if let Some(inner) = self.inner.take() {
-                    linux::stop(inner);
-                }
-            }
-            target_os = "windows" => {
-                if let Some(inner) = self.inner.take() {
-                    windows::stop(inner);
-                }
-            }
-            _ => {
-                // Unreachable: `never: Infallible` makes `Hook` uninhabited here.
-            }
+        if let Some(inner) = self.inner.take() {
+            Backend::stop(inner);
         }
     }
 
@@ -424,10 +460,7 @@ impl Hook {
     /// Windows low-level hook needs no separate privacy grant).
     #[must_use]
     pub fn has_accessibility() -> bool {
-        cfg_select! {
-            target_os = "macos" => { macos::has_accessibility() }
-            _ => { true }
-        }
+        Backend::has_accessibility()
     }
 
     /// Show the macOS Accessibility permission dialog and register this
@@ -440,10 +473,7 @@ impl Hook {
     /// its side effect; the resulting trust state is observed separately via
     /// [`Self::has_accessibility`]. No-op on non-macOS.
     pub fn prompt_accessibility() {
-        cfg_select! {
-            target_os = "macos" => { macos::prompt_accessibility(); }
-            _ => {}
-        }
+        Backend::prompt_accessibility();
     }
 
     /// Enumerate every event tap currently installed in this login session.
@@ -458,10 +488,7 @@ impl Hook {
     /// global tap registry.
     #[must_use]
     pub fn list_event_taps() -> Vec<EventTapInfo> {
-        cfg_select! {
-            target_os = "macos" => { macos::list_event_taps() }
-            _ => { Vec::new() }
-        }
+        Backend::list_event_taps()
     }
 }
 
@@ -479,12 +506,7 @@ impl Hook {
 /// `openlogi-desktop::app_watcher`.
 #[must_use]
 pub fn frontmost_bundle_id() -> Option<String> {
-    cfg_select! {
-        target_os = "macos" => { macos::frontmost_bundle_id() }
-        target_os = "linux" => { linux::frontmost_bundle_id() }
-        target_os = "windows" => { windows::frontmost_process_path() }
-        _ => { None }
-    }
+    Backend::frontmost_app()
 }
 
 /// Return the current global cursor position without installing an input hook.
@@ -493,12 +515,7 @@ pub fn frontmost_bundle_id() -> Option<String> {
 /// compositor deliberately does not expose global pointer coordinates.
 #[must_use]
 pub fn cursor_position() -> Option<CursorPosition> {
-    cfg_select! {
-        target_os = "macos" => { macos::cursor_position() }
-        target_os = "linux" => { linux::cursor_position() }
-        target_os = "windows" => { windows::cursor_position() }
-        _ => { None }
-    }
+    Backend::cursor_position()
 }
 
 #[cfg(target_os = "macos")]
