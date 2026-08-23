@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-08-23
+
+### Fixed
+
+- *(ci)* build both macOS legs with an Icon Composer-capable Xcode ([#815](https://github.com/AprilNEA/OpenLogi/pull/815))
+- *(agent)* make macOS permission failures diagnosable ([#817](https://github.com/AprilNEA/OpenLogi/pull/817))
+
 ## [0.7.6] - 2026-08-23
 
 ### Added
