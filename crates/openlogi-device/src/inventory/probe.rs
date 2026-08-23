@@ -170,9 +170,20 @@ async fn probe_unifying_receiver(
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
 ) -> NodeProbe {
+    // Pairing count is the health gate for this path: without it the result is
+    // settled as a failed probe regardless of any later arrival events. Check
+    // it first and stop immediately on failure instead of spending two more
+    // request timeouts enabling notifications and triggering arrivals on a
+    // channel that has already stopped delivering receiver replies.
+    let pairing_count = match unifying.count_pairings().await {
+        Ok(count) => count,
+        Err(error) => {
+            debug!(?error, "receiver pairing-count read failed");
+            return NodeProbe::failed();
+        }
+    };
+    debug!(pairing_count, "receiver reports pairing count");
     let unique_id = unifying.get_unique_id().await.ok();
-    let pairing_count = unifying.count_pairings().await.ok();
-    debug!(?pairing_count, "receiver reports pairing count");
 
     // Trigger device-arrival events and collect one event per online device.
     // Each event carries the slot index, kind, wpid, and online flag — enough
@@ -229,11 +240,9 @@ async fn probe_unifying_receiver(
 
     let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().flatten().unzip();
 
-    if let Some(count) = pairing_count
-        && paired.len() != usize::from(count)
-    {
+    if paired.len() != usize::from(pairing_count) {
         debug!(
-            expected = count,
+            expected = pairing_count,
             found = paired.len(),
             "online devices differ from pairing count; offline devices not yet surfaced for Unifying"
         );
@@ -249,8 +258,8 @@ async fn probe_unifying_receiver(
     // devices may appear after a late arrival drain. Report that separately as
     // `complete = false`; the unchanged-inventory fallback stops expected
     // offline Unifying shortfalls after they stabilize.
-    let healthy = pairing_count.is_some();
-    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
+    let healthy = true;
+    let complete = paired.len() == usize::from(pairing_count);
 
     NodeProbe {
         inventory: Some(DeviceInventory {
