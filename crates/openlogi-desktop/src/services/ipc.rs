@@ -20,6 +20,7 @@
 //! forever. A dead agent is noticed the moment the socket closes; a *hung* one
 //! is noticed when its hold window passes without an answer.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -187,13 +188,17 @@ async fn observe_loop(
     // every disconnect: the replacement agent numbers its own generations.
     let mut seen: Generation = 0;
     let mut inflight: Option<ObserveFuture> = None;
+    let mut dpi_write: Option<DpiWriteFuture> = None;
+    let mut queued_dpi = PendingDpiWrites::default();
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
         // Taken for the duration of the select so the completed arm can consume
         // it while the others hand it back untouched.
         let mut pending = inflight.take();
+        let mut pending_dpi_write = dpi_write.take();
         let woken = tokio::select! {
             observed = maybe(pending.as_mut()) => Woken::Observed(observed),
+            result = maybe(pending_dpi_write.as_mut()) => Woken::DpiWritten(result),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
             _ = retry.tick(), if pending.is_none() => Woken::Reconnect,
         };
@@ -211,6 +216,7 @@ async fn observe_loop(
                 if let Some(client) = client.as_ref() {
                     inflight = Some(observe(client, seen));
                 }
+                dpi_write = pending_dpi_write;
             }
             // The connection dropped (agent self-exec on update, or a crash).
             // Reconnecting re-reads the whole state, so nothing is lost.
@@ -218,26 +224,54 @@ async fn observe_loop(
                 client = None;
                 seen = 0;
                 connected_since = None;
+                dpi_write = pending_dpi_write;
             }
             Woken::Command(None) => break, // GUI dropped the sender → shut down
+            Woken::Command(Some(Command::SetDpi(route, dpi))) => {
+                inflight = pending;
+                dpi_write = pending_dpi_write;
+                queued_dpi.push(route, dpi);
+            }
             Woken::Command(Some(cmd)) => {
                 inflight = pending;
+                dpi_write = pending_dpi_write;
                 if handle(&mut client, update_tx, cmd).await.is_err() {
                     client = None;
                     seen = 0;
                     connected_since = None;
                 }
             }
-            Woken::Reconnect => match ensure(&mut client).await {
-                Ok(client) => inflight = Some(observe(client, seen)),
-                Err(ConnectFailure::Unreachable) => {}
-                Err(ConnectFailure::NewerAgent) => {
-                    if !notified_outdated {
-                        notified_outdated = true;
-                        let _ = update_tx.send(GuiUpdate::OutdatedGui);
+            Woken::DpiWritten(result) => {
+                inflight = pending;
+                if result.is_err() {
+                    client = None;
+                    seen = 0;
+                    connected_since = None;
+                    // Match the existing fire-and-forget semantics: a transport
+                    // failure drops writes that never reached the agent rather
+                    // than replaying stale pointer speeds after reconnect.
+                    queued_dpi.clear();
+                }
+            }
+            Woken::Reconnect => {
+                dpi_write = pending_dpi_write;
+                match ensure(&mut client).await {
+                    Ok(client) => inflight = Some(observe(client, seen)),
+                    Err(ConnectFailure::Unreachable) => {}
+                    Err(ConnectFailure::NewerAgent) => {
+                        notify_outdated(update_tx, &mut notified_outdated);
                     }
                 }
-            },
+            }
+        }
+        if dpi_write.is_none() {
+            match start_next_dpi_write(&mut client, &mut queued_dpi).await {
+                Ok(next) => dpi_write = next,
+                Err(ConnectFailure::Unreachable) => {}
+                Err(ConnectFailure::NewerAgent) => {
+                    notify_outdated(update_tx, &mut notified_outdated);
+                }
+            }
         }
         if client.is_none() {
             let down_since = connected_since.unwrap_or(started);
@@ -260,6 +294,8 @@ enum Woken {
     Observed(Result<Observation, ()>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
+    /// The one DPI write allowed in flight at a time completed.
+    DpiWritten(Result<(), ()>),
     /// Time to try connecting again.
     Reconnect,
 }
@@ -268,6 +304,35 @@ enum Woken {
 /// owns a clone of the client so the loop can still replace its own `client`
 /// while the poll is outstanding.
 type ObserveFuture = Pin<Box<dyn Future<Output = Result<Observation, ()>> + Send>>;
+
+/// An in-flight DPI write. Keeping it outside [`handle`] lets the command loop
+/// continue receiving newer slider values while the receiver acknowledges the
+/// current one.
+type DpiWriteFuture = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
+
+#[derive(Default)]
+struct PendingDpiWrites(VecDeque<(DeviceRoute, Dpi)>);
+
+impl PendingDpiWrites {
+    /// Keep only the newest not-yet-started value for each device. Different
+    /// devices retain FIFO order so switching the carousel cannot discard a
+    /// pending write for the device the user just left.
+    fn push(&mut self, route: DeviceRoute, dpi: Dpi) {
+        if let Some((_, pending)) = self.0.iter_mut().find(|(candidate, _)| *candidate == route) {
+            *pending = dpi;
+        } else {
+            self.0.push_back((route, dpi));
+        }
+    }
+
+    fn pop(&mut self) -> Option<(DeviceRoute, Dpi)> {
+        self.0.pop_front()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
 
 /// Ask for the next state newer than `seen`.
 fn observe(client: &AgentClient, seen: Generation) -> ObserveFuture {
@@ -279,6 +344,34 @@ fn observe(client: &AgentClient, seen: Generation) -> ObserveFuture {
             debug!(%error, "observe failed — reconnecting");
         })
     })
+}
+
+fn write_dpi(client: &AgentClient, route: DeviceRoute, dpi: Dpi) -> DpiWriteFuture {
+    let client = client.clone();
+    Box::pin(async move { log_apply(client.set_dpi(context::current(), route, dpi).await) })
+}
+
+async fn start_next_dpi_write(
+    client: &mut Option<AgentClient>,
+    queued: &mut PendingDpiWrites,
+) -> Result<Option<DpiWriteFuture>, ConnectFailure> {
+    let Some((route, dpi)) = queued.pop() else {
+        return Ok(None);
+    };
+    match ensure(client).await {
+        Ok(client) => Ok(Some(write_dpi(client, route, dpi))),
+        Err(error) => {
+            queued.clear();
+            Err(error)
+        }
+    }
+}
+
+fn notify_outdated(update_tx: &mpsc::UnboundedSender<GuiUpdate>, notified: &mut bool) {
+    if !*notified {
+        *notified = true;
+        let _ = update_tx.send(GuiUpdate::OutdatedGui);
+    }
 }
 
 /// Await a future that may not exist, never resolving when there is none. The
@@ -673,6 +766,28 @@ mod tests {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[test]
+    fn rapid_dpi_writes_keep_only_the_newest_value_per_device() {
+        let first = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc09b,
+        };
+        let second = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc09c,
+        };
+        let mut pending = PendingDpiWrites::default();
+
+        pending.push(first.clone(), Dpi::new(800));
+        pending.push(first.clone(), Dpi::new(1_600));
+        pending.push(second.clone(), Dpi::new(3_200));
+        pending.push(first.clone(), Dpi::new(2_400));
+
+        assert_eq!(pending.pop(), Some((first, Dpi::new(2_400))));
+        assert_eq!(pending.pop(), Some((second, Dpi::new(3_200))));
+        assert_eq!(pending.pop(), None);
     }
 
     #[cfg(target_os = "macos")]

@@ -97,6 +97,33 @@ fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     }
 }
 
+#[test]
+fn dpi_apply_is_queued_before_the_config_reload() {
+    let inventory = direct_inventory([1, 2, 3, 4]);
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::default(),
+        &[inventory],
+        &[],
+        &AssetResolver::new(),
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    state.commit_dpi(Dpi::new(2_400));
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::SetDpi(_, dpi)) if dpi == Dpi::new(2_400)
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+    assert!(receiver.try_recv().is_err());
+}
+
 fn superseded_litra_light() -> StandaloneDevice {
     StandaloneDevice {
         address: RawDeviceAddress {
