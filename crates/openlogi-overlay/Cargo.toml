@@ -23,7 +23,7 @@ anyhow = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 rust-i18n = "4"
-succession = "0.1"
+succession = "0.2"
 tarpc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

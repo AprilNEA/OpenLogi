@@ -35,7 +35,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 opener = { workspace = true }
-succession = { version = "0.1", features = ["supervision", "eviction"] }
+succession = { version = "0.2", features = ["supervision", "eviction"] }
 tracing-appender = "0.2.5"
 
 # Held at the version Cargo.lock already has for gpui's own build-dependency;

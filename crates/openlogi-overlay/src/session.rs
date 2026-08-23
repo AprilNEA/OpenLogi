@@ -106,17 +106,17 @@ pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
 
 pub(crate) fn claim_the_role() -> Result<Tenancy> {
     let directory = openlogi_core::paths::config_dir().context("resolving the config directory")?;
-    let tenancy = Role::new(directory, "overlay")
-        .claim()
-        .context("Actions Ring overlay single-instance check")?;
     let serving = spawned_by().unwrap_or_else(Run::mint);
-    if let Err(error) = tenancy.publish(&Record::new(
-        Identity::new(serving, Compat::from(PROTOCOL_VERSION)),
-        Tenant::current(),
-    )) {
-        warn!(%error, "could not publish the overlay claim record");
-    }
-    Ok(tenancy)
+    // Identity comes with the claim: an overlay the agent cannot recognize
+    // holds the role while being unevictable by the ordinary path, so failing
+    // here and letting the supervisor start a replacement beats running as
+    // one (#842).
+    Role::new(directory, "overlay")
+        .claim(&Record::new(
+            Identity::new(serving, Compat::from(PROTOCOL_VERSION)),
+            Tenant::current(),
+        ))
+        .context("Actions Ring overlay single-instance check")
 }
 
 /// The agent run this overlay serves.

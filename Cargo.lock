@@ -7404,9 +7404,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "succession"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "494a7cfcb4902761096db71e5e02c48f3e8c5060e563ff3113c306f86a0277ca"
+checksum = "ebea0f5590b6dde1056c1ba7e6045d5abce2f69da6a3f438d05b91d246d5bd53"
 dependencies = [
  "serde",
  "sysinfo 0.38.4",
