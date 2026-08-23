@@ -17,6 +17,38 @@ use openlogi_device::backend::{
 
 use super::{enumerate_devices, is_hidpp_node, open_hidpp_channel, watch_nodes};
 
+/// One logical top-level collection exposed by an OS HID node.
+///
+/// On macOS, `async-hid` emits one [`Device`] per usage pair, but every one of
+/// those devices carries the same IOKit registry id. Keying the handle cache by
+/// [`NodeId`] alone therefore lets the last generic collection overwrite the
+/// HID++ collection selected by enumeration. Preserve the usage pair so an
+/// open receives the same logical device metadata that was selected.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct HandleKey {
+    id: NodeId,
+    usage_page: u16,
+    usage_id: u16,
+}
+
+impl HandleKey {
+    fn for_device(device: &Device) -> Self {
+        Self {
+            id: super::node_id(device),
+            usage_page: device.usage_page,
+            usage_id: device.usage_id,
+        }
+    }
+
+    fn for_node(node: &NodeInfo) -> Self {
+        Self {
+            id: node.id.clone(),
+            usage_page: node.usage_page,
+            usage_id: node.usage_id,
+        }
+    }
+}
+
 /// The process-wide native backend.
 ///
 /// One instance, not one per caller: it owns the handle cache below, and the
@@ -35,8 +67,8 @@ pub(crate) fn native_backend() -> Arc<dyn HidBackend> {
 /// [`HidBackend`] over `async-hid`.
 #[derive(Default)]
 pub(crate) struct NativeBackend {
-    /// OS handles from the most recent enumeration, keyed by the id that
-    /// enumeration reported them under.
+    /// OS handles from the most recent enumeration, keyed by the node id and
+    /// top-level usage pair that enumeration reported them under.
     ///
     /// `async_hid::Device` is an OS handle, not a value: it cannot be rebuilt
     /// from a [`NodeId`], and re-finding one costs another enumeration. Since
@@ -44,7 +76,7 @@ pub(crate) struct NativeBackend {
     /// the handles from that enumeration is both cheaper and a truer model
     /// than looking them up again. Held behind an `Arc` so an open can borrow
     /// one without keeping the map locked across its await.
-    nodes: Mutex<HashMap<NodeId, Arc<Device>>>,
+    nodes: Mutex<HashMap<HandleKey, Arc<Device>>>,
 }
 
 impl NativeBackend {
@@ -57,7 +89,7 @@ impl NativeBackend {
             .collect();
         let handles = devices
             .iter()
-            .map(|device| (super::node_id(device), Arc::clone(device)))
+            .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
             .collect();
         *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
         Ok(devices)
@@ -68,7 +100,7 @@ impl NativeBackend {
         self.nodes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&node.id)
+            .get(&HandleKey::for_node(node))
             .map(Arc::clone)
             .ok_or(BackendError::Disconnected)
     }
@@ -124,5 +156,44 @@ impl RawWriter for NativeRawWriter {
             .write_output_report(report)
             .await
             .map_err(super::backend_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_handle_keys_preserve_collections_on_the_same_os_node() {
+        let os_node = NodeId::from("RegistryEntryId(42)".to_owned());
+        let primary_mouse = NodeInfo {
+            id: os_node.clone(),
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            usage_page: 0x0001,
+            usage_id: 0x0002,
+            name: "Test Mouse".to_owned(),
+            manufacturer: Some("Test Vendor".to_owned()),
+            serial_number: None,
+        };
+        let hidpp = NodeInfo {
+            id: os_node,
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            name: "Test Mouse".to_owned(),
+            manufacturer: Some("Test Vendor".to_owned()),
+            serial_number: None,
+        };
+
+        let hidpp_key = HandleKey::for_node(&hidpp);
+        let handles = HashMap::from([
+            (HandleKey::for_node(&primary_mouse), "primary mouse"),
+            (hidpp_key.clone(), "hidpp"),
+        ]);
+
+        assert_eq!(handles.len(), 2);
+        assert_eq!(handles.get(&hidpp_key), Some(&"hidpp"));
     }
 }
