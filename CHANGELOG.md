@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-08-23
+
+### Added
+
+- *(hid)* recognise Lightspeed receiver 046d:c54d (PRO X SUPERLIGHT 2 DEX) ([#811](https://github.com/AprilNEA/OpenLogi/pull/811))
+
+### Fixed
+
+- *(release)* trust release-plz no-op results
+- *(release)* use changelog as release PR body
+
 ## [0.7.5] - 2026-08-23
 
 ### Added
