@@ -1,6 +1,6 @@
 //! Replace a running agent that speaks an older IPC protocol.
 //!
-//! The self-restart watcher (see [`crate::self_restart`]) keeps a *future*
+//! The binary watcher (see [`crate::binary_watch`]) keeps a *future*
 //! stale agent from outliving an update — but the watcher only exists in
 //! binaries that ship it, so the first protocol bump still strands every
 //! user whose pre-watcher agent is running: it never exits, launchd only
@@ -144,7 +144,7 @@ fn replace_stale() -> Option<InstanceGuard> {
 
 /// No Windows release has ever shipped (or auto-started) the agent, so there
 /// is no pre-watcher population to migrate; from the first shipped build
-/// onward, `self_restart` exits on update and the GUI's spawn retry starts
+/// onward, `binary_watch` exits on update and the GUI's spawn retry starts
 /// the new binary.
 #[cfg(windows)]
 fn replace_stale() -> Option<InstanceGuard> {

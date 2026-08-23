@@ -15,12 +15,12 @@
     windows_subsystem = "windows"
 )]
 
+mod binary_watch;
 mod launch_agent;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "windows")]
 mod resume_windows;
-mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
 mod status_item;
@@ -81,9 +81,9 @@ fn main() {
     };
 
     // Watch our own executable and restart as the new image when an app update
-    // replaces it — see `self_restart`. Only the lock-holding (real) agent
+    // replaces it — see `binary_watch`. Only the lock-holding (real) agent
     // watches, so a losing duplicate can't restart anything.
-    let uninstalled = self_restart::spawn();
+    let uninstalled = binary_watch::spawn();
     overlay::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
@@ -328,7 +328,7 @@ async fn request_input_monitoring() {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => self_restart::relaunch_after_input_monitoring_grant(),
+            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
             Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");

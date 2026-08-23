@@ -115,7 +115,7 @@ every grant on that machine is being ignored.
   answers, so it must not run on the async runtime. It is also not real-time:
   after a grant or revoke the calling process keeps seeing the old answer until
   it restarts. That is why the agent calls
-  `self_restart::relaunch_after_input_monitoring_grant()`.
+  `binary_watch::relaunch_after_input_monitoring_grant()`.
 - `IOHIDDeviceOpen` — **denial is silent**. There is no TCC-specific error; the
   failure is indistinguishable from exclusive access or a disconnect. Never
   report `Failed to open device` to a user as-is; check
