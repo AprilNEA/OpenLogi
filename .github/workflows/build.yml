@@ -231,16 +231,16 @@ jobs:
             [ -f "$1/Contents/Resources/AppIcon.icns" ]
           }
           check "$app" "org.openlogi.openlogi" "OpenLogi"
-          check "$app/Contents/Library/LoginItems/OpenLogiAgent.app" "org.openlogi.agent" "OpenLogi Agent"
-          check "$app/Contents/Library/LoginItems/OpenLogiOverlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
+          check "$app/Contents/Library/LoginItems/OpenLogi Agent.app" "org.openlogi.agent" "OpenLogi Agent"
+          check "$app/Contents/Library/LoginItems/OpenLogi Overlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
 
       - name: Verify signed app bundle
         if: ${{ inputs.sign }}
         run: |
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
-          helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
-          overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
+          helper="$app/Contents/Library/LoginItems/OpenLogi Agent.app"
+          overlay="$app/Contents/Library/LoginItems/OpenLogi Overlay.app"
           cli="$app/Contents/MacOS/openlogi"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"

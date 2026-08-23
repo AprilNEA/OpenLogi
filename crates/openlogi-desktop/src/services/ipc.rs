@@ -352,7 +352,7 @@ fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
 
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
-/// embedded `OpenLogiAgent.app` login-item helper (packaged macOS build).
+/// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
 fn agent_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -365,9 +365,11 @@ fn agent_binary_path() -> Option<PathBuf> {
         return Some(sibling);
     }
     // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-desktop → the helper at
-    // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
-    // Dev uses a spaced bundle path so macOS privacy panes never fall back to
-    // displaying the old path-derived `OpenLogiAgent` name when metadata is stale.
+    // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent
+    // Every family names its directory after the display name, so the privacy
+    // panes' filename fallback (used when bundle metadata is stale) shows the
+    // real name. The last entry keeps finding helpers in bundles built before
+    // the rename.
     #[cfg(target_os = "macos")]
     {
         let contents = dir.parent()?;
@@ -662,21 +664,21 @@ mod tests {
     #[test]
     fn helper_bundle_resolves_only_the_packaged_layout() {
         let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
         );
         assert_eq!(
             helper_bundle(packaged),
             Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
             ))
         );
         let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
         );
         assert_eq!(
             helper_bundle(dev),
             Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
+                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
             ))
         );
         assert_eq!(

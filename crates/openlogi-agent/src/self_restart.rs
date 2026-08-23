@@ -260,10 +260,10 @@ mod tests {
         use std::path::Path;
 
         let binary = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
         );
         let bundle =
-            Path::new("/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app");
+            Path::new("/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app");
         assert_eq!(helper_bundle(binary), Some(bundle));
         assert_eq!(helper_bundle(Path::new("/tmp/openlogi-agent")), None);
     }

@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
 <!--
   Release Info.plist for the nested login-item helper, assembled by `xtask` into
-  OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app.
+  OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app.
 
   LSUIElement=true makes the agent an Accessory app: a menu-bar status item with
   no Dock icon (the agent also sets NSApplicationActivationPolicy::Accessory at
