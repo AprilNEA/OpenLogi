@@ -35,14 +35,9 @@ core-foundation = { workspace = true }
 foreign-types-shared = "0.3"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
-# Accessibility-trust query + prompt (`AXIsProcessTrusted[WithOptions]`) and the
-# `kAXTrustedCheckOptionPrompt` dictionary it takes — typed, so no hand-written
-# ApplicationServices `extern` block.
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber"] }
 
-# WH_MOUSE_LL low-level mouse hook + foreground-process path (GetForegroundWindow
-# / QueryFullProcessImageNameW).
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
@@ -51,7 +46,5 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# unsafe_code is denied workspace-wide; the three platform modules are wall-to-wall
-# OS FFI, so each opts out at its own module root instead of the whole crate.
 [lints]
 workspace = true

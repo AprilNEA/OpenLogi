@@ -29,14 +29,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# Windows exe resources (app icon + VERSIONINFO) — see build.rs. Pinned to the
-# version already in Cargo.lock as gpui's own build-dependency, so the resolve
-# adds an edge, not a crate, and the pinned gpui rev cannot move.
+# Held at the version Cargo.lock already has for gpui's own build-dependency;
+# bumping it independently would move the pinned gpui rev.
 [build-dependencies]
 embed-resource = "3.0.9"
 
-# Native window policy for the ring panel — see src/platform.rs, and
-# crates/openlogi-desktop/src/platform/AGENTS.md for the rules this code follows.
 [target.'cfg(target_os = "macos")'.dependencies]
 # CGGetActiveDisplayList/CGDisplayBounds: placing the ring on the cursor's
 # display needs global display bounds, which GPUI's display API doesn't expose

@@ -4,6 +4,8 @@
 //! given peripheral exposes when the default wrappers (0x2201, 0x2111)
 //! aren't recognised.
 
+use std::fmt;
+
 use anyhow::Result;
 use clap::Args;
 use openlogi_hid::{DeviceRoute, FeatureType, FirmwareEntity};
@@ -22,11 +24,10 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
                     vendor_id: inv.receiver.vendor_id,
                     product_id: inv.receiver.product_id,
                 });
-            let name = paired
-                .codename
-                .clone()
-                .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            println!("device: {name} ({route})");
+            match paired.codename.as_deref() {
+                Some(name) => println!("device: {name} ({route})"),
+                None => println!("device: Slot {} ({route})", paired.slot),
+            }
             match openlogi_hid::dump_features(&route).await {
                 Ok(entries) => {
                     println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
@@ -36,7 +37,7 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
                             idx,
                             entry.id,
                             entry.version,
-                            format_feature_flags(entry.typ)
+                            FeatureFlagsDisplay(entry.typ)
                         );
                     }
                     println!("  ({} feature entries)\n", entries.len());
@@ -46,7 +47,7 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
             match openlogi_hid::dump_firmware_entities(&route).await {
                 Ok(entries) => {
                     for entry in &entries {
-                        println!("  {}", format_firmware_entity(entry));
+                        println!("  {}", FirmwareEntityDisplay(entry));
                     }
                 }
                 Err(e) => println!("  firmware dump failed: {e:#}"),
@@ -67,31 +68,39 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
 /// and an undocumented bit on a new device is exactly what this column exists
 /// to surface. Dropping either would make the column a partial view of a
 /// response it is meant to report verbatim.
-fn format_feature_flags(typ: FeatureType) -> String {
-    const NAMED: [(FeatureType, &str); 5] = [
-        (FeatureType::OBSOLETE, "obsolete"),
-        (FeatureType::HIDDEN, "hidden"),
-        (FeatureType::ENGINEERING, "engineering"),
-        (
-            FeatureType::MANUFACTURING_DEACTIVATABLE,
-            "manufacturing-deactivatable",
-        ),
-        (
-            FeatureType::COMPLIANCE_DEACTIVATABLE,
-            "compliance-deactivatable",
-        ),
-    ];
+struct FeatureFlagsDisplay(FeatureType);
 
-    let mut flags: Vec<String> = NAMED
-        .iter()
-        .filter(|(flag, _)| typ.contains(*flag))
-        .map(|(_, name)| (*name).to_owned())
-        .collect();
-    let unknown = typ.bits() & !FeatureType::all().bits();
-    if unknown != 0 {
-        flags.push(format!("unknown=0x{unknown:02x}"));
+impl fmt::Display for FeatureFlagsDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const NAMED: [(FeatureType, &str); 5] = [
+            (FeatureType::OBSOLETE, "obsolete"),
+            (FeatureType::HIDDEN, "hidden"),
+            (FeatureType::ENGINEERING, "engineering"),
+            (
+                FeatureType::MANUFACTURING_DEACTIVATABLE,
+                "manufacturing-deactivatable",
+            ),
+            (
+                FeatureType::COMPLIANCE_DEACTIVATABLE,
+                "compliance-deactivatable",
+            ),
+        ];
+
+        let mut separator = "";
+        for (flag, name) in NAMED {
+            if self.0.contains(flag) {
+                write!(f, "{separator}{name}")?;
+                separator = ",";
+            }
+        }
+
+        let unknown = self.0.bits() & !FeatureType::all().bits();
+        if unknown != 0 {
+            write!(f, "{separator}unknown=0x{unknown:02x}")?;
+        }
+
+        Ok(())
     }
-    flags.join(",")
 }
 
 /// Render one firmware entity as a single diagnostics line.
@@ -99,28 +108,43 @@ fn format_feature_flags(typ: FeatureType) -> String {
 /// An entity the device declared but could not describe is reported rather
 /// than dropped: a device that cannot describe one of its own firmware images
 /// is exactly what a bug report needs to say.
-fn format_firmware_entity(entry: &FirmwareEntity) -> String {
-    match entry {
-        FirmwareEntity::Readable { index, info } => {
-            let active = if info.active { " [active]" } else { "" };
-            // `extra_version` is optional by spec, and all-zero is how a
-            // device says it has none — so an empty field is absence, not a
-            // value being hidden. The PID above is not optional and is printed
-            // even when the device answers zero, which only a dormant entity
-            // is allowed to do.
-            let [v0, v1, v2, v3, v4] = info.extra_version;
-            let extra = if info.extra_version == [0; 5] {
-                String::new()
-            } else {
-                format!(" extra={v0:02x}{v1:02x}{v2:02x}{v3:02x}{v4:02x}")
-            };
-            format!(
-                "fw {index}: {:?} {}{:02}.{:02}_B{:04} pid={:04x}{active}{extra}",
-                info.kind, info.prefix, info.number, info.revision, info.build, info.transport_pid
-            )
-        }
-        FirmwareEntity::Unreadable { index, error } => {
-            format!("fw {index}: unreadable ({error})")
+struct FirmwareEntityDisplay<'a>(&'a FirmwareEntity);
+
+impl fmt::Display for FirmwareEntityDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            FirmwareEntity::Readable { index, info } => {
+                write!(
+                    f,
+                    "fw {index}: {:?} {}{:02}.{:02}_B{:04} pid={:04x}",
+                    info.kind,
+                    info.prefix,
+                    info.number,
+                    info.revision,
+                    info.build,
+                    info.transport_pid
+                )?;
+                if info.active {
+                    write!(f, " [active]")?;
+                }
+
+                // `extra_version` is optional by spec, and all-zero is how a
+                // device says it has none — so an empty field is absence, not
+                // a value being hidden. The PID above is not optional and is
+                // printed even when the device answers zero, which only a
+                // dormant entity is allowed to do.
+                if info.extra_version != [0; 5] {
+                    write!(f, " extra=")?;
+                    for byte in info.extra_version {
+                        write!(f, "{byte:02x}")?;
+                    }
+                }
+
+                Ok(())
+            }
+            FirmwareEntity::Unreadable { index, error } => {
+                write!(f, "fw {index}: unreadable ({error})")
+            }
         }
     }
 }
@@ -132,7 +156,7 @@ mod tests {
         WriteError,
     };
 
-    use super::{format_feature_flags, format_firmware_entity};
+    use super::{FeatureFlagsDisplay, FirmwareEntityDisplay};
 
     fn entry() -> FirmwareEntity {
         FirmwareEntity::Readable {
@@ -160,7 +184,7 @@ mod tests {
     #[test]
     fn the_running_entity_is_marked_active() {
         assert_eq!(
-            format_firmware_entity(&entry()),
+            FirmwareEntityDisplay(&entry()).to_string(),
             "fw 1: MainApplication MPM17.00_B0008 pid=c08d [active]"
         );
     }
@@ -170,7 +194,7 @@ mod tests {
         let mut e = entry();
         info(&mut e).active = false;
         assert_eq!(
-            format_firmware_entity(&e),
+            FirmwareEntityDisplay(&e).to_string(),
             "fw 1: MainApplication MPM17.00_B0008 pid=c08d"
         );
     }
@@ -183,7 +207,7 @@ mod tests {
         info(&mut e).active = false;
         info(&mut e).transport_pid = 0;
         assert_eq!(
-            format_firmware_entity(&e),
+            FirmwareEntityDisplay(&e).to_string(),
             "fw 1: MainApplication MPM17.00_B0008 pid=0000"
         );
     }
@@ -195,7 +219,7 @@ mod tests {
         let mut e = entry();
         info(&mut e).extra_version = [0x01, 0x02, 0x00, 0xff, 0x10];
         assert_eq!(
-            format_firmware_entity(&e),
+            FirmwareEntityDisplay(&e).to_string(),
             "fw 1: MainApplication MPM17.00_B0008 pid=c08d [active] extra=010200ff10"
         );
     }
@@ -213,20 +237,20 @@ mod tests {
             },
         };
         assert_eq!(
-            format_firmware_entity(&e),
+            FirmwareEntityDisplay(&e).to_string(),
             "fw 2: unreadable (HID++ unsupported response during DumpFeatures for feature 0x0003)"
         );
     }
 
     #[test]
     fn a_feature_with_no_flags_renders_empty() {
-        assert_eq!(format_feature_flags(FeatureType::empty()), "");
+        assert_eq!(FeatureFlagsDisplay(FeatureType::empty()).to_string(), "");
     }
 
     #[test]
     fn every_known_flag_is_named() {
         assert_eq!(
-            format_feature_flags(FeatureType::all()),
+            FeatureFlagsDisplay(FeatureType::all()).to_string(),
             "obsolete,hidden,engineering,manufacturing-deactivatable,compliance-deactivatable"
         );
     }
@@ -236,7 +260,8 @@ mod tests {
     #[test]
     fn the_version_two_flags_are_not_dropped() {
         assert_eq!(
-            format_feature_flags(FeatureType::HIDDEN | FeatureType::COMPLIANCE_DEACTIVATABLE),
+            FeatureFlagsDisplay(FeatureType::HIDDEN | FeatureType::COMPLIANCE_DEACTIVATABLE)
+                .to_string(),
             "hidden,compliance-deactivatable"
         );
     }
@@ -247,7 +272,7 @@ mod tests {
     #[test]
     fn unknown_bits_are_reported_as_a_raw_mask() {
         assert_eq!(
-            format_feature_flags(FeatureType::from_bits_retain(0b0100_0100)),
+            FeatureFlagsDisplay(FeatureType::from_bits_retain(0b0100_0100)).to_string(),
             "hidden,unknown=0x04"
         );
     }
@@ -255,7 +280,7 @@ mod tests {
     #[test]
     fn unknown_bits_alone_still_render() {
         assert_eq!(
-            format_feature_flags(FeatureType::from_bits_retain(0b0000_0011)),
+            FeatureFlagsDisplay(FeatureType::from_bits_retain(0b0000_0011)).to_string(),
             "unknown=0x03"
         );
     }

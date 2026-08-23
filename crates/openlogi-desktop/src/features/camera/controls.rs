@@ -537,11 +537,20 @@ impl CameraControlsPanel {
                 ));
             }
             for slider in &self.sliders {
+                let fallback = if builtin.id != "default"
+                    && matches!(
+                        slider.control,
+                        CameraControl::PowerLineFrequency | CameraControl::LowLightCompensation
+                    ) {
+                    from_slider(slider.state.read(cx).value().start())
+                } else {
+                    slider.range.default
+                };
                 let target = builtin
                     .values
                     .iter()
                     .find(|(c, _)| *c == slider.control)
-                    .map_or(slider.range.default, |(_, pct)| {
+                    .map_or(fallback, |(_, pct)| {
                         let span = to_slider(slider.range.max - slider.range.min);
                         slider.range.min + from_slider(span * pct)
                     });
@@ -853,6 +862,19 @@ fn control_row(
     pal: Palette,
 ) -> AnyElement {
     let slider = &panel.sliders[ix];
+    if slider.control == CameraControl::PowerLineFrequency
+        && [1, 2, 3]
+            .into_iter()
+            .any(|value| slider.range.supports(value))
+    {
+        return frequency_row(panel, ix, cx, pal);
+    }
+    if slider.control == CameraControl::LowLightCompensation
+        && slider.range.min == 0
+        && slider.range.max == 1
+    {
+        return binary_control_row(panel, ix, cx, pal);
+    }
     let value = from_slider(slider.state.read(cx).value().start());
     let auto_on = panel.auto_state_for(slider.control);
     let dimmed = auto_on == Some(true);
@@ -935,6 +957,128 @@ fn control_row(
     row.into_any_element()
 }
 
+fn frequency_row(
+    panel: &CameraControlsPanel,
+    ix: usize,
+    cx: &Context<CameraControlsPanel>,
+    pal: Palette,
+) -> AnyElement {
+    let slider = &panel.sliders[ix];
+    let current = from_slider(slider.state.read(cx).value().start());
+    let mut choices = h_flex().flex_1().justify_end().gap_1();
+    for (choice_ix, (value, label)) in [
+        (1, SharedString::from("50 Hz")),
+        (2, SharedString::from("60 Hz")),
+        (3, tr!("Auto")),
+    ]
+    .into_iter()
+    .filter(|(value, _)| slider.range.supports(*value))
+    .enumerate()
+    {
+        let active = value == current;
+        let accent = rgb(ACCENT_BLUE);
+        choices = choices.child(
+            div()
+                .id(("camera-frequency", choice_ix))
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(if active { accent.into() } else { pal.border })
+                .text_caption()
+                .text_color(if active {
+                    accent.into()
+                } else {
+                    pal.text_muted
+                })
+                .hover(|s| s.bg(pal.surface_hover))
+                .child(label)
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
+                        return;
+                    };
+                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
+                        state.set_value(to_slider(value), window, cx);
+                    });
+                    panel.commit_release(CameraControl::PowerLineFrequency, &uid, &key, value, cx);
+                })),
+        );
+    }
+
+    h_flex()
+        .id(("camera-control-row", ix))
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .w(px(96.))
+                .flex_shrink_0()
+                .truncate()
+                .text_body()
+                .text_color(pal.text_muted)
+                .child(slider.label.clone()),
+        )
+        .child(choices)
+        .into_any_element()
+}
+
+fn binary_control_row(
+    panel: &CameraControlsPanel,
+    ix: usize,
+    cx: &Context<CameraControlsPanel>,
+    pal: Palette,
+) -> AnyElement {
+    let slider = &panel.sliders[ix];
+    let on = from_slider(slider.state.read(cx).value().start()) != 0;
+    let accent = rgb(ACCENT_BLUE);
+    h_flex()
+        .id(("camera-control-row", ix))
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .w(px(96.))
+                .flex_shrink_0()
+                .truncate()
+                .text_body()
+                .text_color(pal.text_muted)
+                .child(slider.label.clone()),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .id("camera-low-light")
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(if on { accent.into() } else { pal.border })
+                .text_caption()
+                .text_color(if on { accent.into() } else { pal.text_muted })
+                .hover(|s| s.bg(pal.surface_hover))
+                .child(if on { tr!("On") } else { tr!("Off") })
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
+                        return;
+                    };
+                    let value = i32::from(!on);
+                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
+                        state.set_value(to_slider(value), window, cx);
+                    });
+                    panel.commit_release(
+                        CameraControl::LowLightCompensation,
+                        &uid,
+                        &key,
+                        value,
+                        cx,
+                    );
+                })),
+        )
+        .into_any_element()
+}
+
 fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
     h_flex()
         .w_full()
@@ -972,6 +1116,8 @@ fn control_label(control: CameraControl) -> SharedString {
         CameraControl::Zoom => tr!("Zoom"),
         CameraControl::Focus => tr!("Focus"),
         CameraControl::Exposure => tr!("Exposure"),
+        CameraControl::PowerLineFrequency => tr!("Anti-flicker"),
+        CameraControl::LowLightCompensation => tr!("Low light compensation"),
         CameraControl::Brightness => tr!("Brightness"),
         CameraControl::Contrast => tr!("Contrast"),
         CameraControl::Saturation => tr!("Saturation"),

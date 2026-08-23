@@ -95,6 +95,14 @@ pub struct DeviceConfig {
     /// (gesture mode is per-button; see
     /// [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
     #[serde(skip_serializing)]
+    // Consumed only by the `fs` half's load migration. The field stays in
+    // every build: it is part of the shape serde *deserializes*, and dropping
+    // it would turn an old config's key into an unknown field.
+    #[cfg_attr(
+        not(feature = "fs"),
+        expect(clippy::allow_attributes, reason = "see above"),
+        allow(dead_code, reason = "only the `fs` half's load migration reads it")
+    )]
     pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right

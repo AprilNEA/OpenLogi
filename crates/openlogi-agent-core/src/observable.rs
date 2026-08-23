@@ -50,6 +50,7 @@ impl ObservableState {
                     inventory: InventoryHealth::Scanning,
                     protocol_version: PROTOCOL_VERSION,
                     agent_version,
+                    input_monitoring_granted: openlogi_hid::permissions::has_access(),
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -164,6 +165,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.accessibility_granted = granted;
+            true
+        });
+    }
+
+    /// Publish an Input Monitoring trust change, as observed by
+    /// [`watchers::input_monitoring`](crate::watchers::input_monitoring).
+    pub fn set_input_monitoring_granted(&self, granted: bool) {
+        self.update(|snapshot| {
+            if snapshot.status.input_monitoring_granted == granted {
+                return false;
+            }
+            snapshot.status.input_monitoring_granted = granted;
             true
         });
     }

@@ -27,11 +27,16 @@ impl<T: Clone> EventEmitter<T> {
 
     /// Emits an event to all senders. Senders whose receivers were dropped are
     /// removed from the list.
+    ///
+    /// `try_send` rather than a blocking send: every channel here is
+    /// [`async_channel::unbounded`], so the only way a send fails is a closed
+    /// receiver — which is precisely the pruning condition. Blocking would be
+    /// the same call with a deadlock hazard attached, since this runs while
+    /// holding [`Self::senders`].
     pub fn emit(&self, event: T) {
         let mut senders = lock(&self.senders);
-        senders.retain(|sender| {
-            sender.receiver_count() > 0 && sender.send_blocking(event.clone()).is_ok()
-        });
+        senders
+            .retain(|sender| sender.receiver_count() > 0 && sender.try_send(event.clone()).is_ok());
     }
 }
 

@@ -253,6 +253,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "appicon"
+version = "0.1.0"
+source = "git+https://github.com/AprilNEA/appicon?tag=v0.1.1#13f3df01e7efb8a977694ee5a45c4a0e4e96ac2d"
+dependencies = [
+ "libc",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "ar_archive_writer"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -410,9 +421,9 @@ dependencies = [
 
 [[package]]
 name = "async-hid"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3633346d0989f6a13133ebce8cbd7b17d8f971513172397c452d438e1e0841e6"
+checksum = "9f70c6f427f9dc3942b5863b2677a34dfcdd5ec46fe3c21a57883c50403269c5"
 dependencies = [
  "async-io",
  "atomic-waker",
@@ -5174,7 +5185,6 @@ dependencies = [
 name = "openlogi-agent-core"
 version = "0.7.4"
 dependencies = [
- "async-hid",
  "futures-lite",
  "openlogi-core",
  "openlogi-hid",
@@ -5257,6 +5267,7 @@ name = "openlogi-desktop"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "appicon",
  "backon",
  "derive_more",
  "disclaim",
@@ -5291,6 +5302,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-device"
+version = "0.7.4"
+dependencies = [
+ "futures-concurrency",
+ "futures-lite",
+ "openlogi-core",
+ "openlogi-hidpp",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "openlogi-hid"
 version = "0.7.4"
 dependencies = [
@@ -5300,6 +5326,7 @@ dependencies = [
  "futures-lite",
  "objc2-io-kit",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-hidpp",
  "serde",
  "serde_json",
@@ -5325,7 +5352,6 @@ dependencies = [
  "hidreport",
  "num_enum",
  "openlogi-hidpp-derive",
- "rand 0.9.4",
  "serde",
  "thiserror 2.0.18",
  "tracing",
@@ -7871,6 +7897,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -9955,6 +9982,7 @@ name = "xtask"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "appicon",
  "clap",
  "comfy-table",
  "fs-err",

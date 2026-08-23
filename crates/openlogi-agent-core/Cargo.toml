@@ -24,8 +24,6 @@ tracing = { workspace = true }
 workspace = true
 
 [dev-dependencies]
-# Only to construct an `InventoryError::Hid` in the watcher's classify tests.
-async-hid = { workspace = true }
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
 tokio = { workspace = true, features = ["test-util"] }

@@ -7,7 +7,7 @@
 //! grant to. Wrapping the build in a real bundle fixes all four — and doing it
 //! here rather than in the cargo runner means the dev and shipped bundles are
 //! assembled by the same code: one identity table ([`identity::Channel`]), one
-//! helper table ([`bundle::HELPERS`]), one set of `Info.plist` templates. The
+//! helper table ([`HELPERS`]), one set of `Info.plist` templates. The
 //! two used to be separate implementations, which is how the dev overlay ended
 //! up with no icon and the dev identity had to be renamed twice.
 //!
@@ -26,7 +26,9 @@ use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::bundle::identity::{self, Channel, Component};
-use super::bundle::{self, HELPERS, Helper};
+use super::bundle::{HELPERS, Helper};
+use crate::icon::IconPipeline as _;
+use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
 
 /// The dev bundle is the dev bundle; there is no channel to choose.
@@ -38,7 +40,9 @@ const CHANNEL: Channel = Channel::Dev;
 /// it.
 const APP_PLIST: &str = "crates/openlogi-desktop/bundle/desktop-dev/Info.plist";
 
-/// The shared app icon, generated on demand by `macos icns`.
+/// The shared app icon, compiled by [`AppBundle`] alongside the catalog and
+/// the alternates. Only this one is checked in; the rest a fresh clone
+/// compiles on its first bundle.
 const ICON: &str = "crates/openlogi-desktop/icon/AppIcon.icns";
 
 /// What the identity pass covers when the helpers were not embedded.
@@ -60,10 +64,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     processes::reap_leftovers(&app, &root.join("target"))?;
 
+    AppBundle.compile()?;
     let icon = root.join(ICON);
-    if !icon.is_file() {
-        bundle::generate_icns()?;
-    }
     ensure_file(&icon)?;
 
     let signing = signing::resolve(&app)?;
@@ -77,6 +79,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     fs_err::copy(root.join(APP_PLIST), app.join("Contents/Info.plist"))
         .context("could not write the dev app Info.plist")?;
     fs_err::copy(&icon, app.join("Contents/Resources/AppIcon.icns"))?;
+    AppBundle.install(&app)?;
 
     // Clear the whole login-items directory rather than the bundles about to be
     // written: helper directory names have changed more than once, and a
@@ -98,6 +101,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     identity::stamp(&app, CHANNEL, components)?;
     identity::verify(&app, CHANNEL, components)?;
     identity::verify_icons(&app, CHANNEL, components)?;
+    AppBundle.verify(&app)?;
     signing.run(&sign_order(&app, components))?;
     register_with_launch_services(&app)?;
 

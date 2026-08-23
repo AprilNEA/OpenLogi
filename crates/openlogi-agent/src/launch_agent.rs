@@ -34,6 +34,8 @@
 
 use tracing::debug;
 
+#[cfg(target_os = "linux")]
+use std::fmt;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::io;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -298,7 +300,7 @@ fn escape_systemd_exec(s: &str) -> String {
 /// best-effort (e.g. the session D-Bus may be unavailable in some environments).
 #[cfg(target_os = "linux")]
 fn run_systemctl(args: &[&str]) {
-    let label = args.join(" ");
+    let label = SystemctlArgsDisplay(args);
     let mut cmd = std::process::Command::new("systemctl");
     cmd.arg("--user").args(args);
     match cmd.output() {
@@ -315,6 +317,21 @@ fn run_systemctl(args: &[&str]) {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct SystemctlArgsDisplay<'a, 'b>(&'a [&'b str]);
+
+#[cfg(target_os = "linux")]
+impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut separator = "";
+        for arg in self.0 {
+            write!(f, "{separator}{arg}")?;
+            separator = " ";
+        }
+        Ok(())
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -325,7 +342,7 @@ mod tests {
     #[test]
     fn rendered_plist_targets_the_agent_and_keeps_alive() {
         let body = render_plist(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
         )
         .expect("render plist");
         assert!(body.contains(LABEL));
@@ -418,6 +435,14 @@ mod linux_tests {
     fn escape_systemd_exec_plain_path_unchanged() {
         let path = "/usr/local/bin/openlogi-agent";
         assert_eq!(escape_systemd_exec(path), path);
+    }
+
+    #[test]
+    fn systemctl_arguments_render_as_a_command_suffix() {
+        assert_eq!(
+            SystemctlArgsDisplay(&["enable", UNIT_NAME]).to_string(),
+            "enable openlogi-agent.service"
+        );
     }
 
     #[test]

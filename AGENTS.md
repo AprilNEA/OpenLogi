@@ -23,7 +23,8 @@ sits beneath both.
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog. No I/O, no async |
 | `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
-| `crates/openlogi-hid` | Device discovery + HID++ writes over `async-hid` |
+| `crates/openlogi-device` | The HID++ device layer: enumeration, probing, writes, sessions, pairing. Knows no host — expressed against `HidBackend` |
+| `crates/openlogi-hid` | That layer wired to this host: `async-hid` transport, macOS Input Monitoring, the on-disk probe cache |
 | `crates/openlogi-assets` | Device-render registry + cached fetch from OpenLogi asset mirrors |
 | `crates/openlogi-cli` | `clap` command tree: `list`, `assets`, `diag` |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
@@ -124,7 +125,7 @@ impl to a derive macro kills every `Type::trait_method` doc link — is explaine
 
 The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
 (Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
-`--all-targets` tests, cargo-deny, Windows clippy, shell lint). macOS-green is
+`--all-targets` tests, cargo-deny, Windows clippy, wasm portability, shell lint). macOS-green is
 not that matrix. To run every job this machine can reproduce:
 
 ```sh
@@ -256,10 +257,24 @@ before editing that area.
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
 | `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |
-| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**`, plus `openlogi-core`/`openlogi-hid` (their serde types ride the wire) | `.claude/rules/ipc-protocol.md` |
+| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**`, plus `openlogi-core`/`openlogi-device` (their serde types ride the wire) | `.claude/rules/ipc-protocol.md` |
 | `crates/openlogi-hook/**`, `crates/openlogi-inject/**`, `crates/openlogi-hid/**` (cfg-gated platform code) | `.claude/rules/cross-platform.md` |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
-| `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
+| `crates/openlogi-device/**`, `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
 | macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |
+
+## Task skills — invoke when the task matches, not when a path matches
+
+The rules above load from the file you are editing. Some work has no file to key
+on: triaging a user report, or deciding what a symptom means. That lives in
+`.claude/skills/`, which Claude Code offers by task description; other agents
+should read the `SKILL.md` when the task matches.
+
+| Task | Skill |
+|---|---|
+| a macOS report of no devices / "Failed to open device" / which permission to grant, and any change to the permission, helper-launch, or bundle-signing code | `.claude/skills/openlogi-macos-permissions/SKILL.md` |
+
+Everything else under `.claude/skills/` is a per-developer symlink into
+`.agents/skills/` and is not part of the project — see `.gitignore`.

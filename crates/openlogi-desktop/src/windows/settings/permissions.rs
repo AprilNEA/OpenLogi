@@ -51,7 +51,11 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
                 tr!("Input Monitoring"),
                 tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
                 Permission::InputMonitoring,
-                |_| permissions::input_monitoring(),
+                |cx| match cx.try_global::<AppState>().and_then(AppState::agent_status) {
+                    Some(status) if status.input_monitoring_granted => PermissionStatus::Granted,
+                    Some(_) => PermissionStatus::Denied,
+                    None => PermissionStatus::Unknown,
+                },
                 pal,
             ))
             .item(permission_item(

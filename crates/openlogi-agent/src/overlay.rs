@@ -132,6 +132,8 @@ fn overlay_binary_path() -> Option<PathBuf> {
     }) {
         for relative in [
             "Contents/Library/LoginItems/OpenLogi Overlay Dev.app/Contents/MacOS/openlogi-overlay",
+            "Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay",
+            // Bundles built before the helpers were renamed to their display names.
             "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
         ] {
             let candidate = app.join(relative);
@@ -171,10 +173,10 @@ mod tests {
         let outer = Path::new("/Applications/OpenLogi.app");
         assert_eq!(
             outer.join(
-                "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay"
+                "Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
             ),
             Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay"
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
             )
         );
     }

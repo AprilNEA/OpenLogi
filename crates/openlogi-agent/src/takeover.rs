@@ -17,10 +17,12 @@
 //! same version or newer means *we* are the duplicate (or the stale one),
 //! and we exit as before.
 //!
-//! SIGTERM, not a polite RPC: past protocols have no quit method. If the old
-//! agent ran under launchd, dying by signal is a non-successful exit, so
-//! launchd respawns it — from the bundle path, i.e. as the *new* binary —
-//! and whichever copy loses the ensuing lock race exits cleanly. Either way
+//! SIGTERM, not a polite RPC: past protocols have no quit method. A holder
+//! too old to handle the signal dies by it, which under launchd is a
+//! non-successful exit, so launchd respawns it — from the bundle path, i.e.
+//! as the *new* binary — and whichever copy loses the ensuing lock race exits
+//! cleanly. A holder new enough to handle SIGTERM releases its event tap and
+//! exits 0, which launchd leaves alone, so the lock falls to us. Either way
 //! exactly one up-to-date agent survives.
 
 #[cfg(unix)]

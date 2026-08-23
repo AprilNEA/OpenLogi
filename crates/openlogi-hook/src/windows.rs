@@ -28,8 +28,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, HookError, HookEvent, KeyEvent, KeyModifiers,
-    MouseEvent,
+    ButtonId, CursorPosition, EventDisposition, HookBackend, HookError, HookEvent, KeyEvent,
+    KeyModifiers, MouseEvent,
 };
 
 const WHEEL_DELTA: f32 = 120.0;
@@ -55,46 +55,113 @@ pub(crate) struct HookInner {
     join: Option<thread::JoinHandle<()>>,
 }
 
-pub(crate) fn start(
-    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
-) -> Result<HookInner, HookError> {
-    let callback: HookCallback = Arc::new(cb);
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let join = thread::Builder::new()
-        .name("openlogi-windows-hook".into())
-        .spawn(move || hook_thread(callback, ready_tx))
-        .map_err(|e| HookError::WindowsHook(format!("could not spawn hook thread: {e}")))?;
+/// The Windows backend: `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks on a thread
+/// with its own message pump.
+pub(crate) struct Backend;
 
-    match ready_rx
-        .recv()
-        .map_err(|e| HookError::WindowsHook(format!("hook thread exited before setup: {e}")))?
-    {
-        Ok(thread_id) => Ok(HookInner {
-            thread_id,
-            join: Some(join),
-        }),
-        Err(e) => {
-            let _ = join.join();
-            Err(e)
+impl HookBackend for Backend {
+    type Running = HookInner;
+
+    fn start(
+        cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
+    ) -> Result<HookInner, HookError> {
+        let callback: HookCallback = Arc::new(cb);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let join = thread::Builder::new()
+            .name("openlogi-windows-hook".into())
+            .spawn(move || hook_thread(callback, ready_tx))
+            .map_err(|e| HookError::WindowsHook(format!("could not spawn hook thread: {e}")))?;
+
+        match ready_rx
+            .recv()
+            .map_err(|e| HookError::WindowsHook(format!("hook thread exited before setup: {e}")))?
+        {
+            Ok(thread_id) => Ok(HookInner {
+                thread_id,
+                join: Some(join),
+            }),
+            Err(e) => {
+                let _ = join.join();
+                Err(e)
+            }
         }
     }
-}
 
-pub(crate) fn stop(mut inner: HookInner) {
-    // SAFETY: PostThreadMessageW takes the target thread id and the message by
-    // value (no pointers); `thread_id` was returned by the hook thread's own
-    // GetCurrentThreadId, so it names a real thread with a message queue.
-    let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
-    if posted == 0 {
-        // SAFETY: GetLastError reads the calling thread's last-error code and
-        // has no preconditions.
-        let err = unsafe { GetLastError() };
-        tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
+    fn stop(mut inner: HookInner) {
+        // SAFETY: PostThreadMessageW takes the target thread id and the message by
+        // value (no pointers); `thread_id` was returned by the hook thread's own
+        // GetCurrentThreadId, so it names a real thread with a message queue.
+        let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
+        if posted == 0 {
+            // SAFETY: GetLastError reads the calling thread's last-error code and
+            // has no preconditions.
+            let err = unsafe { GetLastError() };
+            tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
+        }
+        if let Some(join) = inner.join.take()
+            && let Err(e) = join.join()
+        {
+            tracing::warn!(?e, "Windows hook thread panicked while stopping");
+        }
     }
-    if let Some(join) = inner.join.take()
-        && let Err(e) = join.join()
-    {
-        tracing::warn!(?e, "Windows hook thread panicked while stopping");
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the path buffer is a fixed 32768 u16s"
+    )]
+    fn frontmost_app() -> Option<String> {
+        // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
+        // or null; no preconditions.
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return None;
+        }
+
+        let mut pid = 0;
+        // SAFETY: `hwnd` is the non-null handle just returned; `&raw mut pid` is a
+        // valid out-pointer the call writes the owning process id into.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
+        }
+        if pid == 0 {
+            return None;
+        }
+
+        // SAFETY: OpenProcess takes the access mask and pid by value and returns a
+        // handle or null (checked); on success we own the handle and close it below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return None;
+        }
+
+        let mut buf = vec![0u16; 32_768];
+        let mut len = buf.len() as u32;
+        // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
+        // 32768-u16 buffer and `len` holds its length, so the call writes at most
+        // `len` code units and updates `len` with the count written.
+        let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
+        // SAFETY: `process` is the handle from OpenProcess, owned here and closed
+        // exactly once now that the query has returned.
+        unsafe {
+            CloseHandle(process);
+        }
+        if ok == 0 || len == 0 {
+            return None;
+        }
+
+        Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
+    }
+
+    fn cursor_position() -> Option<CursorPosition> {
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: `point` is a valid writable POINT for the duration of the call.
+        if unsafe { GetCursorPos(&raw mut point) } == 0 {
+            return None;
+        }
+        Some(CursorPosition {
+            x: f64::from(point.x),
+            y: f64::from(point.y),
+        })
     }
 }
 
@@ -482,65 +549,6 @@ fn high_word(value: u32) -> u16 {
 
 fn signed_high_word(value: u32) -> i16 {
     high_word(value).cast_signed()
-}
-
-pub(crate) fn cursor_position() -> Option<CursorPosition> {
-    let mut point = POINT { x: 0, y: 0 };
-    // SAFETY: `point` is a valid writable POINT for the duration of the call.
-    if unsafe { GetCursorPos(&raw mut point) } == 0 {
-        return None;
-    }
-    Some(CursorPosition {
-        x: f64::from(point.x),
-        y: f64::from(point.y),
-    })
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the path buffer is a fixed 32768 u16s"
-)]
-pub(crate) fn frontmost_process_path() -> Option<String> {
-    // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
-    // or null; no preconditions.
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_null() {
-        return None;
-    }
-
-    let mut pid = 0;
-    // SAFETY: `hwnd` is the non-null handle just returned; `&raw mut pid` is a
-    // valid out-pointer the call writes the owning process id into.
-    unsafe {
-        GetWindowThreadProcessId(hwnd, &raw mut pid);
-    }
-    if pid == 0 {
-        return None;
-    }
-
-    // SAFETY: OpenProcess takes the access mask and pid by value and returns a
-    // handle or null (checked); on success we own the handle and close it below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process.is_null() {
-        return None;
-    }
-
-    let mut buf = vec![0u16; 32_768];
-    let mut len = buf.len() as u32;
-    // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
-    // 32768-u16 buffer and `len` holds its length, so the call writes at most
-    // `len` code units and updates `len` with the count written.
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
-    // SAFETY: `process` is the handle from OpenProcess, owned here and closed
-    // exactly once now that the query has returned.
-    unsafe {
-        CloseHandle(process);
-    }
-    if ok == 0 || len == 0 {
-        return None;
-    }
-
-    Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
 }
 
 fn last_error(context: &str) -> HookError {

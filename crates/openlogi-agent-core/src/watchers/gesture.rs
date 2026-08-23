@@ -315,8 +315,16 @@ fn spawn_session(
     let slot = Arc::clone(capture_channel);
     tokio::spawn(async move {
         let _lease = lease;
-        if let Err(e) =
-            run_capture_session(session_route, session_spec, session_tx, stop_rx, slot).await
+        let backend = openlogi_hid::host::backend();
+        if let Err(e) = run_capture_session(
+            &*backend,
+            session_route,
+            session_spec,
+            session_tx,
+            stop_rx,
+            slot,
+        )
+        .await
         {
             debug!(error = %e, "capture session ended");
         }
