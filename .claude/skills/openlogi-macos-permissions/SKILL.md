@@ -21,6 +21,11 @@ list). Classify before doing anything else. The discriminator is one log line:
 | `failed to open HID++ channel — retrying next tick error=Message("Failed to open device")` | open | **Yes, usually.** `IOHIDDeviceOpen` was denied. Same string also covers exclusive access and a device that vanished — see §5. |
 | `opened HID++ channel` … then `Device::new failed` / `enumerate_features failed` with `Channel(Timeout)` or `report writer callback error: 0xE00002D6` | probe | **No.** The open succeeded, so permissions are fine. This is the async-hid macOS write bug (upstream `sidit77/async-hid#45`). |
 
+All of these lines are `debug`-level except the open failure, which is a
+`warn`. A log captured without `OPENLOGI_LOG=debug` can only ever show the
+middle row — in such a log, the absence of the other lines is not evidence
+of anything.
+
 `openlogi list` showing the device while the GUI does not is **not** evidence
 either way: the CLI is a separate code-signing identity running its own HID
 stack, so it can succeed where the agent fails, for either reason.
@@ -69,7 +74,9 @@ OPENLOGI_LOG=debug \
 
 Note what that costs: run from a terminal, the agent's responsible process
 becomes the terminal (§4), so the run you are observing is not the run that
-failed. Compare identities before concluding anything from it.
+failed. Compare identities before concluding anything from it — in
+particular, a successful open under the terminal's grant does not clear the
+copy launchd runs.
 
 Reading the TCC database directly is not an option for a normal user — it is
 itself TCC-protected and returns `authorization denied` without Full Disk
@@ -135,7 +142,8 @@ every grant on that machine is being ignored.
 
 ## 7. Known-broken right now
 
-Check these before filing a new diagnosis:
+Check these before filing a new diagnosis. This list is a snapshot — confirm
+each is still open (`gh issue view 606`, `gh pr view 760`) before citing it:
 
 - The Settings → Input Monitoring row queries the **GUI's** grant, not the
   agent's (#606, PR #760 open). It can read "Granted" while the agent has
