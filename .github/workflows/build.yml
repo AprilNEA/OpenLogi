@@ -142,8 +142,11 @@ jobs:
       # built by two different toolchains depending on which leg produced it.
       - name: Select the Xcode both legs build with
         run: |
-          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
-          if [ -z "$xcode" ]; then
+          # An unmatched glob stays literal, which `-d` then rejects — where
+          # `ls` would have failed the step under the shell's `-e -o pipefail`
+          # before this check could say what is actually wrong.
+          xcode=$(printf '%s\n' /Applications/Xcode_26*.app | sort -V | tail -1)
+          if [ ! -d "$xcode" ]; then
             echo "No Xcode 26 on this runner; the app icon cannot be compiled." >&2
             exit 1
           fi
