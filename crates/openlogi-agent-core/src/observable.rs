@@ -112,7 +112,8 @@ impl ObservableState {
     }
 
     /// Publish where enumeration stands together with the device set it
-    /// produced, so the two can never be read from different generations.
+    /// produced — and whether that tick failed to open HID++ nodes — so none
+    /// of the three can be read from different generations.
     ///
     /// The inventory watcher re-enumerates on a timer, so most calls carry the
     /// same devices as the last one; those notify nobody.
@@ -121,17 +122,20 @@ impl ObservableState {
         health: InventoryHealth,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
     ) {
         self.update(|snapshot| {
             if snapshot.status.inventory == health
                 && snapshot.inventory == inventories
                 && snapshot.standalone == standalone
+                && snapshot.status.hid_open_failures == hid_open_failures
             {
                 return false;
             }
             snapshot.status.inventory = health;
             snapshot.inventory = inventories.to_vec();
             snapshot.standalone = standalone.to_vec();
+            snapshot.status.hid_open_failures = hid_open_failures;
             true
         });
     }
@@ -178,21 +182,6 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.input_monitoring_granted = granted;
-            true
-        });
-    }
-
-    /// Publish whether the last enumeration tick failed to open HID++
-    /// nodes, as reported by
-    /// [`watchers::inventory`](crate::watchers::inventory) — with the grant
-    /// state this is what separates "grant Input Monitoring" from "the grant
-    /// exists but another app or a stale permission session is in the way".
-    pub fn set_hid_open_failures(&self, failing: bool) {
-        self.update(|snapshot| {
-            if snapshot.status.hid_open_failures == failing {
-                return false;
-            }
-            snapshot.status.hid_open_failures = failing;
             true
         });
     }
@@ -282,12 +271,12 @@ mod tests {
         let state = state();
         let mut rx = state.subscribe();
 
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap(), "the first enumeration is news");
         rx.mark_unchanged();
 
         // What the inventory watcher does every couple of seconds on a steady desk.
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(
             !rx.has_changed().unwrap(),
             "an identical enumeration must not wake a reader"
@@ -298,10 +287,10 @@ mod tests {
     fn a_device_waking_inside_an_otherwise_identical_set_is_news() {
         let state = state();
         let mut rx = state.subscribe();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[], false);
         rx.mark_unchanged();
 
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap());
     }
 
@@ -312,7 +301,7 @@ mod tests {
 
         // "Checked, no devices" differs from "not checked yet" only in health —
         // the distinction the GUI's empty state reads.
-        state.set_inventory(InventoryHealth::Ready, &[], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[], &[], false);
         assert!(rx.has_changed().unwrap());
         let snapshot = state.snapshot();
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
@@ -322,7 +311,7 @@ mod tests {
     #[test]
     fn a_hook_write_leaves_the_device_facts_alone() {
         let state = state();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
         state.set_hook_installed(true);
         state.set_accessibility_granted(true);
@@ -348,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_generation_gets_the_current_state_at_once() {
         let state = state();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
         let observed = state.observe(1).await;
         assert_eq!(observed.generation, 2);

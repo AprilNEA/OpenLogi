@@ -359,8 +359,7 @@ async fn apply_inventory_event(
                 info!("native resume notification — replaying volatile settings");
                 orchestrator.reapply_volatile_on_next_refresh();
             }
-            orchestrator.refresh_inventory(&inventories, &standalone);
-            orchestrator.set_hid_open_failures(hid_open_failures);
+            orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
         }
         watchers::inventory::InventoryEvent::Unavailable => {
             orchestrator.lock().await.mark_inventory_unavailable();
