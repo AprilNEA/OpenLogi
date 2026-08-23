@@ -28,8 +28,10 @@ took `serial` and `unit_id` and discarded both for receiver routes.
   a G502 LIGHTSPEED publishes `0x2121 HiResWheel` over its receiver and
   `0x00c2 DfuControlSigned` over USB, same firmware image either way (#660).
   The probe was never wrong; one device simply could not own both readings.
-  Settings that disagree between links become per-link overrides rather than
-  one link overwriting the other.
+  Each link's capabilities are rewritten from the sighting that reached it, so
+  the table describes the hardware rather than whatever a migration happened to
+  leave behind. Settings that disagree between links become per-link overrides
+  rather than one link overwriting the other.
 - Migration is two-phase because a v4 direct key carries the unit id in the key
   string while a receiver key says nothing about the device: schema 4 → 5
   renames direct keys mechanically at load, and receiver entries fold into
