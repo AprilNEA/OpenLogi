@@ -31,7 +31,7 @@ use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
-use crate::thumbwheel::{self, Thumbwheel};
+use crate::thumbwheel::{self, Thumbwheel, WheelResolution};
 
 /// How often the capture session pings its device to prove the channel still
 /// delivers input reports. Cheap: one HID++ round-trip per interval.
@@ -67,10 +67,18 @@ pub enum CapturedInput {
     /// ([`ButtonId::DpiToggle`]) or the thumb-wheel single tap
     /// ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId, #[serde(skip)] Option<i32>),
-    /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
-    /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
-    /// (click bound, rotation rebound, or sensitivity changed).
-    Scroll(i16),
+    /// Thumb-wheel rotation to re-synthesise as horizontal scroll. Emitted
+    /// while the wheel is diverted (click bound, rotation rebound, or
+    /// sensitivity changed).
+    Scroll {
+        /// Rotation in the wheel's diverted increments.
+        increments: i16,
+        /// What one revolution measures in each mode, so the dispatcher can
+        /// scale those increments back to the wheel's native scroll amount
+        /// instead of scrolling by however finely this wheel happens to
+        /// report.
+        resolution: WheelResolution,
+    },
 }
 
 /// Why a capture session could not start (or had to stop).
@@ -196,7 +204,11 @@ pub async fn run_capture_session(
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let gesture_cids = armed.gesture_cids.clone();
-    let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
+    let thumb_index = armed.thumb.as_ref().map(|(_, idx, _)| *idx);
+    let thumb_resolution = armed
+        .thumb
+        .as_ref()
+        .map_or(WheelResolution::UNKNOWN, |(_, _, res)| *res);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
     let listener = chan.add_msg_listener_guarded({
@@ -218,7 +230,7 @@ pub async fn run_capture_session(
             }
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
-                && let Some(input) = thumbwheel_input(event)
+                && let Some(input) = thumbwheel_input(event, thumb_resolution)
             {
                 let _ = sink.send(input);
             }
@@ -314,9 +326,15 @@ pub async fn run_capture_session(
 /// through it: both are direct statements that this report is part of a roll,
 /// and taking either keeps the roll recognised on a wheel whose firmware
 /// leaves byte 4 at zero.
-fn thumbwheel_input(event: thumbwheel::ThumbwheelEvent) -> Option<CapturedInput> {
+fn thumbwheel_input(
+    event: thumbwheel::ThumbwheelEvent,
+    resolution: WheelResolution,
+) -> Option<CapturedInput> {
     if event.rotation != 0 {
-        return Some(CapturedInput::Scroll(event.rotation));
+        return Some(CapturedInput::Scroll {
+            increments: event.rotation,
+            resolution,
+        });
     }
     if event.rotation_status.is_rolling() {
         return None;
@@ -370,9 +388,9 @@ struct ArmedControls {
     button_cids: Vec<(u16, ButtonId)>,
     /// Original reporting state for every diverted `0x1b04` control.
     reporting: Vec<ArmedCid>,
-    /// `0x2150` accessor + feature index, present when the thumb wheel is
-    /// diverted.
-    thumb: Option<(Thumbwheel, u8)>,
+    /// `0x2150` accessor, feature index, and the wheel's reported resolution,
+    /// present when the thumb wheel is diverted.
+    thumb: Option<(Thumbwheel, u8, WheelResolution)>,
 }
 
 #[derive(Clone, Copy)]
@@ -389,7 +407,7 @@ impl ArmedControls {
                 restore_reporting(rc, reporting, "captured control").await;
             }
         }
-        if let Some((tw, _)) = self.thumb.as_ref() {
+        if let Some((tw, _, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
         }
     }
@@ -492,11 +510,11 @@ async fn arm_controls_into(
         // Consume the getInfo error here, before the next await: Hidpp20Error
         // isn't Send, so holding it across an await would make this future
         // (spawned on tokio) non-Send.
-        let supports_single_tap = match tw.get_info().await {
-            Ok(twinfo) => twinfo.supports_single_tap,
+        let (supports_single_tap, resolution) = match tw.get_info().await {
+            Ok(twinfo) => (twinfo.supports_single_tap, twinfo.resolution),
             Err(e) => {
                 warn!(error = ?e, "thumb wheel getInfo failed");
-                false
+                (false, WheelResolution::UNKNOWN)
             }
         };
         // Divert whenever capture was requested: rotation rebinds and the
@@ -514,7 +532,7 @@ async fn arm_controls_into(
             );
             return Err(error);
         }
-        armed.thumb = Some((tw, info.index));
+        armed.thumb = Some((tw, info.index, resolution));
     }
     Ok(())
 }

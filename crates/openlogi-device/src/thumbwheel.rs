@@ -22,6 +22,7 @@ use hidpp::{
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
+use serde::{Deserialize, Serialize};
 
 /// `Thumbwheel` HID++ feature ID.
 pub const FEATURE_ID: u16 = 0x2150;
@@ -103,13 +104,48 @@ impl RotationStatus {
     }
 }
 
-/// Characteristics + capabilities returned by `getThumbwheelInfo`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ThumbwheelInfo {
+/// What one revolution of the wheel measures in each reporting mode.
+///
+/// The two are not the same unit: an MX Master 4 reports 20 ratchets per
+/// revolution natively and 120 increments per revolution diverted. Anything
+/// re-synthesising scroll from diverted increments has to scale by the ratio,
+/// or the same physical motion scrolls six times as far as it did before the
+/// wheel was diverted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WheelResolution {
     /// Ratchets per revolution in native (HID) mode.
     pub native_res: u16,
     /// Rotation increments per revolution in diverted (HID++) mode.
     pub diverted_res: u16,
+}
+
+impl WheelResolution {
+    /// Resolutions a wheel did not report, scaling increments through
+    /// unchanged.
+    pub const UNKNOWN: Self = Self {
+        native_res: 0,
+        diverted_res: 0,
+    };
+
+    /// Native scroll units one diverted increment is worth.
+    ///
+    /// `1.0` when either resolution is missing — a wheel that did not answer
+    /// `getThumbwheelInfo` keeps the raw increment-per-unit behavior rather
+    /// than having its scroll silently scaled by a guess.
+    #[must_use]
+    pub fn native_per_increment(self) -> f32 {
+        if self.native_res == 0 || self.diverted_res == 0 {
+            return 1.0;
+        }
+        f32::from(self.native_res) / f32::from(self.diverted_res)
+    }
+}
+
+/// Characteristics + capabilities returned by `getThumbwheelInfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbwheelInfo {
+    /// What one revolution measures in each reporting mode.
+    pub resolution: WheelResolution,
     /// Original (un-inverted) positive rotation direction: `0` = positive toward
     /// the left/back of the device, `1` = positive toward the right/front.
     pub default_dir: u8,
@@ -213,8 +249,10 @@ impl Thumbwheel {
     pub async fn get_info(&self) -> Result<ThumbwheelInfo, Hidpp20Error> {
         let p = self.call(FN_GET_INFO, [0; 16]).await?;
         Ok(ThumbwheelInfo {
-            native_res: u16::from_be_bytes([p[0], p[1]]),
-            diverted_res: u16::from_be_bytes([p[2], p[3]]),
+            resolution: WheelResolution {
+                native_res: u16::from_be_bytes([p[0], p[1]]),
+                diverted_res: u16::from_be_bytes([p[2], p[3]]),
+            },
             default_dir: p[4] & 0x01,
             supports_single_tap: p[5] & CAP_SINGLE_TAP != 0,
         })

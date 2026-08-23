@@ -411,9 +411,12 @@ fn dispatch(
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
         }
-        CapturedInput::Scroll(rotation) => {
+        CapturedInput::Scroll {
+            increments,
+            resolution,
+        } => {
             // Positive rotation is "up"; each direction has its own binding.
-            let up = rotation >= 0;
+            let up = increments >= 0;
             let button = if up {
                 ButtonId::ThumbwheelScrollUp
             } else {
@@ -427,8 +430,17 @@ fn dispatch(
             let sensitivity = plan.thumbwheel_sensitivity;
             let wheels = accumulators.entry(key.to_owned()).or_default();
             let dir = if up { &mut wheels.up } else { &mut wheels.down };
-            let magnitude = i32::from(rotation).abs();
-            match advance(dir, &action, magnitude, sensitivity, Instant::now()) {
+            let magnitude = i32::from(increments).abs();
+            match advance(
+                dir,
+                &action,
+                magnitude,
+                ScrollScale {
+                    native_per_increment: resolution.native_per_increment(),
+                    sensitivity,
+                },
+                Instant::now(),
+            ) {
                 WheelOutput::Idle => {}
                 WheelOutput::Scroll(lines) => {
                     openlogi_inject::post_horizontal_scroll(lines);
@@ -439,6 +451,27 @@ fn dispatch(
                 }
             }
         }
+    }
+}
+
+/// How far one rotation increment should scroll.
+#[derive(Debug, Clone, Copy)]
+struct ScrollScale {
+    /// Native scroll units one diverted increment is worth, from the wheel's
+    /// own `getThumbwheelInfo`. Diverting the wheel changes the unit it
+    /// reports in — an MX Master 4 goes from 20 ratchets per revolution to 120
+    /// increments — so without this the same physical motion scrolls six times
+    /// as far as it did natively, and the sensitivity slider's 1× is 1× of
+    /// nothing recognisable.
+    native_per_increment: f32,
+    /// The user's own multiplier, relative to that native amount.
+    sensitivity: ThumbwheelSensitivity,
+}
+
+impl ScrollScale {
+    /// Scroll units one increment contributes.
+    fn per_increment(self) -> f32 {
+        self.native_per_increment * self.sensitivity.scroll_multiplier()
     }
 }
 
@@ -455,16 +488,18 @@ fn advance(
     dir: &mut WheelDirection,
     action: &Action,
     magnitude: i32,
-    sensitivity: ThumbwheelSensitivity,
+    scale: ScrollScale,
     now: Instant,
 ) -> WheelOutput {
+    let sensitivity = scale.sensitivity;
     match action {
         // Suppressed: captured but produces nothing.
         Action::None => WheelOutput::Idle,
-        // Continuous, sensitivity-scaled horizontal scroll. Direction comes
-        // from the action; magnitude from the accumulated rotation.
+        // Continuous horizontal scroll, scaled from the wheel's diverted
+        // increments back to its native amount and then by the user's
+        // sensitivity. Direction comes from the action.
         Action::HorizontalScrollRight | Action::HorizontalScrollLeft => {
-            dir.scroll += magnitude as f32 * sensitivity.scroll_multiplier();
+            dir.scroll += magnitude as f32 * scale.per_increment();
             let lines = dir.scroll.trunc();
             if lines >= 1.0 {
                 dir.scroll -= lines;
@@ -512,6 +547,23 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlogi_hid::thumbwheel::WheelResolution;
+
+    /// The resolutions traced off an MX Master 4 over Bolt: 20 ratchets per
+    /// revolution natively, 120 increments per revolution diverted.
+    const TRACED: WheelResolution = WheelResolution {
+        native_res: 20,
+        diverted_res: 120,
+    };
+
+    /// A wheel whose increments are already native scroll units — what the
+    /// scaling tests below vary, and what every other test here assumes.
+    fn unscaled(sensitivity: ThumbwheelSensitivity) -> ScrollScale {
+        ScrollScale {
+            native_per_increment: 1.0,
+            sensitivity,
+        }
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {
@@ -538,6 +590,54 @@ mod tests {
         );
     }
 
+    /// Diverting the wheel changes the unit it reports in. An MX Master 4
+    /// sends 120 increments per revolution where native scrolling produced 20
+    /// ratchets, so a revolution has to keep scrolling 20 units — not 120 —
+    /// with the sensitivity slider left alone.
+    #[test]
+    fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
+        let scale = ScrollScale {
+            native_per_increment: TRACED.native_per_increment(),
+            sensitivity: ThumbwheelSensitivity::DEFAULT,
+        };
+        let mut dir = WheelDirection::default();
+        let now = Instant::now();
+        let mut lines = 0;
+        for _ in 0..120 {
+            if let WheelOutput::Scroll(n) =
+                advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
+            {
+                lines += n;
+            }
+        }
+        assert_eq!(lines, 20, "one revolution is 20 native scroll units");
+    }
+
+    /// The sensitivity slider stays a multiplier *of that native amount*.
+    #[test]
+    fn sensitivity_multiplies_the_native_amount() {
+        let scale = ScrollScale {
+            native_per_increment: TRACED.native_per_increment(),
+            sensitivity: ThumbwheelSensitivity::from_rounded(28.0), // 2x
+        };
+        let mut dir = WheelDirection::default();
+        let now = Instant::now();
+        let mut lines = 0;
+        for _ in 0..120 {
+            if let WheelOutput::Scroll(n) =
+                advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
+            {
+                lines += n;
+            }
+        }
+        assert_eq!(lines, 40, "2x sensitivity doubles the native 20");
+    }
+
+    #[test]
+    fn an_unreported_resolution_leaves_increments_unscaled() {
+        assert!((WheelResolution::UNKNOWN.native_per_increment() - 1.0).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn scroll_accumulates_fractionally_at_sub_unity_sensitivity() {
         let mut dir = WheelDirection::default();
@@ -545,11 +645,23 @@ mod tests {
         // multiplier 0.5: two increments make one whole line.
         let half = ThumbwheelSensitivity::from_rounded(7.0);
         assert_eq!(
-            advance(&mut dir, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut dir,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Idle
         );
         assert_eq!(
-            advance(&mut dir, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut dir,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Scroll(1)
         );
     }
@@ -563,7 +675,7 @@ mod tests {
                 &mut dir,
                 &Action::HorizontalScrollLeft,
                 1,
-                ThumbwheelSensitivity::DEFAULT,
+                unscaled(ThumbwheelSensitivity::DEFAULT),
                 now
             ),
             WheelOutput::Scroll(-1)
@@ -578,17 +690,35 @@ mod tests {
         let now = Instant::now();
         let half = ThumbwheelSensitivity::from_rounded(7.0); // multiplier 0.5
         assert_eq!(
-            advance(&mut up, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut up,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Idle
         );
         // One tick the other way doesn't cancel `up`'s banked half-line…
         assert_eq!(
-            advance(&mut down, &Action::HorizontalScrollLeft, 1, half, now),
+            advance(
+                &mut down,
+                &Action::HorizontalScrollLeft,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Idle
         );
         // …so `up`'s next tick still completes its own line.
         assert_eq!(
-            advance(&mut up, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut up,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Scroll(1)
         );
     }
@@ -604,7 +734,7 @@ mod tests {
                     &mut dir,
                     &Action::VolumeUp,
                     1,
-                    ThumbwheelSensitivity::DEFAULT,
+                    unscaled(ThumbwheelSensitivity::DEFAULT),
                     now
                 ),
                 WheelOutput::Idle
@@ -615,7 +745,7 @@ mod tests {
                 &mut dir,
                 &Action::VolumeUp,
                 1,
-                ThumbwheelSensitivity::DEFAULT,
+                unscaled(ThumbwheelSensitivity::DEFAULT),
                 now
             ),
             WheelOutput::FireAction
@@ -627,7 +757,7 @@ mod tests {
                     &mut dir,
                     &Action::VolumeUp,
                     1,
-                    ThumbwheelSensitivity::DEFAULT,
+                    unscaled(ThumbwheelSensitivity::DEFAULT),
                     now
                 ),
                 WheelOutput::Idle
@@ -643,7 +773,7 @@ mod tests {
                 &mut dir,
                 &Action::None,
                 5,
-                ThumbwheelSensitivity::DEFAULT,
+                unscaled(ThumbwheelSensitivity::DEFAULT),
                 Instant::now()
             ),
             WheelOutput::Idle
