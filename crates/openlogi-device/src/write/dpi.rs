@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, LazyLock, Mutex, PoisonError, Weak},
+    time::Duration,
+};
 
 use hidpp::{
     device::Device,
@@ -46,12 +49,36 @@ const TRANSIENT_WRITE_RETRIES: u8 = 2;
 /// `0x2202`-only mouse gets a panel that cannot read or write anything.
 enum DpiFeature {
     /// `0x2201` — one DPI per sensor, described as a flat list of values.
-    Adjustable(Arc<AdjustableDpiFeature>),
+    Adjustable {
+        feature: Arc<AdjustableDpiFeature>,
+        index: u8,
+    },
 
     /// `0x2202` — independent X/Y DPI plus lift-off distance, described as a
     /// mix of fixed values and stepped ranges.
-    Extended(Arc<ExtendedDpiFeature>),
+    Extended {
+        feature: Arc<ExtendedDpiFeature>,
+        index: u8,
+    },
 }
+
+#[derive(Clone, Copy)]
+enum DpiFeatureAddress {
+    Adjustable(u8),
+    Extended(u8),
+}
+
+struct DpiCacheEntry {
+    channel: Weak<hidpp::channel::HidppChannel>,
+    device_index: u8,
+    feature: DpiFeatureAddress,
+    capabilities: Option<DpiCapabilities>,
+}
+
+/// DPI feature addresses and ranges are immutable for one open HID++ channel.
+/// Keep them beside a weak channel reference so repeated UI reads and startup
+/// re-applies skip the root handshake without pinning a retired receiver.
+static DPI_CACHE: LazyLock<Mutex<Vec<DpiCacheEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 impl DpiFeature {
     /// Opens whichever DPI feature `device` exposes, preferring `0x2201`.
@@ -62,10 +89,16 @@ impl DpiFeature {
     /// exactly as it did before.
     async fn open(device: &mut Device) -> Result<Self, WriteError> {
         if let Some(index) = feature_index(device, AdjustableDpiFeature::ID).await? {
-            return Ok(Self::Adjustable(device.add_feature(index)));
+            return Ok(Self::Adjustable {
+                feature: device.add_feature(index),
+                index,
+            });
         }
         if let Some(index) = feature_index(device, ExtendedDpiFeature::ID).await? {
-            return Ok(Self::Extended(device.add_feature(index)));
+            return Ok(Self::Extended {
+                feature: device.add_feature(index),
+                index,
+            });
         }
         // Neither ID is present. Name the canonical one in the error: a caller
         // reading "0x2201 unsupported" is being told this device has no DPI
@@ -78,24 +111,31 @@ impl DpiFeature {
     /// The HID++ feature ID being driven, for error reporting.
     const fn id(&self) -> u16 {
         match self {
-            Self::Adjustable(_) => AdjustableDpiFeature::ID,
-            Self::Extended(_) => ExtendedDpiFeature::ID,
+            Self::Adjustable { .. } => AdjustableDpiFeature::ID,
+            Self::Extended { .. } => ExtendedDpiFeature::ID,
+        }
+    }
+
+    const fn address(&self) -> DpiFeatureAddress {
+        match self {
+            Self::Adjustable { index, .. } => DpiFeatureAddress::Adjustable(*index),
+            Self::Extended { index, .. } => DpiFeatureAddress::Extended(*index),
         }
     }
 
     /// The number of motion sensors the device reports.
     async fn sensor_count(&self) -> Result<u8, Hidpp20Error> {
         match self {
-            Self::Adjustable(feature) => feature.get_sensor_count().await,
-            Self::Extended(feature) => feature.get_sensor_count().await,
+            Self::Adjustable { feature, .. } => feature.get_sensor_count().await,
+            Self::Extended { feature, .. } => feature.get_sensor_count().await,
         }
     }
 
     /// The DPI currently configured on [`SENSOR`].
     async fn current_dpi(&self) -> Result<Dpi, Hidpp20Error> {
         match self {
-            Self::Adjustable(feature) => feature.get_sensor_dpi(SENSOR).await.map(Dpi::from),
-            Self::Extended(feature) => Ok(feature
+            Self::Adjustable { feature, .. } => feature.get_sensor_dpi(SENSOR).await.map(Dpi::from),
+            Self::Extended { feature, .. } => Ok(feature
                 .get_sensor_dpi_parameters(SENSOR)
                 .await?
                 .dpi_x
@@ -106,8 +146,8 @@ impl DpiFeature {
     /// Every DPI value [`SENSOR`] accepts, as a flat list.
     async fn supported_dpi(&self) -> Result<Vec<u16>, Hidpp20Error> {
         match self {
-            Self::Adjustable(feature) => feature.get_sensor_dpi_list(SENSOR).await,
-            Self::Extended(feature) => {
+            Self::Adjustable { feature, .. } => feature.get_sensor_dpi_list(SENSOR).await,
+            Self::Extended { feature, .. } => {
                 // `getSensorDpiList` (function 3) only answers on sensors that
                 // support profiles; the range description is the one every
                 // 0x2202 sensor reports. X is the axis the UI drives.
@@ -120,17 +160,26 @@ impl DpiFeature {
     }
 
     /// Sets [`SENSOR`]'s DPI.
-    async fn set_dpi(&self, dpi: Dpi) -> Result<(), Hidpp20Error> {
+    async fn set_dpi(&self, dpi: Dpi) -> Result<bool, Hidpp20Error> {
         let dpi = dpi.into();
         match self {
-            Self::Adjustable(feature) => feature.set_sensor_dpi(SENSOR, dpi).await,
-            Self::Extended(feature) => {
+            Self::Adjustable { feature, .. } => {
+                if feature.get_sensor_dpi(SENSOR).await? == dpi {
+                    return Ok(false);
+                }
+                feature.set_sensor_dpi(SENSOR, dpi).await?;
+                Ok(true)
+            }
+            Self::Extended { feature, .. } => {
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
                 // distance in one packet with no "leave unchanged" encoding, so
                 // read the current parameters first and put back what we are
                 // not asked to change. Writing a bare `lod` would silently
                 // retune the sensor's lift-off height.
                 let current = feature.get_sensor_dpi_parameters(SENSOR).await?;
+                if current.dpi_x == dpi && (current.dpi_y == 0 || current.dpi_y == dpi) {
+                    return Ok(false);
+                }
                 let params = SetDpiParameters {
                     dpi_x: dpi,
                     // The spec has the host send 0 for dpiY when the sensor
@@ -150,7 +199,8 @@ impl DpiFeature {
                         ))
                     );
                     if !transient || retries >= TRANSIENT_WRITE_RETRIES {
-                        break result;
+                        result?;
+                        return Ok(true);
                     }
                     retries += 1;
                     debug!(retries, %dpi, "retrying transient extended-DPI write");
@@ -159,6 +209,106 @@ impl DpiFeature {
             }
         }
     }
+}
+
+impl DpiFeatureAddress {
+    fn bind(self, channel: &Arc<hidpp::channel::HidppChannel>, device_index: u8) -> DpiFeature {
+        match self {
+            Self::Adjustable(index) => DpiFeature::Adjustable {
+                feature: Arc::new(AdjustableDpiFeature::new(
+                    Arc::clone(channel),
+                    device_index,
+                    index,
+                )),
+                index,
+            },
+            Self::Extended(index) => DpiFeature::Extended {
+                feature: Arc::new(ExtendedDpiFeature::new(
+                    Arc::clone(channel),
+                    device_index,
+                    index,
+                )),
+                index,
+            },
+        }
+    }
+}
+
+fn cached_dpi(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    device_index: u8,
+) -> Option<(DpiFeatureAddress, Option<DpiCapabilities>)> {
+    let mut cache = DPI_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    cache.retain(|entry| entry.channel.strong_count() > 0);
+    cache
+        .iter()
+        .find(|entry| {
+            entry.device_index == device_index
+                && entry
+                    .channel
+                    .upgrade()
+                    .is_some_and(|cached| Arc::ptr_eq(&cached, channel))
+        })
+        .map(|entry| (entry.feature, entry.capabilities.clone()))
+}
+
+fn cache_dpi_feature(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    device_index: u8,
+    feature: DpiFeatureAddress,
+) {
+    let mut cache = DPI_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    cache.retain(|entry| entry.channel.strong_count() > 0);
+    if let Some(entry) = cache.iter_mut().find(|entry| {
+        entry.device_index == device_index
+            && entry
+                .channel
+                .upgrade()
+                .is_some_and(|cached| Arc::ptr_eq(&cached, channel))
+    }) {
+        entry.feature = feature;
+        return;
+    }
+    cache.push(DpiCacheEntry {
+        channel: Arc::downgrade(channel),
+        device_index,
+        feature,
+        capabilities: None,
+    });
+}
+
+fn cache_dpi_capabilities(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    device_index: u8,
+    capabilities: DpiCapabilities,
+) {
+    let mut cache = DPI_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(entry) = cache.iter_mut().find(|entry| {
+        entry.device_index == device_index
+            && entry
+                .channel
+                .upgrade()
+                .is_some_and(|cached| Arc::ptr_eq(&cached, channel))
+    }) {
+        entry.capabilities = Some(capabilities);
+    }
+}
+
+async fn open_dpi_feature(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    device_index: u8,
+) -> Result<(DpiFeature, Option<DpiCapabilities>), WriteError> {
+    if let Some((address, capabilities)) = cached_dpi(channel, device_index) {
+        return Ok((address.bind(channel, device_index), capabilities));
+    }
+    let mut device = Device::new(Arc::clone(channel), device_index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable {
+            index: device_index,
+        })?;
+    let feature = DpiFeature::open(&mut device).await?;
+    cache_dpi_feature(channel, device_index, feature.address());
+    Ok((feature, None))
 }
 
 /// Resolves `feature_hex` to its runtime index, or `None` when the device does
@@ -219,10 +369,7 @@ async fn get_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
 ) -> Result<Dpi, WriteError> {
-    let mut device = Device::new(Arc::clone(channel), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = DpiFeature::open(&mut device).await?;
+    let (feature, _) = open_dpi_feature(channel, index).await?;
     feature
         .current_dpi()
         .await
@@ -260,11 +407,18 @@ pub(super) async fn get_dpi_info_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
 ) -> Result<DpiInfo, WriteError> {
-    let mut device = Device::new(Arc::clone(channel), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = DpiFeature::open(&mut device).await?;
+    let (feature, cached_capabilities) = open_dpi_feature(channel, index).await?;
     let feature_hex = feature.id();
+    if let Some(capabilities) = cached_capabilities {
+        let current = feature
+            .current_dpi()
+            .await
+            .map_err(|e| classify_dpi_error(feature_hex, e))?;
+        return Ok(DpiInfo {
+            current,
+            capabilities,
+        });
+    }
     let sensor_count = feature
         .sensor_count()
         .await
@@ -282,9 +436,11 @@ pub(super) async fn get_dpi_info_on_channel(
         .supported_dpi()
         .await
         .map_err(|e| classify_dpi_error(feature_hex, e))?;
+    let capabilities = DpiCapabilities::new(values)?;
+    cache_dpi_capabilities(channel, index, capabilities.clone());
     Ok(DpiInfo {
         current,
-        capabilities: DpiCapabilities::new(values)?,
+        capabilities,
     })
 }
 
@@ -309,14 +465,15 @@ pub(super) async fn set_dpi_on_channel(
     index: u8,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
-    let mut device = Device::new(Arc::clone(channel), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = DpiFeature::open(&mut device).await?;
-    feature
+    let (feature, _) = open_dpi_feature(channel, index).await?;
+    let wrote = feature
         .set_dpi(dpi)
         .await
         .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature.id()))?;
+    if !wrote {
+        debug!(index, %dpi, "DPI already matches; write skipped");
+        return Ok(());
+    }
     // Read back to confirm the firmware accepted the value. A mismatch is a
     // silent failure mode that's otherwise invisible — devices in low-power
     // states or with unsupported DPI ranges can ACK the write yet keep the old

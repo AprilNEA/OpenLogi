@@ -340,6 +340,17 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
         ]
     );
 
+    // The feature address and immutable range belong to this open channel.
+    // A second panel load should read only the volatile current DPI instead of
+    // repeating the root handshake, feature lookups, sensor count and range.
+    let reports_before_cached_read = handle.written_reports().len();
+    let cached = get_dpi_info_on(&shared).await?;
+    assert_eq!(cached, dpi);
+    let cached_read_reports = &handle.written_reports()[reports_before_cached_read..];
+    assert_eq!(cached_read_reports.len(), 1);
+    assert_eq!(cached_read_reports[0][2], 0x05);
+    assert_eq!(cached_read_reports[0][3] >> 4, 0x05);
+
     set_dpi_on(&shared, Dpi::new(1200)).await?;
 
     // setSensorDpiParameters is a long request on function 6 of feature index
@@ -355,6 +366,29 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     // Lift-off distance is read back and rewritten unchanged — the packet has
     // no "leave alone" encoding, so writing a bare 0 would retune the sensor.
     assert_eq!(write[9], u8::from(Lod::Medium));
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_extended_dpi_skips_the_firmware_write() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(800)).await?;
+
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| report.len() != 20 || report[2] != 0x05 || report[3] >> 4 != 0x06)
+    );
     Ok(())
 }
 
