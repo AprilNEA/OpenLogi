@@ -183,6 +183,19 @@ impl ConfigIssue {
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
 
+/// The per-app profile the binding panels are editing, and the device it was
+/// chosen for.
+///
+/// The device is stored with it because an overlay is per-device: carrying
+/// Safari's scope onto the next mouse would silently edit a profile the user
+/// never opened. Pairing them makes the scope self-invalidating on a device
+/// switch, rather than something every path that moves the selection — there
+/// are two today — has to remember to reset.
+struct EditingScope {
+    device_key: String,
+    app: String,
+}
+
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
     /// be out of bounds briefly while inventories re-enumerate; views must
@@ -193,6 +206,9 @@ pub struct AppState {
     /// these identifiers are the only ones guaranteed to match what its matcher
     /// compares — see [`ForegroundApps`].
     foreground: ForegroundApps,
+    /// The per-app profile the binding panels are editing, if not the device's
+    /// global one. See [`EditingScope`].
+    editing_scope: Option<EditingScope>,
     /// Aggregate host-camera activity reported by the agent. Runtime only.
     camera_active: bool,
     /// Per-device UI state outside the persisted config and the lazily-loaded
@@ -346,6 +362,7 @@ impl AppState {
         let mut state = Self {
             current_device,
             foreground: ForegroundApps::default(),
+            editing_scope: None,
             camera_active: false,
             device_ui: BTreeMap::new(),
             light_command_status: None,
@@ -504,6 +521,85 @@ impl AppState {
     #[must_use]
     pub fn current_record(&self) -> Option<&DeviceRecord> {
         self.device_list.get(self.current_device)
+    }
+
+    /// The application whose profile the binding panels are editing, or `None`
+    /// for the device's global profile.
+    ///
+    /// Resolves against the *current* device, so a scope chosen for another one
+    /// simply does not apply — see [`EditingScope`].
+    #[must_use]
+    pub fn editing_app(&self) -> Option<&str> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        self.editing_scope
+            .as_ref()
+            .filter(|scope| scope.device_key == key)
+            .map(|scope| scope.app.as_str())
+    }
+
+    /// Edit `app`'s profile for the active device, or its global profile with
+    /// `None`. Re-derives what the panels show; nothing is persisted, because
+    /// which profile is open is a property of this window, not of the config.
+    pub fn set_editing_app(&mut self, app: Option<String>) {
+        self.editing_scope = app
+            .zip(
+                self.current_record()
+                    .and_then(DeviceRecord::persistent_config_key)
+                    .map(str::to_string),
+            )
+            .map(|(app, device_key)| EditingScope { device_key, app });
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.current_gesture_maps();
+    }
+
+    /// Whether the active device can carry saved configuration at all. A
+    /// transient probe — one with no stable unit id — cannot, so nothing that
+    /// would write to `config.toml` for it should be offered.
+    #[must_use]
+    pub fn current_device_is_persistent(&self) -> bool {
+        self.current_record()
+            .is_some_and(DeviceRecord::is_persistent)
+    }
+
+    /// Every application profile the active device has, as
+    /// `(identifier, override count)` in identifier order.
+    pub fn app_profiles(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .into_iter()
+            .flat_map(move |key| {
+                self.config.app_profiles(key).map(move |app| {
+                    let count = self
+                        .config
+                        .per_app_overrides(key, app)
+                        .map_or(0, BTreeMap::len);
+                    (app, count)
+                })
+            })
+    }
+
+    /// Applications the agent recently saw in front, newest first, as
+    /// `(identifier, display name)`. The only identifiers a picker may offer —
+    /// see [`ForegroundApps`].
+    pub fn recent_apps(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.foreground
+            .recent
+            .iter()
+            .map(|app| (app.id.as_str(), app.display_name.as_str()))
+    }
+
+    /// The name the agent last reported for `app`, or `None` for one it has not
+    /// seen this session — a hand-written profile, or one carried in from
+    /// another machine.
+    #[must_use]
+    pub fn recent_app_name(&self, app: &str) -> Option<&str> {
+        self.foreground
+            .recent
+            .iter()
+            .find(|seen| seen.id == app)
+            .map(|seen| seen.display_name.as_str())
     }
 
     /// Adopt the agent's view of the foreground application. Returns whether

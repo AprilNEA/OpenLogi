@@ -1,5 +1,7 @@
 //! AppState unit tests.
 
+use std::collections::BTreeMap;
+
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
@@ -103,6 +105,14 @@ fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     }
 }
 
+/// A second, unmistakably different mouse, so a test can move the carousel.
+fn second_mouse_inventory() -> DeviceInventory {
+    let mut inventory = direct_inventory([0x11, 0x22, 0x33, 0x44]);
+    inventory.receiver.name = "MX Anywhere 3S".to_string();
+    inventory.receiver.product_id = 0xb037;
+    inventory
+}
+
 fn superseded_litra_light() -> StandaloneDevice {
     StandaloneDevice {
         address: RawDeviceAddress {
@@ -152,6 +162,7 @@ fn thumbwheel_pair_updates_both_memory_and_config_entries() {
         &mut bindings,
         &mut config,
         Some(key),
+        None,
         ThumbwheelPreset::Volume.pair(),
     ));
     assert_eq!(
@@ -182,6 +193,7 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
         &mut bindings,
         &mut config,
         None,
+        None,
         ThumbwheelPreset::CycleDpi.pair(),
     ));
     assert_eq!(bindings.len(), 2);
@@ -208,6 +220,147 @@ fn app(id: &str, display_name: &str) -> ForegroundApp {
         id: id.to_string(),
         display_name: display_name.to_string(),
     }
+}
+
+/// A known mouse with `app`'s profile open for editing.
+fn state_editing(app: &str) -> AppState {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_app(Some(app.to_string()));
+    assert_eq!(state.editing_app(), Some(app), "scope did not take");
+    state
+}
+
+#[test]
+fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
+    let mut state = state_editing("com.apple.Safari");
+    state.commit_binding(ButtonId::Back, Action::Undo);
+
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
+    );
+    assert!(
+        state.config.bindings_for(KNOWN_MOUSE_KEY).is_empty(),
+        "the device's global bindings must be untouched"
+    );
+}
+
+#[test]
+fn clearing_an_override_falls_back_to_the_global_binding() {
+    let mut state = state_with_a_known_mouse();
+    state.commit_binding(ButtonId::Back, Action::Copy);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_binding(ButtonId::Back, Action::Undo);
+    assert_eq!(
+        state.button_bindings.get(&ButtonId::Back),
+        Some(&Action::Undo)
+    );
+
+    state.clear_app_binding(ButtonId::Back);
+
+    assert_eq!(
+        state.button_bindings.get(&ButtonId::Back),
+        Some(&Action::Copy),
+        "the panel falls back to what the default profile binds"
+    );
+    assert!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .is_none(),
+        "an emptied profile is pruned, not left behind"
+    );
+}
+
+#[test]
+fn gesture_mode_is_not_editable_from_inside_a_per_app_profile() {
+    // The trap this guards: `set_gesture_mode` writes the device's global
+    // bindings, so honouring it here would change every application from a
+    // panel labelled with one. A per-app entry is `Action`-valued and has no
+    // per-direction shape to promote into.
+    let mut state = state_editing("com.apple.Safari");
+
+    state.commit_gesture_mode(ButtonId::MiddleClick, true);
+
+    assert!(
+        !state
+            .config
+            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick),
+        "a per-app profile must not promote a button globally"
+    );
+    assert!(
+        state.current_gesture_maps().is_empty(),
+        "and no gesture menu is offered in that scope"
+    );
+}
+
+#[test]
+fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
+    let mut state = state_with_a_known_mouse();
+    state.commit_gesture_mode(ButtonId::MiddleClick, true);
+    let global = state.current_gesture_maps();
+    assert!(global.contains_key(&ButtonId::MiddleClick));
+
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    assert!(state.current_gesture_maps().is_empty());
+    // The device still has its gestures — only the open profile cannot show
+    // them, which is what the device card must keep reporting.
+    assert_eq!(
+        state.device_gesture_binding_count(),
+        global.values().map(BTreeMap::len).sum::<usize>()
+    );
+
+    state.set_editing_app(None);
+    assert_eq!(state.current_gesture_maps(), global);
+}
+
+#[test]
+fn a_profile_belongs_to_the_device_it_was_opened_on() {
+    // Overlays are per-device, so a scope must not follow the carousel onto
+    // another mouse and silently edit a profile the user never opened.
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[
+            direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+            second_mouse_inventory(),
+        ],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    let other = state
+        .device_list
+        .iter()
+        .position(|record| record.config_key != KNOWN_MOUSE_KEY)
+        .expect("the fixture pairs a second device");
+    let known = state
+        .device_list
+        .iter()
+        .position(|record| record.config_key == KNOWN_MOUSE_KEY)
+        .expect("the fixture pairs the known mouse");
+
+    state.set_current_device(known);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+
+    state.set_current_device(other);
+    assert_eq!(
+        state.editing_app(),
+        None,
+        "another device falls back to its own global profile"
+    );
+
+    state.set_current_device(known);
+    assert_eq!(
+        state.editing_app(),
+        Some("com.apple.Safari"),
+        "and returning restores the profile that was open here"
+    );
 }
 
 #[test]
