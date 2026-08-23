@@ -148,8 +148,11 @@ each is still open (`gh issue view 606`, `gh pr view 760`) before citing it:
 - The Settings → Input Monitoring row queries the **GUI's** grant, not the
   agent's (#606, PR #760 open). It can read "Granted" while the agent has
   nothing. The Accessibility row above it is already correct — it goes over IPC.
-- The agent's launchd log has no destination (§3). Open.
-- `disclaim`'s spawn result is discarded in `ipc.rs` (`.map(|_| ())`).
+- The agent's launchd log has no destination (§3). Fix open in PR #817.
+- `open -g -n`'s exit status is not checked when launching the packaged
+  helper — a LaunchServices refusal is invisible. Fix open in PR #820.
+  (The `disclaim` path is fine: its spawn result is matched and logged;
+  the `.map(|_| ())` there discards the child handle, not the error.)
 
 ## 8. What this cannot fix
 
