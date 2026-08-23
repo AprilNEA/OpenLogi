@@ -53,15 +53,22 @@ pub fn bindings_for(
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI
 /// shows. Empty when no HID++ source gestures (or `config_key` is `None`).
+///
+/// `app_bundle`'s per-app overlay is applied first: a per-app override turns
+/// a gesture source into a [`Binding::Single`], which drops it from this
+/// app's gesture set entirely — the capture plan then diverts it as a plain
+/// source and its press dispatches via the single-action path, mirroring how
+/// [`oshook_gestures_for`] treats overridden OS-hook buttons.
 #[must_use]
 pub fn hidpp_gesture_maps_for(
     config: &Config,
     config_key: Option<&str>,
+    app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    let stored = config.bindings_for(key);
+    let stored = config.effective_bindings(key, app_bundle);
     ButtonId::ALL
         .iter()
         .copied()
@@ -248,7 +255,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         // The dedicated button gestures by default...
         let dedicated = maps
             .get(&ButtonId::GestureButton)
@@ -301,7 +308,7 @@ mod tests {
         // Default device: the dedicated HID++ gesture button gestures, with its
         // defaults seeded.
         let mut cfg = Config::default();
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         assert_eq!(
             maps.get(&ButtonId::GestureButton)
                 .and_then(|m| m.get(&GestureDirection::Up)),
@@ -314,8 +321,39 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
-            hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
+            hidpp_gesture_maps_for(&cfg, Some("2b042"), None).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
+    }
+
+    #[test]
+    fn per_app_override_drops_the_dedicated_button_from_the_gesture_set() {
+        // The dedicated HID++ gesture button gestures globally (Click → its
+        // seeded default)...  
+        let mut cfg = Config::default();
+        assert!(
+            hidpp_gesture_maps_for(&cfg, Some("2b042"), None)
+                .contains_key(&ButtonId::GestureButton),
+            "the dedicated button gestures globally"
+        );
+
+        // ...but a per-app override replaces it with a Single for that app, so
+        // it must drop out of the gesture set there — the capture plan then
+        // diverts it as a plain source and its press dispatches via the
+        // single-action path (plan.bindings), which carries the override.
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.mitchellh.ghostty",
+            ButtonId::GestureButton,
+            Some(Action::RunShellCommand(String::from("echo hi"))),
+        );
+        let overlaid = hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.mitchellh.ghostty"));
+        assert!(
+            !overlaid.contains_key(&ButtonId::GestureButton),
+            "a per-app override must remove GestureButton from the gesture set, got: {overlaid:?}"
+        );
+        // Other apps are unaffected — it still gestures.
+        assert!(hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.other.App"))
+            .contains_key(&ButtonId::GestureButton));
     }
 }

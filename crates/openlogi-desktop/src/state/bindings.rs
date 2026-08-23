@@ -222,8 +222,8 @@ impl AppState {
         // Both halves come from the same helpers the runtime dispatches with,
         // so the menus can never drift from what the agent actually does:
         // HID++ sources seeded like the gesture watcher, OS-hook buttons raw
-        // like the hook.
-        let mut maps = hidpp_gesture_maps_for(&self.config, Some(key));
+        // like the hook (global view — no per-app overlay here).
+        let mut maps = hidpp_gesture_maps_for(&self.config, Some(key), None);
         maps.extend(oshook_gestures_for(&self.config, Some(key), None));
         maps
     }
