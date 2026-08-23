@@ -218,13 +218,9 @@ pub async fn run_capture_session(
             }
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
+                && let Some(input) = thumbwheel_input(event)
             {
-                if event.single_tap {
-                    let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None));
-                }
-                if event.rotation != 0 {
-                    let _ = sink.send(CapturedInput::Scroll(event.rotation));
-                }
+                let _ = sink.send(input);
             }
         }
     });
@@ -303,6 +299,24 @@ pub async fn run_capture_session(
     }
     debug!(index = device_index, "control capture stopped");
     Ok(())
+}
+
+/// The single input one diverted thumb-wheel report stands for, if any.
+///
+/// A report is a roll *or* a tap, never both: the wheel's touch sensor sets
+/// `single_tap` on the very contact that turned the wheel, so a report
+/// carrying rotation is a roll whose tap bit is an artifact of the finger that
+/// produced it. Forwarding both made a brisk flick fire the tap's action
+/// alongside the scroll. Taps that arrive in their *own* report right after a
+/// roll are the same artifact one report later; that half is the dispatcher's
+/// (see the roll lockout in `openlogi-agent-core`'s capture watcher).
+fn thumbwheel_input(event: thumbwheel::ThumbwheelEvent) -> Option<CapturedInput> {
+    if event.rotation != 0 {
+        return Some(CapturedInput::Scroll(event.rotation));
+    }
+    event
+        .single_tap
+        .then_some(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None))
 }
 
 /// Reason-aware capture: maps stop reasons onto a unit oneshot shutdown.

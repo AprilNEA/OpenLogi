@@ -526,3 +526,38 @@ fn a_dpi_button_re_presses_after_a_release() {
         "press → release → press emits exactly two presses"
     );
 }
+
+fn thumb_event(rotation: i16, single_tap: bool) -> thumbwheel::ThumbwheelEvent {
+    thumbwheel::ThumbwheelEvent {
+        rotation,
+        single_tap,
+        touch: true,
+        proxy: true,
+    }
+}
+
+/// The wheel's touch sensor flags a tap on the same contact that rolled it, so
+/// a rolling report's tap bit is an artifact — forwarding it fired the tap's
+/// bound action in the middle of a scroll.
+#[test]
+fn a_rolling_report_is_a_roll_even_when_it_flags_a_tap() {
+    assert_eq!(
+        thumbwheel_input(thumb_event(-3, true)),
+        Some(CapturedInput::Scroll(-3))
+    );
+}
+
+#[test]
+fn a_still_report_with_a_tap_is_a_tap() {
+    assert_eq!(
+        thumbwheel_input(thumb_event(0, true)),
+        Some(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None))
+    );
+}
+
+/// Touch and proximity alone carry no input: the wheel reports them whenever a
+/// thumb rests near it.
+#[test]
+fn contact_without_rotation_or_a_tap_carries_no_input() {
+    assert_eq!(thumbwheel_input(thumb_event(0, false)), None);
+}

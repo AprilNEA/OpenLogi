@@ -52,7 +52,10 @@ Common device fields are:
 
 - `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity, scroll inversion,
   and scroll resolution
-- `bindings`: a button maps either to one action or to a gesture-direction map
+- `bindings`: a button maps either to one action or to a gesture-direction map.
+  `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
+  stays inert unless bound here, because the wheel reports taps from incidental
+  thumb contact as well as from deliberate ones
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`

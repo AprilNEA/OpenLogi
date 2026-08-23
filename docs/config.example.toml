@@ -26,6 +26,9 @@ scroll_resolution = "high"
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
 Forward = "BrowserForward"
+# The thumb wheel's capacitive tap. Inert unless set here; the wheel also
+# reports taps from incidental thumb contact.
+Thumbwheel = "AppExpose"
 
 [devices."receiver:aabbccdd:slot:1".bindings.GestureButton]
 Click = "MissionControl"
