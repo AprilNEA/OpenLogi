@@ -48,6 +48,30 @@ fn backend_error(error: async_hid::HidError) -> BackendError {
     }
 }
 
+/// Classify a failed device open. On macOS `IOHIDDeviceOpen` denies silently —
+/// the error is indistinguishable from exclusive access — so fold the Input
+/// Monitoring state into the message: it is the difference between "grant the
+/// permission" and "close the other app, or log out and back in".
+#[cfg(not(target_os = "windows"))]
+fn open_error(error: async_hid::HidError) -> BackendError {
+    match backend_error(error) {
+        #[cfg(target_os = "macos")]
+        BackendError::Backend(message) => {
+            let hint = if crate::permissions::has_access() {
+                "Input Monitoring is granted to this process — another app may \
+                 hold the device exclusively, or macOS is serving a stale \
+                 permission session (log out and back in)"
+            } else {
+                "Input Monitoring is NOT granted to this process; grant it to \
+                 OpenLogi Agent under System Settings → Privacy & Security → \
+                 Input Monitoring"
+            };
+            BackendError::Backend(format!("{message}: {hint}"))
+        }
+        other => other,
+    }
+}
+
 /// `DeviceId` is an opaque OS handle (a hidraw path, a Windows device path, an
 /// IOKit entry), so [`NodeId`] carries its `Debug` rendering verbatim.
 ///
@@ -370,7 +394,7 @@ pub(crate) async fn open_hidpp_channel(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let (reader, writer) = dev.open().await.map_err(backend_error)?;
+        let (reader, writer) = dev.open().await.map_err(open_error)?;
         // BLE-direct devices expose only the long HID++ report; flag the channel so
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
