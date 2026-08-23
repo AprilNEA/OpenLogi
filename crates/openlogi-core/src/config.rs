@@ -464,6 +464,43 @@ impl Config {
         }
     }
 
+    /// The overrides `device_key` stores for the application key `app`,
+    /// or `None` when it has no profile for it.
+    ///
+    /// Exact key, deliberately: this answers "what did the user author under
+    /// this key", which is what an editor needs to show and to clear. The
+    /// question [`Self::has_app_override`] answers — "will the app in front hit
+    /// a profile" — is the matcher's, and goes through the same `exe:` fallback
+    /// the matcher does. The two look interchangeable and are not.
+    #[must_use]
+    pub fn per_app_overrides(
+        &self,
+        device_key: &str,
+        app: &str,
+    ) -> Option<&BTreeMap<ButtonId, Action>> {
+        self.devices
+            .get(device_key)?
+            .per_app_bindings
+            .get(app)
+            .filter(|overrides| !overrides.is_empty())
+    }
+
+    /// Every application key `device_key` has a profile for, in key order.
+    pub fn app_profiles(&self, device_key: &str) -> impl Iterator<Item = &str> {
+        self.devices
+            .get(device_key)
+            .into_iter()
+            .flat_map(|device| device.per_app_bindings.keys().map(String::as_str))
+    }
+
+    /// Drop `device_key`'s whole profile for `app`. Nothing happens when there
+    /// is none.
+    pub fn remove_app_profile(&mut self, device_key: &str, app: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.per_app_bindings.remove(app);
+        }
+    }
+
     /// Actions Ring settings for `device_key`, falling back to defaults when
     /// the device has no saved ring configuration.
     #[must_use]
