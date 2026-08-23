@@ -1853,7 +1853,7 @@ fn an_empty_link_table_survives_a_save_and_reload() {
 
     let mut config = Config::load_from_path(&path).expect("load");
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-    assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1"));
+    assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
     assert!(
         config.devices["unit:6be9d300"].links["receiver:82839805:slot:1"]
             .overrides

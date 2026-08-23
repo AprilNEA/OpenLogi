@@ -522,7 +522,7 @@ pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
         let Some(key) = PhysicalDeviceKey::parse(canonical) else {
             continue;
         };
-        adopted |= config.adopt_route(&key, &record.route_key);
+        adopted |= config.adopt_route(&key, &record.route_key, record.capabilities);
     }
     adopted
 }
