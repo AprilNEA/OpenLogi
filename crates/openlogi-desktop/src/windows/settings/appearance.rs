@@ -271,7 +271,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
 fn icon_label(icon: AppIcon) -> SharedString {
     match icon {
         AppIcon::Openlogi => "OpenLogi".into(),
-        AppIcon::Midnight => "Midnight".into(),
+        AppIcon::Prism => "Prism".into(),
     }
 }
 

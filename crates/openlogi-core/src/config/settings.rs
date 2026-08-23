@@ -46,13 +46,13 @@ pub enum AppIcon {
     /// another.
     #[default]
     Openlogi,
-    /// The dark alternate.
-    Midnight,
+    /// The geometric mark on a faceted, light-refracting fill.
+    Prism,
 }
 
 impl AppIcon {
     /// Every icon, in the order Settings offers them.
-    pub const ALL: [Self; 2] = [Self::Openlogi, Self::Midnight];
+    pub const ALL: [Self; 2] = [Self::Openlogi, Self::Prism];
 
     /// Whether this is the icon the installed bundle already wears — the one
     /// case a frontend applies by clearing its override rather than by handing

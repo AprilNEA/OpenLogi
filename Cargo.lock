@@ -9981,6 +9981,7 @@ name = "xtask"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "appicon",
  "clap",
  "comfy-table",
  "fs-err",

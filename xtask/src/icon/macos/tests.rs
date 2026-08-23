@@ -57,7 +57,7 @@ fn a_bundle_missing_an_alternate_icon_is_rejected() {
 
     let error = AppBundle.verify(app.path()).unwrap_err().to_string();
 
-    assert!(error.contains("missing the midnight icon"), "got: {error}");
+    assert!(error.contains("missing the prism icon"), "got: {error}");
 }
 
 #[test]

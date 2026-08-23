@@ -83,7 +83,23 @@ impl IconPipeline for AppBundle {
         fs_err::copy(&catalog, resources.join(CATALOG))
             .with_context(|| format!("could not copy {CATALOG} into the bundle"))?;
 
-        fs_err::create_dir_all(app.join(ICONS_DIR))
+        // Both bundle directories are assembled in place and reused, so a run
+        // of the app that applied an alternate leaves its custom icon behind —
+        // and `codesign` refuses a bundle carrying one ("resource fork, Finder
+        // information, or similar detritus"). A freshly built bundle wears what
+        // it was compiled with.
+        if appicon::has_custom_icon(app) {
+            appicon::reset_file(app).context("could not clear the bundle's custom icon")?;
+        }
+
+        // Rebuilt rather than added to, so an icon that was renamed or dropped
+        // cannot linger in a bundle that keeps being reused.
+        let icons = app.join(ICONS_DIR);
+        if icons.exists() {
+            fs_err::remove_dir_all(&icons)
+                .with_context(|| format!("could not clear {}", icons.display()))?;
+        }
+        fs_err::create_dir_all(&icons)
             .with_context(|| format!("could not create {ICONS_DIR} in the bundle"))?;
         for icon in AppIcon::ALL {
             // Every icon Settings offers needs a preview; only the alternates
@@ -144,7 +160,7 @@ impl IconPipeline for AppBundle {
 fn document(icon: AppIcon) -> &'static str {
     match icon {
         AppIcon::Openlogi => "design/icon/openlogi.icon",
-        AppIcon::Midnight => "design/icon/openlogi-midnight.icon",
+        AppIcon::Prism => "design/icon/openlogi-prism.icon",
     }
 }
 
