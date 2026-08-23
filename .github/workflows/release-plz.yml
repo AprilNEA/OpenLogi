@@ -102,6 +102,41 @@ jobs:
           git add CHANGELOG.md cliff.toml 2>/dev/null || git add CHANGELOG.md
           git commit -m "chore(release): write whole-repo changelog"
           git push origin "HEAD:refs/heads/${branch}"
+      # OpenLogi ships as one application, so the whole-repo changelog is the
+      # release PR body; per-crate version and API-break summaries are noise.
+      - name: Replace release PR body with changelog
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { readFileSync } = require("node:fs");
+            const { owner, repo } = context.repo;
+            const openPulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100,
+            });
+            const pull = openPulls.find(({ head }) => head.ref.startsWith("release-plz/"));
+            if (!pull) {
+              core.info("No open release-plz PR — nothing to update.");
+              return;
+            }
+
+            const changelog = readFileSync("CHANGELOG.md", "utf8");
+            const heading = /^## \[(?!Unreleased\])[^\]]+\][^\n]*$/m.exec(changelog);
+            if (!heading) {
+              core.setFailed("CHANGELOG.md has no release section.");
+              return;
+            }
+            const start = heading.index;
+            const end = changelog.indexOf("\n## [", start);
+            const body = changelog.slice(start, end === -1 ? undefined : end).trim();
+            if (pull.body === body) {
+              core.info("Release PR body changelog already complete.");
+              return;
+            }
+            await github.rest.pulls.update({ owner, repo, pull_number: pull.number, body });
       # `release-plz/action` swallows a release-pr HTTP 422 as a warning and
       # reports no PR, which silently stalls releases (it looks identical to a
       # quiet week of commits). Fail loudly when release-plz opened/updated no
