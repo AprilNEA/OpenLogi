@@ -164,8 +164,8 @@ impl to a derive macro kills every `Type::trait_method` doc link — is explaine
 
 The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
 (Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
-`--all-targets` tests, cargo-deny, Windows clippy, wasm portability, shell lint). macOS-green is
-not that matrix. To run every job this machine can reproduce:
+`--all-targets` tests, typos, cargo-deny, Windows clippy, wasm portability, shell
+lint). macOS-green is not that matrix. To run every job this machine can reproduce:
 
 ```sh
 cargo xtask ci
@@ -179,9 +179,9 @@ OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as no
 run in the PR Testing section. Full map, including "if you changed X, run Y":
 [`.claude/rules/ci.md`](.claude/rules/ci.md).
 
-prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy **and
-rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a backstop,
-not a substitute for running the gate yourself after a rebase.
+prek hooks (`prek.toml`): typos and `cargo fmt` at commit; full-workspace clippy
+**and rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a
+backstop, not a substitute for running the gate yourself after a rebase.
 
 **Push checklist (agents):**
 

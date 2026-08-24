@@ -412,7 +412,7 @@ jobs:
       - name: Load static updater config from 1Password
         id: update_config
         if: ${{ inputs.sign }}
-        # Pinned to an immutable commit (matching crowdin.yml): this step runs
+        # Pinned to an immutable commit (matching the Crowdin workflow): this step runs
         # with the 1Password service-account token during signed release
         # builds, so a repointed mutable tag must not be able to swap the code.
         uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1

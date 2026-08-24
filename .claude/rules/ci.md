@@ -3,8 +3,9 @@ paths:
   - ".github/workflows/**"
   - "xtask/src/commands/ci.rs"
   - "xtask/src/commands/ci/**"
+  - ".cargo/deny.toml"
+  - ".config/typos.toml"
   - ".editorconfig"
-  - "deny.toml"
   - "rust-toolchain.toml"
   - "prek.toml"
 ---
@@ -23,8 +24,8 @@ file, so it is on you.
 `devenv tasks run openlogi:check` is the **full tier** of the host-OS pre-push
 gate (fmt, clippy, tests, rustdoc). `AGENTS.md` defines when a package-local diff
 may check its complete reverse-dependency closure instead. Neither tier is the
-pipeline. macOS-green clippy does not compile linux cfg; it does not run MSRV,
-cargo-deny, Windows clippy, or the shell lint.
+pipeline. macOS-green clippy does not compile linux cfg; it does not run typos,
+MSRV, cargo-deny, Windows clippy, or the shell lint.
 
 Do not claim a skipped job passed. Name it as not run in the PR Testing section.
 
@@ -47,6 +48,7 @@ that host clippy `-D warnings` does not surface still fails CI.
 | CI job | Local command | Who can run it |
 |---|---|---|
 | `rustfmt` | `cargo fmt --all -- --check` | any |
+| `typos` | `typos --config .config/typos.toml .` | any (needs `typos`; included in the devenv shell) |
 | `publish closure` | `cargo xtask release check-publish` | any |
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
@@ -54,7 +56,7 @@ that host clippy `-D warnings` does not surface still fails CI.
 | `rustdoc (non-GUI crates)` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --exclude openlogi-ui --exclude openlogi-desktop --exclude openlogi-overlay --exclude openlogi-agent` | any |
 | `tests (linux)` | `cargo test --workspace --exclude openlogi-desktop` | Linux |
 | `tests (macos, <arch>)` | `cargo test --workspace --all-targets` | macOS. CI matrix is arm64 (`macos-latest`) and x86_64 (`macos-15-intel`) |
-| `cargo-deny` | `cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
+| `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
@@ -93,7 +95,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | any `*.sh`, any file with a shell shebang, `.editorconfig` | `shell` (the prek hooks run the same two tools at commit) |
 | `#[cfg(target_os = …)]`, hook/inject/hid/camera platform files | `clippy-windows` proxy + the linux-musl recipe; say so if you cannot |
 | `crates/openlogi-hidpp/**`, `crates/openlogi-device/**`, `crates/openlogi-core/**`, or any dependency they gain | `wasm` — those crates must keep building with no OS under them |
-| `Cargo.lock` / `deny.toml` / new deps | `cargo-deny` |
+| `Cargo.lock` / `.cargo/deny.toml` / new deps | `cargo-deny` |
 | `rust-version` or a newly stabilized API | `MSRV` |
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |
 | `crates/openlogi-ipc/**` or wire types | `cargo test -p openlogi-ipc --test wire_format` |

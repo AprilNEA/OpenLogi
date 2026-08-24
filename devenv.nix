@@ -47,6 +47,7 @@ in
       cmake
       sccache
       prek
+      typos
       # The `shell` CI job and the prek hooks of the same name.
       shellcheck
       shfmt
@@ -144,8 +145,8 @@ in
       description = "Upload en.yml sources and per-language translations to Crowdin.";
       exec = ''
         set -e
-        ${pkgs.crowdin-cli}/bin/crowdin upload sources
-        ${pkgs.crowdin-cli}/bin/crowdin upload translations
+        ${pkgs.crowdin-cli}/bin/crowdin upload sources --config .config/crowdin.yml
+        ${pkgs.crowdin-cli}/bin/crowdin upload translations --config .config/crowdin.yml
       '';
     };
     "openlogi:i18n-download" = {
@@ -157,7 +158,8 @@ in
         before="$(mktemp -d)"
         trap 'rm -rf "$before"' EXIT
         cp crates/openlogi-ui/locales/*.yml "$before/"
-        ${pkgs.crowdin-cli}/bin/crowdin download --skip-untranslated-strings
+        ${pkgs.crowdin-cli}/bin/crowdin download --config .config/crowdin.yml \
+          --skip-untranslated-strings
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
           --locales crates/openlogi-ui/locales \

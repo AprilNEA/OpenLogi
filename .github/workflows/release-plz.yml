@@ -103,7 +103,7 @@ jobs:
       - name: Write root changelog with git-cliff
         if: steps.open_release_pr.outputs.branch != ''
         working-directory: release-pr
-        run: ../target/debug/xtask release changelog --config ../cliff.toml
+        run: ../target/debug/xtask release changelog --config ../.config/cliff.toml
       - name: Commit root changelog
         if: steps.open_release_pr.outputs.branch != ''
         uses: stefanzweifel/git-auto-commit-action@v7
