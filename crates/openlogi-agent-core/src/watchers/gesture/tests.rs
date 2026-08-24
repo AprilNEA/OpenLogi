@@ -56,10 +56,10 @@ fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
     let now = Instant::now();
     let mut lines = 0;
     for _ in 0..120 {
-        if let WheelOutput::Scroll(n) =
+        if let WheelOutput::Scroll { delta_x, .. } =
             advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
         {
-            lines += n;
+            lines += delta_x;
         }
     }
     assert_eq!(lines, 20, "one revolution is 20 native scroll units");
@@ -76,10 +76,10 @@ fn sensitivity_multiplies_the_native_amount() {
     let now = Instant::now();
     let mut lines = 0;
     for _ in 0..120 {
-        if let WheelOutput::Scroll(n) =
+        if let WheelOutput::Scroll { delta_x, .. } =
             advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
         {
-            lines += n;
+            lines += delta_x;
         }
     }
     assert_eq!(lines, 40, "2x sensitivity doubles the native 20");
@@ -114,7 +114,10 @@ fn scroll_accumulates_fractionally_at_sub_unity_sensitivity() {
             unscaled(half),
             now
         ),
-        WheelOutput::Scroll(1)
+        WheelOutput::Scroll {
+            delta_x: 1,
+            delta_y: 0,
+        }
     );
 }
 
@@ -130,7 +133,33 @@ fn scroll_left_emits_negative_lines() {
             unscaled(ThumbwheelSensitivity::DEFAULT),
             now
         ),
-        WheelOutput::Scroll(-1)
+        WheelOutput::Scroll {
+            delta_x: -1,
+            delta_y: 0,
+        }
+    );
+}
+
+#[test]
+fn vertical_scroll_actions_emit_on_the_vertical_axis() {
+    let now = Instant::now();
+    let mut up = WheelDirection::default();
+    let mut down = WheelDirection::default();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+
+    assert_eq!(
+        advance(&mut up, &Action::ScrollUp, 1, scale, now),
+        WheelOutput::Scroll {
+            delta_x: 0,
+            delta_y: 1,
+        }
+    );
+    assert_eq!(
+        advance(&mut down, &Action::ScrollDown, 1, scale, now),
+        WheelOutput::Scroll {
+            delta_x: 0,
+            delta_y: -1,
+        }
     );
 }
 
@@ -168,7 +197,10 @@ fn directions_accumulate_independently() {
             unscaled(half),
             now
         ),
-        WheelOutput::Scroll(1)
+        WheelOutput::Scroll {
+            delta_x: 1,
+            delta_y: 0,
+        }
     );
 }
 

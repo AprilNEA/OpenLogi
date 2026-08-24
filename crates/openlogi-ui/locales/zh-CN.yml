@@ -187,6 +187,7 @@ _version: 1
 "Volume Down / Up": "减小 / 增大音量"
 "Volume Up / Down": "增大 / 减小音量"
 "Vertical Scroll": "垂直滚动"
+"Vertical Scroll (Reversed)": "垂直滚动（反向）"
 "Horizontal Scroll": "水平滚动"
 "Custom": "自定义"
 "Gesture Button": "手势按钮"

@@ -187,6 +187,7 @@ _version: 1
 "Volume Down / Up": "Bajar / subir volumen"
 "Volume Up / Down": "Subir / bajar volumen"
 "Vertical Scroll": "Desplazamiento vertical"
+"Vertical Scroll (Reversed)": "Desplazamiento vertical (invertido)"
 "Horizontal Scroll": "Desplazamiento horizontal"
 "Custom": "Personalizado"
 "Gesture Button": "Botón de gestos"

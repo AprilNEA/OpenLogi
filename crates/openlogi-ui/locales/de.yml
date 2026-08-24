@@ -187,6 +187,7 @@ _version: 1
 "Volume Down / Up": "Leiser / Lauter"
 "Volume Up / Down": "Lauter / Leiser"
 "Vertical Scroll": "Vertikales Scrollen"
+"Vertical Scroll (Reversed)": "Vertikales Scrollen (umgekehrt)"
 "Horizontal Scroll": "Horizontales Scrollen"
 "Custom": "Benutzerdefiniert"
 "Gesture Button": "Gestentaste"

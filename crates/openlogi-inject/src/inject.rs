@@ -310,33 +310,32 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
-/// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
+/// Synthesise a scroll of `(delta_x, delta_y)` wheel lines at the current focus.
 ///
 /// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
-/// wheel's scrolling after the wheel has been diverted over HID++ to capture its
-/// click. `delta` is the device's raw rotation; its sign follows the wheel's
-/// rotation convention and its magnitude (one line per rotation increment) may
-/// need tuning per device, since the diverted resolution differs from native.
+/// wheel's scrolling after the wheel has been diverted over HID++. The caller
+/// maps physical rotation onto the configured horizontal or vertical axis and
+/// scales it from diverted increments back to native wheel lines.
 ///
 /// No-op (logs nothing) on platforms without a supported injection mechanism.
-pub fn post_horizontal_scroll(delta: i32) {
+pub fn post_thumbwheel_scroll(delta_x: i32, delta_y: i32) {
     cfg_select! {
         target_os = "macos" => {
-            macos::post_horizontal_scroll(delta);
+            macos::post_scroll(delta_x, delta_y);
         }
         target_os = "linux" => {
-            // `delta` is already in "one line per rotation increment" units (see
-            // doc above), which matches REL_HWHEEL's convention of one unit per
-            // detent. This is intentionally different from
-            // Action::HorizontalScrollLeft/Right, which hardcode ±3 as a fixed
-            // "scroll tick" with no device delta involved.
-            linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta);
+            if delta_y != 0 {
+                linux::scroll(evdev::RelativeAxisCode::REL_WHEEL, delta_y);
+            }
+            if delta_x != 0 {
+                linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta_x);
+            }
         }
         target_os = "windows" => {
-            windows::post_horizontal_scroll(delta);
+            windows::post_scroll(delta_x, delta_y);
         }
         _ => {
-            let _ = delta;
+            let _ = (delta_x, delta_y);
         }
     }
 }

@@ -187,6 +187,7 @@ _version: 1
 "Volume Down / Up": "音量を下げる / 上げる"
 "Volume Up / Down": "音量を上げる / 下げる"
 "Vertical Scroll": "縦スクロール"
+"Vertical Scroll (Reversed)": "縦スクロール（反転）"
 "Horizontal Scroll": "横スクロール"
 "Custom": "カスタム"
 "Gesture Button": "ジェスチャーボタン"

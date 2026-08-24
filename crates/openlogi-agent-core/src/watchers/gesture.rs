@@ -10,8 +10,7 @@
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
 //! - thumb-wheel rotation through the [`ButtonId::ThumbwheelScrollUp`] /
 //!   [`ButtonId::ThumbwheelScrollDown`] bindings — either re-synthesised as
-//!   continuous, sensitivity-scaled horizontal scroll or accumulated into a
-//!   custom action,
+//!   continuous, sensitivity-scaled scroll or accumulated into a custom action,
 //!
 //! all via the common [`crate::runtime::ActionDispatcher`].
 //!
@@ -431,7 +430,7 @@ struct WheelAccumulators {
 /// Running state for one rotation direction.
 #[derive(Default)]
 struct WheelDirection {
-    /// Fractional line accumulator for continuous horizontal scroll.
+    /// Fractional line accumulator for continuous scroll.
     scroll: f32,
     /// Integer rotation-increment accumulator for a custom (non-scroll) action.
     action: i32,
@@ -446,8 +445,8 @@ struct WheelDirection {
 enum WheelOutput {
     /// Below threshold / suppressed — emit nothing.
     Idle,
-    /// Post this many horizontal scroll lines (signed: + right, − left).
-    Scroll(i32),
+    /// Post signed horizontal and vertical scroll lines.
+    Scroll { delta_x: i32, delta_y: i32 },
     /// Fire the direction's bound custom action.
     FireAction,
 }
@@ -553,8 +552,8 @@ fn dispatch(
                 Instant::now(),
             ) {
                 WheelOutput::Idle => {}
-                WheelOutput::Scroll(lines) => {
-                    openlogi_inject::post_horizontal_scroll(lines);
+                WheelOutput::Scroll { delta_x, delta_y } => {
+                    openlogi_inject::post_thumbwheel_scroll(delta_x, delta_y);
                 }
                 WheelOutput::FireAction => {
                     debug!(key, ?button, action = %action.label(), "thumb wheel → action");
@@ -606,20 +605,37 @@ fn advance(
     match action {
         // Suppressed: captured but produces nothing.
         Action::None => WheelOutput::Idle,
-        // Continuous horizontal scroll, scaled from the wheel's diverted
+        // Continuous scroll, scaled from the wheel's diverted
         // increments back to its native amount and then by the user's
         // sensitivity. Direction comes from the action.
-        Action::HorizontalScrollRight | Action::HorizontalScrollLeft => {
+        Action::ScrollUp
+        | Action::ScrollDown
+        | Action::HorizontalScrollRight
+        | Action::HorizontalScrollLeft => {
             dir.scroll += magnitude as f32 * scale.per_increment();
             let lines = dir.scroll.trunc();
             if lines >= 1.0 {
                 dir.scroll -= lines;
-                let sign = if matches!(action, Action::HorizontalScrollRight) {
-                    1
-                } else {
-                    -1
-                };
-                WheelOutput::Scroll(sign * lines as i32)
+                let lines = lines as i32;
+                match action {
+                    Action::ScrollUp => WheelOutput::Scroll {
+                        delta_x: 0,
+                        delta_y: lines,
+                    },
+                    Action::ScrollDown => WheelOutput::Scroll {
+                        delta_x: 0,
+                        delta_y: -lines,
+                    },
+                    Action::HorizontalScrollRight => WheelOutput::Scroll {
+                        delta_x: lines,
+                        delta_y: 0,
+                    },
+                    Action::HorizontalScrollLeft => WheelOutput::Scroll {
+                        delta_x: -lines,
+                        delta_y: 0,
+                    },
+                    _ => unreachable!("scroll actions are matched above"),
+                }
             } else {
                 WheelOutput::Idle
             }

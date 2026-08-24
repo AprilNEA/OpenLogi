@@ -187,6 +187,7 @@ _version: 1
 "Volume Down / Up": "Тише / громче"
 "Volume Up / Down": "Громче / тише"
 "Vertical Scroll": "Вертикальная прокрутка"
+"Vertical Scroll (Reversed)": "Вертикальная прокрутка (обратная)"
 "Horizontal Scroll": "Горизонтальная прокрутка"
 "Custom": "Свой"
 "Gesture Button": "Кнопка жестов"

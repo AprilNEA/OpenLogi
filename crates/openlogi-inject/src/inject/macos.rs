@@ -602,14 +602,18 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     ev.post(CGEventTapLocation::HID);
 }
 
-/// Post a horizontal scroll of `delta` lines (wheel2 axis). Line units suit
-/// the thumb wheel's ratchet-like increments better than pixels.
-pub(super) fn post_horizontal_scroll(delta: i32) {
+/// Post `(delta_x, delta_y)` scroll lines. Line units suit the thumb wheel's
+/// ratchet-like increments better than pixels.
+pub(super) fn post_scroll(delta_x: i32, delta_y: i32) {
+    if delta_x == 0 && delta_y == 0 {
+        return;
+    }
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for thumbwheel scroll");
         return;
     };
-    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::LINE, 2, 0, delta, 0) else {
+    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::LINE, 2, delta_y, delta_x, 0)
+    else {
         tracing::warn!("CGEvent::new_scroll_event failed for thumbwheel");
         return;
     };

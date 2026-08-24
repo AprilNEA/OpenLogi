@@ -187,6 +187,7 @@ _version: 1
 "Volume Down / Up": "Äänenvoimakkuus alas / ylös"
 "Volume Up / Down": "Äänenvoimakkuus ylös / alas"
 "Vertical Scroll": "Pystyvieritys"
+"Vertical Scroll (Reversed)": "Pystyvieritys (käänteinen)"
 "Horizontal Scroll": "Vaakavieritys"
 "Custom": "Mukautettu"
 "Gesture Button": "Eletoiminto"

@@ -238,14 +238,23 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-pub(super) fn post_horizontal_scroll(delta: i32) {
-    if delta == 0 {
-        return;
+pub(super) fn post_scroll(delta_x: i32, delta_y: i32) {
+    let mut inputs = Vec::with_capacity(2);
+    if delta_y != 0 {
+        inputs.push(mouse_input(
+            MOUSEEVENTF_WHEEL,
+            delta_y.saturating_mul(WHEEL_DELTA),
+        ));
     }
-    send_inputs(&[mouse_input(
-        MOUSEEVENTF_HWHEEL,
-        delta.saturating_mul(WHEEL_DELTA),
-    )]);
+    if delta_x != 0 {
+        inputs.push(mouse_input(
+            MOUSEEVENTF_HWHEEL,
+            delta_x.saturating_mul(WHEEL_DELTA),
+        ));
+    }
+    if !inputs.is_empty() {
+        send_inputs(&inputs);
+    }
 }
 
 fn post_custom_shortcut(combo: &KeyCombo) {
