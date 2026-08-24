@@ -31,7 +31,7 @@ use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_sessi
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::button_runtime::ButtonPhase;
+use crate::button_runtime::{HidppSessionId, PressToken};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
@@ -102,16 +102,74 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     }
 }
 
-/// One capture session tracked by the manager.
-struct RunningSession {
+/// Capture configuration that determines whether a session can stay armed.
+#[derive(Clone, PartialEq)]
+struct SessionTarget {
     route: DeviceRoute,
     spec: CaptureSpec,
     rearm_generation: u64,
+}
+
+impl SessionTarget {
+    fn for_plan(plan: &DeviceCapturePlan) -> Self {
+        Self {
+            route: plan.route.clone(),
+            spec: spec_for(plan),
+            rearm_generation: plan.rearm_generation,
+        }
+    }
+}
+
+/// One capture session tracked by the manager.
+struct RunningSession {
+    id: HidppSessionId,
+    target: SessionTarget,
     /// Present while the session runs; taken to request a stop. `None` means
     /// the session is draining — deliberately stopped, but its task (and the
     /// control-restore writes in its teardown) may still be in flight.
     stop: Option<oneshot::Sender<()>>,
-    epoch: u64,
+}
+
+struct CapturedEvent {
+    session: HidppSessionId,
+    input: CapturedInput,
+}
+
+struct SessionDone {
+    session: HidppSessionId,
+}
+
+#[derive(Clone)]
+struct SessionChannels {
+    inputs: mpsc::UnboundedSender<CapturedEvent>,
+    done: mpsc::UnboundedSender<SessionDone>,
+    capture: CaptureChannel,
+}
+
+/// Correlates completed HID++ gesture semantics with the exact physical press
+/// token admitted by the shared button runtime. The runtime remains the sole
+/// authority on whether the token is still active.
+#[derive(Default)]
+struct GesturePresses {
+    tokens: HashMap<(HidppSessionId, ButtonId), PressToken>,
+}
+
+impl GesturePresses {
+    fn start(&mut self, session: &HidppSessionId, button: ButtonId, press: PressToken) {
+        self.tokens.insert((session.clone(), button), press);
+    }
+
+    fn get(&self, session: &HidppSessionId, button: ButtonId) -> Option<&PressToken> {
+        self.tokens.get(&(session.clone(), button))
+    }
+
+    fn end(&mut self, session: &HidppSessionId, button: ButtonId) {
+        self.tokens.remove(&(session.clone(), button));
+    }
+
+    fn cancel_session(&mut self, session: &HidppSessionId) {
+        self.tokens.retain(|(candidate, _), _| candidate != session);
+    }
 }
 
 /// What the manager should do with one session-completion report.
@@ -125,7 +183,7 @@ enum DoneAction {
     Remove { unexpected: bool },
 }
 
-/// Decide the [`DoneAction`] for a completion report carrying `done_epoch`,
+/// Decide the [`DoneAction`] for a completion report carrying `done_session`,
 /// given the session the manager currently tracks for that device (if any).
 ///
 /// Only the *current* session's report settles anything; a stale epoch belongs
@@ -133,14 +191,9 @@ enum DoneAction {
 /// gone was stopped deliberately and is merely draining — its report frees the
 /// key quietly. One still holding its stop sender exited on its own and
 /// warrants a warning alongside the re-arm.
-/// Whether a finished session should be re-armed after completion.
-pub(crate) fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
-    done_epoch == live_epoch && has_target
-}
-
-fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
+fn on_done(done_session: &HidppSessionId, live: Option<&RunningSession>) -> DoneAction {
     match live {
-        Some(session) if session.epoch == done_epoch => DoneAction::Remove {
+        Some(session) if session.id == *done_session => DoneAction::Remove {
             unexpected: session.stop.is_some(),
         },
         _ => DoneAction::Ignore,
@@ -150,17 +203,15 @@ fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
 /// Whether an input belongs to the current, still-live session. A draining
 /// session has already emitted `Cancel`, so even its correctly-tagged queued
 /// events must not enter the replacement lifecycle.
-fn accepts_input(input_epoch: u64, live: Option<&RunningSession>) -> bool {
-    live.is_some_and(|session| session.epoch == input_epoch && session.stop.is_some())
+fn accepts_input(input_session: &HidppSessionId, live: Option<&RunningSession>) -> bool {
+    live.is_some_and(|session| session.id == *input_session && session.stop.is_some())
 }
 
 /// Whether the plan currently published for a device still describes the
 /// capture session that produced an input. This closes the interval between a
 /// plan publication and the manager's next teardown tick.
 fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> bool {
-    session.route == plan.route
-        && session.spec == spec_for(plan)
-        && session.rearm_generation == plan.rearm_generation
+    session.target == SessionTarget::for_plan(plan)
 }
 
 /// Snapshot the sessions that should be armed on this tick. Pairing owns the
@@ -169,7 +220,7 @@ fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> b
 fn wanted_sessions(
     receiver_access: &ReceiverAccess,
     capture_plans: &SharedCapturePlans,
-) -> HashMap<String, (DeviceRoute, CaptureSpec, u64)> {
+) -> HashMap<String, SessionTarget> {
     if receiver_access.exclusive_requested() {
         return HashMap::new();
     }
@@ -178,12 +229,7 @@ fn wanted_sessions(
         .map(|plans| {
             plans
                 .iter()
-                .map(|plan| {
-                    (
-                        plan.config_key.clone(),
-                        (plan.route.clone(), spec_for(plan), plan.rearm_generation),
-                    )
-                })
+                .map(|plan| (plan.config_key.clone(), SessionTarget::for_plan(plan)))
                 .collect()
         })
         .unwrap_or_default()
@@ -198,11 +244,11 @@ async fn manage(
     receiver_access: ReceiverAccess,
     dispatcher: ActionDispatcher,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<(String, u64, CapturedInput)>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators: HashMap<String, WheelAccumulators> = HashMap::new();
-    let mut gesture_generations: HashMap<(String, u64, ButtonId), u64> = HashMap::new();
+    let mut gesture_presses = GesturePresses::default();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -210,7 +256,12 @@ async fn manage(
     // next tick, a deliberately stopped one merely frees its key for the
     // replacement once its teardown has drained, and stale completions are
     // ignored (see `on_done`).
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(String, u64)>();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionDone>();
+    let channels = SessionChannels {
+        inputs: tx,
+        done: done_tx,
+        capture: capture_channel,
+    };
     let mut epoch: u64 = 0;
     // The capture-vs-pairing arbiter hands out one exclusive lease. All session
     // tasks share it through an `Arc`; the manager keeps only a `Weak` so the
@@ -219,9 +270,10 @@ async fn manage(
 
     loop {
         tokio::select! {
-            Some((key, input_epoch, input)) = rx.recv() => {
-                let live = sessions.get(&key);
-                let current = accepts_input(input_epoch, live)
+            Some(event) = rx.recv() => {
+                let key = event.session.device_key();
+                let live = sessions.get(key);
+                let current = accepts_input(&event.session, live)
                     && !receiver_access.exclusive_requested()
                     && capture_plans.read().is_ok_and(|plans| {
                         plans
@@ -231,20 +283,17 @@ async fn manage(
                     });
                 if current {
                     dispatch(
-                        &key,
-                        input_epoch,
-                        input,
+                        &event.session,
+                        event.input,
                         &mut accumulators,
-                        &mut gesture_generations,
+                        &mut gesture_presses,
                         &capture_plans,
                         &dispatcher,
                     );
                 } else {
-                    dispatcher.cancel_hidpp_session(&key, input_epoch);
-                    gesture_generations.retain(|(event_key, event_epoch, _), _| {
-                        event_key != &key || *event_epoch != input_epoch
-                    });
-                    debug!(key, input_epoch, "input from a stale capture session — ignored");
+                    dispatcher.cancel_hidpp_session(&event.session);
+                    gesture_presses.cancel_session(&event.session);
+                    debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
                 }
             }
             _ = ticker.tick() => {
@@ -262,21 +311,15 @@ async fn manage(
                 // un-diverted while the new session believes it owns it,
                 // however many ticks the restore takes.
                 for (key, session) in &mut sessions {
-                    let keep = want.get(key).is_some_and(|(route, spec, rearm)| {
-                        *route == session.route
-                            && *spec == session.spec
-                            && *rearm == session.rearm_generation
-                    });
+                    let keep = want.get(key).is_some_and(|target| *target == session.target);
                     if !keep && let Some(stop) = session.stop.take() {
-                        dispatcher.cancel_hidpp_session(key, session.epoch);
-                        gesture_generations.retain(|(event_key, event_epoch, _), _| {
-                            event_key != key || *event_epoch != session.epoch
-                        });
+                        dispatcher.cancel_hidpp_session(&session.id);
+                        gesture_presses.cancel_session(&session.id);
                         let _ = stop.send(());
                     }
                 }
                 accumulators.retain(|key, _| want.contains_key(key));
-                for (key, (route, spec, rearm_generation)) in want {
+                for (key, target) in want {
                     if sessions.contains_key(&key) {
                         continue;
                     }
@@ -293,36 +336,31 @@ async fn manage(
                         fresh
                     };
                     epoch = epoch.wrapping_add(1);
+                    let id = HidppSessionId::new(&key, epoch);
                     let session = spawn_session(
-                        key.clone(),
-                        route,
-                        spec,
-                        rearm_generation,
-                        epoch,
+                        id,
+                        target,
                         session_lease,
-                        &tx,
-                        &done_tx,
-                        &capture_channel,
+                        &channels,
                     );
                     sessions.insert(key, session);
                 }
             }
-            Some((key, done_epoch)) = done_rx.recv() => {
+            Some(done) = done_rx.recv() => {
+                let key = done.session.device_key();
                 // A capture session's task has fully exited — its restore writes
                 // included — so dropping its entry lets the next tick start a
                 // fresh session for that device; the tick fires at most once per
                 // `TARGET_POLL`, which paces the respawn so a permanently failing
                 // device can't hot-loop. A stale epoch (an already-superseded
                 // session) is a no-op.
-                if let DoneAction::Remove { unexpected } = on_done(done_epoch, sessions.get(&key)) {
-                    dispatcher.cancel_hidpp_session(&key, done_epoch);
-                    gesture_generations.retain(|(event_key, event_epoch, _), _| {
-                        event_key != &key || *event_epoch != done_epoch
-                    });
+                if let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) {
+                    dispatcher.cancel_hidpp_session(&done.session);
+                    gesture_presses.cancel_session(&done.session);
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
                     }
-                    sessions.remove(&key);
+                    sessions.remove(key);
                 }
             }
         }
@@ -331,37 +369,31 @@ async fn manage(
 
 /// Start one device's capture session plus its input-forwarding task, and
 /// return the manager's tracking entry for it.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "plumbing between the manager loop's channels; grouping them into \
-              a struct would only relabel the same eight values"
-)]
 fn spawn_session(
-    key: String,
-    route: DeviceRoute,
-    spec: CaptureSpec,
-    rearm_generation: u64,
-    epoch: u64,
+    id: HidppSessionId,
+    target: SessionTarget,
     lease: Arc<SessionReceiverLease>,
-    inputs: &mpsc::UnboundedSender<(String, u64, CapturedInput)>,
-    done: &mpsc::UnboundedSender<(String, u64)>,
-    capture_channel: &CaptureChannel,
+    channels: &SessionChannels,
 ) -> RunningSession {
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let forward = inputs.clone();
-    let forward_key = key.clone();
+    let forward = channels.inputs.clone();
+    let forward_id = id.clone();
     tokio::spawn(async move {
         while let Some(input) = session_rx.recv().await {
-            let _ = forward.send((forward_key.clone(), epoch, input));
+            let _ = forward.send(CapturedEvent {
+                session: forward_id.clone(),
+                input,
+            });
         }
     });
-    let done = done.clone();
-    let session_route = route.clone();
-    let session_spec = spec.clone();
-    let slot = Arc::clone(capture_channel);
+    let done = channels.done.clone();
+    let done_id = id.clone();
+    let session_route = target.route.clone();
+    let session_spec = target.spec.clone();
+    let slot = Arc::clone(&channels.capture);
     tokio::spawn(async move {
         let _lease = lease;
         let backend = openlogi_hid::host::backend();
@@ -379,14 +411,12 @@ fn spawn_session(
         }
         // Report completion so the manager can re-arm if this exit was
         // unexpected rather than a deliberate stop.
-        let _ = done.send((key, epoch));
+        let _ = done.send(SessionDone { session: done_id });
     });
     RunningSession {
-        route,
-        spec,
-        rearm_generation,
+        id,
+        target,
         stop: Some(stop_tx),
-        epoch,
     }
 }
 
@@ -423,17 +453,17 @@ enum WheelOutput {
     FireAction,
 }
 
-/// Route one captured input from device `key` to its bound action (or
+/// Route one captured input from `session` to its bound action (or
 /// re-synthesised scroll), using that device's own plan maps.
 fn dispatch(
-    key: &str,
-    epoch: u64,
+    session: &HidppSessionId,
     input: CapturedInput,
     accumulators: &mut HashMap<String, WheelAccumulators>,
-    gesture_generations: &mut HashMap<(String, u64, ButtonId), u64>,
+    gesture_presses: &mut GesturePresses,
     capture_plans: &SharedCapturePlans,
     dispatcher: &ActionDispatcher,
 ) {
+    let key = session.device_key();
     let Ok(plans) = capture_plans.read() else {
         return;
     };
@@ -443,46 +473,46 @@ fn dispatch(
     };
     match input {
         CapturedInput::Gesture(button, direction) => {
-            let current_hold = gesture_generations
-                .get(&(key.to_owned(), epoch, button))
-                .is_some_and(|generation| *generation == dispatcher.button_generation());
-            if !current_hold {
+            let Some(press) = gesture_presses.get(session, button) else {
                 debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                 return;
-            }
+            };
             if let Some(action) = plan
                 .gesture_bindings
                 .get(&button)
                 .and_then(|map| map.get(&direction))
             {
                 debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                dispatcher.dispatch(action, Some(key));
+                if !dispatcher.try_dispatch_while_pressed(press, action) {
+                    debug!(key, %button, ?direction, "gesture press no longer active — ignored");
+                }
             } else {
                 debug!(key, %button, ?direction, "gesture with no binding — ignored");
             }
         }
-        CapturedInput::ButtonPressed(button, _) => {
+        CapturedInput::ButtonDown(button) => {
             // A raw-XY gesture source owns its click/swipe map; its physical
             // lifecycle is still tracked, but it must not also fire the
             // single-action projection on down.
             let is_gesture = plan.gesture_bindings.contains_key(&button);
-            if is_gesture {
-                gesture_generations.insert(
-                    (key.to_owned(), epoch, button),
-                    dispatcher.button_generation(),
-                );
-            }
             let action = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
             if let Some(action) = action {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
-            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Down, action);
+            let press = dispatcher.try_hidpp_button_down(session, button, action);
+            if is_gesture {
+                if let Some(press) = press {
+                    gesture_presses.start(session, button, press);
+                } else {
+                    gesture_presses.end(session, button);
+                }
+            }
         }
-        CapturedInput::ButtonReleased(button) => {
-            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Up, None);
-            gesture_generations.remove(&(key.to_owned(), epoch, button));
+        CapturedInput::ButtonUp(button) => {
+            dispatcher.try_hidpp_button_up(session, button);
+            gesture_presses.end(session, button);
         }
         CapturedInput::ButtonPulse(button) => {
             let action = plan.bindings.get(&button);
@@ -491,7 +521,7 @@ fn dispatch(
             } else {
                 debug!(key, ?button, "HID++ button pulse with no binding — ignored");
             }
-            dispatcher.dispatch_hidpp_button_pulse(key, epoch, button, action);
+            dispatcher.dispatch_hidpp_button_pulse(session, button, action);
         }
         CapturedInput::Scroll {
             increments,
@@ -627,333 +657,4 @@ fn advance(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use openlogi_hid::thumbwheel::WheelResolution;
-
-    /// The resolutions traced off an MX Master 4 over Bolt: 20 ratchets per
-    /// revolution natively, 120 increments per revolution diverted.
-    const TRACED: WheelResolution = WheelResolution {
-        native_res: 20,
-        diverted_res: 120,
-    };
-
-    /// A wheel whose increments are already native scroll units — what the
-    /// scaling tests below vary, and what every other test here assumes.
-    fn unscaled(sensitivity: ThumbwheelSensitivity) -> ScrollScale {
-        ScrollScale {
-            native_per_increment: 1.0,
-            sensitivity,
-        }
-    }
-
-    #[test]
-    fn multiplier_is_unity_at_default_sensitivity() {
-        assert!((ThumbwheelSensitivity::DEFAULT.scroll_multiplier() - 1.0).abs() < f32::EPSILON);
-        assert!(ThumbwheelSensitivity::from_rounded(28.0).scroll_multiplier() > 1.9);
-        assert!(ThumbwheelSensitivity::MIN.scroll_multiplier() < 0.1);
-    }
-
-    #[test]
-    fn action_threshold_drops_with_sensitivity_and_floors_at_one() {
-        assert_eq!(
-            ThumbwheelSensitivity::DEFAULT.action_threshold(),
-            i32::from(ThumbwheelSensitivity::DEFAULT)
-        );
-        assert!(
-            ThumbwheelSensitivity::MIN.action_threshold()
-                > ThumbwheelSensitivity::DEFAULT.action_threshold(),
-            "low sensitivity needs more increments"
-        );
-        assert_eq!(
-            ThumbwheelSensitivity::MAX.action_threshold(),
-            1,
-            "high sensitivity floors at one"
-        );
-    }
-
-    /// Diverting the wheel changes the unit it reports in. An MX Master 4
-    /// sends 120 increments per revolution where native scrolling produced 20
-    /// ratchets, so a revolution has to keep scrolling 20 units — not 120 —
-    /// with the sensitivity slider left alone.
-    #[test]
-    fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
-        let scale = ScrollScale {
-            native_per_increment: TRACED.native_per_increment(),
-            sensitivity: ThumbwheelSensitivity::DEFAULT,
-        };
-        let mut dir = WheelDirection::default();
-        let now = Instant::now();
-        let mut lines = 0;
-        for _ in 0..120 {
-            if let WheelOutput::Scroll(n) =
-                advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
-            {
-                lines += n;
-            }
-        }
-        assert_eq!(lines, 20, "one revolution is 20 native scroll units");
-    }
-
-    /// The sensitivity slider stays a multiplier *of that native amount*.
-    #[test]
-    fn sensitivity_multiplies_the_native_amount() {
-        let scale = ScrollScale {
-            native_per_increment: TRACED.native_per_increment(),
-            sensitivity: ThumbwheelSensitivity::from_rounded(28.0), // 2x
-        };
-        let mut dir = WheelDirection::default();
-        let now = Instant::now();
-        let mut lines = 0;
-        for _ in 0..120 {
-            if let WheelOutput::Scroll(n) =
-                advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
-            {
-                lines += n;
-            }
-        }
-        assert_eq!(lines, 40, "2x sensitivity doubles the native 20");
-    }
-
-    #[test]
-    fn an_unreported_resolution_leaves_increments_unscaled() {
-        assert!((WheelResolution::UNKNOWN.native_per_increment() - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn scroll_accumulates_fractionally_at_sub_unity_sensitivity() {
-        let mut dir = WheelDirection::default();
-        let now = Instant::now();
-        // multiplier 0.5: two increments make one whole line.
-        let half = ThumbwheelSensitivity::from_rounded(7.0);
-        assert_eq!(
-            advance(
-                &mut dir,
-                &Action::HorizontalScrollRight,
-                1,
-                unscaled(half),
-                now
-            ),
-            WheelOutput::Idle
-        );
-        assert_eq!(
-            advance(
-                &mut dir,
-                &Action::HorizontalScrollRight,
-                1,
-                unscaled(half),
-                now
-            ),
-            WheelOutput::Scroll(1)
-        );
-    }
-
-    #[test]
-    fn scroll_left_emits_negative_lines() {
-        let mut dir = WheelDirection::default();
-        let now = Instant::now();
-        assert_eq!(
-            advance(
-                &mut dir,
-                &Action::HorizontalScrollLeft,
-                1,
-                unscaled(ThumbwheelSensitivity::DEFAULT),
-                now
-            ),
-            WheelOutput::Scroll(-1)
-        );
-    }
-
-    #[test]
-    fn directions_accumulate_independently() {
-        // A reversal must not drain the other direction's pending progress.
-        let mut up = WheelDirection::default();
-        let mut down = WheelDirection::default();
-        let now = Instant::now();
-        let half = ThumbwheelSensitivity::from_rounded(7.0); // multiplier 0.5
-        assert_eq!(
-            advance(
-                &mut up,
-                &Action::HorizontalScrollRight,
-                1,
-                unscaled(half),
-                now
-            ),
-            WheelOutput::Idle
-        );
-        // One tick the other way doesn't cancel `up`'s banked half-line…
-        assert_eq!(
-            advance(
-                &mut down,
-                &Action::HorizontalScrollLeft,
-                1,
-                unscaled(half),
-                now
-            ),
-            WheelOutput::Idle
-        );
-        // …so `up`'s next tick still completes its own line.
-        assert_eq!(
-            advance(
-                &mut up,
-                &Action::HorizontalScrollRight,
-                1,
-                unscaled(half),
-                now
-            ),
-            WheelOutput::Scroll(1)
-        );
-    }
-
-    #[test]
-    fn custom_action_fires_on_threshold_then_respects_cooldown() {
-        let mut dir = WheelDirection::default();
-        let now = Instant::now();
-        // Threshold at default sensitivity is DEFAULT increments.
-        for _ in 0..i32::from(ThumbwheelSensitivity::DEFAULT) - 1 {
-            assert_eq!(
-                advance(
-                    &mut dir,
-                    &Action::VolumeUp,
-                    1,
-                    unscaled(ThumbwheelSensitivity::DEFAULT),
-                    now
-                ),
-                WheelOutput::Idle
-            );
-        }
-        assert_eq!(
-            advance(
-                &mut dir,
-                &Action::VolumeUp,
-                1,
-                unscaled(ThumbwheelSensitivity::DEFAULT),
-                now
-            ),
-            WheelOutput::FireAction
-        );
-        // Immediately after, the cooldown swallows further increments.
-        for _ in 0..i32::from(ThumbwheelSensitivity::DEFAULT) {
-            assert_eq!(
-                advance(
-                    &mut dir,
-                    &Action::VolumeUp,
-                    1,
-                    unscaled(ThumbwheelSensitivity::DEFAULT),
-                    now
-                ),
-                WheelOutput::Idle
-            );
-        }
-    }
-
-    #[test]
-    fn none_action_is_suppressed() {
-        let mut dir = WheelDirection::default();
-        assert_eq!(
-            advance(
-                &mut dir,
-                &Action::None,
-                5,
-                unscaled(ThumbwheelSensitivity::DEFAULT),
-                Instant::now()
-            ),
-            WheelOutput::Idle
-        );
-    }
-
-    /// A session whose stop sender is already gone (taken by a deliberate stop).
-    fn stopped_session_with_epoch(epoch: u64) -> RunningSession {
-        RunningSession {
-            route: DeviceRoute::Direct {
-                vendor_id: 0x046d,
-                product_id: 0xc548,
-            },
-            spec: CaptureSpec::default(),
-            rearm_generation: 0,
-            stop: None,
-            epoch,
-        }
-    }
-
-    /// A session still holding its stop sender (never asked to stop).
-    fn live_session_with_epoch(epoch: u64) -> RunningSession {
-        let (stop, _rx) = oneshot::channel();
-        RunningSession {
-            stop: Some(stop),
-            ..stopped_session_with_epoch(epoch)
-        }
-    }
-
-    #[test]
-    fn rearms_when_the_current_session_dies() {
-        // The live session for this device ended on its own.
-        assert_eq!(
-            on_done(7, Some(&live_session_with_epoch(7))),
-            DoneAction::Remove { unexpected: true }
-        );
-    }
-
-    #[test]
-    fn ignores_a_stale_session_superseded_by_a_restart() {
-        // An older session reports completion after a deliberate restart already
-        // bumped the epoch; re-arming would needlessly cycle the live session.
-        assert_eq!(
-            on_done(6, Some(&live_session_with_epoch(7))),
-            DoneAction::Ignore
-        );
-    }
-
-    #[test]
-    fn ignores_a_completion_for_an_untracked_device() {
-        // The session's entry is already gone (a deliberate stop to idle, or a
-        // device that went away): there is nothing to settle or re-arm.
-        assert_eq!(on_done(7, None), DoneAction::Ignore);
-    }
-
-    #[test]
-    fn settles_a_draining_session_quietly() {
-        // A deliberately stopped session stays tracked until its task — the
-        // control-restore writes included — actually exits, so its key cannot
-        // re-arm mid-restore. Its completion report frees the key without the
-        // unexpected-exit warning.
-        assert_eq!(
-            on_done(7, Some(&stopped_session_with_epoch(7))),
-            DoneAction::Remove { unexpected: false }
-        );
-    }
-
-    #[test]
-    fn accepts_inputs_only_from_the_current_live_session() {
-        assert!(accepts_input(7, Some(&live_session_with_epoch(7))));
-        assert!(
-            !accepts_input(6, Some(&live_session_with_epoch(7))),
-            "a superseded session's queued input is stale"
-        );
-        assert!(
-            !accepts_input(7, Some(&stopped_session_with_epoch(7))),
-            "a draining session was already canceled"
-        );
-        assert!(!accepts_input(7, None));
-    }
-
-    #[test]
-    fn rejects_input_after_the_published_capture_plan_changes() {
-        let mut session = live_session_with_epoch(7);
-        let mut plan = crate::capture_plan::plan_for_device(
-            &openlogi_core::config::Config::default(),
-            "mouse-a",
-            session.route.clone(),
-            None,
-            0,
-        );
-        session.spec = spec_for(&plan);
-        assert!(session_matches_plan(&session, &plan));
-
-        plan.rearm_generation = 1;
-        assert!(
-            !session_matches_plan(&session, &plan),
-            "an input queued before a capture-plan epoch change is stale"
-        );
-    }
-}
+mod tests;

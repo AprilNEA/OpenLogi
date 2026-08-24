@@ -24,10 +24,9 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::button_runtime::ButtonPhase;
+use crate::button_runtime::HidppSessionId;
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::ReceiverAccess;
-use crate::watchers::gesture::should_rearm;
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
 /// `0x1b04` controls to divert (only keys carrying a real binding), and the
@@ -49,6 +48,40 @@ pub struct KeyboardSpec {
 /// Shared keyboard-capture spec, `None` when no online keyboard has bound
 /// keys. Written by the orchestrator, read by the watcher.
 pub type SharedKeyboardSpec = Arc<RwLock<Option<KeyboardSpec>>>;
+
+/// Capture identity excluding bindings, which may change without requiring a
+/// hardware session restart when the diverted key set stays the same.
+#[derive(Clone, PartialEq)]
+struct KeyboardTarget {
+    config_key: String,
+    route: DeviceRoute,
+    wanted: BTreeMap<u16, ButtonId>,
+}
+
+impl KeyboardTarget {
+    fn for_spec(spec: KeyboardSpec) -> Self {
+        Self {
+            config_key: spec.config_key,
+            route: spec.route,
+            wanted: spec.wanted,
+        }
+    }
+
+    fn matches(&self, spec: &KeyboardSpec) -> bool {
+        self.config_key == spec.config_key && self.route == spec.route && self.wanted == spec.wanted
+    }
+}
+
+struct RunningKeyboardSession {
+    id: HidppSessionId,
+    target: KeyboardTarget,
+    stop: oneshot::Sender<()>,
+}
+
+struct KeyboardInput {
+    session: HidppSessionId,
+    input: CapturedInput,
+}
 
 /// How often to re-read the spec so a config edit, per-app overlay change, or
 /// keyboard reconnect re-points the capture session.
@@ -87,27 +120,26 @@ pub fn spawn(
 
 /// Route one accepted keyboard edge through the shared HID++ lifecycle.
 fn dispatch_input(
-    key: &str,
-    epoch: u64,
+    session: &HidppSessionId,
     input: CapturedInput,
     spec: &KeyboardSpec,
     dispatcher: &ActionDispatcher,
 ) {
     match input {
-        CapturedInput::ButtonPressed(button, _) => {
+        CapturedInput::ButtonDown(button) => {
             let action = spec.bindings.get(&button);
             if let Some(action) = action {
                 info!(button = %button, action = %action.label(), "keyboard key → executing bound action");
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }
-            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Down, action);
+            dispatcher.try_hidpp_button_down(session, button, action);
         }
-        CapturedInput::ButtonReleased(button) => {
-            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Up, None);
+        CapturedInput::ButtonUp(button) => {
+            dispatcher.try_hidpp_button_up(session, button);
         }
         CapturedInput::ButtonPulse(button) => {
-            dispatcher.dispatch_hidpp_button_pulse(key, epoch, button, spec.bindings.get(&button));
+            dispatcher.dispatch_hidpp_button_pulse(session, button, spec.bindings.get(&button));
         }
         CapturedInput::Gesture(..) | CapturedInput::Scroll { .. } => {}
     }
@@ -117,14 +149,14 @@ fn dispatch_input(
 fn wanted_session(
     receiver_access: &ReceiverAccess,
     spec: &SharedKeyboardSpec,
-) -> Option<(String, DeviceRoute, BTreeMap<u16, ButtonId>)> {
+) -> Option<KeyboardTarget> {
     if receiver_access.exclusive_requested() {
         return None;
     }
     spec.read()
         .ok()
         .and_then(|guard| guard.clone())
-        .map(|spec| (spec.config_key, spec.route, spec.wanted))
+        .map(KeyboardTarget::for_spec)
 }
 
 /// Keep one keyboard capture session alive for the published spec, restarting
@@ -137,79 +169,78 @@ async fn manage(
     registry: ChannelRegistry,
     dispatcher: ActionDispatcher,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, CapturedInput)>();
-    let mut current: Option<(String, DeviceRoute, BTreeMap<u16, ButtonId>)> = None;
-    let mut stop: Option<oneshot::Sender<()>> = None;
+    let (tx, mut rx) = mpsc::unbounded_channel::<KeyboardInput>();
+    let mut current: Option<RunningKeyboardSession> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     // Sessions report completion tagged with their start epoch, so an
     // unexpected exit of the *current* session re-arms while stale completions
     // are ignored — same pacing/starvation reasoning as the gesture watcher.
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<u64>();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<HidppSessionId>();
     let mut epoch: u64 = 0;
 
     loop {
         tokio::select! {
-            Some((input_epoch, input)) = rx.recv() => {
-                let Some((key, route, wanted)) = current.as_ref() else {
+            Some(input) = rx.recv() => {
+                let Some(running) = current.as_ref() else {
                     continue;
                 };
                 let live_spec = spec.read().ok().and_then(|guard| guard.clone());
-                let current_target = live_spec.as_ref().is_some_and(|live| {
-                    live.config_key == *key && live.route == *route && live.wanted == *wanted
-                });
-                if input_epoch != epoch
-                    || stop.is_none()
+                let current_target = live_spec.as_ref().is_some_and(|live| running.target.matches(live));
+                if input.session != running.id
                     || receiver_access.exclusive_requested()
                     || !current_target
                 {
-                    dispatcher.cancel_hidpp_session(key, input_epoch);
-                    debug!(input_epoch, "input from a stale keyboard session — ignored");
+                    dispatcher.cancel_hidpp_session(&input.session);
+                    debug!(epoch = input.session.epoch(), "input from a stale keyboard session — ignored");
                     continue;
                 }
                 let Some(live_spec) = live_spec else {
                     continue;
                 };
-                dispatch_input(key, input_epoch, input, &live_spec, &dispatcher);
+                dispatch_input(&input.session, input.input, &live_spec, &dispatcher);
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release the capture
                 // session so run_pairing can own the receiver's HID node.
                 let want = wanted_session(&receiver_access, &spec);
-                if want == current {
+                if current
+                    .as_ref()
+                    .is_some_and(|running| Some(&running.target) == want.as_ref())
+                {
                     continue;
                 }
                 // Spec changed (or first tick): stop the old session and start
                 // one for the new state. Sending on the oneshot lets the old
                 // session restore the diverted controls.
-                if let Some(stop) = stop.take() {
-                    if let Some((key, _, _)) = &current {
-                        dispatcher.cancel_hidpp_session(key, epoch);
-                    }
-                    let _ = stop.send(());
-                }
-                if current.is_some() {
-                    current = None;
+                if let Some(running) = current.take() {
+                    dispatcher.cancel_hidpp_session(&running.id);
+                    let _ = running.stop.send(());
                     continue;
                 }
-                if let Some((key, route, wanted)) = want {
+                if let Some(target) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
-                        current = None;
                         continue;
                     };
-                    current = Some((key, route.clone(), wanted.clone()));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let slot = Arc::clone(&keyboard_channel);
                     let session_registry = registry.clone();
                     epoch = epoch.wrapping_add(1);
-                    let session_epoch = epoch;
+                    let id = HidppSessionId::new(&target.config_key, epoch);
                     let (sink, mut session_rx) = mpsc::unbounded_channel();
                     let forward = tx.clone();
+                    let forward_id = id.clone();
                     tokio::spawn(async move {
                         while let Some(input) = session_rx.recv().await {
-                            let _ = forward.send((session_epoch, input));
+                            let _ = forward.send(KeyboardInput {
+                                session: forward_id.clone(),
+                                input,
+                            });
                         }
                     });
                     let done = done_tx.clone();
+                    let done_id = id.clone();
+                    let route = target.route.clone();
+                    let wanted = target.wanted.clone();
                     tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
                         if let Err(e) = run_keyboard_capture_session_with_registry(
@@ -224,23 +255,22 @@ async fn manage(
                         {
                             debug!(error = %e, "keyboard capture session ended");
                         }
-                        let _ = done.send(session_epoch);
+                        let _ = done.send(done_id);
                     });
-                    stop = Some(stop_tx);
-                } else {
-                    current = None;
+                    current = Some(RunningKeyboardSession {
+                        id,
+                        target,
+                        stop: stop_tx,
+                    });
                 }
             }
-            Some(done_epoch) = done_rx.recv() => {
+            Some(done_session) = done_rx.recv() => {
                 // A capture session ended on its own; re-arm only the live one
                 // (see gesture watcher for the epoch/pacing rationale).
-                if should_rearm(done_epoch, epoch, current.is_some()) {
-                    if let Some((key, _, _)) = &current {
-                        dispatcher.cancel_hidpp_session(key, done_epoch);
-                    }
+                if current.as_ref().is_some_and(|running| running.id == done_session) {
+                    dispatcher.cancel_hidpp_session(&done_session);
                     warn!("keyboard capture session ended unexpectedly, re-arming");
                     current = None;
-                    stop = None;
                 }
             }
         }

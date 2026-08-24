@@ -1,307 +1,380 @@
 //! Source-independent button lifecycle state.
 //!
-//! Capture backends report different raw shapes: OS hooks carry a pressed
-//! boolean, while HID++ diverted-control reports carry a snapshot of every
-//! held control. Both are normalised to [`ButtonEvent`] before a bound action
-//! runs, so hold-based consumers have one place to observe terminal `Up` and
-//! `Cancel` phases.
+//! Capture backends report different raw shapes: OS hooks carry discrete
+//! edges, while HID++ diverted-control reports carry complete held-control
+//! snapshots. Producers normalise both into typed inputs for one worker. The
+//! worker is the sole owner of active presses and emits balanced lifecycle
+//! events carrying a unique [`PressId`].
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::thread::{self, ThreadId};
+use std::thread::{self, JoinHandle, ThreadId};
 use std::time::Duration;
 
 use openlogi_core::binding::{Action, ButtonId};
 use tracing::warn;
 
-/// The lifecycle queue is bounded because OS-hook callbacks must fail open
-/// rather than block. An overflow also advances the generation, causing the
-/// worker to cancel every accepted press before it handles another event.
+/// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
+/// Bounds how long graceful process exit waits for terminal handlers.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Lets the worker observe the out-of-band shutdown channel even while idle.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// The phase of one physical button lifecycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ButtonPhase {
-    /// The button became physically held.
-    Down,
-    /// The button was physically released.
-    Up,
-    /// Capture ended before a matching release could be guaranteed.
-    Cancel,
-}
-
-/// The capture source that owns one button lifecycle.
+/// Stable identity of one HID++ capture-session incarnation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ButtonOrigin {
-    /// One OS-hook callback thread. Linux runs one per grabbed device; macOS
-    /// and Windows use one callback thread for their global hook.
-    OsHook(ThreadId),
-    /// One HID++ capture-session epoch for a stable device config key.
-    Hidpp { device_key: Arc<str>, epoch: u64 },
+pub(crate) struct HidppSessionId {
+    device_key: Arc<str>,
+    epoch: u64,
 }
 
-impl ButtonOrigin {
-    /// Build the origin for the current OS-hook callback thread.
-    pub(crate) fn current_os_hook() -> Self {
-        Self::OsHook(std::thread::current().id())
-    }
-
-    /// Build the origin for one HID++ capture session.
-    pub(crate) fn hidpp(device_key: &str, epoch: u64) -> Self {
-        Self::Hidpp {
+impl HidppSessionId {
+    pub(crate) fn new(device_key: &str, epoch: u64) -> Self {
+        Self {
             device_key: Arc::from(device_key),
             epoch,
         }
     }
 
-    /// Device config key for a HID++ source; OS hooks cannot reliably provide
-    /// one on every platform.
-    pub(crate) fn device_key(&self) -> Option<&str> {
+    pub(crate) fn device_key(&self) -> &str {
+        &self.device_key
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+/// Capture source that owns one physical press.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ButtonSource {
+    /// Linux has one callback thread per grabbed device; macOS and Windows
+    /// expose one global callback thread.
+    OsHook(ThreadId),
+    Hidpp(HidppSessionId),
+}
+
+impl ButtonSource {
+    fn current_hook() -> Self {
+        Self::OsHook(thread::current().id())
+    }
+
+    fn device_key(&self) -> Option<&str> {
         match self {
             Self::OsHook(_) => None,
-            Self::Hidpp { device_key, .. } => Some(device_key),
+            Self::Hidpp(session) => Some(session.device_key()),
         }
     }
 }
 
-/// One normalised button lifecycle event.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ButtonEvent {
-    pub(crate) origin: ButtonOrigin,
-    pub(crate) button: ButtonId,
-    pub(crate) phase: ButtonPhase,
-}
-
-impl ButtonEvent {
-    /// Build one event from its correlation key and phase.
-    pub(crate) fn new(origin: ButtonOrigin, button: ButtonId, phase: ButtonPhase) -> Self {
-        Self {
-            origin,
-            button,
-            phase,
-        }
-    }
-
-    fn key(&self) -> ButtonKey {
-        ButtonKey {
-            origin: self.origin.clone(),
-            button: self.button,
-        }
-    }
-
-    fn with_phase(&self, phase: ButtonPhase) -> Self {
-        Self::new(self.origin.clone(), self.button, phase)
-    }
-}
-
+/// Correlation key shared by consecutive edges from one physical control.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ButtonKey {
-    origin: ButtonOrigin,
+struct PressKey {
+    source: ButtonSource,
     button: ButtonId,
 }
 
-/// Accepted events for one raw transition. A repeated `Down` first cancels
-/// the stale lifecycle and then begins a fresh one, so every accepted press
-/// still has exactly one terminal phase.
-pub(crate) type ButtonTransitions = [Option<ButtonEvent>; 2];
-
-/// Tracks active physical presses across capture sources.
-#[derive(Default)]
-pub(crate) struct ButtonRuntime {
-    active: HashSet<ButtonKey>,
+impl PressKey {
+    fn new(source: ButtonSource, button: ButtonId) -> Self {
+        Self { source, button }
+    }
 }
 
-impl ButtonRuntime {
-    /// Accept one raw event and return the lifecycle transitions consumers
-    /// should observe. Stray terminal events are ignored.
-    pub(crate) fn update(&mut self, event: ButtonEvent) -> ButtonTransitions {
-        let key = event.key();
-        match event.phase {
-            ButtonPhase::Down => {
-                if self.active.insert(key) {
-                    [Some(event), None]
-                } else {
-                    [Some(event.with_phase(ButtonPhase::Cancel)), Some(event)]
-                }
-            }
-            ButtonPhase::Up | ButtonPhase::Cancel if self.active.remove(&key) => {
-                [Some(event), None]
-            }
-            ButtonPhase::Up | ButtonPhase::Cancel => [None, None],
+/// Unique identity of one accepted press, including a restart of the same key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PressId(u64);
+
+/// Capability used to run a gesture action only while its originating press
+/// remains active. Future timers and repeat workers can use the same token to
+/// reject work scheduled by a superseded press.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PressToken {
+    id: PressId,
+    key: PressKey,
+    generation: u64,
+}
+
+#[cfg(test)]
+impl PressToken {
+    pub(crate) fn hook_for_test(id: u64, button: ButtonId) -> Self {
+        Self {
+            id: PressId(id),
+            key: PressKey::new(ButtonSource::current_hook(), button),
+            generation: 0,
         }
     }
+}
 
-    /// Cancel every active press owned by one capture source.
-    pub(crate) fn cancel_origin(&mut self, origin: &ButtonOrigin) -> Vec<ButtonEvent> {
-        self.cancel_where(|key| key.origin == *origin)
+/// State retained from `Down` until the exactly-once terminal event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ActivePress {
+    token: PressToken,
+    action: Option<Action>,
+}
+
+impl ActivePress {
+    pub(crate) fn button(&self) -> ButtonId {
+        self.token.key.button
     }
 
-    /// Cancel every active press, used when bindings change or the agent exits.
-    pub(crate) fn cancel_all(&mut self) -> Vec<ButtonEvent> {
-        self.cancel_where(|_| true)
+    pub(crate) fn device_key(&self) -> Option<&str> {
+        self.token.key.source.device_key()
     }
 
-    fn cancel_where(&mut self, matches: impl Fn(&ButtonKey) -> bool) -> Vec<ButtonEvent> {
-        let canceled: Vec<ButtonKey> = self
+    pub(crate) fn action(&self) -> Option<&Action> {
+        self.action.as_ref()
+    }
+}
+
+/// Why an accepted press ended without its ordinary physical release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancelReason {
+    /// A duplicate `Down` proved that the previous release was lost.
+    RepeatedDown,
+    /// A gesture hold aged out before another control took ownership.
+    StaleHold,
+    /// The capture source stopped or could no longer guarantee its release.
+    SourceEnded,
+    /// Bindings, profiles, or queue generation changed under the press.
+    Invalidated,
+    /// The agent is exiting gracefully.
+    Shutdown,
+}
+
+/// How an accepted press reached its exactly-once terminal event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EndReason {
+    /// The physical release edge was observed.
+    Released,
+    /// Capture could no longer guarantee the matching release.
+    Canceled(CancelReason),
+}
+
+/// Typed output from the lifecycle worker.
+pub(crate) enum ButtonRuntimeEvent {
+    Started(ActivePress),
+    Ended {
+        press: ActivePress,
+        reason: EndReason,
+    },
+    /// A semantic gesture action admitted only while `press` is still active.
+    Triggered {
+        press: ActivePress,
+        action: Action,
+    },
+}
+
+/// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
+enum ButtonInput {
+    Down(ActivePress),
+    Up(PressKey),
+    Pulse(ActivePress),
+    TriggerWhilePressed { token: PressToken, action: Action },
+}
+
+enum ButtonCommand {
+    Input { generation: u64, input: ButtonInput },
+    CancelStalePress(PressToken),
+    CancelSource(ButtonSource),
+    CancelHooks,
+    Wake,
+}
+
+struct ShutdownRequest {
+    done: mpsc::SyncSender<()>,
+}
+
+/// Sole owner of active press records.
+#[derive(Default)]
+struct ButtonState {
+    active: HashMap<PressKey, ActivePress>,
+}
+
+impl ButtonState {
+    fn press(&mut self, press: ActivePress) -> Option<ActivePress> {
+        self.active.insert(press.token.key.clone(), press)
+    }
+
+    fn release(&mut self, key: &PressKey) -> Option<ActivePress> {
+        self.active.remove(key)
+    }
+
+    fn active(&self, token: &PressToken) -> Option<&ActivePress> {
+        self.active
+            .get(&token.key)
+            .filter(|press| press.token.id == token.id)
+    }
+
+    fn cancel_press(&mut self, token: &PressToken) -> Option<ActivePress> {
+        self.active(token)?;
+        self.active.remove(&token.key)
+    }
+
+    fn cancel_source(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
+        self.cancel_where(|key| key.source == *source)
+    }
+
+    fn cancel_hooks(&mut self) -> Vec<ActivePress> {
+        self.cancel_where(|key| matches!(key.source, ButtonSource::OsHook(_)))
+    }
+
+    fn cancel_all(&mut self) -> Vec<ActivePress> {
+        self.active.drain().map(|(_, press)| press).collect()
+    }
+
+    fn cancel_where(&mut self, matches: impl Fn(&PressKey) -> bool) -> Vec<ActivePress> {
+        let keys: Vec<PressKey> = self
             .active
-            .iter()
+            .keys()
             .filter(|key| matches(key))
             .cloned()
             .collect();
-        for key in &canceled {
-            self.active.remove(key);
-        }
-        canceled
-            .into_iter()
-            .map(|key| ButtonEvent::new(key.origin, key.button, ButtonPhase::Cancel))
+        keys.into_iter()
+            .filter_map(|key| self.active.remove(&key))
             .collect()
     }
 }
 
-enum ButtonCommand {
-    Event {
-        generation: u64,
-        event: ButtonEvent,
-        action: Option<Action>,
-    },
-    CancelOrigin(ButtonOrigin),
-    Wake,
-    Barrier(mpsc::SyncSender<()>),
-}
-
-/// Non-blocking producer handle for the single button lifecycle worker.
+/// Non-blocking producer cloned into capture callbacks and watcher tasks.
 #[derive(Clone)]
-pub(crate) struct ButtonRuntimeHandle {
-    tx: mpsc::SyncSender<ButtonCommand>,
+pub(crate) struct ButtonInputHandle {
+    events: mpsc::SyncSender<ButtonCommand>,
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
+    next_press: Arc<AtomicU64>,
 }
 
-impl ButtonRuntimeHandle {
-    /// Start one lifecycle worker and call `on_event` for every accepted
-    /// `Down`, `Up`, or `Cancel` transition.
-    pub(crate) fn spawn(on_event: impl Fn(ButtonEvent, Option<Action>) + Send + 'static) -> Self {
-        let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
-        let generation = Arc::new(AtomicU64::new(0));
-        let accepting = Arc::new(AtomicBool::new(true));
-        let worker_generation = Arc::clone(&generation);
-        let _ = thread::Builder::new()
-            .name("openlogi-buttons".into())
-            .spawn(move || run_worker(&rx, &worker_generation, on_event));
-        Self {
-            tx,
-            generation,
-            accepting,
-        }
-    }
-
-    /// Queue one OS-hook phase without blocking its callback.
-    pub(crate) fn try_hook_event(
+impl ButtonInputHandle {
+    pub(crate) fn try_hook_down(
         &self,
         button: ButtonId,
-        phase: ButtonPhase,
         action: Option<&Action>,
-    ) -> bool {
-        self.try_event(ButtonOrigin::current_os_hook(), button, phase, action)
+    ) -> Option<PressToken> {
+        self.try_down(ButtonSource::current_hook(), button, action)
     }
 
-    /// Cancel active presses owned by the current OS-hook callback thread.
+    pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
+        self.try_up(ButtonSource::current_hook(), button)
+    }
+
     pub(crate) fn cancel_hook_thread(&self) {
-        self.try_command(ButtonCommand::CancelOrigin(ButtonOrigin::current_os_hook()));
+        self.try_command(ButtonCommand::CancelSource(ButtonSource::current_hook()));
     }
 
-    /// Queue one HID++ phase for a capture-session epoch.
-    pub(crate) fn hidpp_event(
-        &self,
-        device_key: &str,
-        epoch: u64,
-        button: ButtonId,
-        phase: ButtonPhase,
-        action: Option<&Action>,
-    ) {
-        self.try_event(
-            ButtonOrigin::hidpp(device_key, epoch),
-            button,
-            phase,
-            action,
-        );
+    pub(crate) fn cancel_hooks(&self) {
+        self.try_command(ButtonCommand::CancelHooks);
     }
 
-    /// Deliver one firmware-reported tap with no observable hold duration.
-    pub(crate) fn hidpp_pulse(
+    pub(crate) fn try_hidpp_down(
         &self,
-        device_key: &str,
-        epoch: u64,
+        session: &HidppSessionId,
         button: ButtonId,
         action: Option<&Action>,
-    ) {
-        let origin = ButtonOrigin::hidpp(device_key, epoch);
-        if self.try_event(origin.clone(), button, ButtonPhase::Down, action) {
-            self.try_event(origin, button, ButtonPhase::Up, None);
-        }
+    ) -> Option<PressToken> {
+        self.try_down(ButtonSource::Hidpp(session.clone()), button, action)
     }
 
-    /// Cancel active presses owned by one HID++ session.
-    pub(crate) fn cancel_hidpp_session(&self, device_key: &str, epoch: u64) {
-        self.try_command(ButtonCommand::CancelOrigin(ButtonOrigin::hidpp(
-            device_key, epoch,
-        )));
+    pub(crate) fn try_hidpp_up(&self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.try_up(ButtonSource::Hidpp(session.clone()), button)
     }
 
-    /// Invalidate every active lifecycle. Queued events carrying the previous
-    /// generation are ignored even if producers race this call.
-    pub(crate) fn cancel_all(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        let _ = self.tx.try_send(ButtonCommand::Wake);
-    }
-
-    /// Snapshot the current binding/profile generation. Gesture accumulators
-    /// use this to reject a semantic click or swipe whose physical hold began
-    /// before a global lifecycle cancellation.
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    /// Cancel every active lifecycle and wait briefly for the worker to run
-    /// terminal handlers before process shutdown.
-    pub(crate) fn cancel_all_and_wait(&self) {
-        self.accepting.store(false, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        let (done, wait) = mpsc::sync_channel(0);
-        if self.tx.send(ButtonCommand::Barrier(done)).is_ok() {
-            let _ = wait.recv_timeout(Duration::from_secs(1));
-        }
-    }
-
-    fn try_event(
+    pub(crate) fn try_hidpp_pulse(
         &self,
-        origin: ButtonOrigin,
+        session: &HidppSessionId,
         button: ButtonId,
-        phase: ButtonPhase,
         action: Option<&Action>,
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
+        let press = self.new_press(
+            ButtonSource::Hidpp(session.clone()),
+            button,
+            action,
+            generation,
+        );
+        self.try_input(generation, ButtonInput::Pulse(press))
+    }
+
+    pub(crate) fn try_trigger_while_pressed(&self, token: &PressToken, action: &Action) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        if token.generation != generation {
+            return false;
+        }
+        self.try_input(
+            generation,
+            ButtonInput::TriggerWhilePressed {
+                token: token.clone(),
+                action: action.clone(),
+            },
+        )
+    }
+
+    pub(crate) fn cancel_stale_press(&self, token: &PressToken) {
+        self.try_command(ButtonCommand::CancelStalePress(token.clone()));
+    }
+
+    pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
+        self.try_command(ButtonCommand::CancelSource(ButtonSource::Hidpp(
+            session.clone(),
+        )));
+    }
+
+    pub(crate) fn invalidate_all(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let _ = self.events.try_send(ButtonCommand::Wake);
+    }
+
+    fn try_down(
+        &self,
+        source: ButtonSource,
+        button: ButtonId,
+        action: Option<&Action>,
+    ) -> Option<PressToken> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let press = self.new_press(source, button, action, generation);
+        let token = press.token.clone();
+        self.try_input(generation, ButtonInput::Down(press))
+            .then_some(token)
+    }
+
+    fn try_up(&self, source: ButtonSource, button: ButtonId) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.try_input(generation, ButtonInput::Up(PressKey::new(source, button)))
+    }
+
+    fn new_press(
+        &self,
+        source: ButtonSource,
+        button: ButtonId,
+        action: Option<&Action>,
+        generation: u64,
+    ) -> ActivePress {
+        let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
+        ActivePress {
+            token: PressToken {
+                id,
+                key: PressKey::new(source, button),
+                generation,
+            },
+            action: action.cloned(),
+        }
+    }
+
+    fn try_input(&self, generation: u64, input: ButtonInput) -> bool {
         if !self.accepting.load(Ordering::Acquire) {
             return false;
         }
-        self.try_command(ButtonCommand::Event {
-            generation,
-            event: ButtonEvent::new(origin, button, phase),
-            action: action.cloned(),
-        })
+        self.try_command(ButtonCommand::Input { generation, input })
     }
 
     fn try_command(&self, command: ButtonCommand) -> bool {
-        match self.tx.try_send(command) {
+        match self.events.try_send(command) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
-                // A missing terminal event is more dangerous than dropping an
-                // entire lifecycle. The generation change makes the worker
-                // cancel everything it accepted before processing more input.
                 self.generation.fetch_add(1, Ordering::AcqRel);
-                warn!("button lifecycle queue full — canceling active presses");
+                warn!("button lifecycle queue full — invalidating active presses");
                 false
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -310,194 +383,190 @@ impl ButtonRuntimeHandle {
             }
         }
     }
+
+    fn stop_accepting(&self) {
+        self.accepting.store(false, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Unique owner of the lifecycle worker and its graceful shutdown handshake.
+pub(crate) struct ButtonRuntimeOwner {
+    input: ButtonInputHandle,
+    shutdown: mpsc::Sender<ShutdownRequest>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ButtonRuntimeOwner {
+    pub(crate) fn spawn(
+        on_event: impl Fn(ButtonRuntimeEvent) + Send + 'static,
+    ) -> io::Result<Self> {
+        let (events, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+        let (shutdown, shutdown_rx) = mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(0));
+        let input = ButtonInputHandle {
+            events,
+            generation: Arc::clone(&generation),
+            accepting: Arc::new(AtomicBool::new(true)),
+            next_press: Arc::new(AtomicU64::new(1)),
+        };
+        let worker = thread::Builder::new()
+            .name("openlogi-buttons".into())
+            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &on_event))?;
+        Ok(Self {
+            input,
+            shutdown,
+            worker: Some(worker),
+        })
+    }
+
+    pub(crate) fn input(&self) -> ButtonInputHandle {
+        self.input.clone()
+    }
+
+    pub(crate) fn shutdown(&mut self) -> bool {
+        self.shutdown_with_timeout(SHUTDOWN_TIMEOUT)
+    }
+
+    fn shutdown_with_timeout(&mut self, timeout: Duration) -> bool {
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        self.input.stop_accepting();
+        let (done, wait) = mpsc::sync_channel(0);
+        if self.shutdown.send(ShutdownRequest { done }).is_err() {
+            let _ = worker.join();
+            return false;
+        }
+        if wait.recv_timeout(timeout).is_err() {
+            warn!("button lifecycle worker did not shut down before the deadline");
+            // Dropping a JoinHandle detaches the worker; the queued request
+            // still makes it exit if the current terminal handler returns.
+            return false;
+        }
+        if worker.join().is_err() {
+            warn!("button lifecycle worker panicked during shutdown");
+            return false;
+        }
+        true
+    }
+}
+
+impl Drop for ButtonRuntimeOwner {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
 }
 
 fn run_worker(
-    rx: &mpsc::Receiver<ButtonCommand>,
+    events: &mpsc::Receiver<ButtonCommand>,
+    shutdown: &mpsc::Receiver<ShutdownRequest>,
     shared_generation: &AtomicU64,
-    on_event: impl Fn(ButtonEvent, Option<Action>),
+    emit: &impl Fn(ButtonRuntimeEvent),
 ) {
-    let mut runtime = ButtonRuntime::default();
+    let mut state = ButtonState::default();
     let mut generation = shared_generation.load(Ordering::Acquire);
-    while let Ok(command) = rx.recv() {
+    loop {
+        if let Ok(request) = shutdown.try_recv() {
+            emit_canceled(state.cancel_all(), CancelReason::Shutdown, emit);
+            let _ = request.done.send(());
+            return;
+        }
+        let command = match events.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                emit_canceled(state.cancel_all(), CancelReason::SourceEnded, emit);
+                return;
+            }
+        };
         let current = shared_generation.load(Ordering::Acquire);
         if current != generation {
-            emit_canceled(runtime.cancel_all(), &on_event);
+            emit_canceled(state.cancel_all(), CancelReason::Invalidated, emit);
             generation = current;
         }
         match command {
-            ButtonCommand::Event {
-                generation: event_generation,
-                event,
-                action,
-            } if event_generation == generation => {
-                for event in runtime.update(event).into_iter().flatten() {
-                    let event_action = (event.phase == ButtonPhase::Down)
-                        .then(|| action.clone())
-                        .flatten();
-                    on_event(event, event_action);
+            ButtonCommand::Input {
+                generation: input_generation,
+                input,
+            } if input_generation == generation => process_input(&mut state, input, emit),
+            ButtonCommand::Input { .. } | ButtonCommand::Wake => {}
+            ButtonCommand::CancelStalePress(token) => {
+                if let Some(press) = state.cancel_press(&token) {
+                    emit(ButtonRuntimeEvent::Ended {
+                        press,
+                        reason: EndReason::Canceled(CancelReason::StaleHold),
+                    });
                 }
             }
-            ButtonCommand::Event { .. } | ButtonCommand::Wake => {}
-            ButtonCommand::CancelOrigin(origin) => {
-                emit_canceled(runtime.cancel_origin(&origin), &on_event);
+            ButtonCommand::CancelSource(source) => {
+                emit_canceled(
+                    state.cancel_source(&source),
+                    CancelReason::SourceEnded,
+                    emit,
+                );
             }
-            ButtonCommand::Barrier(done) => {
-                emit_canceled(runtime.cancel_all(), &on_event);
-                let _ = done.send(());
+            ButtonCommand::CancelHooks => {
+                emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
             }
         }
     }
 }
 
-fn emit_canceled(events: Vec<ButtonEvent>, on_event: &impl Fn(ButtonEvent, Option<Action>)) {
-    for event in events {
-        on_event(event, None);
+fn process_input(state: &mut ButtonState, input: ButtonInput, emit: &impl Fn(ButtonRuntimeEvent)) {
+    match input {
+        ButtonInput::Down(press) => {
+            if let Some(stale) = state.press(press.clone()) {
+                emit(ButtonRuntimeEvent::Ended {
+                    press: stale,
+                    reason: EndReason::Canceled(CancelReason::RepeatedDown),
+                });
+            }
+            emit(ButtonRuntimeEvent::Started(press));
+        }
+        ButtonInput::Up(key) => {
+            if let Some(press) = state.release(&key) {
+                emit(ButtonRuntimeEvent::Ended {
+                    press,
+                    reason: EndReason::Released,
+                });
+            }
+        }
+        ButtonInput::Pulse(press) => {
+            if let Some(stale) = state.press(press.clone()) {
+                emit(ButtonRuntimeEvent::Ended {
+                    press: stale,
+                    reason: EndReason::Canceled(CancelReason::RepeatedDown),
+                });
+            }
+            emit(ButtonRuntimeEvent::Started(press.clone()));
+            if let Some(press) = state.release(&press.token.key) {
+                emit(ButtonRuntimeEvent::Ended {
+                    press,
+                    reason: EndReason::Released,
+                });
+            }
+        }
+        ButtonInput::TriggerWhilePressed { token, action } => {
+            if let Some(press) = state.active(&token).cloned() {
+                emit(ButtonRuntimeEvent::Triggered { press, action });
+            }
+        }
+    }
+}
+
+fn emit_canceled(
+    presses: Vec<ActivePress>,
+    reason: CancelReason,
+    emit: &impl Fn(ButtonRuntimeEvent),
+) {
+    for press in presses {
+        emit(ButtonRuntimeEvent::Ended {
+            press,
+            reason: EndReason::Canceled(reason),
+        });
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn hook(button: ButtonId, phase: ButtonPhase) -> ButtonEvent {
-        ButtonEvent::new(ButtonOrigin::current_os_hook(), button, phase)
-    }
-
-    #[test]
-    fn down_terminates_once_with_up() {
-        let mut runtime = ButtonRuntime::default();
-        assert_eq!(
-            runtime.update(hook(ButtonId::Back, ButtonPhase::Down)),
-            [Some(hook(ButtonId::Back, ButtonPhase::Down)), None]
-        );
-        assert_eq!(
-            runtime.update(hook(ButtonId::Back, ButtonPhase::Up)),
-            [Some(hook(ButtonId::Back, ButtonPhase::Up)), None]
-        );
-        assert_eq!(
-            runtime.update(hook(ButtonId::Back, ButtonPhase::Up)),
-            [None, None],
-            "a duplicate release must not produce a second terminal event"
-        );
-    }
-
-    #[test]
-    fn a_repress_cancels_the_stale_lifecycle_before_restarting() {
-        let mut runtime = ButtonRuntime::default();
-        runtime.update(hook(ButtonId::Back, ButtonPhase::Down));
-
-        assert_eq!(
-            runtime.update(hook(ButtonId::Back, ButtonPhase::Down)),
-            [
-                Some(hook(ButtonId::Back, ButtonPhase::Cancel)),
-                Some(hook(ButtonId::Back, ButtonPhase::Down)),
-            ]
-        );
-        assert_eq!(
-            runtime.update(hook(ButtonId::Back, ButtonPhase::Up)),
-            [Some(hook(ButtonId::Back, ButtonPhase::Up)), None]
-        );
-    }
-
-    #[test]
-    fn cancellation_is_scoped_to_one_session() {
-        let mut runtime = ButtonRuntime::default();
-        let first = ButtonOrigin::hidpp("mouse-a", 7);
-        let second = ButtonOrigin::hidpp("mouse-b", 3);
-        runtime.update(ButtonEvent::new(
-            first.clone(),
-            ButtonId::Back,
-            ButtonPhase::Down,
-        ));
-        runtime.update(ButtonEvent::new(
-            second.clone(),
-            ButtonId::Back,
-            ButtonPhase::Down,
-        ));
-
-        assert_eq!(
-            runtime.cancel_origin(&first),
-            vec![ButtonEvent::new(first, ButtonId::Back, ButtonPhase::Cancel,)]
-        );
-        assert_eq!(
-            runtime.update(ButtonEvent::new(
-                second.clone(),
-                ButtonId::Back,
-                ButtonPhase::Up,
-            )),
-            [
-                Some(ButtonEvent::new(second, ButtonId::Back, ButtonPhase::Up,)),
-                None,
-            ],
-            "canceling one device must not terminate another device's hold"
-        );
-    }
-
-    #[test]
-    fn cancel_all_terminates_overlapping_buttons() {
-        let mut runtime = ButtonRuntime::default();
-        runtime.update(hook(ButtonId::Back, ButtonPhase::Down));
-        runtime.update(hook(ButtonId::Forward, ButtonPhase::Down));
-
-        let canceled = runtime.cancel_all();
-        assert_eq!(canceled.len(), 2);
-        assert!(
-            canceled
-                .iter()
-                .all(|event| event.phase == ButtonPhase::Cancel)
-        );
-        assert!(
-            runtime.cancel_all().is_empty(),
-            "each active press is canceled at most once"
-        );
-    }
-
-    #[test]
-    fn worker_delivers_down_and_cancel_to_one_consumer() {
-        let (events, received) = mpsc::channel();
-        let handle = ButtonRuntimeHandle::spawn(move |event, action| {
-            events.send((event, action)).unwrap();
-        });
-
-        assert!(handle.try_hook_event(ButtonId::Back, ButtonPhase::Down, Some(&Action::Copy),));
-        let (down, action) = received.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(down.button, ButtonId::Back);
-        assert_eq!(down.phase, ButtonPhase::Down);
-        assert_eq!(action, Some(Action::Copy));
-
-        handle.cancel_all_and_wait();
-        let (cancel, action) = received.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(cancel.button, ButtonId::Back);
-        assert_eq!(cancel.phase, ButtonPhase::Cancel);
-        assert_eq!(action, None, "terminal events never replay the down action");
-        assert!(
-            !handle.try_hook_event(ButtonId::Forward, ButtonPhase::Down, Some(&Action::Paste)),
-            "shutdown must reject a new press racing process exit"
-        );
-    }
-
-    #[test]
-    fn worker_ignores_an_event_queued_before_generation_invalidation() {
-        let (commands, queued) = mpsc::sync_channel(2);
-        commands
-            .send(ButtonCommand::Event {
-                generation: 0,
-                event: hook(ButtonId::Back, ButtonPhase::Down),
-                action: Some(Action::Copy),
-            })
-            .unwrap();
-        let generation = AtomicU64::new(1);
-        drop(commands);
-
-        let (events, received) = mpsc::channel();
-        run_worker(&queued, &generation, move |event, action| {
-            events.send((event, action)).unwrap();
-        });
-
-        assert!(
-            received.try_recv().is_err(),
-            "an old profile's queued down must not activate a new lifecycle"
-        );
-    }
-}
+mod tests;

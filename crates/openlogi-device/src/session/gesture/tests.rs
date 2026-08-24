@@ -465,10 +465,10 @@ fn gesture_sources_emit_independent_edges_without_snapshot_duplicates() {
     assert_eq!(
         edges,
         vec![
-            CapturedInput::ButtonPressed(ButtonId::GestureButton, None),
-            CapturedInput::ButtonPressed(ButtonId::HapticPanel, None),
-            CapturedInput::ButtonReleased(ButtonId::GestureButton),
-            CapturedInput::ButtonReleased(ButtonId::HapticPanel),
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+            CapturedInput::ButtonDown(ButtonId::HapticPanel),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+            CapturedInput::ButtonUp(ButtonId::HapticPanel),
         ]
     );
 }
@@ -488,11 +488,11 @@ fn a_plain_diverted_gesture_button_presses_without_gesturing() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::GestureButton, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonReleased(ButtonId::GestureButton))
+        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
     );
     assert!(
         rx.try_recv().is_err(),
@@ -514,11 +514,11 @@ fn a_plain_diverted_haptic_panel_presses_as_its_own_button() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::HapticPanel, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::HapticPanel))
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonReleased(ButtonId::HapticPanel))
+        Ok(CapturedInput::ButtonUp(ButtonId::HapticPanel))
     );
     assert!(
         rx.try_recv().is_err(),
@@ -541,21 +541,15 @@ fn plain_button_snapshots_emit_each_edge_once_and_keep_buttons_independent() {
     handle_reprog(&mut acc, forward, &[], &[], &buttons, &tx);
     handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
 
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonDown(ButtonId::Back)));
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::Back, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::Forward))
     );
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonUp(ButtonId::Back)));
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::Forward, None))
-    );
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonReleased(ButtonId::Back))
-    );
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonReleased(ButtonId::Forward))
+        Ok(CapturedInput::ButtonUp(ButtonId::Forward))
     );
     assert!(rx.try_recv().is_err(), "unchanged snapshots emit no edges");
 }
@@ -572,7 +566,7 @@ fn a_held_dpi_button_presses_once_on_the_rising_edge() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
     assert!(rx.try_recv().is_err(), "a held DPI button presses once");
 }
@@ -594,16 +588,16 @@ fn a_dpi_button_re_presses_after_a_release() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonReleased(ButtonId::DpiToggle)),
+        Ok(CapturedInput::ButtonUp(ButtonId::DpiToggle)),
         "the falling edge must be preserved"
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None)),
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle)),
         "a release re-arms the rising edge"
     );
     assert!(

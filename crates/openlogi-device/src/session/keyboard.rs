@@ -53,8 +53,8 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 ];
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
-/// resolves, forwarding [`CapturedInput::ButtonPressed`] and
-/// [`CapturedInput::ButtonReleased`] edges to `sink`.
+/// resolves, forwarding [`CapturedInput::ButtonDown`] and
+/// [`CapturedInput::ButtonUp`] edges to `sink`.
 ///
 /// `wanted` maps `0x1b04` control IDs to the [`ButtonId`] they dispatch as —
 /// the caller passes only the keys that carry a real binding. Controls the
@@ -219,9 +219,9 @@ fn emit_button_edges(
         let now = cids.contains(&cid);
         let was = down.contains(&cid);
         if now && !was {
-            let _ = sink.send(CapturedInput::ButtonPressed(button, None));
+            let _ = sink.send(CapturedInput::ButtonDown(button));
         } else if !now && was {
-            let _ = sink.send(CapturedInput::ButtonReleased(button));
+            let _ = sink.send(CapturedInput::ButtonUp(button));
         }
         if now {
             down.insert(cid);
@@ -297,10 +297,10 @@ mod tests {
         assert_eq!(
             std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
             vec![
-                CapturedInput::ButtonPressed(ButtonId::KeySearch, None),
-                CapturedInput::ButtonPressed(ButtonId::KeyDictation, None),
-                CapturedInput::ButtonReleased(ButtonId::KeySearch),
-                CapturedInput::ButtonReleased(ButtonId::KeyDictation),
+                CapturedInput::ButtonDown(ButtonId::KeySearch),
+                CapturedInput::ButtonDown(ButtonId::KeyDictation),
+                CapturedInput::ButtonUp(ButtonId::KeySearch),
+                CapturedInput::ButtonUp(ButtonId::KeyDictation),
             ]
         );
     }
