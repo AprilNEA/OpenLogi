@@ -105,6 +105,7 @@ pub struct MouseModelView {
     selected: Option<MouseControlId>,
     /// The gesture direction whose action is open in the fixed inspector.
     gesture_active_dir: Option<GestureDirection>,
+    action_picker_open: bool,
     action_search: Entity<InputState>,
     _state_obs: Subscription,
 }
@@ -142,6 +143,7 @@ impl MouseModelView {
             hovered: None,
             selected: None,
             gesture_active_dir: None,
+            action_picker_open: false,
             action_search,
             _state_obs: state_obs,
         }
@@ -151,12 +153,22 @@ impl MouseModelView {
     /// `cx.notify()` to re-render.
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
+        self.action_picker_open = false;
+    }
+
+    pub(super) fn toggle_action_picker(&mut self) {
+        self.action_picker_open = !self.action_picker_open;
+    }
+
+    pub(super) fn close_action_picker(&mut self) {
+        self.action_picker_open = false;
     }
 
     fn select(&mut self, control: MouseControlId) {
         if self.selected != Some(control) {
             self.selected = Some(control);
             self.gesture_active_dir = None;
+            self.action_picker_open = false;
         }
     }
 }
@@ -180,6 +192,7 @@ impl Render for MouseModelView {
             self.hovered = None;
             self.selected = None;
             self.gesture_active_dir = None;
+            self.action_picker_open = false;
         }
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
@@ -228,9 +241,7 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let scope = editing_app.as_ref().map(|_| &overridden);
-                let binding =
-                    binding_label_for_control(label.id, &bindings, &gesture_buttons, scope);
+                let binding = binding_label_for_control(label.id, &bindings, &gesture_buttons);
                 label_control(
                     idx,
                     *label,
@@ -250,6 +261,7 @@ impl Render for MouseModelView {
             BindingInspectorData {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
+                action_picker_open: self.action_picker_open,
                 bindings: &bindings,
                 gesture_maps: &gesture_maps,
                 editing_app: editing_app.as_deref(),
@@ -516,7 +528,6 @@ fn label_control(
 
 struct BindingLabel {
     text: gpui::SharedString,
-    is_default: bool,
     /// Vendored action-icon asset path (see [`action_icon_path`]) for the
     /// card's leading glyph, or `None` for the gesture summary / unbound.
     icon: Option<&'static str>,
@@ -542,14 +553,12 @@ impl RenderOnce for LabelTrigger {
         let pal = theme::palette(cx);
         let binding_color = if highlighted {
             rgb(ACCENT_BLUE).into()
-        } else if self.binding.is_default {
-            pal.text_muted
         } else {
             pal.text_primary
         };
-        // Always show the action the button actually performs; the muted colour
-        // (set above for `is_default`) is what signals "not customised" — more
-        // informative than the bare word "Default".
+        // Always show the action the button actually performs. Default and
+        // customised bindings use the same neutral value colour; only the
+        // actively highlighted control takes the accent.
         let binding = self.binding.text;
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
@@ -588,8 +597,7 @@ impl RenderOnce for LabelTrigger {
                     .child(button_name),
             )
             // Current binding — the value (sm), the same size as the action rows
-            // it edits. Colour, not weight or size, carries the default / set /
-            // highlighted state.
+            // it edits.
             .child(
                 h_flex()
                     .items_center()
@@ -645,18 +653,11 @@ impl RenderOnce for LabelTrigger {
     }
 }
 
-/// The label card's text, icon, and "is this customised" state for one control.
-///
-/// `overridden` is the set of buttons the open per-app profile overrides, and
-/// is empty in the device's global profile. Where it applies it *replaces* the
-/// factory-default comparison: inside an application's profile the distinction
-/// that matters is override versus inherited, and the card already carries it
-/// as muted-versus-primary text.
+/// The label card's text and icon for one control.
 fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
-    scope: Option<&BTreeSet<ButtonId>>,
 ) -> BindingLabel {
     if control
         .button()
@@ -664,7 +665,6 @@ fn binding_label_for_control(
     {
         return BindingLabel {
             text: tr!("5 directions"),
-            is_default: scope.is_some(),
             icon: Some(GESTURE_BUTTON_ICON),
         };
     }
@@ -677,10 +677,6 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(button));
             BindingLabel {
                 text: localized_action_label(&action),
-                is_default: scope.map_or_else(
-                    || action == default_binding(button),
-                    |overridden| !overridden.contains(&button),
-                ),
                 icon: Some(action_icon_path(&action)),
             }
         }
@@ -696,18 +692,11 @@ fn binding_label_for_control(
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
                     text: tr!(preset.label()),
-                    // One visual target, two bindings: overriding the pair
-                    // writes both, so either one is enough to call it set.
-                    is_default: scope.map_or(preset == ThumbwheelPreset::HorizontalScroll, |o| {
-                        !o.contains(&ButtonId::ThumbwheelScrollDown)
-                            && !o.contains(&ButtonId::ThumbwheelScrollUp)
-                    }),
                     icon: Some(preset.icon()),
                 }
             } else {
                 BindingLabel {
                     text: tr!("Custom"),
-                    is_default: false,
                     icon: Some("action-icons/chevrons-right.svg"),
                 }
             }
@@ -891,6 +880,7 @@ mod tests {
                 BindingInspectorData {
                     selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
                     gesture_direction: Some(GestureDirection::Up),
+                    action_picker_open: false,
                     bindings: &bindings,
                     gesture_maps: &gesture_maps,
                     editing_app: None,
@@ -903,6 +893,25 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        view.update(cx, |view, _| {
+            view.selected = Some(MouseControlId::Button(ButtonId::Back));
+            view.action_picker_open = true;
+
+            view.select(MouseControlId::Button(ButtonId::Forward));
+
+            assert!(!view.action_picker_open);
+        });
         drop(view);
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();

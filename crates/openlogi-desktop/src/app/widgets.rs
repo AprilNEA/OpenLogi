@@ -3,7 +3,8 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, px, relative, rgb,
+    AnyElement, Context, Hsla, IntoElement, ParentElement, SharedString, Styled, div,
+    prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
     IconName, Sizable as _,
@@ -71,10 +72,10 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
 }
 
 pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
-    let (label, color) = if online {
-        (tr!("Connected"), theme::STATUS_CONNECTED)
+    let label = if online {
+        tr!("Connected")
     } else {
-        (tr!("Offline"), theme::STATUS_OFFLINE)
+        tr!("Offline")
     };
     h_flex()
         .gap_1()
@@ -86,8 +87,19 @@ pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
         .py_1()
         .text_caption()
         .text_color(pal.text_muted)
-        .child(div().size_1p5().rounded_full().bg(rgb(color)))
+        .child(connectivity_dot(online, pal))
         .child(label)
+}
+
+/// Neutral connectivity indicator: online is solid and offline is hollow, so
+/// the state never depends on hue alone.
+pub(super) fn connectivity_dot(online: bool, pal: Palette) -> impl IntoElement {
+    div()
+        .size_1p5()
+        .rounded_full()
+        .border_1()
+        .border_color(pal.text_muted)
+        .when(online, |dot| dot.bg(pal.text_primary))
 }
 
 pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
@@ -127,17 +139,17 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                         .h_full()
                         .w(relative(f32::from(battery.percentage.clamp(1, 100)) / 100.))
                         .rounded_full()
-                        .bg(rgb(battery_color(battery.percentage))),
+                        .bg(battery_color(battery.percentage, pal)),
                 )
             }
         })
 }
 
-fn battery_color(percentage: u8) -> u32 {
+fn battery_color(percentage: u8, pal: Palette) -> Hsla {
     match percentage {
-        0..=20 => 0x00ef_4444,
-        21..=50 => theme::STATUS_CONNECTING,
-        _ => theme::STATUS_CONNECTED,
+        0..=20 => rgb(0x00ef_4444).into(),
+        21..=50 => rgb(theme::STATUS_CONNECTING).into(),
+        _ => pal.text_primary,
     }
 }
 

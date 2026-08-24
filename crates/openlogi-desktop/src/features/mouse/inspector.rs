@@ -34,10 +34,18 @@ pub(super) const INSPECTOR_W: f32 = 328.;
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
     pub gesture_direction: Option<GestureDirection>,
+    pub action_picker_open: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub editing_app: Option<&'a str>,
     pub overridden: &'a BTreeSet<ButtonId>,
+}
+
+#[derive(Clone, Copy)]
+struct ActionPickerContext<'a> {
+    open: bool,
+    search: &'a Entity<InputState>,
+    view: &'a Entity<MouseModelView>,
 }
 
 pub(super) fn binding_inspector(
@@ -47,14 +55,21 @@ pub(super) fn binding_inspector(
     pal: Palette,
     cx: &mut Context<MouseModelView>,
 ) -> AnyElement {
+    let picker = ActionPickerContext {
+        open: data.action_picker_open,
+        search: action_search,
+        view,
+    };
     let body = match data.selected {
         None => empty_inspector(data.editing_app, data.overridden.len(), pal),
-        Some(MouseControlId::ThumbwheelRotation) => {
-            thumbwheel_inspector(data.bindings, data.editing_app, data.overridden, view, pal)
-        }
-        Some(MouseControlId::Button(button)) => {
-            button_inspector(button, &data, action_search, view, pal, cx)
-        }
+        Some(MouseControlId::ThumbwheelRotation) => thumbwheel_inspector(
+            data.bindings,
+            data.editing_app,
+            data.overridden,
+            picker,
+            pal,
+        ),
+        Some(MouseControlId::Button(button)) => button_inspector(button, &data, picker, pal, cx),
     };
 
     v_flex()
@@ -104,8 +119,7 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> An
 fn button_inspector(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
-    action_search: &Entity<InputState>,
-    view: &Entity<MouseModelView>,
+    picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &mut Context<MouseModelView>,
 ) -> AnyElement {
@@ -114,21 +128,13 @@ fn button_inspector(
     if data.editing_app.is_none()
         && let Some(gesture_map) = gesture_map
     {
-        return gesture_inspector(
-            button,
-            gesture_map,
-            data.gesture_direction,
-            action_search,
-            view,
-            pal,
-            cx,
-        );
+        return gesture_inspector(button, gesture_map, data.gesture_direction, picker, pal, cx);
     }
     if let Some(app) = data.editing_app
         && !overridden
         && gesture_map.is_some()
     {
-        return inherited_gesture_inspector(button, app, action_search, view, pal, cx);
+        return inherited_gesture_inspector(button, app, picker, pal, cx);
     }
 
     let action = data
@@ -146,19 +152,22 @@ fn button_inspector(
         (None, _, true) => tr!("Device default"),
         (None, _, false) => tr!("Customized"),
     };
-    let observer = view.clone();
+    let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         cx.update_global::<AppState, _>(|state, _| state.commit_binding(button, action));
-        observer.update(cx, |_, cx| cx.notify());
+        observer.update(cx, |view, cx| {
+            view.close_action_picker();
+            cx.notify();
+        });
         cx.refresh_windows();
     });
 
     v_flex()
         .gap_3()
         .child(inspector_heading(tr!(button.label()), Some(status), pal))
-        .child(current_action_card(&action, pal))
+        .child(current_action_card(&action, picker, pal))
         .when(overridden, |panel| {
-            let observer = view.clone();
+            let observer = picker.view.clone();
             panel.child(
                 Button::new("inspector-use-default")
                     .small()
@@ -169,7 +178,10 @@ fn button_inspector(
                         cx.update_global::<AppState, _>(|state, _| {
                             state.clear_app_binding(button);
                         });
-                        observer.update(cx, |_, cx| cx.notify());
+                        observer.update(cx, |view, cx| {
+                            view.close_action_picker();
+                            cx.notify();
+                        });
                         cx.refresh_windows();
                     }),
             )
@@ -178,7 +190,7 @@ fn button_inspector(
             data.editing_app.is_none()
                 && (button.is_hidpp_gesture_source() || button.is_os_hook_button()),
             |panel| {
-                let observer = view.clone();
+                let observer = picker.view.clone();
                 panel.child(
                     Button::new("inspector-use-gestures")
                         .small()
@@ -198,32 +210,36 @@ fn button_inspector(
                 )
             },
         )
-        .child(action_library(
-            "inspector-action",
-            Some(&action),
-            action_search,
-            &on_pick,
-            pal,
-            cx,
-        ))
+        .when(picker.open, |panel| {
+            panel.child(action_library(
+                "inspector-action",
+                Some(&action),
+                picker.search,
+                &on_pick,
+                pal,
+                cx,
+            ))
+        })
         .into_any_element()
 }
 
 fn inherited_gesture_inspector(
     button: ButtonId,
     app: &str,
-    action_search: &Entity<InputState>,
-    view: &Entity<MouseModelView>,
+    picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &mut Context<MouseModelView>,
 ) -> AnyElement {
-    let observer = view.clone();
+    let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         cx.update_global::<AppState, _>(|state, _| state.commit_binding(button, action));
-        observer.update(cx, |_, cx| cx.notify());
+        observer.update(cx, |view, cx| {
+            view.close_action_picker();
+            cx.notify();
+        });
         cx.refresh_windows();
     });
-    let edit_default = view.clone();
+    let edit_default = picker.view.clone();
     v_flex()
         .gap_3()
         .child(inspector_heading(
@@ -231,7 +247,7 @@ fn inherited_gesture_inspector(
             Some(tr!("Inherited from Default")),
             pal,
         ))
-        .child(gesture_summary_card(pal))
+        .child(gesture_summary_card(picker, pal))
         .child(div().text_caption().text_color(pal.text_muted).child(tr!(
             "Choosing an action replaces the inherited gestures in %{app}.",
             app => app.to_string()
@@ -250,14 +266,16 @@ fn inherited_gesture_inspector(
                     cx.refresh_windows();
                 }),
         )
-        .child(action_library(
-            "inspector-gesture-override",
-            None,
-            action_search,
-            &on_pick,
-            pal,
-            cx,
-        ))
+        .when(picker.open, |panel| {
+            panel.child(action_library(
+                "inspector-gesture-override",
+                None,
+                picker.search,
+                &on_pick,
+                pal,
+                cx,
+            ))
+        })
         .into_any_element()
 }
 
@@ -265,22 +283,24 @@ fn gesture_inspector(
     button: ButtonId,
     gesture_map: &BTreeMap<GestureDirection, Action>,
     selected_direction: Option<GestureDirection>,
-    action_search: &Entity<InputState>,
-    view: &Entity<MouseModelView>,
+    picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &mut Context<MouseModelView>,
 ) -> AnyElement {
     let direction = selected_direction.unwrap_or(GestureDirection::Click);
     let current = gesture_action(gesture_map, button, direction);
-    let observer = view.clone();
+    let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         cx.update_global::<AppState, _>(|state, _| {
             state.commit_gesture_binding(button, direction, action);
         });
-        observer.update(cx, |_, cx| cx.notify());
+        observer.update(cx, |view, cx| {
+            view.close_action_picker();
+            cx.notify();
+        });
         cx.refresh_windows();
     });
-    let turn_off = view.clone();
+    let turn_off = picker.view.clone();
 
     v_flex()
         .gap_3()
@@ -293,10 +313,10 @@ fn gesture_inspector(
             direction,
             gesture_map,
             button,
-            view,
+            picker.view,
             pal,
         ))
-        .child(current_action_card(&current, pal))
+        .child(current_action_card(&current, picker, pal))
         .child(
             Button::new("inspector-single-action")
                 .small()
@@ -313,14 +333,16 @@ fn gesture_inspector(
                     cx.refresh_windows();
                 }),
         )
-        .child(action_library(
-            "inspector-gesture-action",
-            Some(&current),
-            action_search,
-            &on_pick,
-            pal,
-            cx,
-        ))
+        .when(picker.open, |panel| {
+            panel.child(action_library(
+                "inspector-gesture-action",
+                Some(&current),
+                picker.search,
+                &on_pick,
+                pal,
+                cx,
+            ))
+        })
         .into_any_element()
 }
 
@@ -384,7 +406,7 @@ fn thumbwheel_inspector(
     bindings: &BTreeMap<ButtonId, Action>,
     editing_app: Option<&str>,
     overridden: &BTreeSet<ButtonId>,
-    view: &Entity<MouseModelView>,
+    picker: ActionPickerContext<'_>,
     pal: Palette,
 ) -> AnyElement {
     let backward = bindings
@@ -403,20 +425,28 @@ fn thumbwheel_inspector(
         (Some(_), false) => tr!("Inherited from Default"),
         (None, _) => tr!("Default profile"),
     };
-    let observer = view.clone();
+    let current_label = current.map_or_else(|| tr!("Custom"), |preset| tr!(preset.label()));
+    let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
+    let observer = picker.view.clone();
 
     v_flex()
         .gap_3()
         .child(inspector_heading(tr!("Thumb Wheel"), Some(status), pal))
-        .child(
-            v_flex()
-                .gap_1()
-                .child(popover_section(tr!("Preset"), pal))
-                .children(
-                    ThumbwheelPreset::ALL
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, preset)| {
+        .child(selection_card(
+            "inspector-current-thumbwheel-preset",
+            tr!("Preset"),
+            current_icon,
+            current_label,
+            picker,
+            pal,
+        ))
+        .when(picker.open, |panel| {
+            panel.child(
+                v_flex()
+                    .gap_1()
+                    .child(popover_section(tr!("Preset"), pal))
+                    .children(ThumbwheelPreset::ALL.into_iter().enumerate().map(
+                        |(index, preset)| {
                             let selected = current == Some(preset);
                             let observer = observer.clone();
                             MenuRow::new(("inspector-thumbwheel", index))
@@ -446,14 +476,18 @@ fn thumbwheel_inspector(
                                     cx.update_global::<AppState, _>(|state, _| {
                                         state.commit_thumbwheel_preset(preset);
                                     });
-                                    observer.update(cx, |_, cx| cx.notify());
+                                    observer.update(cx, |view, cx| {
+                                        view.close_action_picker();
+                                        cx.notify();
+                                    });
                                     cx.refresh_windows();
                                 })
-                        }),
-                ),
-        )
+                        },
+                    )),
+            )
+        })
         .when(is_overridden, |panel| {
-            let observer = view.clone();
+            let observer = picker.view.clone();
             panel.child(
                 Button::new("inspector-thumbwheel-use-default")
                     .small()
@@ -464,7 +498,10 @@ fn thumbwheel_inspector(
                         cx.update_global::<AppState, _>(|state, _| {
                             state.clear_app_thumbwheel();
                         });
-                        observer.update(cx, |_, cx| cx.notify());
+                        observer.update(cx, |view, cx| {
+                            view.close_action_picker();
+                            cx.notify();
+                        });
                         cx.refresh_windows();
                     }),
             )
@@ -489,61 +526,103 @@ fn inspector_heading(
         .into_any_element()
 }
 
-fn current_action_card(action: &Action, pal: Palette) -> AnyElement {
-    v_flex()
-        .gap_2()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface_hover)
-        .p_3()
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("Current action")),
-        )
-        .child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    svg()
-                        .path(action_icon_path(action))
-                        .size_4()
-                        .text_color(pal.text_muted),
-                )
-                .child(div().text_body().child(localized_action_label(action))),
-        )
-        .into_any_element()
+fn current_action_card(
+    action: &Action,
+    picker: ActionPickerContext<'_>,
+    pal: Palette,
+) -> AnyElement {
+    selection_card(
+        "inspector-current-action",
+        tr!("Current action"),
+        action_icon_path(action),
+        localized_action_label(action),
+        picker,
+        pal,
+    )
 }
 
-fn gesture_summary_card(pal: Palette) -> AnyElement {
+fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> AnyElement {
+    selection_card(
+        "inspector-current-gesture-summary",
+        tr!("Current action"),
+        GESTURE_BUTTON_ICON,
+        tr!("5 directions"),
+        picker,
+        pal,
+    )
+}
+
+fn selection_card(
+    id: &'static str,
+    caption: gpui::SharedString,
+    icon: &'static str,
+    value: gpui::SharedString,
+    picker: ActionPickerContext<'_>,
+    pal: Palette,
+) -> AnyElement {
+    let toggle = picker.view.clone();
+    let search = picker.search.clone();
+    let opening = !picker.open;
+    let accessible_label = value.clone();
     v_flex()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .aria_expanded(picker.open)
         .gap_2()
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
         .bg(pal.surface_hover)
         .p_3()
+        .cursor_pointer()
+        .hover(move |card| card.bg(pal.surface))
         .child(
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!("Current action")),
+                .child(caption),
         )
         .child(
             h_flex()
                 .items_center()
-                .gap_2()
+                .justify_between()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            svg()
+                                .path(icon)
+                                .size_4()
+                                .flex_none()
+                                .text_color(pal.text_muted),
+                        )
+                        .child(div().min_w_0().truncate().text_body().child(value)),
+                )
                 .child(
                     svg()
-                        .path(GESTURE_BUTTON_ICON)
-                        .size_4()
+                        .path(if picker.open {
+                            "action-icons/chevrons-up.svg"
+                        } else {
+                            "action-icons/chevrons-down.svg"
+                        })
+                        .size_3()
+                        .flex_none()
                         .text_color(pal.text_muted),
-                )
-                .child(div().text_body().child(tr!("5 directions"))),
+                ),
         )
+        .on_click(move |_, window, cx| {
+            if opening {
+                search.update(cx, |search, cx| search.set_value("", window, cx));
+            }
+            toggle.update(cx, |view, cx| {
+                view.toggle_action_picker();
+                cx.notify();
+            });
+        })
         .into_any_element()
 }
 

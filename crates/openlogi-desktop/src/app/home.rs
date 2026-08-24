@@ -22,7 +22,7 @@ use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
-use super::widgets::{add_device_button, kind_label, settings_button};
+use super::widgets::{add_device_button, connectivity_dot, kind_label, settings_button};
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
@@ -298,7 +298,7 @@ fn device_card(
                                 .text_subheading()
                                 .child(record.display_name.clone()),
                         )
-                        .child(status_dot(record.online)),
+                        .child(connectivity_dot(record.online, pal)),
                 )
                 .child(
                     h_flex()
@@ -391,23 +391,6 @@ fn device_image(
         .items_center()
         .justify_center()
         .child(Icon::new(icon).size_8().text_color(pal.text_muted))
-        .into_any_element()
-}
-
-/// Connectivity dot for a gallery card: a steady grey when offline, green when
-/// connected. Flat and unhaloed, matching every other status dot in the app
-/// (the detail header's, the footer's, the permission rows'): connectivity is a
-/// binary readout, and a halo would say nothing the colour doesn't already say.
-fn status_dot(online: bool) -> AnyElement {
-    let color = if online {
-        theme::STATUS_CONNECTED
-    } else {
-        theme::STATUS_OFFLINE
-    };
-    div()
-        .size(px(10.))
-        .rounded_full()
-        .bg(rgb(color))
         .into_any_element()
 }
 
