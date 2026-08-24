@@ -2,10 +2,10 @@
 
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets,
+    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, device_can_capture,
+    host_switch_links, pick_current, plan_reapply, reapply_targets,
 };
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -774,4 +774,47 @@ fn app_switch_republishes_capture_plans() {
     );
     orch.set_current_app(Some("com.example.editor".into()));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+}
+
+/// A device that can arm nothing must earn no capture plan: its session would
+/// hold a HID++ channel open for life and, on macOS, starve the inventory
+/// prober of replies (observed on a G Pro Wireless over Lightspeed).
+#[test]
+fn a_device_without_capturable_features_gets_no_capture_plan() {
+    let no_hidpp_controls = Capabilities {
+        buttons: false,
+        pointer: true,
+        lighting: true,
+        ..Capabilities::default()
+    };
+    assert!(device_can_capture(None));
+    assert!(!device_can_capture(Some(no_hidpp_controls)));
+    let mut config = Config::default();
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Undo));
+
+    // Unknown capabilities keep the plan (probe has not answered yet).
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    assert_eq!(orch.shared.capture_plans.read().unwrap().len(), 1);
+
+    // No reprog controls + no thumb wheel → no plan, binding or not.
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.devices[0].capabilities = Some(no_hidpp_controls);
+    orch.rebuild();
+    assert!(
+        orch.shared.capture_plans.read().unwrap().is_empty(),
+        "an unarmable device must not hold a capture channel"
+    );
+
+    // Reprog controls present → plan again.
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.devices[0].capabilities = Some(Capabilities {
+        buttons: true,
+        ..no_hidpp_controls
+    });
+    orch.rebuild();
+    assert_eq!(orch.shared.capture_plans.read().unwrap().len(), 1);
 }

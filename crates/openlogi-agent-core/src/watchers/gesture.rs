@@ -101,6 +101,24 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     }
 }
 
+/// Whether arming this spec would divert nothing at all.
+///
+/// A session for an empty spec earns its keep nowhere: its only job is
+/// delivering diverted controls, yet it still holds one HID++ channel open for
+/// its whole life. On macOS a concurrently-opened receiver node silently
+/// routes replies to the newest opener, so that permanent idle channel keeps
+/// stealing reply routing from the inventory prober — probes time out, the
+/// device reads as unreachable, and its battery / DPI / lighting panels hide
+/// (observed on a G Pro Wireless over a Lightspeed receiver, where every
+/// probe timed out while the empty-spec session was live). A device with
+/// nothing diverted is therefore better served by no session at all: probes
+/// answer, and its DPI / SmartShift writes take the fresh-open path.
+fn spec_is_empty(spec: &CaptureSpec) -> bool {
+    !spec.capture_thumbwheel
+        && spec.divert_gesture_sources.is_empty()
+        && spec.divert_buttons.is_empty()
+}
+
 /// One capture session tracked by the manager.
 struct RunningSession {
     route: DeviceRoute,
@@ -188,7 +206,7 @@ async fn manage(
                 // While pairing is waiting or active, release every capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
-                let want: HashMap<String, (DeviceRoute, CaptureSpec, u64)> =
+                let mut want: HashMap<String, (DeviceRoute, CaptureSpec, u64)> =
                     if receiver_access.exclusive_requested() {
                         HashMap::new()
                     } else {
@@ -211,6 +229,10 @@ async fn manage(
                             })
                             .unwrap_or_default()
                     };
+                // An empty-spec device gets no session — see `spec_is_empty`.
+                // Filtering here (not at plan build time) also stops a live
+                // session the moment its spec drains to empty.
+                want.retain(|_, (_, spec, _)| !spec_is_empty(spec));
                 // Stop sessions whose device disappeared or whose plan changed.
                 // Sending on the oneshot lets the session restore its controls.
                 // A stopped session stays tracked — stop sender taken — until
@@ -548,6 +570,35 @@ fn advance(
 mod tests {
     use super::*;
     use openlogi_hid::thumbwheel::WheelResolution;
+
+    #[test]
+    fn an_empty_spec_earns_no_session() {
+        // A device with nothing diverted (no thumb wheel, no gesture sources,
+        // no bound buttons) must not hold a capture channel open — on macOS
+        // that idle channel steals reply routing from the inventory prober.
+        assert!(spec_is_empty(&CaptureSpec::default()));
+    }
+
+    #[test]
+    fn any_armed_control_keeps_the_session() {
+        let thumbwheel = CaptureSpec {
+            capture_thumbwheel: true,
+            ..CaptureSpec::default()
+        };
+        assert!(!spec_is_empty(&thumbwheel));
+
+        let gestures = CaptureSpec {
+            divert_gesture_sources: GESTURE_SOURCE_BUTTONS.iter().map(|(cid, _)| *cid).collect(),
+            ..CaptureSpec::default()
+        };
+        assert!(!spec_is_empty(&gestures));
+
+        let buttons = CaptureSpec {
+            divert_buttons: vec![(0x0053, ButtonId::Back)],
+            ..CaptureSpec::default()
+        };
+        assert!(!spec_is_empty(&buttons));
+    }
 
     /// The resolutions traced off an MX Master 4 over Bolt: 20 ratchets per
     /// revolution natively, 120 increments per revolution diverted.

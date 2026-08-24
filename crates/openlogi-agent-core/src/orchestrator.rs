@@ -382,6 +382,7 @@ impl Orchestrator {
         self.devices
             .iter()
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter(|dev| device_can_capture(dev.capabilities))
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
                 Some(plan_for_device(
@@ -790,6 +791,25 @@ impl Orchestrator {
             }
         }
     }
+}
+
+/// Whether the device can arm any HID++ capture at all.
+///
+/// Every captured control — standard buttons, gesture sources, the haptic
+/// panel, the DPI button, the thumb wheel — is diverted through reprog
+/// controls (`0x1b04`) or the dedicated thumb-wheel feature (`0x2150`). A
+/// device exposing neither (a G Pro Wireless over a Lightspeed receiver
+/// reports no `0x1bxx` entry at all) can never arm anything, yet a session
+/// would still hold one HID++ channel open for its whole life — and on macOS
+/// a concurrently-opened receiver node routes replies to the newest opener,
+/// so that idle channel starves the inventory prober: probes time out, the
+/// device reads as unreachable, and its battery / DPI / lighting panels hide.
+/// Its side-button bindings keep working regardless through the OS hook,
+/// which never needed the session. An unknown capability set (the probe has
+/// not answered yet) keeps the session, preserving the pre-existing behavior
+/// until the first successful probe settles it.
+fn device_can_capture(capabilities: Option<Capabilities>) -> bool {
+    capabilities.is_none_or(|caps| caps.buttons || caps.thumbwheel)
 }
 
 /// Resolve the two independently-gated HiResWheel settings for one device.
