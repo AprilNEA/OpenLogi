@@ -19,9 +19,10 @@
 //! Scripted behavior:
 //!
 //! - A Bolt receiver with an online mouse (DPI + SmartShift + battery that
-//!   drains ~1%/minute), an offline mouse, and a lighting-capable keyboard,
-//!   plus one directly-attached mouse — covering every panel and both route
-//!   kinds without hardware.
+//!   drains ~1%/minute), an offline mouse, a lighting-capable keyboard and a
+//!   G-series mouse (gaming control tables, no ReprogControls), plus one
+//!   directly-attached mouse — covering every panel and both route kinds
+//!   without hardware.
 //! - A standalone Litra light whose power / brightness / temperature writes
 //!   persist, and a `camera_active` flag that flips every 30s so the
 //!   camera-linked light rendering has something to follow.
@@ -73,6 +74,10 @@ const RECEIVER_UID: &str = "MOCK-BOLT-01";
 const MOUSE_SLOT: u8 = 1;
 const OFFLINE_SLOT: u8 = 2;
 const KEYBOARD_SLOT: u8 = 3;
+/// A G-series mouse: the gaming control tables and no ReprogControls, so it
+/// gets a Buttons panel drawn down to what the OS hook can see. Scripted here
+/// because that path is otherwise unreachable without G-series hardware.
+const GAMING_MOUSE_SLOT: u8 = 4;
 const MOCK_TORQUE: TunableTorque = match TunableTorque::try_new(50) {
     Ok(value) => value,
     Err(_) => panic!("valid mock SmartShift torque"),
@@ -312,6 +317,17 @@ impl State {
             },
         );
         settings.insert(
+            GAMING_MOUSE_SLOT,
+            DeviceSettings {
+                dpi: Some(DpiState {
+                    current: Dpi::new(3200),
+                    capabilities: DpiCapabilities::new((100u16..=25600).step_by(100).collect())?,
+                }),
+                smartshift: None,
+                lighting: false,
+            },
+        );
+        settings.insert(
             DIRECT_DEVICE_INDEX,
             DeviceSettings {
                 dpi: Some(DpiState {
@@ -324,7 +340,7 @@ impl State {
         );
         Ok(Self {
             paired_extra: Vec::new(),
-            next_slot: KEYBOARD_SLOT + 1,
+            next_slot: GAMING_MOUSE_SLOT + 1,
             settings,
             pairing: None,
             phase: None,
@@ -520,85 +536,149 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
             unique_id: Some(RECEIVER_UID.to_string()),
         },
         paired: vec![
-            PairedDevice {
-                slot: MOUSE_SLOT,
-                codename: Some("MX Master 3S".to_string()),
-                wpid: Some(0xb034),
-                kind: DeviceKind::Mouse,
-                online: true,
-                battery: Some(mouse_battery),
-                model_info: Some(DeviceModelInfo {
-                    entity_count: 3,
-                    serial_number: Some("2140LZ00MOCK".to_string()),
-                    unit_id: [0x01, 0x02, 0x03, 0x04],
-                    transports: DeviceTransports {
-                        usb: false,
-                        equad: true,
-                        btle: true,
-                        bluetooth: false,
-                    },
-                    model_ids: [0xb034, 0x4082, 0],
-                    extended_model_id: 0x0b,
-                }),
-                capabilities: Some(Capabilities {
-                    buttons: true,
-                    pointer: true,
-                    lighting: false,
-                    scroll_inversion: true,
-                    hires_wheel: true,
-                    thumbwheel: true,
-                    haptic_feedback: true,
-                    haptic_panel: true,
-                }),
-            },
-            PairedDevice {
-                slot: OFFLINE_SLOT,
-                codename: Some("MX Anywhere 3".to_string()),
-                wpid: Some(0x4090),
-                kind: DeviceKind::Mouse,
-                online: false,
-                battery: None,
-                model_info: None,
-                capabilities: None,
-            },
-            // Lighting is scripted `true` (unlike a real MX Keys) so the
-            // Lighting panel is reachable without G-series hardware.
-            PairedDevice {
-                slot: KEYBOARD_SLOT,
-                codename: Some("MX Keys".to_string()),
-                wpid: Some(0x408a),
-                kind: DeviceKind::Keyboard,
-                online: true,
-                battery: Some(BatteryInfo {
-                    percentage: 100,
-                    level: BatteryLevel::Full,
-                    status: BatteryStatus::Full,
-                }),
-                model_info: Some(DeviceModelInfo {
-                    entity_count: 2,
-                    serial_number: None,
-                    unit_id: [0x05, 0x06, 0x07, 0x08],
-                    transports: DeviceTransports {
-                        usb: false,
-                        equad: true,
-                        btle: true,
-                        bluetooth: false,
-                    },
-                    model_ids: [0xb35b, 0x408a, 0],
-                    extended_model_id: 0,
-                }),
-                capabilities: Some(Capabilities {
-                    buttons: false,
-                    pointer: false,
-                    lighting: true,
-                    scroll_inversion: false,
-                    hires_wheel: false,
-                    thumbwheel: false,
-                    haptic_feedback: false,
-                    haptic_panel: false,
-                }),
-            },
+            bolt_mouse(mouse_battery),
+            bolt_gaming_mouse(),
+            bolt_offline_mouse(),
+            bolt_keyboard(),
         ],
+    }
+}
+
+/// The fully-featured online mouse: every panel the GUI can draw. `battery`
+/// is passed in because it is the one field that moves between polls.
+fn bolt_mouse(battery: BatteryInfo) -> PairedDevice {
+    PairedDevice {
+        slot: MOUSE_SLOT,
+        codename: Some("MX Master 3S".to_string()),
+        wpid: Some(0xb034),
+        kind: DeviceKind::Mouse,
+        online: true,
+        battery: Some(battery),
+        model_info: Some(DeviceModelInfo {
+            entity_count: 3,
+            serial_number: Some("2140LZ00MOCK".to_string()),
+            unit_id: [0x01, 0x02, 0x03, 0x04],
+            transports: DeviceTransports {
+                usb: false,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xb034, 0x4082, 0],
+            extended_model_id: 0x0b,
+        }),
+        capabilities: Some(Capabilities {
+            buttons: true,
+            hook_only_buttons: false,
+            pointer: true,
+            lighting: false,
+            scroll_inversion: true,
+            hires_wheel: true,
+            thumbwheel: true,
+            haptic_feedback: true,
+            haptic_panel: true,
+        }),
+    }
+}
+
+/// A G-series mouse, with capabilities as a real G502 LIGHTSPEED reports
+/// them: `buttons` from the gaming control tables, `hook_only_buttons`
+/// because there is no `0x1b04` to divert through, and no thumb wheel or
+/// haptics. Scripted because that path is otherwise unreachable without
+/// G-series hardware.
+fn bolt_gaming_mouse() -> PairedDevice {
+    PairedDevice {
+        slot: GAMING_MOUSE_SLOT,
+        codename: Some("G502 LIGHTSPEED".to_string()),
+        wpid: Some(0x407f),
+        kind: DeviceKind::Mouse,
+        online: true,
+        // Its own static level, so two online mice never read alike and
+        // a per-device battery bug can't hide behind a shared value.
+        battery: Some(BatteryInfo {
+            percentage: 45,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        }),
+        model_info: Some(DeviceModelInfo {
+            entity_count: 3,
+            serial_number: Some("2204GS00MOCK".to_string()),
+            unit_id: [0x11, 0x12, 0x13, 0x14],
+            transports: DeviceTransports {
+                usb: true,
+                equad: true,
+                btle: false,
+                bluetooth: false,
+            },
+            model_ids: [0xc08d, 0x407f, 0],
+            extended_model_id: 0,
+        }),
+        capabilities: Some(Capabilities {
+            buttons: true,
+            hook_only_buttons: true,
+            pointer: true,
+            lighting: true,
+            scroll_inversion: false,
+            hires_wheel: true,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+        }),
+    }
+}
+
+/// A mouse that was paired but is asleep — never probed, so no capabilities.
+fn bolt_offline_mouse() -> PairedDevice {
+    PairedDevice {
+        slot: OFFLINE_SLOT,
+        codename: Some("MX Anywhere 3".to_string()),
+        wpid: Some(0x4090),
+        kind: DeviceKind::Mouse,
+        online: false,
+        battery: None,
+        model_info: None,
+        capabilities: None,
+    }
+}
+
+/// Lighting is scripted `true` (unlike a real MX Keys) so the Lighting panel
+/// is reachable without G-series hardware.
+fn bolt_keyboard() -> PairedDevice {
+    PairedDevice {
+        slot: KEYBOARD_SLOT,
+        codename: Some("MX Keys".to_string()),
+        wpid: Some(0x408a),
+        kind: DeviceKind::Keyboard,
+        online: true,
+        battery: Some(BatteryInfo {
+            percentage: 100,
+            level: BatteryLevel::Full,
+            status: BatteryStatus::Full,
+        }),
+        model_info: Some(DeviceModelInfo {
+            entity_count: 2,
+            serial_number: None,
+            unit_id: [0x05, 0x06, 0x07, 0x08],
+            transports: DeviceTransports {
+                usb: false,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xb35b, 0x408a, 0],
+            extended_model_id: 0,
+        }),
+        capabilities: Some(Capabilities {
+            buttons: false,
+            hook_only_buttons: false,
+            pointer: false,
+            lighting: true,
+            scroll_inversion: false,
+            hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+        }),
     }
 }
 
@@ -638,6 +718,7 @@ fn direct_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities {
                 buttons: true,
+                hook_only_buttons: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,

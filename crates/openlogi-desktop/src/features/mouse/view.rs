@@ -14,12 +14,16 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::device::DeviceKind;
 
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
     asset_hotspots_for_png, default_labels, labels_from_hotspots,
 };
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::hotspots::{
+    Hotspot, MOUSE_MODEL_SIZE, ModelControls, MouseControlId, default_hotspots,
+    retain_remappable_hotspots,
+};
 use super::inspector::{BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
@@ -63,7 +67,7 @@ struct MouseWorkspaceData<'a> {
     bindings: &'a BTreeMap<ButtonId, Action>,
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
-    thumbwheel: bool,
+    controls: ModelControls,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -85,10 +89,10 @@ impl<'a> MouseWorkspaceData<'a> {
             glow: state
                 .current_record()
                 .and_then(|record| keyboard_glow(state, record)),
-            thumbwheel: state
-                .current_record()
-                .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.thumbwheel),
+            controls: state.current_record().map_or_else(
+                || ModelControls::for_device(None, DeviceKind::Mouse),
+                |record| ModelControls::for_device(record.capabilities, record.kind),
+            ),
             editing_app: state.editing_app().map(|app| {
                 state
                     .recent_app_name(app)
@@ -109,7 +113,10 @@ impl<'a> MouseWorkspaceData<'a> {
             bindings,
             gesture_maps,
             glow: None,
-            thumbwheel: false,
+            // No device at all: presume the same full model the tab gate
+            // presumes for an unprobed mouse, rather than the empty `Default`,
+            // which would read as "hook-only" and silently filter the diagram.
+            controls: ModelControls::for_device(None, DeviceKind::Mouse),
             editing_app: None,
             overridden: None,
         }
@@ -242,7 +249,7 @@ impl Render for MouseModelView {
             bindings,
             gesture_maps,
             glow,
-            thumbwheel,
+            controls,
             editing_app,
             overridden,
         } = MouseWorkspaceData::read(cx)
@@ -268,7 +275,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, controls);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -383,7 +390,7 @@ fn model_layout(
     asset: Option<&ResolvedAsset>,
     viewport_w: f32,
     viewport_h: f32,
-    thumbwheel: bool,
+    controls: ModelControls,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -402,7 +409,7 @@ fn model_layout(
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
     let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+        scaled_model(asset, target_h, max_image_w, controls, label_distribution);
     if !has_labels {
         labels.clear();
     }
@@ -425,17 +432,20 @@ fn scaled_model(
     asset: Option<&ResolvedAsset>,
     target_h: f32,
     max_w: f32,
-    thumbwheel: bool,
+    controls: ModelControls,
     label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
+    let thumbwheel = controls.thumbwheel;
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let mut hotspots = asset_hotspots_for_png(a, w, h);
+        retain_remappable_hotspots(&mut hotspots, controls.can_divert);
+        // Derived from the surviving hotspots, so the labels can't outlive them.
         let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let mut hotspots: Vec<Hotspot> = default_hotspots(thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -445,8 +455,13 @@ fn scaled_model(
                 ..hs
             })
             .collect();
+        retain_remappable_hotspots(&mut hotspots, controls.can_divert);
+        // The synthetic layout authors its labels independently of its
+        // hotspots, so a filtered model has to drop the orphans itself or the
+        // leader lines point at controls that are no longer drawn.
         let labels = default_labels(thumbwheel, label_distribution)
             .into_iter()
+            .filter(|label| hotspots.iter().any(|hotspot| hotspot.id == label.id))
             .map(|l| Label {
                 y: l.y * scale,
                 ..l
@@ -1017,10 +1032,134 @@ mod tests {
         );
     }
 
+    /// A depot render whose authored markers cover both hook-visible and
+    /// HID++-only controls. A G-series mouse resolves a real depot, so the
+    /// asset path — not just the synthetic fallback — has to be filtered.
+    fn asset_with_slots(slot_names: &[&str]) -> ResolvedAsset {
+        ResolvedAsset {
+            depot: "g502_wireless".to_string(),
+            display_name: "G502".to_string(),
+            kind: openlogi_core::device::DeviceKind::Mouse,
+            image_path: std::path::PathBuf::from("/tmp/g502.png"),
+            hero_image_path: None,
+            glow: None,
+            metadata: openlogi_assets::metadata::Metadata {
+                images: vec![openlogi_assets::metadata::ImageEntry {
+                    key: "device_buttons_image".to_string(),
+                    origin: openlogi_assets::metadata::Origin {
+                        width: 420,
+                        height: 560,
+                    },
+                    assignments: slot_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| openlogi_assets::metadata::Assignment {
+                            slot_name: (*name).to_string(),
+                            #[expect(
+                                clippy::cast_precision_loss,
+                                reason = "fixture indices are single digits"
+                            )]
+                            marker: openlogi_assets::metadata::Point {
+                                x: 50.,
+                                y: 10. * i as f32,
+                            },
+                            label: openlogi_assets::metadata::Direction { x: -1, y: -1 },
+                        })
+                        .collect(),
+                }],
+            },
+            png_width: 420,
+            png_height: 560,
+        }
+    }
+
+    #[test]
+    fn asset_model_for_hook_only_mouse_drops_hidpp_controls() {
+        let asset = asset_with_slots(&[
+            "SLOT_NAME_MIDDLE_BUTTON",
+            "SLOT_NAME_BACK_BUTTON",
+            "SLOT_NAME_FORWARD_BUTTON",
+            "SLOT_NAME_MODESHIFT_BUTTON",
+            "SLOT_NAME_GESTURE_BUTTON",
+        ]);
+        let controls = ModelControls {
+            thumbwheel: false,
+            can_divert: false,
+        };
+        let (_, _, hotspots, _) = scaled_model(
+            Some(&asset),
+            560.,
+            420.,
+            controls,
+            LabelDistribution::LeftOnly,
+        );
+        assert_eq!(
+            hotspots
+                .iter()
+                .map(|hotspot| hotspot.id)
+                .collect::<Vec<_>>(),
+            vec![
+                MouseControlId::Button(ButtonId::MiddleClick),
+                MouseControlId::Button(ButtonId::Back),
+                MouseControlId::Button(ButtonId::Forward),
+            ],
+            "the depot's DPI and gesture markers can never fire without 0x1b04"
+        );
+    }
+
+    /// Every control the model draws must be one this device can actually be
+    /// bound on, and every label must point at a control that is still drawn —
+    /// the synthetic silhouette builds its labels independently of its
+    /// hotspots, so a filtered model that forgets its labels leaves leader
+    /// lines aimed at nothing.
+    #[test]
+    fn fallback_model_for_hook_only_mouse_draws_only_os_hook_controls() {
+        let controls = ModelControls {
+            thumbwheel: true,
+            can_divert: false,
+        };
+        let (_, _, hotspots, labels) =
+            scaled_model(None, 560., 420., controls, LabelDistribution::LeftOnly);
+        assert_eq!(
+            hotspots
+                .iter()
+                .map(|hotspot| hotspot.id)
+                .collect::<Vec<_>>(),
+            vec![
+                MouseControlId::Button(ButtonId::MiddleClick),
+                MouseControlId::Button(ButtonId::Back),
+                MouseControlId::Button(ButtonId::Forward),
+            ]
+        );
+        for label in &labels {
+            assert!(
+                hotspots.iter().any(|hotspot| hotspot.id == label.id),
+                "label {:?} survived its hotspot",
+                label.id
+            );
+        }
+    }
+
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+        let divertable = |thumbwheel| ModelControls {
+            thumbwheel,
+            can_divert: true,
+        };
+        let (_, _, without, _) = scaled_model(
+            None,
+            560.,
+            420.,
+            divertable(false),
+            LabelDistribution::LeftOnly,
+        );
+        let (_, _, with, _) = scaled_model(
+            None,
+            560.,
+            420.,
+            divertable(true),
+            LabelDistribution::LeftOnly,
+        );
         assert_eq!(
             without
                 .iter()
