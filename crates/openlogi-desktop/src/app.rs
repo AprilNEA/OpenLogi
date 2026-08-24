@@ -356,11 +356,11 @@ impl AppView {
 
     fn open_monitors(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Monitors;
-        self.refresh_monitors(cx);
+        Self::refresh_monitors(cx);
         cx.notify();
     }
 
-    fn refresh_monitors(&mut self, cx: &mut Context<Self>) {
+    fn refresh_monitors(cx: &mut Context<Self>) {
         let Some(sender) = AppState::try_read(cx).map(AppState::ipc_sender) else {
             return;
         };
@@ -395,7 +395,7 @@ impl AppView {
         .detach();
     }
 
-    fn test_monitor_input(&mut self, monitor_id: String, input: u32, cx: &mut Context<Self>) {
+    fn test_monitor_input(monitor_id: String, input: u32, cx: &mut Context<Self>) {
         let Some(sender) = AppState::try_read(cx).map(AppState::ipc_sender) else {
             return;
         };
@@ -430,7 +430,7 @@ impl AppView {
                 });
                 return;
             }
-            let _ = view.update(cx, |this, cx| this.refresh_monitors(cx));
+            let _ = view.update(cx, |_this, cx| Self::refresh_monitors(cx));
         })
         .detach();
     }
