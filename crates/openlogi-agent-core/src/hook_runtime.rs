@@ -22,15 +22,14 @@ use openlogi_hook::{
 };
 use tracing::{info, warn};
 
+use crate::button_runtime::{ButtonPhase, ButtonRuntimeHandle};
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
-/// Runtime dependencies shared by every action source: the OS hook, HID++
-/// controls, keyboard capture, and Actions Ring slot activation.
 #[derive(Clone)]
-pub struct ActionDispatcher {
+struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture: CaptureChannel,
     registry: ChannelRegistry,
@@ -38,27 +37,8 @@ pub struct ActionDispatcher {
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
-impl ActionDispatcher {
-    /// Build a dispatcher around the agent's shared device state and ring queue.
-    #[must_use]
-    pub fn new(
-        dpi_cycle: Arc<RwLock<DpiCycles>>,
-        capture: CaptureChannel,
-        registry: ChannelRegistry,
-        receiver_access: ReceiverAccess,
-        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
-    ) -> Self {
-        Self {
-            dpi_cycle,
-            capture,
-            registry,
-            receiver_access,
-            action_ring,
-        }
-    }
-
-    /// Route one action without blocking the input callback.
-    pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
+impl ActionExecutor {
+    fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -77,6 +57,115 @@ impl ActionDispatcher {
             Some(&self.registry),
             &self.receiver_access,
         );
+    }
+}
+
+/// Runtime dependencies shared by every action source: the OS hook, HID++
+/// controls, keyboard capture, and Actions Ring slot activation.
+#[derive(Clone)]
+pub struct ActionDispatcher {
+    executor: ActionExecutor,
+    buttons: ButtonRuntimeHandle,
+}
+
+impl ActionDispatcher {
+    /// Build a dispatcher around the agent's shared device state and ring queue.
+    #[must_use]
+    pub fn new(
+        dpi_cycle: Arc<RwLock<DpiCycles>>,
+        capture: CaptureChannel,
+        registry: ChannelRegistry,
+        receiver_access: ReceiverAccess,
+        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    ) -> Self {
+        let executor = ActionExecutor {
+            dpi_cycle,
+            capture,
+            registry,
+            receiver_access,
+            action_ring,
+        };
+        let button_executor = executor.clone();
+        let buttons = ButtonRuntimeHandle::spawn(move |event, action| {
+            if event.phase == ButtonPhase::Cancel {
+                info!(button = %event.button, origin = ?event.origin, "button lifecycle canceled");
+            }
+            if let Some(action) = action {
+                button_executor.dispatch(&action, event.origin.device_key());
+            }
+        });
+        Self { executor, buttons }
+    }
+
+    /// Route one action without blocking the input callback.
+    pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
+        self.executor.dispatch(action, device_key);
+    }
+
+    /// Queue one OS-hook button phase without blocking the hook callback.
+    /// Returns `false` when the queue cannot accept the event, so a physical
+    /// press can fail open instead of freezing or disappearing.
+    pub(crate) fn try_dispatch_hook_button(
+        &self,
+        button: ButtonId,
+        phase: ButtonPhase,
+        action: Option<&Action>,
+    ) -> bool {
+        self.buttons.try_hook_event(button, phase, action)
+    }
+
+    /// Cancel every active press owned by the current OS-hook callback thread.
+    /// This is the terminal edge for [`MouseEvent::CaptureInterrupted`].
+    pub(crate) fn cancel_hook_thread_buttons(&self) {
+        self.buttons.cancel_hook_thread();
+    }
+
+    /// Queue one HID++ button phase for a specific capture-session epoch.
+    pub(crate) fn dispatch_hidpp_button(
+        &self,
+        device_key: &str,
+        epoch: u64,
+        button: ButtonId,
+        phase: ButtonPhase,
+        action: Option<&Action>,
+    ) {
+        self.buttons
+            .hidpp_event(device_key, epoch, button, phase, action);
+    }
+
+    /// Deliver an instantaneous HID++ button tap as one balanced lifecycle.
+    /// Used only for firmware reports that expose no physical release edge.
+    pub(crate) fn dispatch_hidpp_button_pulse(
+        &self,
+        device_key: &str,
+        epoch: u64,
+        button: ButtonId,
+        action: Option<&Action>,
+    ) {
+        self.buttons.hidpp_pulse(device_key, epoch, button, action);
+    }
+
+    /// Cancel presses from a HID++ session that is stopping or has died.
+    pub(crate) fn cancel_hidpp_session(&self, device_key: &str, epoch: u64) {
+        self.buttons.cancel_hidpp_session(device_key, epoch);
+    }
+
+    /// Snapshot the generation used to invalidate gesture semantics together
+    /// with their physical button lifecycle.
+    pub(crate) fn button_generation(&self) -> u64 {
+        self.buttons.generation()
+    }
+
+    /// Invalidate every active lifecycle after a binding/profile change or
+    /// capture-owner transition. Events already queued under the old
+    /// generation are ignored even if they arrive after this call's wake-up.
+    pub fn cancel_all_buttons(&self) {
+        self.buttons.cancel_all();
+    }
+
+    /// Synchronously cancel every active lifecycle before process shutdown.
+    pub fn cancel_all_buttons_and_wait(&self) {
+        self.buttons.cancel_all_and_wait();
     }
 }
 
@@ -130,8 +219,9 @@ const STALE_HOLD: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct HoldState {
     /// The held button and when its hold began. The timestamp exists solely
-    /// for stale-hold recovery in [`Self::begin`].
-    button: Option<(ButtonId, Instant)>,
+    /// for stale-hold recovery in [`Self::begin`]; the generation prevents an
+    /// old hold from firing against bindings published after cancellation.
+    button: Option<(ButtonId, Instant, u64)>,
     swipe: SwipeAccumulator,
 }
 
@@ -148,14 +238,15 @@ impl HoldState {
     /// this is proof the release was lost — and any press once the hold has
     /// aged past [`STALE_HOLD`], without which every other gesture button
     /// would stay refused indefinitely.
-    fn begin(&mut self, button: ButtonId) -> bool {
-        if let Some((held, since)) = self.button
+    fn begin(&mut self, button: ButtonId, generation: u64) -> bool {
+        if let Some((held, since, held_generation)) = self.button
+            && held_generation == generation
             && held != button
             && since.elapsed() < STALE_HOLD
         {
             return false;
         }
-        self.button = Some((button, Instant::now()));
+        self.button = Some((button, Instant::now(), generation));
         self.swipe.begin();
         true
     }
@@ -163,8 +254,16 @@ impl HoldState {
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
     /// with the held button. Returns `Some((button, direction))` exactly once per
     /// hold, or `None` while still too short, already fired, or not holding.
-    fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(ButtonId, GestureDirection)> {
-        let (button, _) = self.button?;
+    fn accumulate(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        generation: u64,
+    ) -> Option<(ButtonId, GestureDirection)> {
+        let (button, _, held_generation) = self.button?;
+        if held_generation != generation {
+            return None;
+        }
         self.swipe.accumulate(dx, dy).map(|dir| (button, dir))
     }
 
@@ -172,13 +271,10 @@ impl HoldState {
     /// never committed a swipe (the caller should fire the `Click` action),
     /// `Some(false)` when a swipe already fired, and `None` for a stray release
     /// of a button we weren't holding.
-    fn end(&mut self, button: ButtonId) -> Option<bool> {
-        if self.button.is_some_and(|(held, _)| held == button) {
-            self.button = None;
-            Some(self.swipe.end())
-        } else {
-            None
-        }
+    fn end(&mut self, button: ButtonId, generation: u64) -> Option<bool> {
+        let (_, _, held_generation) = self.button.take_if(|(held, _, _)| *held == button)?;
+        let was_click = self.swipe.end();
+        Some(was_click && held_generation == generation)
     }
 
     /// Cancel any in-progress hold without firing anything — used when the OS
@@ -193,7 +289,7 @@ impl HoldState {
     /// the lost-button-up recovery without sleeping.
     #[cfg(test)]
     fn backdate_for_test(&mut self) {
-        if let Some((_, since)) = &mut self.button
+        if let Some((_, since, _)) = &mut self.button
             && let Some(aged) = Instant::now().checked_sub(STALE_HOLD)
         {
             *since = aged;
@@ -264,6 +360,7 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     action_tx: &mpsc::SyncSender<Action>,
+    dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
@@ -272,17 +369,25 @@ fn handle_button(
 
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
+    let generation = dispatcher.button_generation();
     if pressed {
         let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
-        if is_gesture && HOLD.with_borrow_mut(|h| h.begin(id)) {
-            return EventDisposition::Suppress;
+        if is_gesture && HOLD.with_borrow_mut(|h| h.begin(id, generation)) {
+            let queued = dispatcher.try_dispatch_hook_button(id, ButtonPhase::Down, None);
+            if queued {
+                return EventDisposition::Suppress;
+            }
+            // The lifecycle queue failed open, so unwind the hold begun above
+            // and pair the physical release as pass-through too.
+            let _ = HOLD.with_borrow_mut(|h| h.end(id, generation));
+            return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
         }
     } else {
         // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
-        let ended = HOLD.with_borrow_mut(|h| h.end(id));
+        let ended = HOLD.with_borrow_mut(|h| h.end(id, generation));
         if let Some(was_click) = ended {
             if was_click {
                 let action = hooks
@@ -294,6 +399,7 @@ fn handle_button(
                     let _ = try_queue_action(action_tx, action);
                 }
             }
+            dispatcher.try_dispatch_hook_button(id, ButtonPhase::Up, None);
             return EventDisposition::Suppress;
         }
     }
@@ -310,9 +416,10 @@ fn handle_button(
     }
     if pressed {
         info!(button = %id, action = %action.label(), "button → executing bound action");
-        let queued = try_queue_action(action_tx, action);
+        let queued = dispatcher.try_dispatch_hook_button(id, ButtonPhase::Down, Some(&action));
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
+    dispatcher.try_dispatch_hook_button(id, ButtonPhase::Up, None);
     FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
 }
 
@@ -351,8 +458,9 @@ fn handle_moved(
     delta_y: i32,
     hooks: &SharedHookMaps,
     action_tx: &mpsc::SyncSender<Action>,
+    generation: u64,
 ) -> EventDisposition {
-    let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
+    let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y, generation));
     if let Some((button, dir)) = commit {
         let action = hooks.try_read().ok().map(|m| {
             m.gestures
@@ -385,7 +493,7 @@ pub fn start(
     }
 
     // Actions never run on the tap callback thread (HID CGEventTap freeze hazard).
-    let action_tx = spawn_action_worker(dispatcher);
+    let action_tx = spawn_action_worker(dispatcher.clone());
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
@@ -397,12 +505,24 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(id, pressed, device.as_ref(), &hooks, &action_tx),
-                MouseEvent::Moved { delta_x, delta_y } => {
-                    handle_moved(delta_x, delta_y, &hooks, &action_tx)
-                }
+                } => handle_button(
+                    id,
+                    pressed,
+                    device.as_ref(),
+                    &hooks,
+                    &action_tx,
+                    &dispatcher,
+                ),
+                MouseEvent::Moved { delta_x, delta_y } => handle_moved(
+                    delta_x,
+                    delta_y,
+                    &hooks,
+                    &action_tx,
+                    dispatcher.button_generation(),
+                ),
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
+                    dispatcher.cancel_hook_thread_buttons();
                     EventDisposition::PassThrough
                 }
                 MouseEvent::Scroll {
@@ -650,21 +770,21 @@ mod tests {
     #[test]
     fn accumulate_tags_a_committed_swipe_with_the_held_button() {
         let mut hold = HoldState::default();
-        hold.begin(ButtonId::Back);
+        hold.begin(ButtonId::Back, 0);
         hold.swipe.backdate_hold_for_test();
 
         // A clear rightward swipe commits, tagged with the held button.
         assert_eq!(
-            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0, 0),
             Some((ButtonId::Back, GestureDirection::Right))
         );
         assert_eq!(
-            hold.accumulate(50, 0),
+            hold.accumulate(50, 0, 0),
             None,
             "commits at most once per hold"
         );
         // A release after a committed swipe is NOT a click.
-        assert_eq!(hold.end(ButtonId::Back), Some(false));
+        assert_eq!(hold.end(ButtonId::Back, 0), Some(false));
     }
 
     #[test]
@@ -673,14 +793,14 @@ mod tests {
         // release was lost (a button cannot be pressed while down): the hold
         // restarts instead of wedging on the stale state.
         let mut hold = HoldState::default();
-        assert!(hold.begin(ButtonId::Back));
+        assert!(hold.begin(ButtonId::Back, 0));
         assert!(
-            hold.begin(ButtonId::Back),
+            hold.begin(ButtonId::Back, 0),
             "a same-button re-press is proof of a lost release"
         );
         hold.swipe.backdate_hold_for_test();
         assert_eq!(
-            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0, 0),
             Some((ButtonId::Back, GestureDirection::Right))
         );
     }
@@ -692,15 +812,15 @@ mod tests {
         // once the hold is old enough to be presumed stale — otherwise every
         // gesture button stays wedged until the stale one is pressed again.
         let mut hold = HoldState::default();
-        assert!(hold.begin(ButtonId::Back));
+        assert!(hold.begin(ButtonId::Back, 0));
         hold.backdate_for_test();
         assert!(
-            hold.begin(ButtonId::Forward),
+            hold.begin(ButtonId::Forward, 0),
             "an aged hold must yield to a new press"
         );
         hold.swipe.backdate_hold_for_test();
         assert_eq!(
-            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0, 0),
             Some((ButtonId::Forward, GestureDirection::Right))
         );
     }
@@ -711,32 +831,50 @@ mod tests {
         // accumulator; the second press is refused (its caller falls through to
         // the single-action path) and its release is a stray, not a click.
         let mut hold = HoldState::default();
-        assert!(hold.begin(ButtonId::Back));
+        assert!(hold.begin(ButtonId::Back, 0));
         hold.swipe.backdate_hold_for_test();
         assert!(
-            !hold.begin(ButtonId::Forward),
+            !hold.begin(ButtonId::Forward, 0),
             "a second press must not hijack the active hold"
         );
 
         // The accumulated motion still belongs to the first button...
         assert_eq!(
-            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0, 0),
             Some((ButtonId::Back, GestureDirection::Right))
         );
         // ...the refused button's release is a stray...
-        assert_eq!(hold.end(ButtonId::Forward), None);
+        assert_eq!(hold.end(ButtonId::Forward, 0), None);
         // ...and the first hold ends normally (swipe fired, so not a click).
-        assert_eq!(hold.end(ButtonId::Back), Some(false));
+        assert_eq!(hold.end(ButtonId::Back, 0), Some(false));
     }
 
     #[test]
     fn end_matches_the_held_button() {
         let mut hold = HoldState::default();
-        hold.begin(ButtonId::Back);
+        hold.begin(ButtonId::Back, 0);
         // A stray release of a button we weren't holding is ignored...
-        assert_eq!(hold.end(ButtonId::Forward), None);
+        assert_eq!(hold.end(ButtonId::Forward, 0), None);
         // ...and ending the held button with no swipe is a plain click.
-        assert_eq!(hold.end(ButtonId::Back), Some(true));
+        assert_eq!(hold.end(ButtonId::Back, 0), Some(true));
+    }
+
+    #[test]
+    fn a_canceled_generation_cannot_fire_an_old_gesture() {
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back, 3));
+        hold.swipe.backdate_hold_for_test();
+
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0, 4),
+            None,
+            "motion after a profile change must not use the new gesture map"
+        );
+        assert_eq!(
+            hold.end(ButtonId::Back, 4),
+            Some(false),
+            "release stays suppressed but cannot become a click"
+        );
     }
 
     #[test]

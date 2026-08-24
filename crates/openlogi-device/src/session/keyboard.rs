@@ -1,5 +1,5 @@
 //! Live key capture for one keyboard: divert the bound F-row controls over
-//! HID++ `0x1b04` and turn their presses into [`CapturedInput`] the agent can
+//! HID++ `0x1b04` and turn their physical edges into [`CapturedInput`] the agent can
 //! dispatch.
 //!
 //! [`run_keyboard_capture_session`] is the keyboard counterpart of
@@ -53,8 +53,8 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 ];
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
-/// resolves, forwarding a [`CapturedInput::ButtonPressed`] on each press
-/// (rising edge) to `sink`.
+/// resolves, forwarding [`CapturedInput::ButtonPressed`] and
+/// [`CapturedInput::ButtonReleased`] edges to `sink`.
 ///
 /// `wanted` maps `0x1b04` control IDs to the [`ButtonId`] they dispatch as —
 /// the caller passes only the keys that carry a real binding. Controls the
@@ -119,7 +119,7 @@ async fn run_keyboard_capture_session_on(
 
     let diverted = arm_keys(&rc, &controls, &wanted).await?;
 
-    // Rising-edge press state per CID. Behind a `Mutex` because the channel's
+    // Physical press state per CID. Behind a `Mutex` because the channel's
     // read thread invokes the listener by shared reference.
     let held: Arc<Mutex<BTreeSet<u16>>> = Arc::new(Mutex::new(BTreeSet::new()));
     let feature_index = info.index;
@@ -140,18 +140,7 @@ async fn run_keyboard_capture_session_on(
             // Recover the guard even if a prior holder panicked — the critical
             // section is panic-free, so the data is consistent.
             let mut down = held.lock().unwrap_or_else(PoisonError::into_inner);
-            for (&cid, &button) in &diverted {
-                let now = cids.contains(&cid);
-                let was = down.contains(&cid);
-                if now && !was {
-                    let _ = sink.send(CapturedInput::ButtonPressed(button, None));
-                }
-                if now {
-                    down.insert(cid);
-                } else {
-                    down.remove(&cid);
-                }
-            }
+            emit_button_edges(&mut down, &cids, &diverted, &sink);
         }
     });
 
@@ -218,6 +207,30 @@ async fn run_keyboard_capture_session_on(
     Ok(())
 }
 
+/// Diff one full diverted-control snapshot into exactly one edge per physical
+/// transition. Unchanged snapshots are deliberately silent.
+fn emit_button_edges(
+    down: &mut BTreeSet<u16>,
+    cids: &[u16],
+    diverted: &BTreeMap<u16, ButtonId>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    for (&cid, &button) in diverted {
+        let now = cids.contains(&cid);
+        let was = down.contains(&cid);
+        if now && !was {
+            let _ = sink.send(CapturedInput::ButtonPressed(button, None));
+        } else if !now && was {
+            let _ = sink.send(CapturedInput::ButtonReleased(button));
+        }
+        if now {
+            down.insert(cid);
+        } else {
+            down.remove(&cid);
+        }
+    }
+}
+
 /// Divert every wanted control the keyboard exposes as divertable, returning
 /// the armed `CID → ButtonId` subset. Missing / non-divertable controls are
 /// skipped with a debug log, so a partially-supported keyboard degrades per
@@ -259,5 +272,36 @@ async fn rearm_keys(rc: &ReprogControlsV4, diverted: &BTreeMap<u16, ButtonId>) {
                 "re-divert after wake failed — key stays native until next wake"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_snapshots_emit_balanced_edges_without_duplicates() {
+        let diverted = BTreeMap::from([
+            (0x00d4, ButtonId::KeySearch),
+            (0x0103, ButtonId::KeyDictation),
+        ]);
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+        let mut down = BTreeSet::new();
+
+        emit_button_edges(&mut down, &[0x00d4], &diverted, &sink);
+        emit_button_edges(&mut down, &[0x00d4], &diverted, &sink);
+        emit_button_edges(&mut down, &[0x00d4, 0x0103], &diverted, &sink);
+        emit_button_edges(&mut down, &[0x0103], &diverted, &sink);
+        emit_button_edges(&mut down, &[], &diverted, &sink);
+
+        assert_eq!(
+            std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
+            vec![
+                CapturedInput::ButtonPressed(ButtonId::KeySearch, None),
+                CapturedInput::ButtonPressed(ButtonId::KeyDictation, None),
+                CapturedInput::ButtonReleased(ButtonId::KeySearch),
+                CapturedInput::ButtonReleased(ButtonId::KeyDictation),
+            ]
+        );
     }
 }

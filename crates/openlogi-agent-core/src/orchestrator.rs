@@ -288,6 +288,7 @@ impl Orchestrator {
             return None;
         }
         Some(KeyboardSpec {
+            config_key: dev.config_key.clone(),
             route: dev.route.clone()?,
             wanted,
             bindings,
@@ -723,12 +724,14 @@ impl Orchestrator {
     /// and republishing for it could restart a capture session (a plan's
     /// divert set is part of its identity) over nothing. The observable cell
     /// still gets the whole value — it dedupes on its own, and its recent list
-    /// is the only source a client has for these identifiers.
-    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) {
+    /// is the only source a client has for these identifiers. Returns whether
+    /// the effective app identifier changed and active button lifecycles must
+    /// be canceled.
+    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
         let id = app.as_ref().map(|app| app.id.clone());
         self.observable.set_foreground(app);
         if id == self.current_app {
-            return;
+            return false;
         }
         self.current_app = id;
         write_value(
@@ -739,6 +742,7 @@ impl Orchestrator {
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
+        true
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

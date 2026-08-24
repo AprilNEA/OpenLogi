@@ -291,14 +291,21 @@ fn shutdown_signals() -> (Option<()>, Option<()>) {
 /// would any other way of leaving that skips destructors. The agent's run loop
 /// is not the process — macOS keeps the AppKit tray loop on the main thread —
 /// so the exit has to be explicit.
-fn release_hook_and_exit(hook: Option<Hook>, reason: &str) -> ! {
+fn release_hook_and_exit(hook: Option<Hook>, dispatcher: &ActionDispatcher, reason: &str) -> ! {
     info!(reason, "releasing the input hook and exiting");
     drop(hook);
+    dispatcher.cancel_all_buttons_and_wait();
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"
     )]
     std::process::exit(0)
+}
+
+/// Stop the hook so no new edge can race the lifecycle cancellation.
+fn stop_hook(hook: &mut Option<Hook>, dispatcher: &ActionDispatcher) {
+    *hook = None;
+    dispatcher.cancel_all_buttons();
 }
 
 /// Prompt for Accessibility when the enabled mouse hook needs it.
@@ -370,6 +377,18 @@ async fn apply_inventory_event(
         watchers::inventory::InventoryEvent::SystemWake => {
             orchestrator.lock().await.reapply_volatile_on_next_refresh();
         }
+    }
+}
+
+/// Publish one foreground-app change and cancel button lifecycles whose
+/// bindings were resolved against the previous app profile.
+async fn apply_foreground_update(
+    app: watchers::foreground_app::ForegroundUpdate,
+    orchestrator: &Mutex<Orchestrator>,
+    dispatcher: &ActionDispatcher,
+) {
+    if orchestrator.lock().await.set_current_app(app) {
+        dispatcher.cancel_all_buttons();
     }
 }
 
@@ -481,7 +500,7 @@ async fn run(
                 camera_open = false;
             },
             Some(app) = app_rx.recv() => {
-                orchestrator.lock().await.set_current_app(app);
+                apply_foreground_update(app, &orchestrator, &dispatcher).await;
             }
             Some(device_key) = action_ring_rx.recv() => {
                 begin_action_ring(&orchestrator, &action_ring, &ring_haptics, device_key.as_deref()).await;
@@ -489,7 +508,7 @@ async fn run(
             Some(granted) = accessibility_rx.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
-                    hook = None;
+                    stop_hook(&mut hook, &dispatcher);
                 }
                 if granted && hook.is_none() {
                     hook = start_hook(
@@ -504,12 +523,12 @@ async fn run(
                 observable.set_hook_installed(hook.is_some());
             }
             () = shutdown_signal(&mut sigterm, &mut sigint) => {
-                release_hook_and_exit(hook.take(), "shutdown signal")
+                release_hook_and_exit(hook.take(), &dispatcher, "shutdown signal")
             }
             // The app was removed while we kept running from its bundle. Leave
             // through the same door, so the event tap goes with us (#807).
             Some(()) = uninstalled.recv() => {
-                release_hook_and_exit(hook.take(), "the app was uninstalled")
+                release_hook_and_exit(hook.take(), &dispatcher, "the app was uninstalled")
             }
             Some(granted) = input_monitoring_rx.recv() => {
                 observable.set_input_monitoring_granted(granted);

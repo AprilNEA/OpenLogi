@@ -24,6 +24,7 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::button_runtime::ButtonPhase;
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::should_rearm;
@@ -34,6 +35,9 @@ use crate::watchers::gesture::should_rearm;
 /// config / inventory / foreground-app changes.
 #[derive(Clone)]
 pub struct KeyboardSpec {
+    /// Stable config key used to scope lifecycle cancellation and hardware
+    /// actions to this keyboard.
+    pub config_key: String,
     /// HID++ route of the keyboard.
     pub route: DeviceRoute,
     /// `0x1b04` control ID → button, for exactly the bound keys.
@@ -81,6 +85,48 @@ pub fn spawn(
     });
 }
 
+/// Route one accepted keyboard edge through the shared HID++ lifecycle.
+fn dispatch_input(
+    key: &str,
+    epoch: u64,
+    input: CapturedInput,
+    spec: &KeyboardSpec,
+    dispatcher: &ActionDispatcher,
+) {
+    match input {
+        CapturedInput::ButtonPressed(button, _) => {
+            let action = spec.bindings.get(&button);
+            if let Some(action) = action {
+                info!(button = %button, action = %action.label(), "keyboard key → executing bound action");
+            } else {
+                debug!(?button, "keyboard key with no binding — ignored");
+            }
+            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Down, action);
+        }
+        CapturedInput::ButtonReleased(button) => {
+            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Up, None);
+        }
+        CapturedInput::ButtonPulse(button) => {
+            dispatcher.dispatch_hidpp_button_pulse(key, epoch, button, spec.bindings.get(&button));
+        }
+        CapturedInput::Gesture(..) | CapturedInput::Scroll { .. } => {}
+    }
+}
+
+/// Snapshot the keyboard session target unless pairing currently owns capture.
+fn wanted_session(
+    receiver_access: &ReceiverAccess,
+    spec: &SharedKeyboardSpec,
+) -> Option<(String, DeviceRoute, BTreeMap<u16, ButtonId>)> {
+    if receiver_access.exclusive_requested() {
+        return None;
+    }
+    spec.read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|spec| (spec.config_key, spec.route, spec.wanted))
+}
+
 /// Keep one keyboard capture session alive for the published spec, restarting
 /// it when the keyboard or its bound-key set changes, and dispatch incoming
 /// presses. Runs for the lifetime of the process.
@@ -91,8 +137,8 @@ async fn manage(
     registry: ChannelRegistry,
     dispatcher: ActionDispatcher,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let mut current: Option<(DeviceRoute, BTreeMap<u16, ButtonId>)> = None;
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u64, CapturedInput)>();
+    let mut current: Option<(String, DeviceRoute, BTreeMap<u16, ButtonId>)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     // Sessions report completion tagged with their start epoch, so an
@@ -103,36 +149,32 @@ async fn manage(
 
     loop {
         tokio::select! {
-            Some(input) = rx.recv() => {
-                // The keyboard session only emits ButtonPressed; other inputs
-                // (gesture/scroll) never originate here.
-                let CapturedInput::ButtonPressed(button, _) = input else {
+            Some((input_epoch, input)) = rx.recv() => {
+                let Some((key, route, wanted)) = current.as_ref() else {
                     continue;
                 };
-                let action = spec
-                    .read()
-                    .ok()
-                    .and_then(|guard| {
-                        guard.as_ref().and_then(|s| s.bindings.get(&button).cloned())
-                    });
-                if let Some(action) = action {
-                    info!(button = %button, action = %action.label(), "keyboard key → executing bound action");
-                    dispatcher.dispatch(&action, None);
-                } else {
-                    debug!(?button, "keyboard key with no binding — ignored");
+                let live_spec = spec.read().ok().and_then(|guard| guard.clone());
+                let current_target = live_spec.as_ref().is_some_and(|live| {
+                    live.config_key == *key && live.route == *route && live.wanted == *wanted
+                });
+                if input_epoch != epoch
+                    || stop.is_none()
+                    || receiver_access.exclusive_requested()
+                    || !current_target
+                {
+                    dispatcher.cancel_hidpp_session(key, input_epoch);
+                    debug!(input_epoch, "input from a stale keyboard session — ignored");
+                    continue;
                 }
+                let Some(live_spec) = live_spec else {
+                    continue;
+                };
+                dispatch_input(key, input_epoch, input, &live_spec, &dispatcher);
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release the capture
                 // session so run_pairing can own the receiver's HID node.
-                let want = if receiver_access.exclusive_requested() {
-                    None
-                } else {
-                    spec.read()
-                        .ok()
-                        .and_then(|guard| guard.clone())
-                        .map(|s| (s.route, s.wanted))
-                };
+                let want = wanted_session(&receiver_access, &spec);
                 if want == current {
                     continue;
                 }
@@ -140,24 +182,33 @@ async fn manage(
                 // one for the new state. Sending on the oneshot lets the old
                 // session restore the diverted controls.
                 if let Some(stop) = stop.take() {
+                    if let Some((key, _, _)) = &current {
+                        dispatcher.cancel_hidpp_session(key, epoch);
+                    }
                     let _ = stop.send(());
                 }
                 if current.is_some() {
                     current = None;
                     continue;
                 }
-                if let Some((route, wanted)) = want {
+                if let Some((key, route, wanted)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), wanted.clone()));
+                    current = Some((key, route.clone(), wanted.clone()));
                     let (stop_tx, stop_rx) = oneshot::channel();
-                    let sink = tx.clone();
                     let slot = Arc::clone(&keyboard_channel);
                     let session_registry = registry.clone();
                     epoch = epoch.wrapping_add(1);
                     let session_epoch = epoch;
+                    let (sink, mut session_rx) = mpsc::unbounded_channel();
+                    let forward = tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(input) = session_rx.recv().await {
+                            let _ = forward.send((session_epoch, input));
+                        }
+                    });
                     let done = done_tx.clone();
                     tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
@@ -184,6 +235,9 @@ async fn manage(
                 // A capture session ended on its own; re-arm only the live one
                 // (see gesture watcher for the epoch/pacing rationale).
                 if should_rearm(done_epoch, epoch, current.is_some()) {
+                    if let Some((key, _, _)) = &current {
+                        dispatcher.cancel_hidpp_session(key, done_epoch);
+                    }
                     warn!("keyboard capture session ended unexpectedly, re-arming");
                     current = None;
                     stop = None;

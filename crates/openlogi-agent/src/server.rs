@@ -113,6 +113,7 @@ impl Agent for AgentServer {
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 self.orchestrator.lock().await.reload_config(config);
+                self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::launch_agent::reconcile(launch_at_login);

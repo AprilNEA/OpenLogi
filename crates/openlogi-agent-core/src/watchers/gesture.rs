@@ -31,6 +31,7 @@ use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_sessi
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
+use crate::button_runtime::ButtonPhase;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
@@ -146,6 +147,48 @@ fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
     }
 }
 
+/// Whether an input belongs to the current, still-live session. A draining
+/// session has already emitted `Cancel`, so even its correctly-tagged queued
+/// events must not enter the replacement lifecycle.
+fn accepts_input(input_epoch: u64, live: Option<&RunningSession>) -> bool {
+    live.is_some_and(|session| session.epoch == input_epoch && session.stop.is_some())
+}
+
+/// Whether the plan currently published for a device still describes the
+/// capture session that produced an input. This closes the interval between a
+/// plan publication and the manager's next teardown tick.
+fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> bool {
+    session.route == plan.route
+        && session.spec == spec_for(plan)
+        && session.rearm_generation == plan.rearm_generation
+}
+
+/// Snapshot the sessions that should be armed on this tick. Pairing owns the
+/// receiver exclusively, so its request temporarily makes the wanted set
+/// empty and lets the normal teardown path restore every control.
+fn wanted_sessions(
+    receiver_access: &ReceiverAccess,
+    capture_plans: &SharedCapturePlans,
+) -> HashMap<String, (DeviceRoute, CaptureSpec, u64)> {
+    if receiver_access.exclusive_requested() {
+        return HashMap::new();
+    }
+    capture_plans
+        .read()
+        .map(|plans| {
+            plans
+                .iter()
+                .map(|plan| {
+                    (
+                        plan.config_key.clone(),
+                        (plan.route.clone(), spec_for(plan), plan.rearm_generation),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
@@ -155,10 +198,11 @@ async fn manage(
     receiver_access: ReceiverAccess,
     dispatcher: ActionDispatcher,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(String, u64, CapturedInput)>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators: HashMap<String, WheelAccumulators> = HashMap::new();
+    let mut gesture_generations: HashMap<(String, u64, ButtonId), u64> = HashMap::new();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -175,42 +219,39 @@ async fn manage(
 
     loop {
         tokio::select! {
-            Some((key, input)) = rx.recv() => {
-                dispatch(
-                    &key,
-                    input,
-                    &mut accumulators,
-                    &capture_plans,
-                    &dispatcher,
-                );
+            Some((key, input_epoch, input)) = rx.recv() => {
+                let live = sessions.get(&key);
+                let current = accepts_input(input_epoch, live)
+                    && !receiver_access.exclusive_requested()
+                    && capture_plans.read().is_ok_and(|plans| {
+                        plans
+                            .iter()
+                            .find(|plan| plan.config_key == key)
+                            .is_some_and(|plan| live.is_some_and(|session| session_matches_plan(session, plan)))
+                    });
+                if current {
+                    dispatch(
+                        &key,
+                        input_epoch,
+                        input,
+                        &mut accumulators,
+                        &mut gesture_generations,
+                        &capture_plans,
+                        &dispatcher,
+                    );
+                } else {
+                    dispatcher.cancel_hidpp_session(&key, input_epoch);
+                    gesture_generations.retain(|(event_key, event_epoch, _), _| {
+                        event_key != &key || *event_epoch != input_epoch
+                    });
+                    debug!(key, input_epoch, "input from a stale capture session — ignored");
+                }
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release every capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
-                let want: HashMap<String, (DeviceRoute, CaptureSpec, u64)> =
-                    if receiver_access.exclusive_requested() {
-                        HashMap::new()
-                    } else {
-                        capture_plans
-                            .read()
-                            .map(|plans| {
-                                plans
-                                    .iter()
-                                    .map(|plan| {
-                                        (
-                                            plan.config_key.clone(),
-                                            (
-                                                plan.route.clone(),
-                                                spec_for(plan),
-                                                plan.rearm_generation,
-                                            ),
-                                        )
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    };
+                let want = wanted_sessions(&receiver_access, &capture_plans);
                 // Stop sessions whose device disappeared or whose plan changed.
                 // Sending on the oneshot lets the session restore its controls.
                 // A stopped session stays tracked — stop sender taken — until
@@ -227,6 +268,10 @@ async fn manage(
                             && *rearm == session.rearm_generation
                     });
                     if !keep && let Some(stop) = session.stop.take() {
+                        dispatcher.cancel_hidpp_session(key, session.epoch);
+                        gesture_generations.retain(|(event_key, event_epoch, _), _| {
+                            event_key != key || *event_epoch != session.epoch
+                        });
                         let _ = stop.send(());
                     }
                 }
@@ -270,6 +315,10 @@ async fn manage(
                 // device can't hot-loop. A stale epoch (an already-superseded
                 // session) is a no-op.
                 if let DoneAction::Remove { unexpected } = on_done(done_epoch, sessions.get(&key)) {
+                    dispatcher.cancel_hidpp_session(&key, done_epoch);
+                    gesture_generations.retain(|(event_key, event_epoch, _), _| {
+                        event_key != &key || *event_epoch != done_epoch
+                    });
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
                     }
@@ -294,7 +343,7 @@ fn spawn_session(
     rearm_generation: u64,
     epoch: u64,
     lease: Arc<SessionReceiverLease>,
-    inputs: &mpsc::UnboundedSender<(String, CapturedInput)>,
+    inputs: &mpsc::UnboundedSender<(String, u64, CapturedInput)>,
     done: &mpsc::UnboundedSender<(String, u64)>,
     capture_channel: &CaptureChannel,
 ) -> RunningSession {
@@ -306,7 +355,7 @@ fn spawn_session(
     let forward_key = key.clone();
     tokio::spawn(async move {
         while let Some(input) = session_rx.recv().await {
-            let _ = forward.send((forward_key.clone(), input));
+            let _ = forward.send((forward_key.clone(), epoch, input));
         }
     });
     let done = done.clone();
@@ -378,8 +427,10 @@ enum WheelOutput {
 /// re-synthesised scroll), using that device's own plan maps.
 fn dispatch(
     key: &str,
+    epoch: u64,
     input: CapturedInput,
     accumulators: &mut HashMap<String, WheelAccumulators>,
+    gesture_generations: &mut HashMap<(String, u64, ButtonId), u64>,
     capture_plans: &SharedCapturePlans,
     dispatcher: &ActionDispatcher,
 ) {
@@ -392,6 +443,13 @@ fn dispatch(
     };
     match input {
         CapturedInput::Gesture(button, direction) => {
+            let current_hold = gesture_generations
+                .get(&(key.to_owned(), epoch, button))
+                .is_some_and(|generation| *generation == dispatcher.button_generation());
+            if !current_hold {
+                debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
+                return;
+            }
             if let Some(action) = plan
                 .gesture_bindings
                 .get(&button)
@@ -404,12 +462,36 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonPressed(button, _) => {
-            if let Some(action) = plan.bindings.get(&button) {
+            // A raw-XY gesture source owns its click/swipe map; its physical
+            // lifecycle is still tracked, but it must not also fire the
+            // single-action projection on down.
+            let is_gesture = plan.gesture_bindings.contains_key(&button);
+            if is_gesture {
+                gesture_generations.insert(
+                    (key.to_owned(), epoch, button),
+                    dispatcher.button_generation(),
+                );
+            }
+            let action = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+            if let Some(action) = action {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
-                dispatcher.dispatch(action, Some(key));
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
+            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Down, action);
+        }
+        CapturedInput::ButtonReleased(button) => {
+            dispatcher.dispatch_hidpp_button(key, epoch, button, ButtonPhase::Up, None);
+            gesture_generations.remove(&(key.to_owned(), epoch, button));
+        }
+        CapturedInput::ButtonPulse(button) => {
+            let action = plan.bindings.get(&button);
+            if let Some(action) = action {
+                debug!(key, ?button, action = %action.label(), "HID++ button pulse → action");
+            } else {
+                debug!(key, ?button, "HID++ button pulse with no binding — ignored");
+            }
+            dispatcher.dispatch_hidpp_button_pulse(key, epoch, button, action);
         }
         CapturedInput::Scroll {
             increments,
@@ -838,6 +920,40 @@ mod tests {
         assert_eq!(
             on_done(7, Some(&stopped_session_with_epoch(7))),
             DoneAction::Remove { unexpected: false }
+        );
+    }
+
+    #[test]
+    fn accepts_inputs_only_from_the_current_live_session() {
+        assert!(accepts_input(7, Some(&live_session_with_epoch(7))));
+        assert!(
+            !accepts_input(6, Some(&live_session_with_epoch(7))),
+            "a superseded session's queued input is stale"
+        );
+        assert!(
+            !accepts_input(7, Some(&stopped_session_with_epoch(7))),
+            "a draining session was already canceled"
+        );
+        assert!(!accepts_input(7, None));
+    }
+
+    #[test]
+    fn rejects_input_after_the_published_capture_plan_changes() {
+        let mut session = live_session_with_epoch(7);
+        let mut plan = crate::capture_plan::plan_for_device(
+            &openlogi_core::config::Config::default(),
+            "mouse-a",
+            session.route.clone(),
+            None,
+            0,
+        );
+        session.spec = spec_for(&plan);
+        assert!(session_matches_plan(&session, &plan));
+
+        plan.rearm_generation = 1;
+        assert!(
+            !session_matches_plan(&session, &plan),
+            "an input queued before a capture-plan epoch change is stale"
         );
     }
 }
