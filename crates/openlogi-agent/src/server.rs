@@ -266,6 +266,11 @@ impl Agent for AgentServer {
         self.action_ring.observe(since).await
     }
 
+    async fn restart_after_input_monitoring_change(self, _: Context) {
+        #[cfg(target_os = "macos")]
+        crate::binary_watch::restart_after_input_monitoring_change();
+    }
+
     async fn action_ring_hover(
         self,
         _: Context,

@@ -329,7 +329,7 @@ async fn request_input_monitoring() {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
+            Ok(true) => binary_watch::restart_after_input_monitoring_change(),
             Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");

@@ -55,7 +55,8 @@ pub use succession::Identity;
 /// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
 /// v25: `AgentStatus::input_monitoring_granted` appended.
 /// v26: `AgentStatus::hid_open_failures` appended.
-pub const PROTOCOL_VERSION: u32 = 26;
+/// v27: [`Agent::restart_after_input_monitoring_change`] appended.
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -493,4 +494,10 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Restart the agent after the user changes Input Monitoring in System
+    /// Settings, so macOS applies the new TCC decision to device opens.
+    ///
+    /// The GUI calls this only on macOS. Other platforms accept it as a no-op
+    /// so the IPC contract stays portable.
+    async fn restart_after_input_monitoring_change();
 }
