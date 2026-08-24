@@ -584,19 +584,17 @@ impl Orchestrator {
         true
     }
 
-    /// Push the saved native wheel resolution/inversion to every currently online
-    /// device. Separated from [`Self::rebuild`] (which also runs on
-    /// foreground-app changes) because the HID++ write is only needed when
-    /// config or device presence changes. The write short-circuits at the
-    /// `0x2121` layer when the wheel already holds the desired state, so calling
-    /// it on every reload costs at most one wheel-mode read per device — and
-    /// still recovers a device whose earlier write timed out while it was waking.
-    fn apply_native_wheel_modes(&self) {
-        for dev in self.devices.iter().filter(|dev| dev.online) {
-            let Some(route) = dev.route.clone() else {
-                continue;
-            };
-            let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
+    /// Push native wheel resolution/inversion only where this config reload
+    /// changed the effective wheel settings.
+    ///
+    /// Every persisted GUI edit reloads the whole config. Starting an unchanged
+    /// wheel-mode transaction for a SmartShift-only edit makes that transaction
+    /// race the explicit SmartShift write on the same HID writer; a slow wheel
+    /// read can then consume the SmartShift write and confirmation budgets.
+    fn apply_changed_native_wheel_modes(&self, previous_config: &Config) {
+        for (route, resolution, inverted) in
+            wheel_mode_reapply_plan(previous_config, &self.config, &self.devices)
+        {
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
                 resolution,
@@ -745,7 +743,7 @@ impl Orchestrator {
     pub fn reload_config(&mut self, config: Config) {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
-        self.config = config;
+        let previous_config = std::mem::replace(&mut self.config, config);
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -762,7 +760,7 @@ impl Orchestrator {
             .retain(|key, _| retained_overrides.contains(key));
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
-        self.apply_native_wheel_modes();
+        self.apply_changed_native_wheel_modes(&previous_config);
         self.apply_fn_locks();
         self.reapply_light_settings();
     }
@@ -819,6 +817,25 @@ fn configured_wheel_mode(
         .scroll_inversion
         .then(|| config.invert_scroll(&dev.config_key));
     (resolution, inverted)
+}
+
+/// Plan the native wheel writes required by a config reload. Returning data
+/// keeps change detection independent from thread spawning and device I/O.
+fn wheel_mode_reapply_plan(
+    previous_config: &Config,
+    config: &Config,
+    devices: &[AgentDevice],
+) -> Vec<(DeviceRoute, Option<ScrollResolution>, Option<bool>)> {
+    devices
+        .iter()
+        .filter(|device| device.online)
+        .filter_map(|device| {
+            let route = device.route.clone()?;
+            let previous = configured_wheel_mode(previous_config, device);
+            let current = configured_wheel_mode(config, device);
+            (previous != current).then_some((route, current.0, current.1))
+        })
+        .collect()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

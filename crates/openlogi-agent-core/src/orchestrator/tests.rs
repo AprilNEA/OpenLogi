@@ -3,15 +3,19 @@
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets,
+    pick_current, plan_reapply, reapply_targets, wheel_mode_reapply_plan,
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, ButtonId};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{
+    Config, LightSettings, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, ScrollResolution, SmartShift,
+    WheelMode,
+};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
+use openlogi_core::hid::SmartShiftAutoDisengage;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use std::sync::Arc;
 
@@ -273,6 +277,57 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
     });
 
     assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+}
+
+#[test]
+fn smartshift_only_reload_plans_no_wheel_mode_write() {
+    let mut previous = Config::default();
+    previous.set_scroll_resolution("a", Some(ScrollResolution::Low));
+    previous.set_invert_scroll("a", true);
+    let mut updated = previous.clone();
+    updated.set_smartshift(
+        "a",
+        SmartShift {
+            mode: WheelMode::Ratchet,
+            auto_disengage: SmartShiftAutoDisengage::Threshold(SMARTSHIFT_AUTO_DISENGAGE_DEFAULT),
+            tunable_torque: None,
+        },
+    );
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+
+    let plan = wheel_mode_reapply_plan(&previous, &updated, &[device]);
+
+    assert!(
+        plan.is_empty(),
+        "an unrelated SmartShift edit must not occupy the wheel writer"
+    );
+}
+
+#[test]
+fn wheel_mode_reload_plans_the_updated_values() {
+    let previous = Config::default();
+    let mut updated = previous.clone();
+    updated.set_scroll_resolution("a", Some(ScrollResolution::High));
+    updated.set_invert_scroll("a", true);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+    let expected_route = device.route.clone().expect("test device has a route");
+
+    let plan = wheel_mode_reapply_plan(&previous, &updated, &[device]);
+
+    assert_eq!(
+        plan,
+        vec![(expected_route, Some(ScrollResolution::High), Some(true))]
+    );
 }
 
 #[test]
