@@ -41,7 +41,8 @@ optional physical device key.
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
-- `language`, `appearance`, optional theme names, and optional UI radius
+- `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
+  optional theme names, and optional UI radius
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like

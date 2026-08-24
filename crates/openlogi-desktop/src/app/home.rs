@@ -1,13 +1,18 @@
-//! The Home (device gallery) screen: the top bar, the responsive device grid,
-//! and the loading/empty states shown in place of the gallery before the agent
-//! has reported an inventory.
+//! The Home (device gallery) screen: its top bar, switchable grid/list/carousel
+//! layouts, and the loading/empty states shown before the agent reports an
+//! inventory.
+
+mod views;
+
+pub(super) use views::device_gallery;
+#[cfg(test)]
+pub(super) use views::ordered_device_indices;
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div,
-    fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, AppContext as _, Context, Hsla, IntoElement, ParentElement, SharedString,
+    Styled, Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -16,10 +21,9 @@ use gpui_component::{
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputState},
-    scroll::ScrollableElement as _,
     v_flex,
 };
-use openlogi_core::config::LightSettings;
+use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
 };
@@ -35,11 +39,14 @@ use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 
-/// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
-/// Add-Device button. The count belongs with the title so the grid itself can
-/// stay focused on identifying individual devices.
-pub(super) fn home_header(pal: Palette, cx: &Context<AppView>) -> impl IntoElement {
+/// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
+/// and Add Device.
+pub(super) fn home_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let device_count = AppState::try_read(cx).map_or(0, |state| state.device_list.len());
+    let current_mode = AppState::try_read(cx).map_or(DeviceViewMode::Grid, |state| {
+        state.app_settings().device_view_mode
+    });
+    let view = cx.entity();
     let device_count_label = if device_count == 1 {
         tr!("%{count} device", count => device_count)
     } else {
@@ -66,106 +73,9 @@ pub(super) fn home_header(pal: Palette, cx: &Context<AppView>) -> impl IntoEleme
                         .child(device_count_label),
                 ),
         )
+        .child(views::device_view_switcher(current_mode, view))
         .child(settings_button())
         .child(add_device_button())
-}
-
-/// Gap between gallery cards, in pixels.
-const GALLERY_GAP: f32 = 16.;
-/// Maximum width of the grid: three cards at their maximum width plus gaps.
-const GALLERY_MAX_W: f32 = theme::GALLERY_CARD_MAX_W * 3. + GALLERY_GAP * 2.;
-
-/// The Home device list: equal-height cards in a wrapping grid, so the complete
-/// finite device set stays visible instead of being hidden behind carousel
-/// navigation. Three columns fit the normal wide window; two and one columns
-/// fall out of the same flex constraints as the window narrows. Clicking a
-/// card opens its detail screen and makes it the active device. A disabled
-/// device wears a persistent red ring so the unmanaged state stays visible.
-pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
-    let view = cx.entity();
-    let pal = theme::palette(cx);
-    let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        let mut records: Vec<_> = state.device_list.iter().enumerate().collect();
-        // `sort_by_key` is stable: connected devices move to the front while
-        // each status group keeps the deterministic route order maintained by
-        // AppState. Recency can join this key only once the inventory persists
-        // a real last-seen timestamp.
-        records.sort_by_key(|(_, record)| !record.online);
-        records
-            .into_iter()
-            .map(|(idx, record)| {
-                let key = record.config_key.clone();
-                let enabled = state.device_enabled(&record.config_key);
-                let light_enabled = record.kind == DeviceKind::Light
-                    && state.light_enabled_for(&record.device_key());
-                let light_settings = state.light_for(&record.device_key());
-                let glow = keyboard_glow(state, record);
-                let view = view.clone();
-                device_card(
-                    record,
-                    enabled,
-                    idx == active_idx,
-                    glow,
-                    light_enabled,
-                    light_settings,
-                    pal,
-                )
-                .min_w(px(theme::GALLERY_CARD_MIN_W))
-                .max_w(px(theme::GALLERY_CARD_MAX_W))
-                .flex_1()
-                .active(gpui::Styled::shadow_2xs)
-                .accessibility_label(record.display_name.clone())
-                .aria_description(device_accessibility_description(record))
-                .aria_selected(idx == active_idx)
-                .cursor_pointer()
-                .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-                .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |this, cx| this.open_device(key.clone(), cx));
-                })
-                .into_any_element()
-            })
-            .collect()
-    });
-
-    v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .items_center()
-        .overflow_y_scrollbar()
-        .p_6()
-        .child(
-            h_flex()
-                .w_full()
-                .max_w(px(GALLERY_MAX_W))
-                .items_stretch()
-                .flex_wrap()
-                .gap(px(GALLERY_GAP))
-                .children(cards),
-        )
-}
-
-fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
-    let status = if record.online {
-        tr!("Connected")
-    } else {
-        tr!("Offline")
-    };
-    let identity = if record.display_name == record.model_name {
-        kind_label(record.kind)
-    } else {
-        format!("{}. {}", record.model_name, kind_label(record.kind))
-    };
-    let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
-    if let Some(battery) = record.battery.as_ref() {
-        format!("{metadata} {} {}%.", tr!("Battery"), battery.percentage).into()
-    } else {
-        metadata.into()
-    }
 }
 
 /// Opacity the lighting colour is painted at over the device image, in both the
@@ -234,10 +144,10 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
     .size_full()
 }
 
-/// A device card in the Home grid: product image, identity, a single explicit
-/// connection line, and a consistently placed battery line. The `active`
-/// device (whose bindings and DPI are live) keeps a persistent accent ring and
-/// faint fill; inactive cards gain the same ring on hover or keyboard focus.
+/// A device card in the Home grid and carousel: product image, identity, a
+/// single explicit connection line, and a consistently placed battery line.
+/// The `active` device keeps a persistent accent ring and faint fill; inactive
+/// cards gain the same ring on hover or keyboard focus.
 /// Returns an unstyled semantic button so the gallery can add its activation
 /// handler without giving up keyboard behavior.
 fn device_card(
@@ -249,15 +159,6 @@ fn device_card(
     light_settings: LightSettings,
     pal: Palette,
 ) -> BaseButton {
-    // Disabled devices get a persistent red ring; active managed devices keep
-    // the accent ring; otherwise transparent until hover (wired by the gallery).
-    let ring = if !enabled {
-        rgb(theme::STATUS_DISABLED).into()
-    } else if active {
-        theme::accent()
-    } else {
-        gpui::transparent_black()
-    };
     BaseButton::new(format!("device-card-{}", record.config_key))
         .w_full()
         .flex()
@@ -267,7 +168,7 @@ fn device_card(
         .p_4()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(ring)
+        .border_color(device_ring(enabled, active))
         .bg(pal.panel)
         .shadow_xs()
         .selected_fill(active)
@@ -302,6 +203,7 @@ fn device_card(
                         .gap_2()
                         .child(
                             v_flex()
+                                .flex_1()
                                 .min_w_0()
                                 .gap_0p5()
                                 .child(
@@ -347,6 +249,16 @@ fn device_card(
                     },
                 )),
         )
+}
+
+fn device_ring(enabled: bool, active: bool) -> Hsla {
+    if !enabled {
+        rgb(theme::STATUS_DISABLED).into()
+    } else if active {
+        theme::accent()
+    } else {
+        gpui::transparent_black()
+    }
 }
 
 fn device_identity_subtitle(record: &DeviceRecord) -> SharedString {

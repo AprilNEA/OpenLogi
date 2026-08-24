@@ -32,7 +32,7 @@ pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, UiScale, WheelMode,
+    ThumbwheelSensitivity, UiScale, WheelMode, DeviceViewMode,
 };
 
 use crate::binding::{
@@ -49,8 +49,9 @@ use settings::GestureOwner;
 /// v5 adds the app-wide `ui_scale` preference. Older files default to the
 /// standard 100% scale.
 ///
-/// Per-device custom names are optional and did not require a version bump:
-/// the absent field means "use the model name".
+/// Per-device custom names and the Home gallery view preference are optional
+/// and did not require a version bump: absent fields use the model name and
+/// responsive grid respectively.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer

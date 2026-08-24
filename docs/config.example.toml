@@ -14,6 +14,7 @@ language = "en"
 thumbwheel_sensitivity = 14
 appearance = "system"
 ui_scale = "normal"
+device_view_mode = "grid"
 # macOS only: "openlogi" (the signed icon) or "prism".
 app_icon = "openlogi"
 

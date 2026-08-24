@@ -833,6 +833,27 @@ fn config_without_ui_scale_uses_standard_scale() {
 }
 
 #[test]
+fn device_view_mode_roundtrips_and_defaults_to_grid() {
+    let mut cfg = Config::default();
+    cfg.app_settings.device_view_mode = DeviceViewMode::Carousel;
+
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    let parsed = write_and_read(&cfg);
+    let without_preference: Config =
+        toml::from_str("schema_version = 4\n").expect("config predating the view preference loads");
+
+    assert!(body.contains("device_view_mode = \"carousel\""));
+    assert_eq!(
+        parsed.app_settings.device_view_mode,
+        DeviceViewMode::Carousel
+    );
+    assert_eq!(
+        without_preference.app_settings.device_view_mode,
+        DeviceViewMode::Grid
+    );
+}
+
+#[test]
 fn asset_source_preference_roundtrips() {
     let mut cfg = Config::default();
     cfg.app_settings.asset_source = AssetSourcePreference::OpenLogi;

@@ -642,7 +642,7 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::home::{battery_needs_attention, connection_icon_path};
+    use super::home::{battery_needs_attention, connection_icon_path, ordered_device_indices};
     use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
@@ -798,6 +798,20 @@ mod tests {
             online: true,
             battery: None,
         }
+    }
+
+    #[test]
+    fn gallery_order_moves_connected_devices_first_stably() {
+        let mut records = vec![
+            record(DeviceKind::Mouse, None),
+            record(DeviceKind::Keyboard, None),
+            record(DeviceKind::Trackball, None),
+            record(DeviceKind::Light, None),
+        ];
+        records[0].online = false;
+        records[2].online = false;
+
+        assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
     }
 
     /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
