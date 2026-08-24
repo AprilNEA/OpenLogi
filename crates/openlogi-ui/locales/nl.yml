@@ -333,6 +333,8 @@ _version: 1
 "Theme": "Theme"
 "Corner radius": "Corner radius"
 "Roundness of buttons, cards, and controls.": "Roundness of buttons, cards, and controls."
+"Interface scale": "Interface scale"
+"Scale text and interface spacing.": "Scale text and interface spacing."
 "Sharp": "Sharp"
 "Round": "Round"
 "All": "All"

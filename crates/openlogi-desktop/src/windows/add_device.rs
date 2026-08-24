@@ -180,7 +180,8 @@ impl AuxWindow for AddDeviceView {
 }
 
 impl Render for AddDeviceView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
         let state = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
 

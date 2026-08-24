@@ -333,6 +333,8 @@ _version: 1
 "Theme": "主题"
 "Corner radius": "圆角"
 "Roundness of buttons, cards, and controls.": "按钮、卡片与控件的圆角程度。"
+"Interface scale": "界面缩放"
+"Scale text and interface spacing.": "缩放文字与界面间距。"
 "Sharp": "直角"
 "Round": "圆润"
 "All": "全部"

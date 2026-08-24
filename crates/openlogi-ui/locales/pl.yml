@@ -333,6 +333,8 @@ _version: 1
 "Theme": "Motyw"
 "Corner radius": "Promień narożników"
 "Roundness of buttons, cards, and controls.": "Zaokrąglenie przycisków, kart i elementów sterujących."
+"Interface scale": "Interface scale"
+"Scale text and interface spacing.": "Scale text and interface spacing."
 "Sharp": "Ostry"
 "Round": "Zaokrąglony"
 "All": "Wszystkie"

@@ -467,7 +467,7 @@ fn human_readable_toml_layout() {
     // The key only contains [A-Za-z0-9_], so TOML emits it as a bare-word
     // table key (no surrounding quotes). The test asserts the observable
     // structure rather than locking in a specific quoting.
-    assert!(body.contains("schema_version = 4"), "got: {body}");
+    assert!(body.contains("schema_version = 5"), "got: {body}");
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     // A `Single` binding serializes byte-identically to the pre-v2 bare
     // `Action`, so the leaf line is unchanged.
@@ -777,6 +777,28 @@ fn app_settings_launch_at_login_roundtrips() {
 }
 
 #[test]
+fn app_settings_ui_scale_roundtrips() {
+    let mut cfg = Config::default();
+    cfg.app_settings.ui_scale = UiScale::ExtraLarge;
+
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    let parsed = write_and_read(&cfg);
+
+    assert!(body.contains("ui_scale = \"extra_large\""));
+    assert_eq!(parsed.app_settings.ui_scale, UiScale::ExtraLarge);
+}
+
+#[test]
+fn config_without_ui_scale_uses_standard_scale() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "schema_version = 4\n").expect("write v4 config");
+    let parsed = Config::load_from_path(&path).expect("v4 config should load");
+
+    assert_eq!(parsed.app_settings.ui_scale, UiScale::Normal);
+}
+
+#[test]
 fn asset_source_preference_roundtrips() {
     let mut cfg = Config::default();
     cfg.app_settings.asset_source = AssetSourcePreference::OpenLogi;
@@ -873,7 +895,7 @@ Click = \"Paste\"
     // Saving self-heals to the current shape: stamped version + merged table,
     // legacy field names gone.
     let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(body.contains("schema_version = 4"), "got: {body}");
+    assert!(body.contains("schema_version = 5"), "got: {body}");
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     assert!(!body.contains("button_bindings"), "got: {body}");
     assert!(!body.contains("gesture_bindings"), "got: {body}");
@@ -994,7 +1016,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivty = 14\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivty = 14\n",
     )
     .expect("write typo");
     assert_matches!(
@@ -1004,7 +1026,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
 
     fs::write(
         &path,
-        r#"schema_version = 4
+        r#"schema_version = 5
 [devices.mouse.identity]
 display_name = "Mouse"
 kind = "mouse"
@@ -1019,11 +1041,11 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 
     fs::write(
         &path,
-        "schema_version = 4\n[devices.mouse]\ngesture_owner = \"Off\"\n",
+        "schema_version = 5\n[devices.mouse]\ngesture_owner = \"Off\"\n",
     )
     .expect("write obsolete field");
     assert_matches!(
-        Config::load_from_path(&path).expect_err("v4 legacy field must fail"),
+        Config::load_from_path(&path).expect_err("current-schema legacy field must fail"),
         ConfigError::ObsoleteField { .. }
     );
 }
@@ -1031,12 +1053,12 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 #[test]
 fn persisted_numeric_contracts_reject_unsafe_values() {
     for body in [
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = 0\n",
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = 101\n",
-        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
-        "schema_version = 4\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
-        "schema_version = 4\n[devices.mouse]\ndpi = 65536\n",
-        "schema_version = 4\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 0\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 101\n",
+        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
+        "schema_version = 5\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
+        "schema_version = 5\n[devices.mouse]\ndpi = 65536\n",
+        "schema_version = 5\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
     ] {
         assert!(toml::from_str::<Config>(body).is_err(), "accepted: {body}");
     }
@@ -1048,7 +1070,7 @@ fn tracked_save_preserves_comments_and_rejects_concurrent_edits() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "# keep this comment\nschema_version = 4\nselected_device = \"one\" # and this one\n",
+        "# keep this comment\nschema_version = 5\nselected_device = \"one\" # and this one\n",
     )
     .expect("write");
     let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load tracked");

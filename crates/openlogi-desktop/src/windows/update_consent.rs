@@ -69,7 +69,8 @@ fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
 }
 
 impl Render for UpdateConsentView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
         v_flex()

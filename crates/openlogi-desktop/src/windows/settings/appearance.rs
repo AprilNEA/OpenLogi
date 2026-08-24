@@ -1,4 +1,4 @@
-//! Appearance settings page: mode, theme grid, radius, language.
+//! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
 use gpui::img;
@@ -9,7 +9,8 @@ use super::{
     IconName, Input, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc,
     SelectState, Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
     SharedString, Sizable, StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor,
-    ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px, rgb, theme, v_flex,
+    ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme,
+    v_flex,
 };
 use crate::platform::app_icon;
 use crate::ui::theme::Typography as _;
@@ -64,15 +65,23 @@ pub(super) fn appearance_page(
         );
     }
 
-    let theme_group = theme_group.item(
-        // Compact control → inline on the right of the label (HIG), unlike the
-        // wide thumbnail/grid controls which stack below.
-        SettingItem::new(
-            tr!("Corner radius"),
-            SettingField::render(move |_, _, cx| radius_segment(cx)),
+    let theme_group = theme_group
+        .item(
+            // Compact control → inline on the right of the label (HIG), unlike the
+            // wide thumbnail/grid controls which stack below.
+            SettingItem::new(
+                tr!("Corner radius"),
+                SettingField::render(move |_, _, cx| radius_segment(cx)),
+            )
+            .description(tr!("Roundness of buttons, cards, and controls.")),
         )
-        .description(tr!("Roundness of buttons, cards, and controls.")),
-    );
+        .item(
+            SettingItem::new(
+                tr!("Interface scale"),
+                SettingField::render(move |_, _, cx| scale_segment(cx)),
+            )
+            .description(tr!("Scale text and interface spacing.")),
+        );
 
     let language_group = SettingGroup::new().title(tr!("Language")).item(
         SettingItem::new(
@@ -111,6 +120,17 @@ fn set_radius(cx: &mut App, radius: Option<u8>) {
         cx.emit(StateEvent::SettingsChanged);
     });
     theme::apply_from_settings(None, cx);
+}
+
+/// Persist an interface-scale choice and repaint every desktop window. Each
+/// root applies its own rem size on that repaint, avoiding a re-entrant update
+/// of the Settings window currently dispatching this click.
+fn set_scale(cx: &mut App, scale: UiScale) {
+    AppState::update(cx, |state, cx| {
+        state.set_ui_scale(scale);
+        cx.emit(StateEvent::SettingsChanged);
+    });
+    cx.refresh_windows();
 }
 
 /// The Light / Dark / Follow-system appearance picker — three macOS-style
@@ -377,6 +397,31 @@ fn radius_segment(cx: &App) -> ButtonGroup {
             if let Some(&ix) = clicks.first() {
                 set_radius(cx, options[ix]);
             }
+        })
+}
+
+/// The supported interface-scale presets. Keeping this finite makes every
+/// layout state reviewable and avoids arbitrary values that can render a
+/// window unusable.
+fn scale_segment(cx: &App) -> ButtonGroup {
+    let current =
+        AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
+    ButtonGroup::new("interface-scale")
+        .outline()
+        .children(UiScale::ALL.map(|scale| {
+            Button::new(format!("interface-scale-{}", scale.percent()))
+                .label(format!("{}%", scale.percent()))
+                .selected(current == scale)
+        }))
+        .on_click(|clicks, _, cx| {
+            let Some(scale) = clicks
+                .first()
+                .and_then(|index| UiScale::ALL.get(*index))
+                .copied()
+            else {
+                return;
+            };
+            set_scale(cx, scale);
         })
 }
 

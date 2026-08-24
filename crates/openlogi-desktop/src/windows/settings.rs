@@ -33,7 +33,9 @@ pub(super) use gpui_component::{
 };
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
-pub(super) use openlogi_core::config::{Appearance, AssetSourcePreference, ThumbwheelSensitivity};
+pub(super) use openlogi_core::config::{
+    Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale,
+};
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
@@ -358,7 +360,8 @@ pub fn open_at(page: SettingsPage, cx: &mut App) {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
         let view = cx.entity();
         // Only surface the Camera permission when a webcam is actually present,

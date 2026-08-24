@@ -165,10 +165,10 @@ impl RenderOnce for PanelCard {
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)
-            .p(px(theme::CARD_PAD))
+            .p(theme::CARD_PAD)
             .child(
                 v_flex()
-                    .gap(px(theme::CARD_GAP))
+                    .gap(theme::CARD_GAP)
                     .when(!self.title.is_empty(), |this| {
                         this.child(
                             h_flex()

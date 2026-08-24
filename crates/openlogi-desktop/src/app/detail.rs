@@ -2,8 +2,8 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -38,14 +38,13 @@ use crate::features::profile_scope::{ProfileIconCache, profile_scope_bar};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
-    CONTENT_W_2XL, CONTENT_W_LG, CONTENT_W_MD, CONTENT_W_SM, CONTENT_W_XL, DETAIL_RAIL_W, HEADER_H,
-    Palette, SCREEN_PAD, Typography as _,
+    ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
 
-const CAMERA_PREVIEW_W: f32 = 514.;
-const CAMERA_CONTROLS_W: f32 = 500.;
-const LIGHT_CONTROLS_W: f32 = 400.;
-const LIGHT_CONTROLS_MIN_W: f32 = 360.;
+const CAMERA_PREVIEW_W: Rems = rems(32.125);
+const CAMERA_CONTROLS_W: Rems = rems(31.25);
+const LIGHT_CONTROLS_W: Rems = rems(25.);
+const LIGHT_CONTROLS_MIN_W: Rems = rems(22.5);
 
 /// Compact device identity bar. Section navigation belongs to the workspace
 /// rail below; pairing belongs to the Devices screen, so neither competes with
@@ -284,7 +283,7 @@ fn buttons_tab(
 }
 
 fn tab_body(
-    width: f32,
+    width: ContentWidth,
     content: impl IntoElement,
 ) -> gpui_component::scroll::Scrollable<gpui::Div> {
     v_flex()
@@ -293,17 +292,17 @@ fn tab_body(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p(px(SCREEN_PAD))
-        .child(div().w_full().max_w(px(width)).child(content))
+        .p(SCREEN_PAD)
+        .child(div().w_full().max_w(width.rems()).child(content))
 }
 
 /// Keys tab: the function-row remapper for a keyboard.
 fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
-    tab_body(CONTENT_W_2XL, keyboard_model.clone()).justify_center()
+    tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
 }
 
 fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
-    tab_body(CONTENT_W_MD, panel.clone())
+    tab_body(ContentWidth::Medium, panel.clone())
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
@@ -317,7 +316,7 @@ fn pointer_tab(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     tab_body(
-        CONTENT_W_LG,
+        ContentWidth::Large,
         h_flex()
             .w_full()
             .items_stretch()
@@ -349,10 +348,11 @@ fn pointer_tab(
 }
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
-    // Two cards plus one 16 px gap fit exactly inside the 720 px window minimum
-    // after this tab's `SCREEN_PAD` (20 px) side inset, while still leaving a
-    // usable slider: 332·2 + 16 + 20·2 = 720.
-    div().min_w(px(332.)).flex_1().h_full().child(card)
+    // At 100%, two cards plus one 16 px gap fit exactly inside the 720 px
+    // window minimum after this tab's 20 px side insets, while still leaving a
+    // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
+    // scales together.
+    div().min_w(rems(20.75)).flex_1().h_full().child(card)
 }
 
 /// Scrolling card: per-device native inversion and wheel-resolution controls.
@@ -495,7 +495,7 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
 /// [`DetailTab::tabs_for`].
 fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
     tab_body(
-        CONTENT_W_SM,
+        ContentWidth::Small,
         PanelCard::new(
             tr!("Lighting"),
             Icon::new(IconName::Palette),
@@ -514,41 +514,35 @@ fn camera_tab(
     camera_preview: &gpui::Entity<CameraPreview>,
     camera_controls: &gpui::Entity<CameraControlsPanel>,
 ) -> impl IntoElement {
-    v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .items_center()
-        .overflow_y_scrollbar()
-        .p_6()
-        .child(
-            h_flex()
-                .w_full()
-                .flex_wrap()
-                .justify_center()
-                .items_start()
-                .gap_3()
-                .child(
-                    div()
-                        .w(px(CAMERA_PREVIEW_W))
-                        .flex_shrink_0()
-                        .child(PanelCard::new(
-                            tr!("Camera"),
-                            Icon::new(IconName::Eye),
-                            camera_preview.clone().into_any_element(),
-                        )),
-                )
-                .child(
-                    div()
-                        .w(px(CAMERA_CONTROLS_W))
-                        .flex_shrink_0()
-                        .child(PanelCard::new(
-                            tr!("Camera controls"),
-                            Icon::new(IconName::Settings),
-                            camera_controls.clone().into_any_element(),
-                        )),
-                ),
-        )
+    tab_body(
+        ContentWidth::DoubleExtraLarge,
+        h_flex()
+            .w_full()
+            .flex_wrap()
+            .justify_center()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .w(CAMERA_PREVIEW_W)
+                    .flex_shrink_0()
+                    .child(PanelCard::new(
+                        tr!("Camera"),
+                        Icon::new(IconName::Eye),
+                        camera_preview.clone().into_any_element(),
+                    )),
+            )
+            .child(
+                div()
+                    .w(CAMERA_CONTROLS_W)
+                    .flex_shrink_0()
+                    .child(PanelCard::new(
+                        tr!("Camera controls"),
+                        Icon::new(IconName::Settings),
+                        camera_controls.clone().into_any_element(),
+                    )),
+            ),
+    )
 }
 
 /// Standalone-light controls in a separate panel from HID++ keyboard RGB.
@@ -577,7 +571,7 @@ fn light_tab(
         },
     );
     tab_body(
-        CONTENT_W_XL,
+        ContentWidth::ExtraLarge,
         h_flex()
             .w_full()
             .gap_4()
@@ -586,8 +580,8 @@ fn light_tab(
             .child(light_visual::detail(asset, online, enabled, settings, pal))
             .child(
                 div()
-                    .w(px(LIGHT_CONTROLS_W))
-                    .min_w(px(LIGHT_CONTROLS_MIN_W))
+                    .w(LIGHT_CONTROLS_W)
+                    .min_w(LIGHT_CONTROLS_MIN_W)
                     .child(PanelCard::new(
                         tr!("Lighting"),
                         Icon::new(IconName::Sun),
@@ -600,7 +594,7 @@ fn light_tab(
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     tab_body(
-        CONTENT_W_SM,
+        ContentWidth::Small,
         v_flex()
             .w_full()
             .gap_3()

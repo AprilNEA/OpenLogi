@@ -467,6 +467,7 @@ impl Render for AppView {
         reason = "root view assembles every screen branch inline"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
         // Every frame — including the pre-connection and error frames — hangs

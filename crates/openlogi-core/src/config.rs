@@ -32,7 +32,7 @@ pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, WheelMode,
+    ThumbwheelSensitivity, UiScale, WheelMode,
 };
 
 use crate::binding::{
@@ -45,6 +45,9 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v5 adds the app-wide `ui_scale` preference. Older files default to the
+/// standard 100% scale.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer
@@ -64,7 +67,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]

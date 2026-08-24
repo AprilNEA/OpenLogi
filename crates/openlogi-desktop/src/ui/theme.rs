@@ -14,9 +14,9 @@
 
 #[cfg(test)]
 use gpui::rgb;
-use gpui::{App, FontWeight, Hsla, Pixels, Rgba, Styled, Window, hsla, px, relative};
+use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
-use openlogi_core::config::Appearance;
+use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
 
@@ -39,14 +39,38 @@ pub const HEADER_H: f32 = 64.;
 pub const FOOTER_H: f32 = 40.;
 pub const DETAIL_RAIL_W: f32 = 168.;
 
-/// Maximum-width scale for detail-tab content.
-pub const CONTENT_W_SM: f32 = 560.;
-pub const CONTENT_W_MD: f32 = 680.;
-pub const CONTENT_W_LG: f32 = 920.;
-pub const CONTENT_W_XL: f32 = 980.;
-pub const CONTENT_W_2XL: f32 = 1040.;
+const BASE_REM_SIZE: f32 = 16.;
 
-/// Semantic spacing tokens (px), so surfaces that must agree share one value
+/// Maximum-width scale for detail-tab content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentWidth {
+    /// A single compact settings card (560 px at 100%).
+    Small,
+    /// A wider single panel (680 px at 100%).
+    Medium,
+    /// A two-column settings layout (920 px at 100%).
+    Large,
+    /// A device visual beside its controls (980 px at 100%).
+    ExtraLarge,
+    /// The widest workspace layout (1040 px at 100%).
+    DoubleExtraLarge,
+}
+
+impl ContentWidth {
+    /// Resolve this semantic width in scalable rem units.
+    #[must_use]
+    pub const fn rems(self) -> Rems {
+        match self {
+            Self::Small => rems(35.),
+            Self::Medium => rems(42.5),
+            Self::Large => rems(57.5),
+            Self::ExtraLarge => rems(61.25),
+            Self::DoubleExtraLarge => rems(65.),
+        }
+    }
+}
+
+/// Semantic spacing tokens, so surfaces that must agree share one value
 /// instead of each call site hand-picking a `p_*` / `gap_*` step.
 ///
 /// - `SCREEN_PAD` — the inset around a detail-tab body. Uniform across tabs so
@@ -54,9 +78,9 @@ pub const CONTENT_W_2XL: f32 = 1040.;
 ///   two-column grid is sized against this exact value; see its card min-width).
 /// - `CARD_PAD` / `CARD_GAP` — a card's inner padding and its title-to-content
 ///   gap, so every [`panel_card`](crate::app) reads the same.
-pub const SCREEN_PAD: f32 = 20.;
-pub const CARD_PAD: f32 = 16.;
-pub const CARD_GAP: f32 = 12.;
+pub const SCREEN_PAD: Rems = rems(1.25);
+pub const CARD_PAD: Rems = rems(1.);
+pub const CARD_GAP: Rems = rems(0.75);
 
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
@@ -224,6 +248,21 @@ pub fn register_builtin_themes(cx: &mut App) {
     }
 }
 
+fn rem_size(scale: UiScale) -> Pixels {
+    px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
+}
+
+/// Apply the stored interface scale to one desktop window.
+///
+/// Root views call this before building their elements so text and every
+/// rem-based layout token change together. The Actions Ring is a separate
+/// process and deliberately keeps its cursor-centred pixel geometry.
+pub fn apply_ui_scale(window: &mut Window, cx: &App) {
+    let scale =
+        AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
+    window.set_rem_size(rem_size(scale));
+}
+
 /// Resolve the user's stored appearance preference and apply it to the global
 /// [`Theme`]. Reads [`AppState`] live, so it is the single entry point for first
 /// paint, OS-appearance changes, and live edits on the Appearance page:
@@ -364,7 +403,7 @@ pub trait Typography: Styled + Sized {
     /// heaviest, largest step — the one place Bold is used.
     #[must_use]
     fn text_title(self) -> Self {
-        self.text_size(px(26.))
+        self.text_size(rems(1.625))
             .font_weight(FontWeight::BOLD)
             .line_height(relative(1.2))
     }
@@ -373,7 +412,7 @@ pub trait Typography: Styled + Sized {
     /// primary heading.
     #[must_use]
     fn text_heading(self) -> Self {
-        self.text_size(px(20.))
+        self.text_size(rems(1.25))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.3))
     }
@@ -382,7 +421,7 @@ pub trait Typography: Styled + Sized {
     /// inside a card rather than titling a screen.
     #[must_use]
     fn text_subheading(self) -> Self {
-        self.text_size(px(15.))
+        self.text_size(rems(0.9375))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.4))
     }
@@ -390,14 +429,14 @@ pub trait Typography: Styled + Sized {
     /// Default body copy — control labels, descriptions, values.
     #[must_use]
     fn text_body(self) -> Self {
-        self.text_size(px(15.)).line_height(relative(1.45))
+        self.text_size(rems(0.9375)).line_height(relative(1.45))
     }
 
     /// De-emphasised metadata and helper text — the muted line under a label,
     /// battery readouts, hints. Pair with `pal.text_muted`.
     #[must_use]
     fn text_caption(self) -> Self {
-        self.text_size(px(12.)).line_height(relative(1.4))
+        self.text_size(rems(0.75)).line_height(relative(1.4))
     }
 }
 
@@ -406,6 +445,29 @@ impl<E: Styled> Typography for E {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_width_scale_preserves_the_standard_layout() {
+        assert_eq!(
+            [
+                ContentWidth::Small,
+                ContentWidth::Medium,
+                ContentWidth::Large,
+                ContentWidth::ExtraLarge,
+                ContentWidth::DoubleExtraLarge,
+            ]
+            .map(|width| width.rems().to_pixels(px(BASE_REM_SIZE))),
+            [px(560.), px(680.), px(920.), px(980.), px(1040.)]
+        );
+    }
+
+    #[test]
+    fn ui_scale_presets_map_to_expected_rem_sizes() {
+        assert_eq!(
+            UiScale::ALL.map(rem_size),
+            [px(14.4), px(16.), px(17.6), px(20.)]
+        );
+    }
 
     #[test]
     fn openlogi_theme_text_pairs_meet_normal_text_contrast() {

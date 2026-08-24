@@ -333,6 +333,8 @@ _version: 1
 "Theme": "Тема"
 "Corner radius": "Радіус заокруглення"
 "Roundness of buttons, cards, and controls.": "Заокругленість кнопок, карток і елементів керування."
+"Interface scale": "Interface scale"
+"Scale text and interface spacing.": "Scale text and interface spacing."
 "Sharp": "Гострі"
 "Round": "Заокруглені"
 "All": "Усі"

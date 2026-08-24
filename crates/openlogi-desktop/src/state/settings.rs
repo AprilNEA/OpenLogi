@@ -3,7 +3,7 @@
 use super::AppState;
 use gpui::App;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, ThumbwheelSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale,
 };
 
 impl AppState {
@@ -75,6 +75,15 @@ impl AppState {
         }
         self.config.app_settings.appearance = appearance;
         self.persist_config("appearance setting");
+    }
+    /// Persist the text and interface scale. Open window roots apply the new
+    /// rem size when the caller refreshes them. No-op when unchanged.
+    pub fn set_ui_scale(&mut self, scale: UiScale) {
+        if self.config.app_settings.ui_scale == scale {
+            return;
+        }
+        self.config.app_settings.ui_scale = scale;
+        self.persist_config("UI scale setting");
     }
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
     /// theme). No-op when unchanged.
