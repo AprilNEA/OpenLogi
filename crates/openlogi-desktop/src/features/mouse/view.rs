@@ -273,13 +273,14 @@ impl Render for MouseModelView {
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
         let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, pal, glow);
+        let model = ModelRect {
+            left: mouse_left,
+            width: mouse_w,
+            height: mouse_h,
+        };
         let hotspots_layer = hotspots_layer(
             &hotspots_outer,
-            ModelRect {
-                left: mouse_left,
-                width: mouse_w,
-                height: mouse_h,
-            },
+            model,
             hovered,
             active,
             self.selected,
@@ -297,11 +298,8 @@ impl Render for MouseModelView {
                     idx,
                     *label,
                     binding,
-                    highlight == Some(label.id),
-                    mouse_left,
-                    mouse_w,
-                    hovered,
-                    active,
+                    hovered == Some(label.id) || active == Some(label.id),
+                    model,
                     self.selected == Some(label.id),
                     &view,
                 )
@@ -557,33 +555,25 @@ fn hotspots_layer(
 
 /// Position a selectable control card at the label's slot in the side gutter.
 /// Selection updates the fixed inspector; labels never own editor overlays.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "wrapper position + trigger \
-state both need this many inputs; bundling would just hide the dependency"
-)]
 fn label_control(
     idx: usize,
     label: Label,
     binding: BindingLabel,
     highlighted: bool,
-    mouse_left: f32,
-    mouse_w: f32,
-    hovered: Option<MouseControlId>,
-    active: Option<MouseControlId>,
+    model: ModelRect,
     selected: bool,
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
     let x = match label.side {
-        Side::Left => mouse_left - SIDE_GAP - LABEL_W,
-        Side::Right => mouse_left + mouse_w + SIDE_GAP,
+        Side::Left => model.left - SIDE_GAP - LABEL_W,
+        Side::Right => model.left + model.width + SIDE_GAP,
     };
     let view = view.clone();
     let trigger = LabelTrigger {
         id: ("label-trigger", idx).into(),
         label,
         binding,
-        highlighted: highlighted || hovered == Some(label.id) || active == Some(label.id),
+        highlighted,
         selected,
         view,
     };
