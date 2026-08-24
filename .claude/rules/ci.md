@@ -20,9 +20,11 @@ whose invocation does not depend on the host, and `every_ci_yml_job_name_resolve
 fails on a job name the runner cannot even name — but neither can check this
 file, so it is on you.
 
-`devenv tasks run openlogi:check` is the **host-OS pre-push gate** (fmt, clippy,
-tests, rustdoc). It is **not** the pipeline. macOS-green clippy does not compile
-linux cfg; it does not run MSRV, cargo-deny, Windows clippy, or the shell lint.
+`devenv tasks run openlogi:check` is the **full tier** of the host-OS pre-push
+gate (fmt, clippy, tests, rustdoc). `AGENTS.md` defines when a package-local diff
+may check its complete reverse-dependency closure instead. Neither tier is the
+pipeline. macOS-green clippy does not compile linux cfg; it does not run MSRV,
+cargo-deny, Windows clippy, or the shell lint.
 
 Do not claim a skipped job passed. Name it as not run in the PR Testing section.
 
@@ -86,7 +88,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 
 | Diff | Run |
 |---|---|
-| anything Rust | `rustfmt`; crate-scoped clippy + tests while iterating; host `clippy` / `tests` before push |
+| anything Rust | the local-gate tier selected in `AGENTS.md`; the pre-push hook always runs full-workspace Clippy and non-GUI rustdoc |
 | crate publish flags, workspace path dependencies, `release-plz.toml` | `publish-closure` |
 | any `*.sh`, any file with a shell shebang, `.editorconfig` | `shell` (the prek hooks run the same two tools at commit) |
 | `#[cfg(target_os = …)]`, hook/inject/hid/camera platform files | `clippy-windows` proxy + the linux-musl recipe; say so if you cannot |
