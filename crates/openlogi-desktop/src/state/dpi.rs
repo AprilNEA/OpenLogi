@@ -118,7 +118,7 @@ impl AppState {
         let route = record.route.clone();
         if let Some(persistent_key) = persistent_key {
             self.config.set_dpi(&persistent_key, dpi);
-            if !self.persist_and_reload("DPI") {
+            if !self.persist_config("DPI") {
                 return;
             }
         } else {
@@ -130,6 +130,10 @@ impl AppState {
         if let Some(route) = route {
             self.send_ipc(crate::services::ipc::Command::SetDpi(route, dpi));
         }
+        // Apply-now is deliberately queued before the config reload. The IPC
+        // client can coalesce rapid slider releases while this reload runs, so
+        // the mouse no longer waits behind older config work before changing.
+        self.send_ipc(crate::services::ipc::Command::ReloadConfig);
     }
 }
 
