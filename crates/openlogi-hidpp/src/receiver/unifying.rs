@@ -381,10 +381,14 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
-        DeviceConnection, DeviceKind, Event, decode_notification, update_wireless_notification_flag,
+        DeviceConnection, DeviceKind, DevicePairingInformation, Event, InfoSubRegister, Receiver,
+        Register, decode_notification, update_wireless_notification_flag,
     };
-    use crate::protocol::v10::{Message, MessageHeader};
+    use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
+    use crate::protocol::v10::{Message, MessageHeader, MessageType};
 
     /// Builds the long notification the receiver broadcasts, with `payload`
     /// laid out exactly as the 17 bytes following the header.
@@ -446,6 +450,61 @@ mod tests {
 
         assert!(connection(1 << 5).encrypted);
         assert!(!connection(1 << 4).encrypted);
+    }
+
+    #[test]
+    fn pairing_information_reads_encryption_from_bit_5() {
+        // The pairing register carries the same device-info byte as the 0x41
+        // notification, decoded independently — pin its bits too so the two
+        // paths cannot diverge unnoticed.
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let chan = Arc::new(channel_with_reader(raw).await);
+            let receiver =
+                Receiver::new(chan).expect("the mock's VID/PID routes as a Unifying receiver");
+
+            // First response: bit 5 + bit 6 — encrypted, offline. Second:
+            // bit 4 only (software present), which must not read as
+            // encryption.
+            for status in [0x62, 0x12] {
+                let mut payload = [0u8; 17];
+                payload[0] = Register::ReceiverInfo.into(); // RAP matches on the address echo
+                payload[1] = u8::from(InfoSubRegister::DevicePairingInformation) | 0x02;
+                payload[2] = status;
+                payload[3] = 0x69; // wpid, little-endian
+                payload[4] = 0x40;
+                payload[5..9].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+                handle.queue_response(
+                    Message::Long(
+                        MessageHeader {
+                            device_index: super::RECEIVER_DEVICE_INDEX,
+                            sub_id: MessageType::GetLongRegister.into(),
+                        },
+                        payload,
+                    )
+                    .into(),
+                );
+            }
+
+            let encrypted_offline = receiver.get_device_pairing_information(2).await.unwrap();
+            assert_eq!(
+                encrypted_offline,
+                DevicePairingInformation {
+                    wpid: 0x4069,
+                    kind: DeviceKind::Mouse,
+                    encrypted: true,
+                    online: false,
+                    unit_id: [0xde, 0xad, 0xbe, 0xef],
+                }
+            );
+
+            let software_present = receiver.get_device_pairing_information(2).await.unwrap();
+            assert!(
+                !software_present.encrypted,
+                "bit 4 is software-present, not encryption"
+            );
+            assert!(software_present.online);
+        });
     }
 
     #[test]
