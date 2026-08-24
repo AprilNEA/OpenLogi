@@ -168,8 +168,10 @@ impl Receiver {
         Ok(())
     }
 
-    /// Triggers device-arrival notifications for all currently connected
-    /// devices. Used to enumerate online devices at startup.
+    /// Triggers device-arrival notifications for every paired slot, online or
+    /// not — the notification's link-status bit distinguishes (Solaar uses the
+    /// same trigger as its "scan all devices" pass). Used to enumerate paired
+    /// devices at startup.
     pub async fn trigger_device_arrival(&self) -> Result<(), ReceiverError> {
         self.chan
             .write_register(
@@ -250,16 +252,18 @@ fn update_wireless_notification_flag(flags: &mut [u8; 3], enabled: bool) -> bool
     *flags != previous
 }
 
-/// The sub-id of the only notification this receiver emits: a paired device
-/// came online.
+/// The sub-id of the only notification this receiver emits: a paired slot's
+/// connection status changed, or was re-reported by
+/// [`Receiver::trigger_device_arrival`].
 const DEVICE_CONNECTION_SUB_ID: u8 = 0x41;
 
 /// Decodes an unsolicited receiver message into the event it carries, or
 /// `None` for a report this crate does not model.
 ///
-/// Kept separate from the message listener in [`Receiver::new`] so the wire
-/// layout is reachable from tests without a HID channel behind it.
-fn decode_notification(msg: &v10::Message) -> Option<Event> {
+/// Public so consumers can decode captured reports and fabricate events from
+/// wire bytes in their own tests without a HID channel behind them.
+#[must_use]
+pub fn decode_notification(msg: &v10::Message) -> Option<Event> {
     let header = msg.header();
     if header.sub_id != DEVICE_CONNECTION_SUB_ID {
         return None;
@@ -340,7 +344,8 @@ pub enum DeviceKind {
 }
 
 /// Represents a device-connection event fired by the receiver when a paired
-/// device comes online (or in response to [`Receiver::trigger_device_arrival`]).
+/// device's link status changes, or re-broadcast for a paired slot in
+/// response to [`Receiver::trigger_device_arrival`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -351,7 +356,9 @@ pub struct DeviceConnection {
     pub kind: DeviceKind,
     /// Whether the link is encrypted.
     pub encrypted: bool,
-    /// Whether the device is currently online.
+    /// Whether the device's link is currently established (payload bit 6
+    /// clear). Trigger-driven re-broadcasts report offline paired slots with
+    /// `false`, so a `0x41` alone is a slot report, not proof of liveness.
     pub online: bool,
     /// Wireless product ID of the device.
     pub wpid: u16,
@@ -362,8 +369,10 @@ pub struct DeviceConnection {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum Event {
-    /// Fired whenever a paired device connects or reconnects, and for all
-    /// online devices in response to [`Receiver::trigger_device_arrival`].
+    /// Fired whenever a paired device connects or reconnects, and for *every*
+    /// paired slot — offline ones included — in response to
+    /// [`Receiver::trigger_device_arrival`], with
+    /// [`DeviceConnection::online`] carrying the link status.
     DeviceConnection(DeviceConnection),
 }
 
