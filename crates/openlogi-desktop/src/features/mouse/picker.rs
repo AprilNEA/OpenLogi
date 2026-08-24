@@ -14,8 +14,8 @@ use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
-/// Cap for action lists hosted in a popover.
-pub(crate) const POPOVER_LIST_MAX_H: f32 = 360.;
+/// Height cap shared by compact inspector and editor lists.
+pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 
 /// Commit callback invoked when an action row is clicked.
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
@@ -111,14 +111,21 @@ pub(crate) fn action_rows_matching(
     pal: Palette,
 ) -> Vec<AnyElement> {
     let query = query.trim().to_lowercase();
-    let mut index = 0usize;
+    let mut catalog_index = 0usize;
     let mut children: Vec<AnyElement> = Vec::new();
     for (category, actions) in grouped_catalog() {
         let category_label = rust_i18n::t!(category.label());
         let category_matches = category_label.to_lowercase().contains(&query);
-        let actions: Vec<Action> = actions
+        // Number the full catalog before filtering so typing in the search box
+        // never changes an action row's element identity.
+        let actions: Vec<(usize, Action)> = actions
             .into_iter()
-            .filter(|action| {
+            .map(|action| {
+                let key = catalog_index;
+                catalog_index += 1;
+                (key, action)
+            })
+            .filter(|(_, action)| {
                 query.is_empty()
                     || category_matches
                     || rust_i18n::t!(action.label())
@@ -130,17 +137,15 @@ pub(crate) fn action_rows_matching(
         if actions.is_empty() {
             continue;
         }
-        children.push(popover_section(category_label.into_owned(), pal));
-        for action in actions {
+        children.push(editor_section(category_label.into_owned(), pal));
+        for (action_key, action) in actions {
             let selected = current == Some(&action);
             let label = tr!(action.label());
             let accessible_label = label.clone();
             let icon_path = action_icon_path(&action);
             let on_pick = on_pick.clone();
-            let row_id = index;
-            index += 1;
             children.push(
-                MenuRow::new((id_prefix, row_id))
+                MenuRow::new((id_prefix, action_key))
                     .selected(selected)
                     .role(Role::MenuItem)
                     .aria_label(accessible_label)
@@ -172,8 +177,8 @@ pub(crate) fn action_rows_matching(
     children
 }
 
-/// The shared floating-card surface for compact binding menus.
-pub(crate) fn menu_card(pal: Palette) -> gpui::Div {
+/// Shared card surface for compact binding panels and menus.
+pub(crate) fn compact_panel(pal: Palette) -> gpui::Div {
     v_flex()
         .bg(pal.panel)
         .border_1()
@@ -184,7 +189,7 @@ pub(crate) fn menu_card(pal: Palette) -> gpui::Div {
 }
 
 /// A group heading inset to line up with the rows under it.
-pub(crate) fn popover_section(label: impl Into<gpui::SharedString>, pal: Palette) -> AnyElement {
+pub(crate) fn editor_section(label: impl Into<gpui::SharedString>, pal: Palette) -> AnyElement {
     section_label(label, pal)
         .w_full()
         .px_2()
@@ -208,11 +213,11 @@ pub(crate) fn divider(pal: Palette) -> impl IntoElement {
     div().mb_1().h(px(1.)).w_full().bg(pal.border)
 }
 
-/// Height-capped scroll region for popover-hosted rows.
-pub(crate) fn scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
+/// Height-capped scroll region for compact editor rows.
+pub(crate) fn editor_scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
     div()
         .id(id)
-        .max_h(px(POPOVER_LIST_MAX_H))
+        .max_h(px(EDITOR_LIST_MAX_H))
         .overflow_y_scroll()
         .children(rows)
 }

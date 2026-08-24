@@ -39,6 +39,13 @@ pub const HEADER_H: f32 = 64.;
 pub const FOOTER_H: f32 = 40.;
 pub const DETAIL_RAIL_W: f32 = 168.;
 
+/// Maximum-width scale for detail-tab content.
+pub const CONTENT_W_SM: f32 = 560.;
+pub const CONTENT_W_MD: f32 = 680.;
+pub const CONTENT_W_LG: f32 = 920.;
+pub const CONTENT_W_XL: f32 = 980.;
+pub const CONTENT_W_2XL: f32 = 1040.;
+
 /// Semantic spacing tokens (px), so surfaces that must agree share one value
 /// instead of each call site hand-picking a `p_*` / `gap_*` step.
 ///

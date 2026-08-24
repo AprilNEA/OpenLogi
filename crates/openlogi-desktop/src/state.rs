@@ -221,7 +221,7 @@ pub struct AppState {
     light_command_status: Option<(DeviceKey, u64, LightCommandStatus)>,
     next_light_request_id: u64,
     /// The hotspot the user most recently armed by clicking. Drives the
-    /// "selected button" outline on the mouse model and the popover content.
+    /// "selected button" outline on the mouse model and inspector content.
     pub active_button: Option<ButtonId>,
     /// Everything the GUI knows about the agent connection — the last status
     /// snapshot, or why there isn't one. The render path branches on this
@@ -231,11 +231,13 @@ pub struct AppState {
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction sub-bindings for every gesture-mode button of the current
-    /// device, keyed by button. Edited via each button's gesture menu and
-    /// persisted as that button's [`Binding::Gesture`] entry in the device's
-    /// unified binding map ([`DeviceConfig::bindings`]). Rebuilt by
-    /// [`Self::current_gesture_maps`].
+    /// Cached per-direction sub-bindings for every gesture-mode button of the
+    /// current device's global profile, keyed by button. The cache remains
+    /// populated while editing a per-app profile so the inspector can describe
+    /// inherited gestures without rebuilding the maps during rendering. Edited
+    /// via each button's gesture menu and persisted as that button's
+    /// [`Binding::Gesture`] entry in the device's unified binding map
+    /// ([`DeviceConfig::bindings`]).
     ///
     /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -394,7 +396,7 @@ impl AppState {
             state.persist_config("device identity");
         }
         state.button_bindings = state.bindings_for_current();
-        state.gesture_bindings = state.current_gesture_maps();
+        state.gesture_bindings = state.device_gesture_maps();
         // Keyboard bindings are global, so they seed straight from the config
         // map — no per-device resolution like mouse bindings above.
         state.keyboard_bindings = state
@@ -461,7 +463,7 @@ impl AppState {
     fn restore_persisted_config(&mut self) {
         self.config.clone_from(&self.persisted_config);
         self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.current_gesture_maps();
+        self.gesture_bindings = self.device_gesture_maps();
         self.keyboard_bindings = self.config.keyboard.bindings.clone();
         if let Some(dpi) = self
             .current_record()
@@ -551,7 +553,7 @@ impl AppState {
             )
             .map(|(app, device_key)| EditingScope { device_key, app });
         self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.current_gesture_maps();
+        self.gesture_bindings = self.device_gesture_maps();
     }
 
     /// Whether the active device can carry saved configuration at all. A

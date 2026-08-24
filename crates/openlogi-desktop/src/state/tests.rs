@@ -331,6 +331,10 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
 
     state.set_editing_app(Some("com.apple.Safari".into()));
     assert!(state.current_gesture_maps().is_empty());
+    assert_eq!(
+        state.gesture_bindings, global,
+        "the inspector cache keeps inherited gestures while per-app editing hides their controls"
+    );
     // The device still has its gestures — only the open profile cannot show
     // them, which is what the device card must keep reporting.
     assert_eq!(

@@ -56,7 +56,7 @@ pub(super) fn home_header(pal: Palette) -> impl IntoElement {
 const GALLERY_GAP: f32 = 24.;
 
 /// The Home device list: an equal-size, horizontally scrollable row of device
-/// cards (Logi Options+ style), via [`Carousel`]'s `uniform` mode. Each card
+/// cards (Logi Options+ style), via [`Carousel`]. Each card
 /// floats the device photo on the window background above its name and battery;
 /// the row centres while the cards fit the viewport and scrolls once they don't.
 /// Clicking a card opens its detail screen and makes it the active device.
@@ -75,18 +75,13 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
 
     v_flex().flex_1().w_full().min_h_0().child(
-        Carousel::new("device-carousel")
+        Carousel::new("device-carousel", px(theme::GALLERY_CARD_W))
             .len(len)
             .selected(active_idx)
-            .uniform(px(theme::GALLERY_CARD_W))
             .gap(px(GALLERY_GAP))
             // The arrows stay: they are the only tab-focusable control that
             // moves the selection (and the row scrolls to the selected card),
-            // so they are the keyboard path to off-screen devices. The dots go:
-            // they duplicate the scroll position and, as plain divs, were never
-            // keyboard-operable anyway.
-            .indicators(false)
-            .accent(rgb(theme::ACCENT_BLUE).into())
+            // so they are the keyboard path to off-screen devices.
             .render_item(move |idx, focused, _window, cx| {
                 let pal = theme::palette(cx);
                 let Some(record) = AppState::try_global(cx)

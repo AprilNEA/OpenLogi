@@ -40,7 +40,8 @@ use super::editors::{
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::mouse::picker::{
-    PickFn, action_icon_path, action_rows, divider, menu_card, popover_section, scroll_list,
+    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
+    editor_section,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceRecord, StateEvent};
@@ -238,32 +239,21 @@ impl FunctionRowView {
     }
 }
 
-/// The app-state slice the view renders from: the device's asset, the global
-/// keyboard bindings, and the lighting glow (geometry + tinted colour).
-type StateSnapshot = (
-    Option<ResolvedAsset>,
-    Vec<(KeyTrigger, Action)>,
-    Option<(Arc<GlowGeometry>, Hsla)>,
-);
-
 impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (asset, bindings, glow): StateSnapshot = AppState::try_read(cx)
-            .map(|s| {
-                (
-                    s.current_record().and_then(|r| r.asset.clone()),
-                    s.keyboard_bindings
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                    s.current_record().and_then(|r| keyboard_glow(s, r)),
-                )
-            })
-            .unwrap_or_default();
+        let state = AppState::try_read(cx);
+        let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
+        let bindings = state.map(|state| &state.keyboard_bindings);
+        let glow = state.and_then(|state| {
+            state
+                .current_record()
+                .and_then(|record| keyboard_glow(state, record))
+        });
 
         let viewport_h = f32::from(window.viewport_size().height);
-        let render_size = keyboard_render_size(asset.as_ref(), viewport_h);
-        let points = key_points(asset.as_ref());
+        let render_size = keyboard_render_size(asset, viewport_h);
+        let points = key_points(asset);
+        let image_path = asset.map(|asset| asset.image_path.clone());
         let slots: Vec<KeySlot> = FUNCTION_KEYS
             .iter()
             .zip(points.iter())
@@ -273,17 +263,15 @@ impl Render for FunctionRowView {
                     keycode: *keycode,
                     modifiers: KeyModifiers::default(),
                 };
-                let bound = bindings
-                    .iter()
-                    .find(|(k, _)| *k == trigger)
-                    .map(|(_, a)| a.clone());
+                let bound = bindings.and_then(|bindings| bindings.get(&trigger));
                 KeySlot {
                     idx,
                     label,
                     trigger,
                     x_frac: point.x_frac,
                     y_frac: point.y_frac,
-                    bound,
+                    binding: binding_label(bound),
+                    binding_icon: bound.map(action_icon_path),
                 }
             })
             .collect();
@@ -302,10 +290,7 @@ impl Render for FunctionRowView {
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
-            let current_action = bindings
-                .iter()
-                .find(|(trigger, _)| trigger == &slot.trigger)
-                .map(|(_, action)| action);
+            let current_action = bindings.and_then(|bindings| bindings.get(&slot.trigger));
             match kind {
                 PowerUserKind::Workflow => {
                     if self.workflow_draft.is_empty() {
@@ -325,9 +310,10 @@ impl Render for FunctionRowView {
             }
         }
         let view = cx.entity();
-        let keyboard = KeyboardPane::new(slots.clone(), asset, glow, render_size, view.clone())
-            .selected(selected)
-            .hovered(hovered);
+        let keyboard =
+            KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
+                .selected(selected)
+                .hovered(hovered);
         let panel = selected.map(|selected| self.config_panel(selected, &slots, &view, cx));
 
         // The whole row animates as one: when a key is selected the right-side
@@ -360,7 +346,8 @@ struct KeySlot {
     trigger: KeyTrigger,
     x_frac: f32,
     y_frac: f32,
-    bound: Option<Action>,
+    binding: gpui::SharedString,
+    binding_icon: Option<&'static str>,
 }
 
 /// The two-pane row: keyboard photo + an optional side panel.
@@ -419,7 +406,7 @@ impl RenderOnce for InspectorRow {
 #[derive(IntoElement)]
 struct KeyboardPane {
     slots: Vec<KeySlot>,
-    asset: Option<ResolvedAsset>,
+    image_path: Option<std::path::PathBuf>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     render_size: (f32, f32),
     selected: Option<usize>,
@@ -430,14 +417,14 @@ struct KeyboardPane {
 impl KeyboardPane {
     fn new(
         slots: Vec<KeySlot>,
-        asset: Option<ResolvedAsset>,
+        image_path: Option<std::path::PathBuf>,
         glow: Option<(Arc<GlowGeometry>, Hsla)>,
         render_size: (f32, f32),
         view: Entity<FunctionRowView>,
     ) -> Self {
         Self {
             slots,
-            asset,
+            image_path,
             glow,
             render_size,
             selected: None,
@@ -462,7 +449,7 @@ impl KeyboardPane {
 impl RenderOnce for KeyboardPane {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (img_w, img_h) = self.render_size;
-        let img_path = self.asset.map(|asset| asset.image_path);
+        let img_path = self.image_path;
         let view_clone = self.view;
         let selected = self.selected;
         let hovered = self.hovered;
@@ -532,8 +519,8 @@ fn key_callout(
     let top = callout_top_px(idx);
     let view_hover = view.clone();
     let view_click = view.clone();
-    let binding = binding_label(slot.bound.as_ref());
-    let binding_icon = slot.bound.as_ref().map(action_icon_path);
+    let binding = slot.binding;
+    let binding_icon = slot.binding_icon;
 
     v_flex()
         .id(("key-callout", idx))
@@ -834,12 +821,12 @@ impl FunctionRowView {
 
         let rows = panel_action_rows(current.as_ref(), &on_pick, view, &pal);
 
-        menu_card(pal)
+        compact_panel(pal)
             .w(px(PANEL_W))
             .max_h(px(500.))
             .child(title_header(&key_name, &pal))
             .child(divider(pal))
-            .child(scroll_list("key-panel-scroll", rows))
+            .child(editor_scroll_list("key-panel-scroll", rows))
             .into_any_element()
     }
 }
@@ -869,7 +856,7 @@ fn panel_action_rows(
     pal: &Palette,
 ) -> Vec<AnyElement> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
-    children.push(popover_section(tr!("Power User").to_string(), *pal));
+    children.push(editor_section(tr!("Power User").to_string(), *pal));
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (

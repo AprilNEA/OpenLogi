@@ -1,6 +1,6 @@
 //! Mouse, gesture, and keyboard binding commits.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use gpui::App;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
@@ -135,21 +135,16 @@ impl AppState {
         self.persist_and_reload("per-app profile");
     }
 
-    /// The buttons the open per-app profile overrides, so the panel can tell an
-    /// override apart from a binding inherited from the global profile. Empty
-    /// in the global profile, where there is nothing to distinguish.
+    /// The open per-app profile's overrides, so the panel can tell an override
+    /// apart from a binding inherited from the global profile. `None` in the
+    /// global profile, where there is nothing to distinguish.
     #[must_use]
-    pub fn editing_app_overrides(&self) -> BTreeSet<ButtonId> {
-        let Some(key) = self
+    pub fn editing_app_overrides(&self) -> Option<&BTreeMap<ButtonId, Action>> {
+        let key = self
             .current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-        else {
-            return BTreeSet::new();
-        };
+            .and_then(DeviceRecord::persistent_config_key)?;
         self.editing_app()
             .and_then(|app| self.config.per_app_overrides(key, app))
-            .map(|overrides| overrides.keys().copied().collect())
-            .unwrap_or_default()
     }
 
     /// Apply one paired thumb-wheel preset atomically. Both directional
@@ -249,6 +244,7 @@ impl AppState {
     /// in that app. Offering the gesture menu instead would edit the global
     /// profile from a screen labelled with an application.
     #[must_use]
+    #[cfg(test)]
     pub fn current_gesture_maps(&self) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
         if self.editing_app().is_some() {
             return BTreeMap::new();
@@ -282,7 +278,7 @@ impl AppState {
         self.config.set_gesture_mode(&key, button, enabled);
         // The mode change shuffles bindings between the single + gesture maps.
         self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.current_gesture_maps();
+        self.gesture_bindings = self.device_gesture_maps();
         self.persist_and_reload("gesture-mode change");
     }
 

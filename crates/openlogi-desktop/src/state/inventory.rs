@@ -126,7 +126,7 @@ impl AppState {
         // tracks the now-current device rather than the old one.
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.current_gesture_maps();
+        self.gesture_bindings = self.device_gesture_maps();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
         true
@@ -298,7 +298,7 @@ impl AppState {
         // device's number until a fresh read lands.
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.current_gesture_maps();
+        self.gesture_bindings = self.device_gesture_maps();
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)

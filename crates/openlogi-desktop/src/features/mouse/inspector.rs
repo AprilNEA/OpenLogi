@@ -1,6 +1,6 @@
 //! Fixed binding inspector for the Buttons workspace.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -20,7 +20,7 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 
 use super::hotspots::MouseControlId;
 use super::picker::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, popover_section,
+    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::{MouseModelView, localized_action_label};
@@ -38,7 +38,7 @@ pub(super) struct BindingInspectorData<'a> {
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub editing_app: Option<&'a str>,
-    pub overridden: &'a BTreeSet<ButtonId>,
+    pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,7 +53,7 @@ pub(super) fn binding_inspector(
     action_search: &Entity<InputState>,
     view: &Entity<MouseModelView>,
     pal: Palette,
-    cx: &mut Context<MouseModelView>,
+    cx: &Context<MouseModelView>,
 ) -> AnyElement {
     let picker = ActionPickerContext {
         open: data.action_picker_open,
@@ -61,7 +61,11 @@ pub(super) fn binding_inspector(
         view,
     };
     let body = match data.selected {
-        None => empty_inspector(data.editing_app, data.overridden.len(), pal),
+        None => empty_inspector(
+            data.editing_app,
+            data.overridden.map_or(0, BTreeMap::len),
+            pal,
+        ),
         Some(MouseControlId::ThumbwheelRotation) => thumbwheel_inspector(
             data.bindings,
             data.editing_app,
@@ -121,10 +125,12 @@ fn button_inspector(
     data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-    cx: &mut Context<MouseModelView>,
+    cx: &Context<MouseModelView>,
 ) -> AnyElement {
     let gesture_map = data.gesture_maps.get(&button);
-    let overridden = data.overridden.contains(&button);
+    let overridden = data
+        .overridden
+        .is_some_and(|overrides| overrides.contains_key(&button));
     if data.editing_app.is_none()
         && let Some(gesture_map) = gesture_map
     {
@@ -225,7 +231,7 @@ fn inherited_gesture_inspector(
     app: &str,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-    cx: &mut Context<MouseModelView>,
+    cx: &Context<MouseModelView>,
 ) -> AnyElement {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -280,7 +286,7 @@ fn gesture_inspector(
     selected_direction: Option<GestureDirection>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-    cx: &mut Context<MouseModelView>,
+    cx: &Context<MouseModelView>,
 ) -> AnyElement {
     let direction = selected_direction.unwrap_or(GestureDirection::Click);
     let current = gesture_action(gesture_map, button, direction);
@@ -348,7 +354,7 @@ fn gesture_directions(
 ) -> AnyElement {
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Direction"), pal))
+        .child(editor_section(tr!("Direction"), pal))
         .children(
             GestureDirection::ALL
                 .into_iter()
@@ -397,7 +403,7 @@ fn gesture_directions(
 fn thumbwheel_inspector(
     bindings: &BTreeMap<ButtonId, Action>,
     editing_app: Option<&str>,
-    overridden: &BTreeSet<ButtonId>,
+    overridden: Option<&BTreeMap<ButtonId, Action>>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
 ) -> AnyElement {
@@ -410,8 +416,10 @@ fn thumbwheel_inspector(
         .cloned()
         .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
     let current = ThumbwheelPreset::recognize(&backward, &forward);
-    let is_overridden = overridden.contains(&ButtonId::ThumbwheelScrollDown)
-        || overridden.contains(&ButtonId::ThumbwheelScrollUp);
+    let is_overridden = overridden.is_some_and(|overrides| {
+        overrides.contains_key(&ButtonId::ThumbwheelScrollDown)
+            || overrides.contains_key(&ButtonId::ThumbwheelScrollUp)
+    });
     let status = match (editing_app, is_overridden) {
         (Some(app), true) => tr!("Overridden in %{app}", app => app.to_string()),
         (Some(_), false) => tr!("Inherited from Default"),
@@ -436,7 +444,7 @@ fn thumbwheel_inspector(
             panel.child(
                 v_flex()
                     .gap_1()
-                    .child(popover_section(tr!("Preset"), pal))
+                    .child(editor_section(tr!("Preset"), pal))
                     .children(ThumbwheelPreset::ALL.into_iter().enumerate().map(
                         |(index, preset)| {
                             let selected = current == Some(preset);
@@ -629,7 +637,7 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(popover_section(tr!("Actions"), pal))
+        .child(editor_section(tr!("Actions"), pal))
         .child(Input::new(action_search).small().cleanable(true))
         .child(
             v_flex()

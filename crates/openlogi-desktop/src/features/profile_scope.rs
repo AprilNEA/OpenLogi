@@ -1,6 +1,6 @@
 //! Profile context bar for the Buttons workspace.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use gpui::{
@@ -20,7 +20,7 @@ use crate::state::AppState;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
-use super::mouse::picker::{divider, menu_card, title};
+use super::mouse::picker::{compact_panel, divider, title};
 
 const PROFILE_CONTROL_H: f32 = 30.;
 
@@ -132,7 +132,8 @@ pub(crate) fn profile_canvas_status(pal: Palette, cx: &App) -> Option<AnyElement
             .recent_app_name(app)
             .map_or_else(|| friendly_app_name(app), str::to_string)
     });
-    let summary = profile_summary(editing_app.as_deref(), state.editing_app_overrides().len());
+    let override_count = state.editing_app_overrides().map_or(0, BTreeMap::len);
+    let summary = profile_summary(editing_app.as_deref(), override_count);
     let active = state
         .active_profile_name()
         .map_or_else(|| tr!("Default"), gpui::SharedString::from);
@@ -361,7 +362,7 @@ fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
                 })
                 .collect::<Vec<_>>();
 
-            menu_card(pal)
+            compact_panel(pal)
                 .w(px(260.))
                 .child(title(tr!("Add app profile"), pal))
                 .child(divider(pal))
@@ -392,7 +393,7 @@ fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
         .content(move |_state, _window, cx| {
             let popover = cx.entity().downgrade();
             let profile = profile.clone();
-            menu_card(pal)
+            compact_panel(pal)
                 .w(px(224.))
                 .child(title(tr!("Profile options"), pal))
                 .child(divider(pal))

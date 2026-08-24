@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{
@@ -56,47 +56,61 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
-#[derive(Default)]
-struct MouseWorkspaceData {
-    device_key: Option<String>,
-    asset: Option<ResolvedAsset>,
+struct MouseWorkspaceData<'a> {
+    device_key: Option<&'a str>,
+    asset: Option<&'a ResolvedAsset>,
     active: Option<MouseControlId>,
-    bindings: BTreeMap<ButtonId, Action>,
-    gesture_maps: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    bindings: &'a BTreeMap<ButtonId, Action>,
+    gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
     editing_app: Option<String>,
-    overridden: BTreeSet<ButtonId>,
+    overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
 
-impl MouseWorkspaceData {
-    fn read(cx: &App) -> Self {
-        AppState::try_read(cx)
-            .map(|state| Self {
-                device_key: state
-                    .current_record()
-                    .map(|record| record.config_key.clone()),
-                asset: state
-                    .current_record()
-                    .and_then(|record| record.asset.clone()),
-                active: state.active_button.map(MouseControlId::from_active_button),
-                bindings: state.button_bindings.clone(),
-                gesture_maps: state.device_gesture_maps(),
-                glow: state
-                    .current_record()
-                    .and_then(|record| keyboard_glow(state, record)),
-                thumbwheel: state
-                    .current_record()
-                    .and_then(|record| record.capabilities)
-                    .is_some_and(|capabilities| capabilities.thumbwheel),
-                editing_app: state.editing_app().map(|app| {
-                    state
-                        .recent_app_name(app)
-                        .map_or_else(|| friendly_app_name(app), str::to_string)
-                }),
-                overridden: state.editing_app_overrides(),
-            })
-            .unwrap_or_default()
+impl<'a> MouseWorkspaceData<'a> {
+    fn read(cx: &'a App) -> Option<Self> {
+        AppState::try_read(cx).map(|state| Self {
+            device_key: state
+                .current_record()
+                .map(|record| record.config_key.as_str()),
+            asset: state
+                .current_record()
+                .and_then(|record| record.asset.as_ref()),
+            active: state.active_button.map(MouseControlId::from_active_button),
+            bindings: &state.button_bindings,
+            gesture_maps: &state.gesture_bindings,
+            glow: state
+                .current_record()
+                .and_then(|record| keyboard_glow(state, record)),
+            thumbwheel: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.thumbwheel),
+            editing_app: state.editing_app().map(|app| {
+                state
+                    .recent_app_name(app)
+                    .map_or_else(|| friendly_app_name(app), str::to_string)
+            }),
+            overridden: state.editing_app_overrides(),
+        })
+    }
+
+    fn empty(
+        bindings: &'a BTreeMap<ButtonId, Action>,
+        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    ) -> Self {
+        Self {
+            device_key: None,
+            asset: None,
+            active: None,
+            bindings,
+            gesture_maps,
+            glow: None,
+            thumbwheel: false,
+            editing_app: None,
+            overridden: None,
+        }
     }
 }
 
@@ -168,6 +182,17 @@ impl MouseModelView {
         self.action_picker_open = false;
     }
 
+    fn reset_for_device(&mut self, device_key: Option<&str>) {
+        if self.current_device_key.as_deref() == device_key {
+            return;
+        }
+        self.current_device_key = device_key.map(str::to_string);
+        self.hovered = None;
+        self.selected = None;
+        self.gesture_active_dir = None;
+        self.action_picker_open = false;
+    }
+
     fn select(&mut self, control: MouseControlId) {
         if self.selected != Some(control) {
             self.selected = Some(control);
@@ -201,6 +226,7 @@ fn set_control_hovered(
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
             asset,
@@ -211,20 +237,18 @@ impl Render for MouseModelView {
             thumbwheel,
             editing_app,
             overridden,
-        } = MouseWorkspaceData::read(cx);
+        } = MouseWorkspaceData::read(cx)
+            .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
 
-        if self.current_device_key != device_key {
-            self.current_device_key = device_key;
-            self.hovered = None;
-            self.selected = None;
-            self.gesture_active_dir = None;
-            self.action_picker_open = false;
-        }
+        self.reset_for_device(device_key);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
             .copied()
-            .filter(|button| editing_app.is_none() || !overridden.contains(button))
+            .filter(|button| {
+                editing_app.is_none()
+                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+            })
             .collect();
 
         let viewport_h = f32::from(window.viewport_size().height);
@@ -236,7 +260,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset.as_ref(), viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active);
@@ -248,7 +272,7 @@ impl Render for MouseModelView {
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset.as_ref(), mouse_left, mouse_w, mouse_h, pal, glow);
+        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, pal, glow);
         let hotspots_layer = hotspots_layer(
             &hotspots_outer,
             ModelRect {
@@ -268,7 +292,7 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, &bindings, &gesture_buttons);
+                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
                 label_control(
                     idx,
                     *label,
@@ -289,10 +313,10 @@ impl Render for MouseModelView {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
                 action_picker_open: self.action_picker_open,
-                bindings: &bindings,
-                gesture_maps: &gesture_maps,
+                bindings,
+                gesture_maps,
                 editing_app: editing_app.as_deref(),
-                overridden: &overridden,
+                overridden,
             },
             &self.action_search,
             &view,
@@ -651,7 +675,7 @@ impl RenderOnce for LabelTrigger {
                 .border_color(rgb(ACCENT_BLUE))
             })
             // Button name — the caption (xs / muted), the same size as the
-            // popover title and category headers it shares the binding flow with.
+            // inspector title and category headers it shares the binding flow with.
             .child(
                 div()
                     .text_caption()
@@ -947,7 +971,6 @@ mod tests {
                 )]),
             )]);
             let bindings = BTreeMap::new();
-            let overridden = BTreeSet::new();
             let entity = cx.entity();
 
             binding_inspector(
@@ -958,7 +981,7 @@ mod tests {
                     bindings: &bindings,
                     gesture_maps: &gesture_maps,
                     editing_app: None,
-                    overridden: &overridden,
+                    overridden: None,
                 },
                 &view.action_search,
                 &entity,

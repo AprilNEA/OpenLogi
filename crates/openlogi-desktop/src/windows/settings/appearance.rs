@@ -536,7 +536,7 @@ fn theme_card(
     let dark = mode.is_dark();
     let stored = name.clone();
     v_flex()
-        .id(SharedString::from(format!("theme-{index}")))
+        .id(("theme", index))
         .w(px(132.))
         .p(px(8.))
         .gap_2()
