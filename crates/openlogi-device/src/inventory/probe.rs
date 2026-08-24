@@ -549,7 +549,8 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
     out
 }
 
-/// `None` when the arrival trigger itself failed: unlike Bolt (whose paired
+/// `None` when the receiver could not be asked: the arrival trigger failed,
+/// or the notification-flag fallback write did. Unlike Bolt (whose paired
 /// list comes from the slot registers), the drain is the only Unifying device
 /// source, so the caller must treat that as a failed probe rather than an
 /// empty receiver.
