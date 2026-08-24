@@ -467,6 +467,28 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
     assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
 }
 
+#[test]
+fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
+    // The seed has to match the native behavior on both sides: the capture
+    // plan diverts a control only when its binding leaves the default, so any
+    // other seed would divert an untouched tilt and kill horizontal scroll.
+    assert_eq!(
+        default_binding(ButtonId::WheelTiltLeft),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::WheelTiltRight),
+        Action::HorizontalScrollRight
+    );
+    for tilt in [ButtonId::WheelTiltLeft, ButtonId::WheelTiltRight] {
+        assert!(ButtonId::ALL.contains(&tilt));
+        // A tilt reaches the host over HID++ diversion only: the OS hook sees
+        // a horizontal scroll, not a button, and it swipes nothing.
+        assert!(!tilt.is_os_hook_button());
+        assert!(!tilt.is_hidpp_gesture_source());
+    }
+}
+
 // ── Effect classification ─────────────────────────────────────────────────
 //
 // `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three

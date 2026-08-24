@@ -64,19 +64,31 @@ pub enum ButtonId {
     /// (Logi metadata slot `ASSIGNMENT_NAME_SHOW_RADIAL_MENU`, HID++ CID
     /// `0x01a0`). A separate physical control from [`ButtonId::GestureButton`];
     /// captured over HID++ like it, and eligible as the gesture owner.
+    HapticPanel,
+    /// Tilting the main wheel left — `0x1b04` CID `0x005b` ("Left Scroll"),
+    /// Logi metadata slot `SLOT_NAME_LEFT_SCROLL_BUTTON`. A distinct control
+    /// from the thumb wheel: it is a plain divertable button, not a rotation,
+    /// and it lives on the main wheel of mice like the MX Anywhere 2S.
+    WheelTiltLeft,
+    /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
+    /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
+    /// [`ButtonId::WheelTiltLeft`].
+    ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    HapticPanel,
+    WheelTiltRight,
 }
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
     /// trigger list.
-    pub const ALL: [ButtonId; 11] = [
+    pub const ALL: [ButtonId; 13] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
+        ButtonId::WheelTiltLeft,
+        ButtonId::WheelTiltRight,
         ButtonId::Back,
         ButtonId::Forward,
         ButtonId::DpiToggle,
@@ -135,6 +147,8 @@ impl ButtonId {
             ButtonId::LeftClick => "Left Click",
             ButtonId::RightClick => "Right Click",
             ButtonId::MiddleClick => "Middle Click",
+            ButtonId::WheelTiltLeft => "Tilt Left",
+            ButtonId::WheelTiltRight => "Tilt Right",
             ButtonId::Back => "Back",
             ButtonId::Forward => "Forward",
             ButtonId::DpiToggle => "DPI Toggle",
