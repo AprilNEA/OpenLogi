@@ -49,7 +49,7 @@ impl Config {
     ///
     /// Prefers the device's own identity — that is the whole point of the
     /// schema-5 model — but only once the settings are actually there. A
-    /// `receiver:`/`raw:` entry is not renamed by the schema-4→5 migration
+    /// `receiver:`/`raw:` entry is not renamed by the load-time migration
     /// (nothing on disk says which device occupies a pairing slot), so
     /// immediately after an upgrade every such device's settings still live
     /// under its route-derived key while its identity key holds nothing.
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn settings_still_under_the_pre_upgrade_key_are_read_from_it() {
-        // The upgrade path the agent lives through: the schema-4→5 migration
+        // The upgrade path the agent lives through: the load-time migration
         // deliberately leaves `receiver:` keys alone, and only the GUI folds
         // them. Answering with `unit:6be9d300` here would hand the agent an
         // empty entry, so every receiver-paired device would silently revert
@@ -503,7 +503,7 @@ mod tests {
         // which only works because a Bolt/RawHid/Unknown route key *is* the
         // key such an entry was written under. A Direct route key deliberately
         // is not: its identity moved into the entry key, which is exactly why
-        // the schema-4→5 migration can rename direct entries at load and
+        // the load-time migration can rename direct entries and
         // cannot rename the others. Three doc comments say so; this asserts it.
         for stable in [on_receiver(), litra()] {
             let physical = stable.physical_key().expect("physical");

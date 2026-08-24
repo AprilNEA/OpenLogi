@@ -266,10 +266,11 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 3 {
         config.migrate_owner_locked_gestures();
     }
-    // Through v5, not v4: v5 was the `ui_scale` bump, which left device keys
-    // exactly as v4 wrote them. Gating on v4 here would leave every config a
-    // v5 build had touched holding transport-scoped keys forever.
-    if header.schema_version <= 5 {
+    // v5 is the schema this change is part of, so every *released* schema —
+    // v4 and below — is what needs the rename. A file already declaring v5 was
+    // written by an unpublished build of this branch and is not something users
+    // have on disk.
+    if header.schema_version <= 4 {
         config.migrate_transport_scoped_keys();
     }
     config.schema_version = SCHEMA_VERSION;

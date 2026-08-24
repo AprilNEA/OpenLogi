@@ -516,7 +516,10 @@ fn human_readable_toml_layout() {
     // The key only contains [A-Za-z0-9_], so TOML emits it as a bare-word
     // table key (no surrounding quotes). The test asserts the observable
     // structure rather than locking in a specific quoting.
-    assert!(body.contains("schema_version = 5"), "got: {body}");
+    assert!(
+        body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+        "got: {body}"
+    );
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     // A `Single` binding serializes byte-identically to the pre-v2 bare
     // `Action`, so the leaf line is unchanged.
@@ -1028,7 +1031,10 @@ Click = \"Paste\"
     // Saving self-heals to the current shape: stamped version + merged table,
     // legacy field names gone.
     let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(body.contains("schema_version = 5"), "got: {body}");
+    assert!(
+        body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+        "got: {body}"
+    );
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     assert!(!body.contains("button_bindings"), "got: {body}");
     assert!(!body.contains("gesture_bindings"), "got: {body}");
@@ -1877,7 +1883,7 @@ fn a_failed_backup_write_leaves_the_migration_backup_still_owed() {
     // The pre-migration file is the user's only recovery path from a
     // key-rewriting migration. If the backup write fails — full disk,
     // read-only directory — and the debt is cleared anyway, the next save
-    // that *does* succeed overwrites the v4 file with v5 content and no copy
+    // that *does* succeed overwrites the v4 file with migrated content and no copy
     // ever exists.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");

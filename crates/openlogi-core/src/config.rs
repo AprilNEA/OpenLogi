@@ -49,7 +49,7 @@ use settings::GestureOwner;
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v6 drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
+/// v5 also drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
 /// names the mouse *and the cable it was plugged into*, so a device moved to a
 /// different route was silently orphaned from its settings.
 /// [`Config::migrate_transport_scoped_keys`] rewrites such a key to its bare
@@ -84,7 +84,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
