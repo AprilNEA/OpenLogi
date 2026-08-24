@@ -6,8 +6,8 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonGroup},
+    IconName, Sizable as _,
+    button::{Toggle, ToggleVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
     v_flex,
@@ -26,47 +26,48 @@ use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
     view: gpui::Entity<AppView>,
-) -> ButtonGroup {
-    let modes = [
-        DeviceViewMode::Grid,
-        DeviceViewMode::List,
-        DeviceViewMode::Carousel,
-    ];
-    ButtonGroup::new("device-view-mode")
-        .compact()
-        .outline()
-        .small()
-        .child(
-            Button::new("device-view-grid")
-                .icon(IconName::LayoutDashboard)
-                .label(tr!("Grid"))
-                .tooltip(tr!("Grid"))
-                .selected(current == DeviceViewMode::Grid),
-        )
-        .child(
-            Button::new("device-view-list")
-                .icon(IconName::Menu)
-                .label(tr!("List"))
-                .tooltip(tr!("List"))
-                .selected(current == DeviceViewMode::List),
-        )
-        .child(
-            Button::new("device-view-carousel")
-                .icon(IconName::GalleryVerticalEnd)
-                .label(tr!("Carousel"))
-                .tooltip(tr!("Carousel"))
-                .selected(current == DeviceViewMode::Carousel),
-        )
-        .on_click(move |indices, _, cx| {
-            let Some(&mode) = indices.first().and_then(|index| modes.get(*index)) else {
-                return;
-            };
-            AppState::update(cx, |state, cx| {
-                state.set_device_view_mode(mode);
-                cx.emit(StateEvent::SettingsChanged);
-            });
-            view.update(cx, |_, cx| cx.notify());
-        })
+) -> impl IntoElement {
+    let toggle =
+        move |id: &'static str, icon: IconName, tooltip: SharedString, mode: DeviceViewMode| {
+            let view = view.clone();
+            Toggle::new(id)
+                .icon(icon)
+                .tooltip(tooltip)
+                .checked(current == mode)
+                .outline()
+                .small()
+                .on_click(move |checked, _, cx| {
+                    if !checked {
+                        return;
+                    }
+                    AppState::update(cx, |state, cx| {
+                        state.set_device_view_mode(mode);
+                        cx.emit(StateEvent::SettingsChanged);
+                    });
+                    view.update(cx, |_, cx| cx.notify());
+                })
+        };
+
+    h_flex().gap_1().children([
+        toggle(
+            "device-view-grid",
+            IconName::LayoutDashboard,
+            tr!("Grid"),
+            DeviceViewMode::Grid,
+        ),
+        toggle(
+            "device-view-list",
+            IconName::Menu,
+            tr!("List"),
+            DeviceViewMode::List,
+        ),
+        toggle(
+            "device-view-carousel",
+            IconName::GalleryVerticalEnd,
+            tr!("Carousel"),
+            DeviceViewMode::Carousel,
+        ),
+    ])
 }
 
 /// Gap between gallery cards, in pixels.
