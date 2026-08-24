@@ -211,6 +211,11 @@ pub struct AppState {
     editing_scope: Option<EditingScope>,
     /// Aggregate host-camera activity reported by the agent. Runtime only.
     camera_active: bool,
+    /// Camera-consent poll started by an in-app macOS prompt. The app-state
+    /// entity owns it because permission can resolve after the initiating view
+    /// or window closes; dropping the entity at process shutdown cancels it.
+    #[cfg(target_os = "macos")]
+    camera_permission_poll: Option<gpui::Task<()>>,
     /// Per-device UI state outside the persisted config and the lazily-loaded
     /// DPI/SmartShift reads ([`Self::reads`]) —
     /// manual camera-light overrides, volatile light settings, in-flight
@@ -366,6 +371,8 @@ impl AppState {
             foreground: ForegroundApps::default(),
             editing_scope: None,
             camera_active: false,
+            #[cfg(target_os = "macos")]
+            camera_permission_poll: None,
             device_ui: BTreeMap::new(),
             light_command_status: None,
             next_light_request_id: 0,
