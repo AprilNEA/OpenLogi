@@ -17,6 +17,7 @@
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
@@ -505,6 +506,18 @@ async fn arm_controls_into(
                 armed.button_cids.push((cid, button));
             }
         }
+
+        // Everything this session wants diverted is now diverted; anything
+        // else of ours that the device still reports as diverted is a leftover
+        // and has to be handed back, not merely left un-renewed.
+        let owned: BTreeSet<u16> = armed
+            .gesture_cids
+            .iter()
+            .copied()
+            .chain(armed.dpi_cids.iter().copied())
+            .chain(armed.button_cids.iter().map(|&(cid, _)| cid))
+            .collect();
+        release_unowned_diversions(&rc, &controls, &owned).await;
     }
 
     if spec.capture_thumbwheel
@@ -543,6 +556,88 @@ async fn arm_controls_into(
         armed.thumb = Some((tw, info.index, resolution));
     }
     Ok(())
+}
+
+/// The `0x1b04` controls OpenLogi ever diverts: the gesture sources, the
+/// DPI/ModeShift family, and the rebindable standard buttons. A control
+/// outside this set is none of OpenLogi's business — another application's
+/// diversion is left exactly as found.
+fn managed_cids() -> BTreeSet<u16> {
+    GESTURE_SOURCE_BUTTONS
+        .iter()
+        .map(|&(cid, _)| cid)
+        .chain(reprog_controls::DPI_MODE_SHIFT_CIDS)
+        .chain(DIVERTABLE_STANDARD_BUTTONS.iter().map(|&(cid, _)| cid))
+        .collect()
+}
+
+/// The controls this session deliberately leaves native: OpenLogi-managed,
+/// exposed by this device as divertable, and not in `owned`. Each is a
+/// candidate for [`release_unowned_diversions`].
+///
+/// Split out from the async walk so the ownership rule is unit-testable
+/// without a device on the other end of a channel.
+fn unowned_divertable_cids(
+    controls: &[reprog_controls::CtrlIdInfo],
+    owned: &BTreeSet<u16>,
+) -> Vec<u16> {
+    let managed = managed_cids();
+    controls
+        .iter()
+        .filter(|control| control.is_divertable())
+        .map(|control| control.cid)
+        .filter(|cid| managed.contains(cid) && !owned.contains(cid))
+        .collect()
+}
+
+/// Hand back every OpenLogi-managed control that this session does not own but
+/// the device still reports as diverted.
+///
+/// Diversion is volatile device state with no owner of its own: whoever set it
+/// last has to clear it, and an agent that died mid-session never does (nor
+/// does a Logi Options+ install that left its own behind). The arming loops
+/// above only ever touch the CIDs they divert, so a leftover diversion on a
+/// control the *current* config wants native used to survive every restart —
+/// the button then produces no OS event (it is diverted) and no HID++ one
+/// (nothing armed it): dead until the device sleeps or reconnects.
+///
+/// A button in gesture mode is exactly that case. Middle/Back/Forward swipes
+/// are detected by the OS hook, so `plan_for_device` deliberately keeps a
+/// gesture-mode button out of `spec.divert_buttons` — diverting it would
+/// starve the hook of the very press it must see. Moving a button that was
+/// diverted for a single action into gesture mode therefore has to *clear*
+/// that diversion; stopping renewal is not enough.
+///
+/// Costs one `getCidReporting` per unowned managed control the device exposes
+/// (at most a handful, once per arm) and only writes when one is actually
+/// diverted. Failures are logged, not propagated: a control that will not
+/// answer here is no reason to abort an otherwise healthy session.
+async fn release_unowned_diversions(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    owned: &BTreeSet<u16>,
+) {
+    for cid in unowned_divertable_cids(controls, owned) {
+        match rc.get_cid_reporting(cid).await {
+            Ok(reporting) if reporting.diverted => {
+                info!(cid, "releasing a diversion this session does not own");
+                restore(
+                    rc.set_cid_reporting_full(cid, undivert_change(reporting))
+                        .await
+                        .map(|_| ()),
+                    "unowned diversion",
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                debug!(
+                    cid,
+                    ?error,
+                    "could not read reporting while releasing diversions"
+                );
+            }
+        }
+    }
 }
 
 async fn arm_reprog_control(
