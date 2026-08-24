@@ -4,10 +4,11 @@ mod action_icons;
 mod editor;
 
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
     v_flex,
@@ -22,6 +23,7 @@ use crate::ui::theme::{self, Palette, Typography as _};
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
 pub struct ActionRingPanel {
+    focus_handle: FocusHandle,
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
@@ -46,12 +48,19 @@ impl ActionRingPanel {
             }
         });
         Self {
+            focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
             application_input: None,
             shortcut_input: None,
             library_scroll: ScrollHandle::new(),
             state_obs,
         }
+    }
+}
+
+impl Focusable for ActionRingPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -79,6 +88,8 @@ impl Render for ActionRingPanel {
         v_flex()
             .w_full()
             .gap_4()
+            .tab_group()
+            .track_focus(&self.focus_handle)
             .child(
                 v_flex()
                     .gap_1()
@@ -274,8 +285,8 @@ fn slot_button(
     let accessible_label = label.clone();
     let selected_view = view.clone();
 
-    div()
-        .id(("action-ring-slot", index))
+    BaseButton::new(("action-ring-slot", index))
+        .selected(selected)
         .absolute()
         .left(px(left))
         .top(px(top))
@@ -301,8 +312,7 @@ fn slot_button(
             pal.text_muted
         })
         .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(accessible_label)
+        .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .when_some(icon_path, |button, path| {
             button.child(svg().path(path).size(px(20.0)).text_color(if selected {
@@ -320,6 +330,15 @@ fn slot_button(
             } else {
                 pal.control_hover
             })
+        })
+        .focus_visible(move |button| {
+            button
+                .border_color(rgb(theme::ACCENT_BLUE))
+                .bg(if selected {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
         })
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {

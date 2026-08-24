@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Role,
-    SharedString, StatefulInteractiveElement as _, Styled, canvas, div, fill, img, point,
+    AnyElement, Context, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement as _, Styled, canvas, div, fill, img, point,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName,
     button::{Button, ButtonVariants as _},
@@ -116,14 +117,15 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     light_settings,
                     pal,
                 )
-                .id(("device-card", idx))
                 .active(gpui::Styled::shadow_2xs)
-                .role(Role::Button)
-                .aria_label(record.display_name.clone())
+                .accessibility_label(record.display_name.clone())
                 .aria_description(device_accessibility_description(&record))
                 .aria_selected(focused)
                 .cursor_pointer()
                 .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+                .focus_visible(move |s| {
+                    s.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm()
+                })
                 .on_click(move |_, _, cx| {
                     view.update(cx, |this, cx| this.open_device(key.clone(), cx));
                 })
@@ -235,8 +237,8 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// bindings and DPI are live) keeps a persistent accent ring and faint fill;
 /// inactive cards gain the same ring on hover. A low resting shadow strengthens
 /// on hover and settles on press. The 1px border is always reserved so the hover
-/// ring never nudges the layout. Returns a bare [`Div`] so the gallery can wire
-/// the hover and click handlers.
+/// ring never nudges the layout. Returns an unstyled semantic button so the
+/// gallery can add its activation handler without giving up keyboard behavior.
 fn device_card(
     record: &DeviceRecord,
     enabled: bool,
@@ -245,7 +247,7 @@ fn device_card(
     light_enabled: bool,
     light_settings: LightSettings,
     pal: Palette,
-) -> Div {
+) -> BaseButton {
     // Disabled devices get a persistent red ring; active managed devices keep
     // the accent ring; otherwise transparent until hover (wired by the gallery).
     let ring = if !enabled {
@@ -255,9 +257,11 @@ fn device_card(
     } else {
         gpui::transparent_black()
     };
-    v_flex()
+    BaseButton::new(format!("device-card-{}", record.config_key))
         .w(px(theme::GALLERY_CARD_W))
         .flex_shrink_0()
+        .flex()
+        .flex_col()
         .items_center()
         .gap_3()
         .p_3()

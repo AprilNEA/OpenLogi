@@ -144,7 +144,6 @@ pub(crate) fn action_rows_matching(
                     .selected(selected)
                     .role(Role::MenuItem)
                     .aria_label(accessible_label)
-                    .aria_selected(selected)
                     .child(
                         h_flex()
                             .items_center()

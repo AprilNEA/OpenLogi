@@ -7,6 +7,7 @@ use gpui::{
     AnyElement, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::Button,
@@ -359,7 +360,6 @@ fn gesture_directions(
                     MenuRow::new(("inspector-direction", index))
                         .selected(selected)
                         .role(Role::Button)
-                        .aria_selected(selected)
                         .child(
                             v_flex()
                                 .min_w_0()
@@ -444,7 +444,6 @@ fn thumbwheel_inspector(
                             MenuRow::new(("inspector-thumbwheel", index))
                                 .selected(selected)
                                 .role(Role::Button)
-                                .aria_selected(selected)
                                 .child(
                                     h_flex()
                                         .items_center()
@@ -554,11 +553,11 @@ fn selection_card(
     let search = picker.search.clone();
     let opening = !picker.open;
     let accessible_label = value.clone();
-    v_flex()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(accessible_label)
+    BaseButton::new(id)
+        .accessibility_label(accessible_label)
         .aria_expanded(picker.open)
+        .flex()
+        .flex_col()
         .gap_2()
         .rounded(pal.control_radius)
         .border_1()
@@ -567,6 +566,7 @@ fn selection_card(
         .p_3()
         .cursor_pointer()
         .hover(move |card| card.bg(pal.control_hover))
+        .focus_visible(move |card| card.bg(pal.control_hover).border_color(rgb(ACCENT_BLUE)))
         .child(
             div()
                 .text_caption()

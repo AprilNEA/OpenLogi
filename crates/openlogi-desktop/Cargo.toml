@@ -28,6 +28,7 @@ tarpc = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
+gpui-base = { workspace = true }
 gpui-component-assets = { workspace = true }
 swr-core = { workspace = true }
 swr-gpui = { workspace = true }

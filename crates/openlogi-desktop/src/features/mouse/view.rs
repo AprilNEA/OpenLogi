@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, RenderOnce, Role, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, h_flex,
     input::{InputEvent, InputState},
-    v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -100,6 +101,7 @@ impl MouseWorkspaceData {
 
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
+    focus_handle: FocusHandle,
     current_device_key: Option<String>,
     hovered: Option<MouseControlId>,
     selected: Option<MouseControlId>,
@@ -139,6 +141,7 @@ impl MouseModelView {
             }
         });
         Self {
+            focus_handle: cx.focus_handle(),
             current_device_key: None,
             hovered: None,
             selected: None,
@@ -171,6 +174,28 @@ impl MouseModelView {
             self.action_picker_open = false;
         }
     }
+}
+
+impl Focusable for MouseModelView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+fn set_control_hovered(
+    view: &Entity<MouseModelView>,
+    control: MouseControlId,
+    hovered: bool,
+    cx: &mut App,
+) {
+    view.update(cx, |this, cx| {
+        if hovered {
+            this.hovered = Some(control);
+        } else if this.hovered == Some(control) {
+            this.hovered = None;
+        }
+        cx.notify();
+    });
 }
 
 impl Render for MouseModelView {
@@ -272,16 +297,22 @@ impl Render for MouseModelView {
             pal,
             cx,
         );
-        workspace_layout(canvas.into_any_element(), inspector)
+        workspace_layout(canvas.into_any_element(), inspector, &self.focus_handle)
     }
 }
 
-fn workspace_layout(canvas: AnyElement, inspector: AnyElement) -> AnyElement {
+fn workspace_layout(
+    canvas: AnyElement,
+    inspector: AnyElement,
+    focus_handle: &FocusHandle,
+) -> AnyElement {
     h_flex()
         .flex_1()
         .min_h_0()
         .w_full()
         .items_stretch()
+        .tab_group()
+        .track_focus(focus_handle)
         .child(
             div()
                 .flex_1()
@@ -563,12 +594,13 @@ impl RenderOnce for LabelTrigger {
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
         let button_name = tr!(self.label.id.label());
-        v_flex()
-            .id(self.id)
-            .role(Role::Button)
-            .aria_label(tr!("Bind %{name}", name => button_name.clone()))
+        BaseButton::new(self.id)
+            .selected(selected)
+            .accessibility_label(tr!("Bind %{name}", name => button_name.clone()))
             .aria_description(binding_description)
             .aria_selected(selected)
+            .flex()
+            .flex_col()
             .w(px(LABEL_W))
             .h(px(LABEL_H))
             .px_3()
@@ -593,6 +625,14 @@ impl RenderOnce for LabelTrigger {
                 } else {
                     pal.control_hover
                 })
+            })
+            .focus_visible(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+                .border_color(rgb(ACCENT_BLUE))
             })
             // Button name — the caption (xs / muted), the same size as the
             // popover title and category headers it shares the binding flow with.
@@ -646,15 +686,7 @@ impl RenderOnce for LabelTrigger {
                 });
             })
             .on_hover(move |hovered, _window, cx| {
-                let is_hovered = *hovered;
-                view.update(cx, |this, cx| {
-                    if is_hovered {
-                        this.hovered = Some(btn);
-                    } else if this.hovered == Some(btn) {
-                        this.hovered = None;
-                    }
-                    cx.notify();
-                });
+                set_control_hovered(&view, btn, *hovered, cx);
             })
     }
 }
@@ -810,10 +842,9 @@ impl RenderOnce for HotspotTrigger {
         let hotspot = self.hotspot;
         let btn = hotspot.id;
 
-        div()
-            .id(self.id)
-            .role(Role::Button)
-            .aria_label(tr!("Bind %{name}", name => tr!(btn.label())))
+        BaseButton::new(self.id)
+            .selected(selected)
+            .accessibility_label(tr!("Bind %{name}", name => tr!(btn.label())))
             .aria_selected(selected)
             .flex()
             .items_center()
@@ -837,6 +868,12 @@ impl RenderOnce for HotspotTrigger {
                         hsla(0., 0., 0.18, 0.85)
                     }),
             )
+            .focus_visible(|style| {
+                style
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(ACCENT_BLUE))
+            })
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);
@@ -844,15 +881,7 @@ impl RenderOnce for HotspotTrigger {
                 });
             })
             .on_hover(move |hovered, _window, cx| {
-                let is_hovered = *hovered;
-                view.update(cx, |this, cx| {
-                    if is_hovered {
-                        this.hovered = Some(btn);
-                    } else if this.hovered == Some(btn) {
-                        this.hovered = None;
-                    }
-                    cx.notify();
-                });
+                set_control_hovered(&view, btn, *hovered, cx);
             })
     }
 }

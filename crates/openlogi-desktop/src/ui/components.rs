@@ -6,9 +6,10 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    Window, div, prelude::FluentBuilder as _, px, rgb,
+    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Disableable, Icon, IconName, Selectable, Sizable, Size, h_flex, switch::Switch, v_flex,
 };
@@ -183,21 +184,41 @@ impl RenderOnce for PanelCard {
     }
 }
 
+type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
 /// A full-width row in an action menu.
 #[derive(IntoElement)]
 pub(crate) struct MenuRow {
-    base: Stateful<gpui::Div>,
+    base: BaseButton,
     selected: bool,
     children: Vec<AnyElement>,
+    on_click: Option<ClickHandler>,
 }
 
 impl MenuRow {
     pub(crate) fn new(id: impl Into<ElementId>) -> Self {
         Self {
-            base: h_flex().id(id),
+            base: BaseButton::new(id),
             selected: false,
             children: Vec::new(),
+            on_click: None,
         }
+    }
+
+    /// Set the accessibility role for this row's semantic button.
+    #[must_use]
+    pub(crate) fn role(mut self, role: Role) -> Self {
+        self.base = self.base.role(role);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(std::rc::Rc::new(handler));
+        self
     }
 }
 
@@ -231,7 +252,10 @@ impl RenderOnce for MenuRow {
         let pal = theme::palette(cx);
         let selected = self.selected;
         self.base
+            .selected(selected)
+            .aria_selected(selected)
             .w_full()
+            .flex()
             .items_center()
             .justify_between()
             .gap_2()
@@ -248,31 +272,50 @@ impl RenderOnce for MenuRow {
                     pal.control_hover
                 })
             })
+            .focus_visible(move |style| {
+                style.bg(if selected {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+            })
             .children(self.children)
+            .when_some(self.on_click, |row, handler| {
+                row.on_click(move |event, window, cx| handler(event, window, cx))
+            })
     }
 }
 
 /// A selectable camera-profile chip.
 #[derive(IntoElement)]
 pub(crate) struct ProfileTab {
-    base: Stateful<gpui::Div>,
+    base: BaseButton,
     label: SharedString,
     selected: bool,
     children: Vec<AnyElement>,
+    on_click: Option<ClickHandler>,
     delete: Option<(ElementId, ClickHandler)>,
 }
-
-type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 impl ProfileTab {
     pub(crate) fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         Self {
-            base: h_flex().id(id),
+            base: BaseButton::new(id).role(Role::Tab),
             label: label.into(),
             selected: false,
             children: Vec::new(),
+            on_click: None,
             delete: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(std::rc::Rc::new(handler));
+        self
     }
 
     #[must_use]
@@ -316,9 +359,14 @@ impl RenderOnce for ProfileTab {
         let pal = theme::palette(cx);
         let accent = rgb(ACCENT_BLUE);
         let has_delete = self.delete.is_some();
+        let label = self.label;
         self.base
+            .selected(self.selected)
+            .aria_selected(self.selected)
+            .accessibility_label(label.clone())
             .when(!has_delete, gpui::Styled::px_2)
             .when(has_delete, |tab| tab.pl_2().pr_1())
+            .flex()
             .py_0p5()
             .gap_1()
             .items_center()
@@ -347,16 +395,29 @@ impl RenderOnce for ProfileTab {
                     pal.control_hover
                 })
             })
-            .child(self.label)
+            .focus_visible(move |style| {
+                style
+                    .bg(if self.selected {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                    .border_color(accent)
+            })
+            .child(label.clone())
             .children(self.children)
+            .when_some(self.on_click, |tab, handler| {
+                tab.on_click(move |event, window, cx| handler(event, window, cx))
+            })
             .when_some(self.delete, |tab, (id, handler)| {
                 tab.child(
-                    div()
-                        .id(id)
+                    BaseButton::new(id)
+                        .accessibility_label(format!("{label} ×"))
                         .px_0p5()
                         .rounded_full()
                         .text_color(pal.text_muted)
                         .hover(|style| style.text_color(pal.text_primary))
+                        .focus_visible(|style| style.text_color(pal.text_primary))
                         .child("×")
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
@@ -423,5 +484,107 @@ impl RenderOnce for PresetChip {
                 })
             })
             .children(self.children)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext};
+
+    use super::*;
+
+    struct MenuRowHarness {
+        activations: Rc<Cell<usize>>,
+    }
+
+    impl Render for MenuRowHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let activations = self.activations.clone();
+            div().tab_group().size(px(100.)).child(
+                MenuRow::new("keyboard-menu-row")
+                    .role(Role::MenuItem)
+                    .child("Action")
+                    .on_click(move |_, _, _| activations.set(activations.get() + 1)),
+            )
+        }
+    }
+
+    struct ProfileTabHarness {
+        applications: Rc<Cell<usize>>,
+        deletions: Rc<Cell<usize>>,
+    }
+
+    impl Render for ProfileTabHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let applications = self.applications.clone();
+            let deletions = self.deletions.clone();
+            div().tab_group().size(px(100.)).child(
+                ProfileTab::new("keyboard-profile-tab", "Custom")
+                    .on_click(move |_, _, _| applications.set(applications.get() + 1))
+                    .on_delete("keyboard-profile-delete", move |_, _, _| {
+                        deletions.set(deletions.get() + 1);
+                    }),
+            )
+        }
+    }
+
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+    }
+
+    #[gpui::test]
+    fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let activations = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let activations = activations.clone();
+            move |_, _| MenuRowHarness { activations }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.update(Window::focus_next);
+        cx.update(|window, cx| assert!(window.focused(cx).is_some()));
+
+        activate_key(cx, "enter");
+        activate_key(cx, "space");
+
+        assert_eq!(activations.get(), 2);
+    }
+
+    #[gpui::test]
+    fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let applications = Rc::new(Cell::new(0));
+        let deletions = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let applications = applications.clone();
+            let deletions = deletions.clone();
+            move |_, _| ProfileTabHarness {
+                applications,
+                deletions,
+            }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        cx.update(Window::focus_next);
+        activate_key(cx, "enter");
+        assert_eq!(applications.get(), 1);
+        assert_eq!(deletions.get(), 0);
+
+        cx.update(Window::focus_next);
+        activate_key(cx, "space");
+        assert_eq!(applications.get(), 1);
+        assert_eq!(deletions.get(), 1);
     }
 }

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, point,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
@@ -913,6 +913,7 @@ fn panel_action_rows(
         children.push(
             MenuRow::new(format!("panel-power-{idx}"))
                 .selected(selected)
+                .role(Role::MenuItem)
                 .child(
                     h_flex()
                         .items_center()

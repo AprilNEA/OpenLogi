@@ -7,6 +7,7 @@ use gpui::{
     Anchor, AnyElement, App, Image, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
@@ -233,11 +234,14 @@ fn profile_tab(
     leading: Option<AnyElement>,
     selected: bool,
     pal: Palette,
-) -> gpui::Stateful<gpui::Div> {
-    h_flex()
-        .id(id)
+) -> BaseButton {
+    let label = label.into();
+    BaseButton::new(id)
         .role(Role::Tab)
+        .selected(selected)
+        .accessibility_label(label.clone())
         .aria_selected(selected)
+        .flex()
         .flex_none()
         .items_center()
         .gap_1p5()
@@ -255,8 +259,15 @@ fn profile_tab(
                 pal.control_hover
             })
         })
+        .focus_visible(move |tab| {
+            tab.bg(if selected {
+                theme::accent_tint_hover()
+            } else {
+                pal.control_hover
+            })
+        })
         .children(leading)
-        .child(label.into())
+        .child(label)
 }
 
 fn application_mark(icon: Option<Arc<Image>>, name: &str, pal: Palette) -> AnyElement {
@@ -324,6 +335,7 @@ fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
                     let app = choice.app.clone();
                     let popover = popover.clone();
                     MenuRow::new(("recent-app", index))
+                        .role(Role::MenuItem)
                         .child(
                             h_flex()
                                 .items_center()
@@ -379,6 +391,7 @@ fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
                 .child(divider(pal))
                 .child(
                     MenuRow::new("remove-profile")
+                        .role(Role::MenuItem)
                         .child(
                             h_flex()
                                 .items_center()

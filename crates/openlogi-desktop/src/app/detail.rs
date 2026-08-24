@@ -5,6 +5,7 @@ use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _,
     button::{Button, ButtonGroup},
@@ -198,11 +199,13 @@ fn detail_navigation(
         .p_3()
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
-            h_flex()
-                .id(("detail-navigation", index))
+            BaseButton::new(("detail-navigation", index))
                 .role(Role::Tab)
+                .selected(selected)
+                .accessibility_label(tab.label())
                 .aria_selected(selected)
                 .w_full()
+                .flex()
                 .items_center()
                 .gap_2p5()
                 .px_3()
@@ -217,6 +220,13 @@ fn detail_navigation(
                 })
                 .when(selected, |row| row.bg(crate::ui::theme::accent_tint()))
                 .hover(move |row| {
+                    row.bg(if selected {
+                        crate::ui::theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
+                .focus_visible(move |row| {
                     row.bg(if selected {
                         crate::ui::theme::accent_tint_hover()
                     } else {

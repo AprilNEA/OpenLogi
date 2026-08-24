@@ -20,7 +20,8 @@ use openlogi_core::binding::{
 use super::action_icons::action_icon_path;
 use crate::features::mouse::picker::popover_section;
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::components::MenuRow;
+use crate::ui::theme::{self, Palette, Typography as _};
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
@@ -228,22 +229,10 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
             let row_index = index;
             index += 1;
             rows.push(
-                h_flex()
-                    .id(("ring-action", row_index))
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(pal.control_radius)
-                    .text_body()
-                    .text_color(pal.text_primary)
-                    .selected_fill(selected)
+                MenuRow::new(("ring-action", row_index))
                     .role(Role::MenuItem)
                     .aria_label(label.clone())
-                    .aria_selected(selected)
-                    .cursor_pointer()
+                    .selected(selected)
                     .child(
                         h_flex()
                             .items_center()
@@ -263,13 +252,6 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                                 .size_3()
                                 .text_color(rgb(theme::ACCENT_BLUE)),
                         )
-                    })
-                    .hover(move |row| {
-                        row.bg(if selected {
-                            theme::accent_tint_hover()
-                        } else {
-                            pal.control_hover
-                        })
                     })
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);

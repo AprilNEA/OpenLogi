@@ -15,8 +15,7 @@
 )]
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, div, px, svg,
+    AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,

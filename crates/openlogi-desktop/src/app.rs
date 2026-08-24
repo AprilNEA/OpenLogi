@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
     StatefulInteractiveElement as _, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
@@ -13,7 +13,7 @@ use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
-use self::menu::{CloseWindow, Minimize, Zoom};
+use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
@@ -187,6 +187,12 @@ pub struct AppView {
     active_tab: DetailTab,
 }
 
+impl Focusable for AppView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl AppView {
     /// Construct the root view and its child entities.
     pub fn new(
@@ -335,9 +341,9 @@ impl AppView {
     /// Attach the window-level back-navigation listeners to `root`: a mouse
     /// configurator should honor the hardware it configures. Two routes reach
     /// us — the native navigate button (its default binding never diverts, so
-    /// the OS still sees it), and Alt+Left, which is both what a rebound
-    /// button's BrowserBack action injects on Linux and what keyboard users
-    /// expect.
+    /// the OS still sees it), and the contextual [`NavigateBack`] action, bound
+    /// to Alt+Left (what a rebound BrowserBack action injects on Linux and what
+    /// keyboard users expect).
     fn with_back_navigation(root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         root.on_mouse_down(
             MouseButton::Navigate(NavigationDirection::Back),
@@ -347,11 +353,8 @@ impl AppView {
                 }
             }),
         )
-        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-            if event.keystroke.modifiers.alt
-                && event.keystroke.key == "left"
-                && !matches!(this.route, Route::Home)
-            {
+        .on_action(cx.listener(|this, _: &NavigateBack, _, cx| {
+            if !matches!(this.route, Route::Home) {
                 this.go_home(cx);
             }
         }))
@@ -473,7 +476,9 @@ impl Render for AppView {
             .size_full()
             .bg(pal.page)
             .text_color(pal.text_primary)
+            .tab_group()
             .track_focus(&self.focus_handle)
+            .key_context(APP_KEY_CONTEXT)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

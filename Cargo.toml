@@ -90,6 +90,10 @@ block2 = "0.6.2"
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
+# The unstyled interaction primitives behind gpui-component. Desktop uses its
+# semantic Button for custom-painted controls that must retain native keyboard
+# and accessibility behavior without inheriting widget chrome.
+gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
 # Pinned to the same rev as gpui-component: this crate embeds the lucide SVGs
 # that the `IconName` enum is macro-generated from, so the two must agree.
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
