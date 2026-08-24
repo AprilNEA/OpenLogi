@@ -309,6 +309,27 @@ fn smartshift_only_reload_plans_no_wheel_mode_write() {
 }
 
 #[test]
+fn unchanged_wheel_reload_plans_recovery_write() {
+    let mut config = Config::default();
+    config.set_scroll_resolution("a", Some(ScrollResolution::Low));
+    config.set_invert_scroll("a", true);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+    let expected_route = device.route.clone().expect("test device has a route");
+
+    let plan = wheel_mode_reapply_plan(&config, &config, &[device]);
+
+    assert_eq!(
+        plan,
+        vec![(expected_route, Some(ScrollResolution::Low), Some(true))]
+    );
+}
+
+#[test]
 fn wheel_mode_reload_plans_the_updated_values() {
     let previous = Config::default();
     let mut updated = previous.clone();

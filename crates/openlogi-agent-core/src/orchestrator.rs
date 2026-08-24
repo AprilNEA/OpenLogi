@@ -584,14 +584,15 @@ impl Orchestrator {
         true
     }
 
-    /// Push native wheel resolution/inversion only where this config reload
-    /// changed the effective wheel settings.
+    /// Reconcile native wheel resolution/inversion after a config reload.
     ///
     /// Every persisted GUI edit reloads the whole config. Starting an unchanged
     /// wheel-mode transaction for a SmartShift-only edit makes that transaction
     /// race the explicit SmartShift write on the same HID writer; a slow wheel
-    /// read can then consume the SmartShift write and confirmation budgets.
-    fn apply_changed_native_wheel_modes(&self, previous_config: &Config) {
+    /// read can then consume the SmartShift write and confirmation budgets. An
+    /// ordinary reload still retries unchanged wheel settings so it can recover
+    /// from an earlier transient write failure while the device stayed online.
+    fn apply_reload_native_wheel_modes(&self, previous_config: &Config) {
         for (route, resolution, inverted) in
             wheel_mode_reapply_plan(previous_config, &self.config, &self.devices)
         {
@@ -760,7 +761,7 @@ impl Orchestrator {
             .retain(|key, _| retained_overrides.contains(key));
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
-        self.apply_changed_native_wheel_modes(&previous_config);
+        self.apply_reload_native_wheel_modes(&previous_config);
         self.apply_fn_locks();
         self.reapply_light_settings();
     }
@@ -821,6 +822,11 @@ fn configured_wheel_mode(
 
 /// Plan the native wheel writes required by a config reload. Returning data
 /// keeps change detection independent from thread spawning and device I/O.
+///
+/// An unchanged wheel configuration is normally retried: the preceding
+/// fire-and-forget write may have failed while the device was waking. The one
+/// exception is a SmartShift change for the same device, because the GUI follows
+/// that reload with an explicit SmartShift transaction on the shared writer.
 fn wheel_mode_reapply_plan(
     previous_config: &Config,
     config: &Config,
@@ -833,7 +839,9 @@ fn wheel_mode_reapply_plan(
             let route = device.route.clone()?;
             let previous = configured_wheel_mode(previous_config, device);
             let current = configured_wheel_mode(config, device);
-            (previous != current).then_some((route, current.0, current.1))
+            let smartshift_changed = previous_config.smartshift(&device.config_key)
+                != config.smartshift(&device.config_key);
+            (previous != current || !smartshift_changed).then_some((route, current.0, current.1))
         })
         .collect()
 }
