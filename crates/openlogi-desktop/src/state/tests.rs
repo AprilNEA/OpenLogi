@@ -730,6 +730,7 @@ fn known_offline_device_is_an_asset_sync_target() {
             codename: Some("MX Anywhere 3S".to_string()),
             driver_id: None,
             registry_model_id: None,
+            wpid: None,
         },
     );
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1254,6 +1255,7 @@ fn gesture_maps_cover_every_gesture_mode_button() {
             codename: None,
             driver_id: None,
             registry_model_id: None,
+            wpid: None,
         },
     );
     config.set_gesture_mode("2b042", ButtonId::Back, true);

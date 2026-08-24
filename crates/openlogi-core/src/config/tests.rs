@@ -531,6 +531,7 @@ fn device_identity_roundtrips_and_is_iterable() {
         light_capabilities: None,
         driver_id: None,
         registry_model_id: None,
+        wpid: None,
     };
     cfg.set_device_identity("2b034", mouse.clone());
     // Recording an identity must not disturb unrelated per-device state.
@@ -577,6 +578,7 @@ fn persisted_identity_strips_per_unit_identifiers() {
             light_capabilities: None,
             driver_id: None,
             registry_model_id: None,
+            wpid: None,
         },
     );
     let model = config
