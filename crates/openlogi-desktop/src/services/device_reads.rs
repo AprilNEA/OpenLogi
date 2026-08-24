@@ -181,12 +181,16 @@ impl DeviceReads {
         let load = project_load(query.read(cx), smartshift_error_is_permanent);
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
-            let load = project_load(query_state.read(cx), smartshift_error_is_permanent);
+            let query_state = query_state.read(cx);
+            let settled = smartshift_read_is_settled(query_state);
+            let load = project_load(query_state, smartshift_error_is_permanent);
             if state
                 .reads
                 .update_smartshift(&observed_key, generation, load)
             {
-                state.apply_smartshift_read(&observed_key, write_id);
+                if settled {
+                    state.apply_smartshift_read(&observed_key, write_id);
+                }
                 cx.emit(StateEvent::SmartShiftChanged(observed_key.clone()));
             }
         });
@@ -411,11 +415,17 @@ fn smartshift_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
+/// Stale data remains renderable while SWR revalidates, but only the settled
+/// snapshot represents the device-facing result of a confirmation read.
+fn smartshift_read_is_settled(state: &QueryState<Cached<SmartShiftStatus>, WriteError>) -> bool {
+    !state.is_validating
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use openlogi_core::hid::{Dpi, DpiCapabilities};
+    use openlogi_core::hid::{Dpi, DpiCapabilities, SmartShiftAutoDisengage, SmartShiftMode};
     use swr_core::{Fetcher as _, Instant, RuntimeFuture};
 
     use super::*;
@@ -522,6 +532,29 @@ mod tests {
             ),
             Load::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn validating_smartshift_data_is_visible_but_not_confirmed() {
+        let optimistic = Arc::new(SmartShiftStatus {
+            mode: SmartShiftMode::Ratchet,
+            auto_disengage: SmartShiftAutoDisengage::Permanent,
+            tunable_torque: None,
+        });
+        let validating = state(Some(Arc::new(Some(optimistic.clone()))), None, false, true);
+
+        assert_eq!(
+            project_load(&validating, smartshift_error_is_permanent),
+            Load::Ready(optimistic.clone()),
+            "the optimistic value stays visible while confirmation is in flight"
+        );
+        assert!(
+            !smartshift_read_is_settled(&validating),
+            "validating stale data is not a device confirmation"
+        );
+
+        let settled = state(Some(Arc::new(Some(optimistic))), None, false, false);
+        assert!(smartshift_read_is_settled(&settled));
     }
 
     #[tokio::test]
