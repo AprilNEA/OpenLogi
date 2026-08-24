@@ -11,7 +11,9 @@ use openlogi_core::device::DeviceKind;
 
 use super::AppView;
 use super::widgets::back_button;
-use crate::state::{AppState, HostSwitchTargetDevice, MonitorDiscovery, StateEvent};
+use crate::state::{
+    AppState, HostSwitchKeyboardDevice, HostSwitchTargetDevice, MonitorDiscovery, StateEvent,
+};
 use crate::ui::theme::{self, Palette, SCREEN_PAD, Typography as _};
 
 pub(super) fn monitor_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -100,7 +102,7 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let enabled = AppState::try_read(cx).is_none_or(AppState::host_monitor_enabled);
     let keyboard_name = AppState::try_read(cx)
         .and_then(AppState::host_switch_keyboard_name)
-        .unwrap_or_else(|| "当前键盘".to_string());
+        .unwrap_or_else(|| "未选择发起键盘".to_string());
     panel_card(
         "Easy-Switch 设置".into(),
         Icon::empty().path("action-icons/monitor.svg"),
@@ -113,6 +115,7 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     .text_color(pal.text_muted)
                     .child(format!("发起设备：{keyboard_name}。按这把键盘的 Easy-Switch 1 / 2 / 3 时，下面开启的设备会跟随切到同一个电脑。")),
             )
+            .child(keyboard_selector(pal, cx))
             .child(follow_devices_panel(pal, cx))
             .child(
                 h_flex()
@@ -146,7 +149,7 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                                 let enabled = *checked;
                                 AppState::update(cx, |state, cx| {
                                     state.set_host_monitor_enabled(enabled);
-                                    cx.emit(StateEvent::SettingsChanged);
+                                    cx.emit(StateEvent::MonitorChanged);
                                 });
                             }),
                     ),
@@ -154,6 +157,85 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             .child(logic_diagram(enabled, pal))
             .into_any_element(),
     )
+}
+
+fn keyboard_selector(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
+    let keyboards =
+        AppState::try_read(cx).map_or_else(Vec::new, AppState::host_switch_keyboard_devices);
+    v_flex()
+        .gap_2()
+        .child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_body()
+                                .text_color(pal.text_primary)
+                                .child("选择发起键盘"),
+                        )
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .child("多键盘时必须明确选择哪一把键盘的 Easy-Switch 负责这些绑定，避免写到错误设备。"),
+                        ),
+                )
+                .child(status_pill(format!("{} 把键盘", keyboards.len()), pal)),
+        )
+        .child(if keyboards.is_empty() {
+            div()
+                .p_3()
+                .rounded(pal.control_radius)
+                .border_1()
+                .border_color(pal.border)
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child("当前没有发现可配置的键盘。请先连接支持 Easy-Switch 的 Logitech 键盘。")
+                .into_any_element()
+        } else {
+            h_flex()
+                .gap_2()
+                .flex_wrap()
+                .children(
+                    keyboards
+                        .into_iter()
+                        .map(|keyboard| keyboard_choice(keyboard, pal).into_any_element()),
+                )
+                .into_any_element()
+        })
+        .into_any_element()
+}
+
+fn keyboard_choice(keyboard: HostSwitchKeyboardDevice, pal: Palette) -> impl IntoElement {
+    let key = keyboard.config_key.clone();
+    let button = Button::new(format!("host-switch-keyboard-{key}"))
+        .small()
+        .icon(Icon::empty().path("action-icons/keyboard.svg").size_3())
+        .label(format!(
+            "{} · {}",
+            keyboard.display_name,
+            if keyboard.online {
+                "已连接"
+            } else {
+                "离线"
+            }
+        ))
+        .tooltip("选择这把键盘作为 Easy-Switch 联动的发起设备")
+        .on_click(move |_, _, cx| {
+            AppState::update(cx, |state, cx| {
+                state.set_host_switch_keyboard_key(key.clone());
+                cx.emit(StateEvent::MonitorChanged);
+            });
+        });
+    if keyboard.selected {
+        button.primary()
+    } else {
+        button.outline().text_color(pal.text_muted)
+    }
 }
 
 fn follow_devices_panel(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
@@ -264,7 +346,7 @@ fn follow_device_row(device: HostSwitchTargetDevice, pal: Palette) -> impl IntoE
                     let enabled = *checked;
                     AppState::update(cx, |state, cx| {
                         state.set_host_switch_target_enabled(&key, enabled);
-                        cx.emit(StateEvent::SettingsChanged);
+                        cx.emit(StateEvent::MonitorChanged);
                     });
                 }),
         )
@@ -696,7 +778,7 @@ fn host_button(
         .on_click(move |_, _, cx| {
             AppState::update(cx, |state, cx| {
                 state.commit_host_monitor_input(host, monitor_id.clone(), input);
-                cx.emit(StateEvent::SettingsChanged);
+                cx.emit(StateEvent::MonitorChanged);
             });
         });
     if selected {

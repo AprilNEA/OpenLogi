@@ -249,6 +249,7 @@ impl AppView {
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
                 StateEvent::ForegroundChanged => !on_home,
+                StateEvent::MonitorChanged => matches!(view.route, Route::Monitors),
                 StateEvent::BindingsChanged(key) => {
                     !on_home
                         && matches!(
@@ -365,7 +366,7 @@ impl AppView {
         };
         AppState::update(cx, |state, cx| {
             state.set_monitor_loading();
-            cx.emit(StateEvent::SettingsChanged);
+            cx.emit(StateEvent::MonitorChanged);
         });
         let (tx, rx) = tokio::sync::oneshot::channel();
         if sender
@@ -374,7 +375,7 @@ impl AppView {
         {
             AppState::update(cx, |state, cx| {
                 state.store_monitors(Err("agent unavailable".into()));
-                cx.emit(StateEvent::SettingsChanged);
+                cx.emit(StateEvent::MonitorChanged);
             });
             return;
         }
@@ -387,7 +388,7 @@ impl AppView {
             cx.update(|cx| {
                 AppState::update(cx, |state, cx| {
                     state.store_monitors(result);
-                    cx.emit(StateEvent::SettingsChanged);
+                    cx.emit(StateEvent::MonitorChanged);
                 });
             });
         })
@@ -410,7 +411,7 @@ impl AppView {
         {
             AppState::update(cx, |state, cx| {
                 state.store_monitors(Err("agent unavailable".into()));
-                cx.emit(StateEvent::SettingsChanged);
+                cx.emit(StateEvent::MonitorChanged);
             });
             return;
         }
@@ -424,7 +425,7 @@ impl AppView {
                 cx.update(|cx| {
                     AppState::update(cx, |state, cx| {
                         state.store_monitors(Err(error));
-                        cx.emit(StateEvent::SettingsChanged);
+                        cx.emit(StateEvent::MonitorChanged);
                     });
                 });
                 return;

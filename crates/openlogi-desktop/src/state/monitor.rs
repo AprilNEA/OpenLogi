@@ -1,7 +1,7 @@
 use openlogi_core::config::MonitorInputAssignment;
 use openlogi_core::device::DeviceKind;
 
-use super::{AppState, HostSwitchTargetDevice, MonitorDiscovery};
+use super::{AppState, HostSwitchKeyboardDevice, HostSwitchTargetDevice, MonitorDiscovery};
 
 impl AppState {
     #[must_use]
@@ -62,6 +62,35 @@ impl AppState {
             return;
         }
         self.persist_and_reload("host-switch monitor enabled");
+    }
+
+    #[must_use]
+    pub fn host_switch_keyboard_devices(&self) -> Vec<HostSwitchKeyboardDevice> {
+        let selected = self.host_switch_keyboard_key();
+        self.devices()
+            .iter()
+            .filter(|record| record.kind == DeviceKind::Keyboard)
+            .filter_map(|record| {
+                let config_key = record.persistent_config_key()?.to_string();
+                Some(HostSwitchKeyboardDevice {
+                    selected: selected == Some(config_key.as_str()),
+                    config_key,
+                    display_name: record.display_name.clone(),
+                    online: record.online,
+                })
+            })
+            .collect()
+    }
+
+    pub fn set_host_switch_keyboard_key(&mut self, config_key: String) {
+        let exists = self.devices().iter().any(|record| {
+            record.kind == DeviceKind::Keyboard
+                && record.persistent_config_key() == Some(config_key.as_str())
+        });
+        if !exists || self.host_switch_keyboard_key.as_deref() == Some(config_key.as_str()) {
+            return;
+        }
+        self.host_switch_keyboard_key = Some(config_key);
     }
 
     #[must_use]
@@ -164,25 +193,7 @@ impl AppState {
     }
 
     fn host_switch_keyboard_key(&self) -> Option<&str> {
-        self.current_record()
-            .filter(|record| record.kind == DeviceKind::Keyboard)
-            .and_then(|record| record.persistent_config_key())
-            .or_else(|| {
-                self.devices()
-                    .iter()
-                    .find(|record| record.kind == DeviceKind::Keyboard)
-                    .and_then(|record| record.persistent_config_key())
-            })
-            .or_else(|| {
-                self.config
-                    .devices
-                    .iter()
-                    .find(|(_, device)| {
-                        !device.host_switch_targets.is_empty()
-                            || !device.host_switch_monitor_inputs.is_empty()
-                    })
-                    .map(|(key, _)| key.as_str())
-            })
+        self.host_switch_keyboard_key.as_deref()
     }
 }
 
