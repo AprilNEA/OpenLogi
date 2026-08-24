@@ -172,6 +172,7 @@ pub(super) fn detail_content(
                 .min_h_0()
                 .w_full()
                 .items_stretch()
+                .bg(pal.surface)
                 .child(navigation)
                 .child(content),
         )
