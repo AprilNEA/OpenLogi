@@ -31,6 +31,33 @@ impl KeyboardUsage {
         self.into_inner()
     }
 
+    /// The printable ASCII character this usage's *unshifted* key produces on
+    /// a standard layout — the inverse of the character branches in this
+    /// module's `parse_key`. `None` for function/arrow/editing keys: a
+    /// keyboard layout switch never relocates those, so callers should keep
+    /// treating them positionally.
+    #[must_use]
+    pub fn ascii_char(self) -> Option<char> {
+        let code = self.into_inner();
+        match code {
+            0x04..=0x1d => Some(char::from(b'a' + code - 0x04)),
+            0x1e..=0x26 => Some(char::from(b'1' + code - 0x1e)),
+            0x27 => Some('0'),
+            0x2d => Some('-'),
+            0x2e => Some('='),
+            0x2f => Some('['),
+            0x30 => Some(']'),
+            0x31 => Some('\\'),
+            0x33 => Some(';'),
+            0x34 => Some('\''),
+            0x35 => Some('`'),
+            0x36 => Some(','),
+            0x37 => Some('.'),
+            0x38 => Some('/'),
+            _ => None,
+        }
+    }
+
     fn label(self) -> String {
         let code = self.into_inner();
         match code {
@@ -354,6 +381,23 @@ mod tests {
         let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
         assert_eq!(combo.key().code(), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
+    }
+
+    #[test]
+    fn ascii_char_is_the_inverse_of_parse_key() {
+        let combo = "Cmd+S".parse::<KeyCombo>().expect("valid shortcut failed");
+        assert_eq!(combo.key().ascii_char(), Some('s'));
+
+        let combo = "Cmd+[".parse::<KeyCombo>().expect("valid shortcut failed");
+        assert_eq!(combo.key().ascii_char(), Some('['));
+
+        // Function/arrow/editing keys are not relocated by a layout switch.
+        let combo = "F5".parse::<KeyCombo>().expect("valid shortcut failed");
+        assert_eq!(combo.key().ascii_char(), None);
+        let combo = "Left".parse::<KeyCombo>().expect("valid shortcut failed");
+        assert_eq!(combo.key().ascii_char(), None);
+        let combo = "Enter".parse::<KeyCombo>().expect("valid shortcut failed");
+        assert_eq!(combo.key().ascii_char(), None);
     }
 
     #[test]
