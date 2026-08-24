@@ -186,16 +186,14 @@ pub async fn switch_linked_hosts(
     // sharing the same receiver.
     let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
     for target in targets {
-        match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
-            Ok(change) => {
-                if let Err(error) = apply_host_change(change).await {
-                    debug!(%error, route = %target, host, "linked device host switch failed");
-                }
-            }
-            Err(error) => {
+        let change = prepare_host_change(target, host, keyboard, &channel, channel_pool)
+            .await
+            .inspect_err(|error| {
                 debug!(%error, route = %target, host, "linked device host switch preparation failed");
-            }
-        }
+            })?;
+        apply_host_change(change).await.inspect_err(|error| {
+            debug!(%error, route = %target, host, "linked device host switch failed");
+        })?;
     }
     let changed = apply_host_change(keyboard_change).await?;
     if changed {
