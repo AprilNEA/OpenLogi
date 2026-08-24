@@ -12,6 +12,7 @@
 - A kernel with `hidraw` and `uinput` module support (standard on all major
   distros).
 - `systemd` + `udev` (standard on Ubuntu, Fedora, Arch, Debian, openSUSE, …).
+- GLIBC 2.35 or newer for the pre-built packages (Ubuntu 22.04 baseline).
 
 ## NixOS
 

@@ -763,11 +763,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The native build host defines the oldest GLIBC these binaries can
+          # load against. Keep both architectures on the documented 2.35 floor.
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
     permissions:
       contents: read
@@ -779,7 +781,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
-          shared-key: linux-stable-release
+          # Cargo does not include the host GLIBC in its freshness checks. Do
+          # not restore release objects previously linked on Ubuntu 24.04.
+          shared-key: linux-jammy-stable-release
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       # The nfpm `arch` and the runner's native arch must agree — the packages
@@ -821,6 +825,29 @@ jobs:
 
       - name: Build and package
         run: cargo run -p xtask -- linux package
+
+      - name: Verify GLIBC baseline
+        env:
+          MAX_GLIBC_VERSION: "2.35"
+        run: |
+          for binary in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
+            required=$(
+              readelf --version-info "target/release/$binary" \
+                | sed -n 's/.*Name: GLIBC_\([0-9][0-9.]*\).*/\1/p' \
+                | sort -Vu \
+                | tail -n 1
+            )
+            if [ -z "$required" ]; then
+              echo "could not determine the GLIBC requirement for $binary" >&2
+              exit 1
+            fi
+            echo "$binary requires GLIBC $required"
+            newest=$(printf '%s\n%s\n' "$MAX_GLIBC_VERSION" "$required" | sort -V | tail -n 1)
+            if [ "$newest" != "$MAX_GLIBC_VERSION" ]; then
+              echo "$binary exceeds the GLIBC $MAX_GLIBC_VERSION release baseline" >&2
+              exit 1
+            fi
+          done
 
       - name: Collect packages
         env:

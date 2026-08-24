@@ -125,6 +125,7 @@ sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
+Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
 
 NixOS users can instead import the repository's module, which installs the
 package and udev rules and starts the agent with the graphical session:
