@@ -633,6 +633,13 @@ pub(super) fn post_zoom(delta: i32) {
 }
 
 /// Live state of the streamed pinch behind [`post_zoom_continuous`].
+///
+/// Deliberately one process-global session, shared across devices and
+/// directions: the pinch is focus-directed output, so the focused app has a
+/// single gesture stream to consume no matter which wheel fed it, and folding
+/// concurrent deltas together yields correct net semantics. Keying by device
+/// would instead interleave competing began/ended lifecycles into that one
+/// app — the very corruption [`post_zoom`] avoids for button steps.
 #[derive(Default)]
 struct ZoomSession {
     open: bool,
