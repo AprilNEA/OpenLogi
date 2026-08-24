@@ -50,9 +50,19 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            img(crate::app_assets::LOGO)
+                .w(px(56.))
+                .h(px(56.))
+                .flex_shrink_0(),
+        )
         .child(
             v_flex()
+                // Without `min_w_0` a flex child refuses to shrink below its
+                // content width, so the link row below overflows the card
+                // instead of wrapping inside it.
+                .min_w_0()
+                .flex_1()
                 .gap_2()
                 .child(
                     h_flex()
@@ -68,6 +78,11 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
                 )
                 .child(
                     h_flex()
+                        // These buttons are label-width, so their total varies
+                        // with locale, font and DPI. Wrapping keeps the last
+                        // one reachable at any width rather than relying on the
+                        // window being wide enough to fit them on one line.
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .pt_1()
