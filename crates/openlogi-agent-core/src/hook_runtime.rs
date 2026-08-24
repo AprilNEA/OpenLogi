@@ -216,19 +216,34 @@ thread_local! {
 
 /// Whether a button event's physical source may be remapped/suppressed.
 ///
-/// macOS attributes every CGEvent to an IOKit sender and fails closed: only
-/// known Logitech non-trackpad devices are remappable, so the built-in
-/// trackpad can never be swallowed. Linux/Windows often lack attribution
-/// (`device: None`); those platforms already restrict which devices the hook
-/// attaches to, so unknown sources stay remappable.
-fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
+/// An attributed event is judged on identity alone: only known Logitech
+/// non-trackpad devices are remappable, so the built-in trackpad can never be
+/// swallowed. Linux/Windows often lack attribution (`device: None`); those
+/// platforms already restrict which devices the hook attaches to, so unknown
+/// sources stay remappable there.
+///
+/// macOS normally attributes every CGEvent to an IOKit sender, but not always —
+/// see the unattributed arm for which buttons still get the benefit of the
+/// doubt when it does not.
+fn button_source_may_remap(id: ButtonId, device: Option<&EventDevice>) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
         None => {
             // Attribution missing: safe on Linux/Windows (device selection is
-            // upstream of the callback). On macOS fail closed — an unattributed
-            // event is more likely a trackpad/system source than a Logi mouse.
-            !cfg!(target_os = "macos")
+            // upstream of the callback).
+            //
+            // On macOS a CGEvent can reach the tap with no IOHIDEvent attached,
+            // and then there is no sender to resolve. Failing closed on that is
+            // right for the primary buttons — an unattributed left/right click
+            // is more likely a trackpad or a system source than a Logi mouse.
+            // It is wrong for the auxiliary ones: no trackpad emits button
+            // 2/3/4 at all, so nothing this rule protects can be the source,
+            // while a mouse that delivers Middle/Back/Forward through a HID
+            // collection carrying no sender loses every binding on those
+            // buttons — silently, since the events still reach the tap.
+            // Gesture mode is the worst of it: the hook never claims the press,
+            // so hold-and-swipe simply never fires.
+            !cfg!(target_os = "macos") || id.is_os_hook_button()
         }
     }
 }
@@ -266,7 +281,7 @@ fn handle_button(
     action_tx: &mpsc::SyncSender<Action>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.is_os_hook_button() || !button_source_may_remap(id, device) {
         return EventDisposition::PassThrough;
     }
 
@@ -846,6 +861,69 @@ mod tests {
         assert_eq!(
             resolve_gesture_click(&empty, ButtonId::Forward),
             default_binding(ButtonId::Forward)
+        );
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn logitech() -> EventDevice {
+        EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xc548),
+            product_name: Some("USB Receiver".into()),
+        }
+    }
+
+    fn trackpad() -> EventDevice {
+        EventDevice {
+            vendor_id: Some(0x05ac),
+            product_id: Some(0x0324),
+            product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+        }
+    }
+
+    /// The regression this arm exists for. Some mice deliver their auxiliary
+    /// buttons through a HID collection whose CGEvent carries no IOHIDEvent, so
+    /// there is no sender to resolve and `device` arrives as `None`. Failing
+    /// closed there loses every Middle/Back/Forward binding on that mouse —
+    /// and silently, because the events do reach the tap.
+    #[test]
+    fn an_unattributed_auxiliary_button_is_still_remappable() {
+        for id in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                button_source_may_remap(id, None),
+                "{id:?} must stay remappable without attribution, or its bindings can never fire"
+            );
+        }
+    }
+
+    /// The primary buttons keep the conservative rule: an unattributed left or
+    /// right click is far more likely a trackpad or a system source than a
+    /// mouse, and suppressing either would brick the pointer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn an_unattributed_primary_button_still_fails_closed() {
+        assert!(
+            !button_source_may_remap(ButtonId::LeftClick, None),
+            "an unattributed primary click must not be remappable on macOS"
+        );
+    }
+
+    /// Attribution, when present, still decides on identity alone — the
+    /// unattributed arm must not have loosened anything for a device the hook
+    /// can actually see.
+    #[test]
+    fn an_attributed_source_is_judged_on_identity() {
+        assert!(
+            button_source_may_remap(ButtonId::MiddleClick, Some(&logitech())),
+            "a Logitech mouse is remappable"
+        );
+        assert!(
+            !button_source_may_remap(ButtonId::MiddleClick, Some(&trackpad())),
+            "a trackpad must never be swallowed, whatever the button"
         );
     }
 }

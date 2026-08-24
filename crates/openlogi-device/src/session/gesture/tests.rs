@@ -618,3 +618,78 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
         None
     );
 }
+
+/// A control the device exposes as divertable, for the ownership tests.
+fn divertable(cid: u16) -> reprog_controls::CtrlIdInfo {
+    reprog_controls::CtrlIdInfo {
+        cid,
+        task_id: 0,
+        flags: reprog_controls::CidFlags::DIVERTABLE.bits(),
+    }
+}
+
+/// The regression this whole release step exists for. Bind Middle Click to a
+/// single action and it gets diverted over `0x1b04`; move it into gesture mode
+/// and the plan deliberately stops diverting it, because the OS hook has to see
+/// the physical press to run hold+swipe detection. If the earlier diversion is
+/// merely left un-renewed — the agent was killed, so nothing restored it — the
+/// button emits no OS event and no HID++ event: gestures silently never fire
+/// and the button is dead until the mouse sleeps.
+#[test]
+fn a_gesture_mode_button_left_diverted_is_released() {
+    let controls = [divertable(0x0052)];
+    let owned = BTreeSet::new();
+
+    assert_eq!(
+        unowned_divertable_cids(&controls, &owned),
+        vec![0x0052],
+        "a managed control this session leaves native must be released if still diverted"
+    );
+}
+
+/// The mirror rule: a control this session just armed is in active use, and
+/// releasing it would undo the diversion one line after setting it.
+#[test]
+fn a_control_this_session_armed_is_never_released() {
+    let controls = [divertable(0x0052), divertable(0x0053)];
+    let owned = BTreeSet::from([0x0052]);
+
+    assert_eq!(
+        unowned_divertable_cids(&controls, &owned),
+        vec![0x0053],
+        "an owned CID must stay diverted; only the unowned one is a candidate"
+    );
+}
+
+/// Diversion has no owner field on the wire, so "not ours" is decided by the
+/// managed tables alone. A divertable control OpenLogi never touches — another
+/// application's, or one this version has no binding for — is left exactly as
+/// found rather than being stolen back to native.
+#[test]
+fn a_control_openlogi_never_diverts_is_left_alone() {
+    let controls = [divertable(0x00ff), divertable(0x0052)];
+    let owned = BTreeSet::new();
+
+    assert_eq!(
+        unowned_divertable_cids(&controls, &owned),
+        vec![0x0052],
+        "only OpenLogi-managed CIDs are candidates for release"
+    );
+}
+
+/// Arming only ever diverts what `getCtrlIdInfo` reports as divertable, so the
+/// release walk must apply the same filter — writing to a control the firmware
+/// does not divert is a wasted round-trip at best.
+#[test]
+fn a_non_divertable_control_is_not_a_candidate() {
+    let controls = [reprog_controls::CtrlIdInfo {
+        cid: 0x0052,
+        task_id: 0,
+        flags: reprog_controls::CidFlags::REPROGRAMMABLE.bits(),
+    }];
+
+    assert!(
+        unowned_divertable_cids(&controls, &BTreeSet::new()).is_empty(),
+        "a control the device will not divert is never a release candidate"
+    );
+}
