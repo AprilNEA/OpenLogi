@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Linksklick"
 "Right Click": "Rechtsklick"
 "Middle Click": "Mittelklick"
+"Tilt Left": "Kippen links"
+"Tilt Right": "Kippen rechts"
 "Back (Button 4)": "Zurück (Taste 4)"
 "Forward (Button 5)": "Vor (Taste 5)"
 "Back": "Zurück"

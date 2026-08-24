@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Click sinistro"
 "Right Click": "Click destro"
 "Middle Click": "Click centrale"
+"Tilt Left": "Inclinazione sinistra"
+"Tilt Right": "Inclinazione destra"
 "Back (Button 4)": "Indietro (pulsante 4)"
 "Forward (Button 5)": "Avanti (pulsante 5)"
 "Back": "Indietro"

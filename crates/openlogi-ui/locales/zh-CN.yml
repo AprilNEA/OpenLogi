@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "左键单击"
 "Right Click": "右键单击"
 "Middle Click": "中键单击"
+"Tilt Left": "向左倾斜"
+"Tilt Right": "向右倾斜"
 "Back (Button 4)": "后退（侧键4）"
 "Forward (Button 5)": "前进（侧键5）"
 "Back": "后退"

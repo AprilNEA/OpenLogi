@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Linkerklik"
 "Right Click": "Rechterklik"
 "Middle Click": "Middenklik"
+"Tilt Left": "Kantelen links"
+"Tilt Right": "Kantelen rechts"
 "Back (Button 4)": "Vorige (knop 4)"
 "Forward (Button 5)": "Volgende (knop 5)"
 "Back": "Vorige"

@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "左クリック"
 "Right Click": "右クリック"
 "Middle Click": "中クリック"
+"Tilt Left": "左チルト"
+"Tilt Right": "右チルト"
 "Back (Button 4)": "戻る（サイドボタン4）"
 "Forward (Button 5)": "進む（サイドボタン5）"
 "Back": "戻る"

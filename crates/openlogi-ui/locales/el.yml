@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Αριστερό κλικ"
 "Right Click": "Δεξί κλικ"
 "Middle Click": "Μεσαίο κλικ"
+"Tilt Left": "Κλίση αριστερά"
+"Tilt Right": "Κλίση δεξιά"
 "Back (Button 4)": "Πίσω (κουμπί 4)"
 "Forward (Button 5)": "Εμπρός (κουμπί 5)"
 "Back": "Πίσω"

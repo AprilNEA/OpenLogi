@@ -181,6 +181,11 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         "SLOT_NAME_LEFT_BUTTON" => Some(MouseControlId::Button(ButtonId::LeftClick)),
         "SLOT_NAME_RIGHT_BUTTON" => Some(MouseControlId::Button(ButtonId::RightClick)),
         "SLOT_NAME_MIDDLE_BUTTON" => Some(MouseControlId::Button(ButtonId::MiddleClick)),
+        // The main wheel's tilt. Logi names the two slots after the scroll they
+        // produce in firmware; each is its own reprogrammable control
+        // (`0x1b04` CIDs `0x005b` / `0x005d`), not part of the middle click.
+        "SLOT_NAME_LEFT_SCROLL_BUTTON" => Some(MouseControlId::Button(ButtonId::WheelTiltLeft)),
+        "SLOT_NAME_RIGHT_SCROLL_BUTTON" => Some(MouseControlId::Button(ButtonId::WheelTiltRight)),
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
         "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
@@ -220,6 +225,21 @@ mod tests {
         assert_eq!(
             map_slot_name("SLOT_NAME_THUMBWHEEL"),
             Some(MouseControlId::ThumbwheelRotation)
+        );
+    }
+
+    #[test]
+    fn wheel_tilt_slots_map_to_their_own_controls() {
+        // Logi ships the tilt as two slots named after the scroll it produces
+        // (MX Anywhere 2S and friends). Leaving them unmapped is what used to
+        // hide the tilt from the buttons panel entirely.
+        assert_eq!(
+            map_slot_name("SLOT_NAME_LEFT_SCROLL_BUTTON"),
+            Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
+        );
+        assert_eq!(
+            map_slot_name("SLOT_NAME_RIGHT_SCROLL_BUTTON"),
+            Some(MouseControlId::Button(ButtonId::WheelTiltRight))
         );
     }
 

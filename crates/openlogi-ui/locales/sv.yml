@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Vänsterklick"
 "Right Click": "Högerklick"
 "Middle Click": "Mittenklick"
+"Tilt Left": "Luta vänster"
+"Tilt Right": "Luta höger"
 "Back (Button 4)": "Bakåt (knapp 4)"
 "Forward (Button 5)": "Framåt (knapp 5)"
 "Back": "Bakåt"

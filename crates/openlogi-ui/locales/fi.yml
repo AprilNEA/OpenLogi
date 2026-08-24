@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Vasen napsautus"
 "Right Click": "Oikea napsautus"
 "Middle Click": "Keskinapsautus"
+"Tilt Left": "Kallista vasemmalle"
+"Tilt Right": "Kallista oikealle"
 "Back (Button 4)": "Takaisin (painike 4)"
 "Forward (Button 5)": "Eteenpäin (painike 5)"
 "Back": "Takaisin"

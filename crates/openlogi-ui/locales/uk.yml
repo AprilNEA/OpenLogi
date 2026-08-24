@@ -150,6 +150,8 @@ _version: 1
 "Left Click": "Клацання лівою"
 "Right Click": "Клацання правою"
 "Middle Click": "Клацання середньою"
+"Tilt Left": "Нахил ліворуч"
+"Tilt Right": "Нахил праворуч"
 "Back (Button 4)": "Назад (кнопка 4)"
 "Forward (Button 5)": "Вперед (кнопка 5)"
 "Back": "Назад"
