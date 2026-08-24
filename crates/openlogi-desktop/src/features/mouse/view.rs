@@ -654,7 +654,7 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
-                    text: preset.label().into(),
+                    text: tr!(preset.label()),
                     is_default: preset == ThumbwheelPreset::HorizontalScroll,
                     icon: Some(preset.icon()),
                 }

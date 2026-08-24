@@ -135,7 +135,7 @@ pub(crate) fn thumbwheel_picker<T: 'static>(
         .enumerate()
         .map(|(idx, preset)| {
             let selected = current == Some(preset);
-            let label = preset.label();
+            let label = tr!(preset.label());
             let observer = observer.clone();
             let popover = popover.clone();
             menu_row(("thumbwheel-preset", idx), pal, selected)
