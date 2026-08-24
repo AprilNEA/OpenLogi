@@ -215,6 +215,7 @@ fn legacy_asset(
         .iter()
         .map(|x| Assignment {
             slot_name: String::new(),
+            slot_id: String::new(),
             marker: Point { x: *x, y: marker_y },
             label: Direction { x: -1, y: -1 },
         })
@@ -280,6 +281,7 @@ fn assignments_from_markers(markers: &[f32]) -> Vec<Assignment> {
         .enumerate()
         .map(|(idx, x)| Assignment {
             slot_name: format!("slot-{idx}"),
+            slot_id: format!("fixture_g{idx}_m1"),
             marker: Point { x: *x, y: 13.0 },
             label: Direction { x: -1, y: -1 },
         })
