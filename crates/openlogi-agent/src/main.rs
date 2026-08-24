@@ -316,7 +316,7 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
 /// binary the user authorizes. A newly granted permission requires a process
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
-async fn request_input_monitoring() {
+pub(crate) async fn request_input_monitoring() {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
@@ -329,7 +329,7 @@ async fn request_input_monitoring() {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
+            Ok(true) => binary_watch::restart_after_input_monitoring_change(),
             Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");

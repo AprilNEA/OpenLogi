@@ -402,3 +402,8 @@ _version: 1
 "Shortcut, e.g. Cmd+Shift+P": "Tastenkürzel, z. B. Cmd+Shift+P"
 "Application, folder path, or URL": "Anwendung, Ordnerpfad oder URL"
 "Open application or folder": "Anwendung oder Ordner öffnen"
+"Input Monitoring permission required": "Input Monitoring permission required"
+"OpenLogi needs Input Monitoring to discover, pair, and configure Logitech devices.": "OpenLogi needs Input Monitoring to discover, pair, and configure Logitech devices."
+"Enable “OpenLogi Agent” in the Input Monitoring list — the background agent owns device access, not the OpenLogi app.": "Enable “OpenLogi Agent” in the Input Monitoring list — the background agent owns device access, not the OpenLogi app."
+"I’ve granted access — continue": "I’ve granted access — continue"
+"The background agent restarts once, then OpenLogi continues automatically.": "The background agent restarts once, then OpenLogi continues automatically."

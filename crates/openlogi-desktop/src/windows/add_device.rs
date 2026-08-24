@@ -64,7 +64,12 @@ pub fn open(cx: &mut App) {
             PairingUi::Searching | PairingUi::Found(_) | PairingUi::Pairing | PairingUi::Passkey(_)
         )
     );
-    if !active {
+    let input_monitoring_missing = cfg!(target_os = "macos")
+        && cx
+            .try_global::<AppState>()
+            .and_then(AppState::agent_status)
+            .is_some_and(|status| !status.input_monitoring_granted);
+    if !active && !input_monitoring_missing {
         start_search(cx);
     }
     windows::open_or_focus(
@@ -184,6 +189,11 @@ impl Render for AddDeviceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let state = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
+        let input_monitoring_missing = cfg!(target_os = "macos")
+            && cx
+                .try_global::<AppState>()
+                .and_then(AppState::agent_status)
+                .is_some_and(|status| !status.input_monitoring_granted);
 
         v_flex()
             .size_full()
@@ -210,14 +220,17 @@ impl Render for AddDeviceView {
                             .text_heading()
                             .child(tr!("Add Device")),
                     )
-                    .child(body(&state, pal)),
+                    .child(body(&state, input_monitoring_missing, pal)),
             )
     }
 }
 
 /// The state-dependent body of the window.
-fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
+fn body(state: &PairingUi, input_monitoring_missing: bool, pal: Palette) -> impl IntoElement {
     let mut col = v_flex().w_full().flex_1().gap_4();
+    if input_monitoring_missing {
+        return col.child(input_monitoring_body(pal));
+    }
     match state {
         PairingUi::Idle => {
             col = col
@@ -307,6 +320,40 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
         }
     }
     col
+}
+
+fn input_monitoring_body(pal: Palette) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .gap_4()
+        .child(
+            div()
+                .text_color(pal.text_primary)
+                .font_weight(FontWeight::MEDIUM)
+                .child(tr!("Input Monitoring permission required")),
+        )
+        .child(hint(
+            tr!(
+                "Enable “OpenLogi Agent” in the Input Monitoring list — the background agent owns device access, not the OpenLogi app."
+            ),
+            pal,
+        ))
+        .child(
+            action_button(
+                "ad-open-input-monitoring",
+                tr!("Open System Settings to grant access"),
+                true,
+            )
+            .on_click(|_, _, cx| crate::app::request_input_monitoring(cx)),
+        )
+        .child(
+            action_button(
+                "ad-restart-after-input-monitoring",
+                tr!("I’ve granted access — continue"),
+                false,
+            )
+            .on_click(|_, _, cx| crate::app::restart_after_input_monitoring_change(cx)),
+        )
 }
 
 /// A discovered-device row; clicking it pairs with that device.

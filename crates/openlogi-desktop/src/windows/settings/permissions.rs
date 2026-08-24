@@ -240,6 +240,10 @@ fn permission_field(
                     {
                         state.request_accessibility_prompt();
                     }
+                    if matches!(permission, Permission::InputMonitoring) {
+                        crate::app::request_input_monitoring(cx);
+                        return;
+                    }
                     // The Camera pane only lists an app after its first
                     // AVFoundation request, so a deep link can't grant it.
                     if prompts_here {

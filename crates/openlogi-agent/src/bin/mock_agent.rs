@@ -830,6 +830,14 @@ impl Agent for MockAgent {
         info!("request_accessibility_prompt (no-op in the mock)");
     }
 
+    async fn restart_after_input_monitoring_change(self, _: Context) {
+        info!("restart_after_input_monitoring_change (no-op in the mock)");
+    }
+
+    async fn request_input_monitoring_access(self, _: Context) {
+        info!("request_input_monitoring_access (no-op in the mock)");
+    }
+
     async fn start_pairing(
         self,
         _: Context,
