@@ -106,7 +106,7 @@ fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     }
 }
 
-/// A second, unmistakably different mouse, so a test can move the carousel.
+/// A second, unmistakably different mouse, so a test can change the active device.
 fn second_mouse_inventory() -> DeviceInventory {
     let mut inventory = direct_inventory([0x11, 0x22, 0x33, 0x44]);
     inventory.receiver.name = "MX Anywhere 3S".to_string();
@@ -214,6 +214,39 @@ fn state_with_a_known_mouse() -> AppState {
         ConfigPersistence::MemoryOnly,
         commands,
     )
+}
+
+#[test]
+fn custom_device_name_updates_the_ui_and_can_restore_the_model_name() {
+    let mut state = state_with_a_known_mouse();
+    let model_name = state
+        .current_record()
+        .expect("known mouse")
+        .model_name
+        .clone();
+
+    state.set_device_custom_name(KNOWN_MOUSE_KEY, "  Office mouse  ");
+
+    assert_eq!(
+        state
+            .current_record()
+            .map(|record| record.display_name.as_str()),
+        Some("Office mouse")
+    );
+    assert_eq!(
+        state.config.device_custom_name(KNOWN_MOUSE_KEY),
+        Some("Office mouse")
+    );
+
+    state.set_device_custom_name(KNOWN_MOUSE_KEY, "   ");
+
+    assert_eq!(
+        state
+            .current_record()
+            .map(|record| record.display_name.as_str()),
+        Some(model_name.as_str())
+    );
+    assert_eq!(state.config.device_custom_name(KNOWN_MOUSE_KEY), None);
 }
 
 fn app(id: &str, display_name: &str) -> ForegroundApp {
@@ -349,7 +382,7 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
 
 #[test]
 fn a_profile_belongs_to_the_device_it_was_opened_on() {
-    // Overlays are per-device, so a scope must not follow the carousel onto
+    // Overlays are per-device, so a scope must not follow the selection onto
     // another mouse and silently edit a profile the user never opened.
     let cache = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

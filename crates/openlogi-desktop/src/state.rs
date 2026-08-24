@@ -6,7 +6,7 @@
 //! in the owning entity.
 //!
 //! [`AppState::with_runtime`] resolves every paired device's asset + DPI
-//! target up front so views can switch instantly when the carousel selection
+//! target up front so views can switch instantly when the active device
 //! changes — no synchronous I/O during the device switch.
 
 use std::collections::BTreeMap;
@@ -90,7 +90,7 @@ pub(crate) enum StateEvent {
     DiagnosticsChanged,
     /// The merged device inventory changed.
     InventoryChanged,
-    /// The active carousel device changed.
+    /// The active device changed.
     DeviceSelected(DeviceKey),
     /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
     BindingsChanged(DeviceKey),
@@ -178,7 +178,7 @@ impl ConfigIssue {
 
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
-/// consecutive misses so a transient probe timeout does not make the carousel
+/// consecutive misses so a transient probe timeout does not make the device card
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
 
@@ -233,7 +233,7 @@ pub struct AppState {
     /// connection-problem frames can never disagree about what the agent said.
     agent_link: AgentLink,
     /// Bindings for the *currently selected* device. Reloaded whenever the
-    /// carousel selection changes.
+    /// active device changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
     /// Cached per-direction sub-bindings for every gesture-mode button of the
     /// current device's global profile, keyed by button. The cache remains
@@ -258,7 +258,7 @@ pub struct AppState {
     pub(crate) reads: DeviceReads,
     /// Monotonic identity assigned to the next confirmable SmartShift write.
     next_smartshift_write_id: u64,
-    /// All paired devices, in carousel order. Each entry caches the per-
+    /// All paired devices, in stable gallery order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
     /// Live config — kept in sync with disk via [`Self::commit_binding`] and

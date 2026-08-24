@@ -52,7 +52,7 @@ struct DpiPanelSnapshot {
 
 impl DpiPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Repaint when the carousel switches devices or DPI discovery
+        // Repaint when the active device changes or DPI discovery
         // completes. The slider entity is rebuilt in `render` whenever the
         // selected device or reported range changes, because SliderState's
         // range is builder-only.
@@ -152,7 +152,7 @@ impl DpiPanel {
                         let dpi = AppState::try_read(cx)
                             .map_or(dpi, |state| state.normalize_active_dpi(dpi));
                         // `commit_dpi` resolves the target at fire-time, so
-                        // carousel-driven device switches route the write to the
+                        // gallery-driven device switches route the write to the
                         // now-current device, not whichever was active when this
                         // slider entity was constructed.
                         AppState::update(cx, |state, cx| {
@@ -336,7 +336,7 @@ fn slider_element(
         (DpiStatus::Unknown | DpiStatus::Loading, _) => {
             status_line(tr!("Reading supported DPI values…"), pal).into_any_element()
         }
-        // Clickable: reselecting is a no-op for a single-device carousel, so the
+        // Clickable: reselecting is a no-op for a single-device gallery, so the
         // retry must work in place.
         (DpiStatus::Failed(_), _) => retry_line(
             "dpi-retry",

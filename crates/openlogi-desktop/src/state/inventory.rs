@@ -43,7 +43,7 @@ impl AppState {
             .collect()
     }
     /// Replace [`Self::device_list`] from a fresh inventory snapshot,
-    /// preserving the carousel selection by `config_key` when possible. If
+    /// preserving the active device by `config_key` when possible. If
     /// the previously-selected device disappeared, the selection falls back
     /// to index 0. Returns whether anything actually changed.
     ///
@@ -190,13 +190,13 @@ impl AppState {
             merged.push(record);
         }
         // Adopted records whose known card was never in the previous list
-        // (identity known only from config) still belong in the carousel.
+        // (identity known only from config) still belong in the gallery.
         merged.extend(adopted.into_values());
         let live: HashSet<String> = merged.iter().map(DeviceRecord::inventory_key).collect();
         self.device_ui.retain(|key, _| live.contains(key.as_str()));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
         // canonical route order or a new device would be stuck at the end of
-        // the carousel permanently.
+        // the gallery permanently.
         sort_device_list(&mut merged);
         merged
     }
@@ -271,7 +271,7 @@ impl AppState {
         }
         adopted
     }
-    /// Switch the carousel to `idx`. Out-of-range indices are silently
+    /// Make the device at `idx` active. Out-of-range indices are silently
     /// ignored so callers can pass them straight through from UI events.
     /// Persists the new selection (by config key, not index — index isn't
     /// stable across restarts), reloads bindings for the new device, and
@@ -325,7 +325,7 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
             continue;
         }
         let identity = DeviceIdentity {
-            display_name: record.display_name.clone(),
+            display_name: record.model_name.clone(),
             kind: record.kind,
             capabilities,
             light_capabilities: record.light_capabilities,

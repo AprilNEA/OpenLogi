@@ -40,20 +40,24 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
         .on_click(move |_, _, cx| view.update(cx, AppView::go_home))
 }
 
-/// Square Settings gear in the Home header: opens the Settings window.
+/// Settings button in the Home header: opens the Settings window. The visible
+/// label keeps the action discoverable without requiring hover.
 pub(super) fn settings_button() -> impl IntoElement {
     Button::new("home-settings")
+        .outline()
         .icon(IconName::Settings)
+        .label(tr!("Settings"))
         .tooltip(tr!("Settings"))
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
-/// Trailing "+" button that opens the pairing window. Present in both screen
-/// headers; the empty state carries its own primary "Add Device" CTA, so this
-/// never floats alone in an empty header.
+/// Primary action that opens the pairing window. The empty state carries its
+/// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
     Button::new("header-add-device")
+        .primary()
         .icon(IconName::Plus)
+        .label(tr!("Add Device"))
         .tooltip(tr!("Add Device"))
         .on_click(|_, _, cx| crate::windows::add_device::open(cx))
 }

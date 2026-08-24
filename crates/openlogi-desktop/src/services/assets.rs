@@ -237,7 +237,7 @@ impl AssetResolver {
             // markers against the *buttons* image (typically
             // `side_*.png`), so we prefer that resource for the
             // mouse-model render — otherwise hotspot percentages drift
-            // off every button. `front_*.png` is left for the carousel.
+            // off every button. `front_*.png` is left for the gallery.
             //
             // The depot's manifest keys variants on one of its model ids,
             // which isn't always the index primary — the MX Master 3S

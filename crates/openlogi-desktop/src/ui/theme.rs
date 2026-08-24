@@ -85,12 +85,13 @@ pub const CARD_GAP: Rems = rems(0.75);
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
 
-/// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
-/// out in a horizontally scrollable row (centred when they fit, scrollable when
-/// they don't); `GALLERY_PHOTO_H` is the height of the device photo above the
-/// name/battery row.
-pub const GALLERY_CARD_W: f32 = 240.;
-pub const GALLERY_PHOTO_H: f32 = 230.;
+/// Responsive bounds for a device card in the Home grid. At the 720 px minimum
+/// window width, two cards fit after the screen inset and gap; at the normal
+/// wide window, three grow to [`GALLERY_CARD_MAX_W`]. `GALLERY_PHOTO_H` is the
+/// product-image stage above the identity and status rows.
+pub const GALLERY_CARD_MIN_W: f32 = 310.;
+pub const GALLERY_CARD_MAX_W: f32 = 405.;
+pub const GALLERY_PHOTO_H: f32 = 196.;
 
 /// Appearance-dependent surface + text colours for the bespoke (non
 /// gpui-component) surfaces. Resolved once per render via [`palette`] and

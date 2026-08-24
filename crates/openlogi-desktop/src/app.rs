@@ -620,7 +620,7 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(None, cx));
             (
-                home::home_header(pal).into_any_element(),
+                home::home_header(pal, cx).into_any_element(),
                 if has_device {
                     home::device_gallery(cx).into_any_element()
                 } else {
@@ -642,7 +642,7 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::home::connection_icon_path;
+    use super::home::{battery_needs_attention, connection_icon_path};
     use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
@@ -672,6 +672,28 @@ mod tests {
         assert!(!battery_charging_no_reading(&b(
             0,
             BatteryStatus::Discharging
+        )));
+    }
+
+    #[test]
+    fn low_discharging_battery_needs_attention() {
+        let battery = |percentage, status| BatteryInfo {
+            percentage,
+            level: BatteryLevel::Low,
+            status,
+        };
+
+        assert!(battery_needs_attention(&battery(
+            20,
+            BatteryStatus::Discharging
+        )));
+        assert!(!battery_needs_attention(&battery(
+            21,
+            BatteryStatus::Discharging
+        )));
+        assert!(!battery_needs_attention(&battery(
+            20,
+            BatteryStatus::Charging
         )));
     }
 
@@ -758,6 +780,7 @@ mod tests {
             config_key: "test".to_string(),
             persistent: true,
             model_key: "test".to_string(),
+            model_name: "Test".to_string(),
             display_name: "Test".to_string(),
             asset: None,
             model_info: None,

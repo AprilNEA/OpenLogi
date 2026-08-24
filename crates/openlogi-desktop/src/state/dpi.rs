@@ -74,7 +74,7 @@ impl AppState {
     }
     /// Seed the active panel from the latest query. Query generations fence
     /// disconnected routes; this selected-device check prevents an old
-    /// carousel page from changing the shared visible value.
+    /// gallery card from changing the shared visible value.
     pub(crate) fn apply_dpi_read(&mut self, key: &DeviceKey) {
         if self
             .current_record()

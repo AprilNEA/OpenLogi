@@ -17,6 +17,7 @@ use gpui_component::{
 };
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::{BatteryStatus, DeviceKind};
+use openlogi_core::hid::DeviceRoute;
 
 use super::widgets::{
     back_button, battery_charging_no_reading, battery_summary, kind_label, route_label,
@@ -625,6 +626,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                     .gap_3()
                     .child(device_summary(
                         &record.display_name,
+                        &record.model_name,
                         record.kind,
                         record.online,
                         pal,
@@ -737,7 +739,18 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     PanelCard::new(tr!("Configuration"), Icon::new(IconName::Folder), content)
 }
 
-fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> impl IntoElement {
+fn device_summary(
+    name: &str,
+    model_name: &str,
+    kind: DeviceKind,
+    online: bool,
+    pal: Palette,
+) -> impl IntoElement {
+    let subtitle = if name == model_name {
+        kind_label(kind)
+    } else {
+        format!("{model_name} · {}", kind_label(kind))
+    };
     h_flex()
         .justify_between()
         .gap_3()
@@ -751,7 +764,7 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(kind_label(kind)),
+                        .child(subtitle),
                 ),
         )
         .child(status_badge(online, pal))
@@ -767,8 +780,11 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
         route_label(record.route.as_ref())
     };
     let mut items = vec![DescriptionItem::new(tr!("Connection")).value(connection)];
-    if !is_camera {
-        items.push(DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()));
+    if matches!(
+        record.route,
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    ) {
+        items.push(DescriptionItem::new(tr!("Channel")).value(record.slot.to_string()));
     }
     items.push(DescriptionItem::new(tr!("Device key")).value(elided_key(&record.config_key)));
     if let Some(serial) = record.serial_number {

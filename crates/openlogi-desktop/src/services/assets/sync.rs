@@ -171,7 +171,7 @@ fn sync_depot(
 
     // Optional second pass: download the manifest-mapped render PNGs — the
     // colour variant matching the device's `extended_model_id` for the front
-    // (carousel) and side / buttons (mouse-model) views, plus the camera hero
+    // (gallery) and side / buttons (mouse-model) views, plus the camera hero
     // (`device_camera_image` — camera depots ship no bare `front*.png`, so the
     // baseline fetch above brings no render for them at all). Failure is
     // non-fatal — `AssetResolver.load_files` falls back to whatever landed.

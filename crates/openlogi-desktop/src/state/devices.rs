@@ -21,10 +21,10 @@ use crate::services::assets::{AssetResolver, ResolvedAsset};
 /// and the [`DeviceRoute`] HID++ writes / capture target.
 ///
 /// The `kind` / `slot` / `online` / `battery` fields mirror the source
-/// [`PairedDevice`](openlogi_core::device::PairedDevice) so the header
-/// carousel can render straight from the device list — the list is the single
-/// source of truth for "which devices exist", keeping carousel order aligned
-/// with [`super::AppState::current_device`].
+/// [`PairedDevice`](openlogi_core::device::PairedDevice) so the gallery can
+/// render straight from the device list — the list is the single source of
+/// truth for "which devices exist", keeping gallery order aligned with
+/// [`super::AppState::current_device`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
     /// Route-derived key used for runtime state and, when [`Self::persistent`]
@@ -35,6 +35,9 @@ pub struct DeviceRecord {
     pub(crate) persistent: bool,
     /// Stable model key used only for asset/model lookup and diagnostics.
     pub model_key: String,
+    /// Hardware model name, unaffected by the user's per-device alias.
+    pub model_name: String,
+    /// Effective user-facing name: the configured alias, or [`Self::model_name`].
     pub display_name: String,
     pub asset: Option<ResolvedAsset>,
     pub model_info: Option<DeviceModelInfo>,
@@ -98,7 +101,7 @@ impl DeviceRecord {
     }
 }
 
-/// Build the carousel's device list as the **union** of the live inventory and
+/// Build the gallery's device list as the **union** of the live inventory and
 /// the persisted set of devices we've seen before.
 ///
 /// Live devices come from `inventories` (the agent's current HID++ probe).
@@ -137,7 +140,7 @@ pub(super) fn build_device_list(
                 } else {
                     // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
                     // timed out. Surface the device anyway using the wpid (or slot
-                    // as a last-resort model key) so it appears in the carousel
+                    // as a last-resort model key) so it appears in the gallery
                     // with a stable display fallback.
                     let key = paired.wpid.map_or_else(
                         || format!("slot{}", paired.slot),
@@ -166,6 +169,7 @@ pub(super) fn build_device_list(
                 config_key,
                 persistent,
                 model_key,
+                model_name: display_name.clone(),
                 display_name,
                 asset,
                 model_info,
@@ -209,8 +213,20 @@ pub(super) fn build_device_list(
     for camera in cameras {
         list.push(camera_record(camera, cache));
     }
+    apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
+}
+
+fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
+    for record in list {
+        if let Some(name) = record
+            .persistent_config_key()
+            .and_then(|key| config.device_custom_name(key))
+        {
+            record.display_name = name.to_string();
+        }
+    }
 }
 
 /// A [`DeviceRecord`] for a Logitech UVC webcam.
@@ -232,6 +248,7 @@ fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
         model_key: format!("{:04x}", camera.product_id),
         config_key,
         persistent: true,
+        model_name: camera.name.clone(),
         display_name: camera.name.clone(),
         asset,
         model_info: None,
@@ -305,6 +322,7 @@ fn append_standalone(
             // The registry id is presentation metadata, not a replacement for
             // the raw-device model identity used before registry integration.
             model_key: format!("raw:{:04x}", device.address.product_id),
+            model_name: display_name.clone(),
             display_name,
             asset,
             model_info: None,
@@ -457,6 +475,7 @@ fn offline_record(
         config_key: config_key.to_string(),
         persistent: true,
         model_key,
+        model_name: display_name.clone(),
         display_name,
         asset,
         model_info,
@@ -509,6 +528,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         config_key: known.config_key.clone(),
         persistent: true,
         model_key: known.model_key.clone(),
+        model_name: known.model_name.clone(),
         display_name: known.display_name.clone(),
         asset: known.asset.clone().or(live.asset),
         model_info: known.model_info.clone().or(live.model_info),
@@ -534,7 +554,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
     }
 }
 
-/// Order the carousel by physical route. HID enumeration order can change as
+/// Order the gallery by physical route. HID enumeration order can change as
 /// different mice wake, sleep, or are selected; sorting by the stable route
 /// (not whichever HID node was reported first) keeps the header stable.
 /// Applied both on a fresh build and after [`super::AppState`] merges a
@@ -553,7 +573,7 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
             record.unit_id,
         ),
         record.model_key.clone(),
-        record.display_name.clone(),
+        record.model_name.clone(),
     )
 }
 
@@ -566,6 +586,7 @@ fn demo_keyboard() -> DeviceRecord {
         config_key: "demo-g513".to_string(),
         persistent: true,
         model_key: "demo-g513".to_string(),
+        model_name: "Logitech G513".to_string(),
         display_name: "Logitech G513".to_string(),
         asset: None,
         model_info: None,
@@ -724,6 +745,7 @@ mod tests {
             config_key: key.to_string(),
             persistent: true,
             model_key: key.to_string(),
+            model_name: format!("live {key}"),
             display_name: format!("live {key}"),
             asset: None,
             model_info: None,
@@ -830,6 +852,18 @@ mod tests {
         let cache = AssetResolver::new();
         let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
         assert_eq!(list[0].display_name, "Slot 2");
+    }
+
+    #[test]
+    fn saved_custom_name_identifies_the_device_without_replacing_its_model_name() {
+        let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
+        let mut config = Config::default();
+        config.set_device_custom_name("receiver:da2699e1:slot:2", Some("Office keyboard".into()));
+
+        let list = build_device_list(&[inv], &[], &AssetResolver::new(), &config, &[]);
+
+        assert_eq!(list[0].display_name, "Office keyboard");
+        assert_eq!(list[0].model_name, "Slot 2");
     }
 
     #[test]

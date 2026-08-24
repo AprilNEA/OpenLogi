@@ -131,6 +131,31 @@ impl AppState {
         self.config.device_enabled(key)
     }
 
+    /// Set the user-facing name of a persistent device. Whitespace-only names
+    /// clear the alias and restore the hardware model name.
+    pub fn set_device_custom_name(&mut self, key: &str, custom_name: &str) {
+        let custom_name = match custom_name.trim() {
+            "" => None,
+            name => Some(name.to_string()),
+        };
+        if self.config.device_custom_name(key) == custom_name.as_deref() {
+            return;
+        }
+        self.config.set_device_custom_name(key, custom_name.clone());
+        if !self.persist_config("device name") {
+            return;
+        }
+        for record in self
+            .device_list
+            .iter_mut()
+            .filter(|record| record.config_key == key)
+        {
+            record.display_name = custom_name
+                .clone()
+                .unwrap_or_else(|| record.model_name.clone());
+        }
+    }
+
     /// Enable or disable OpenLogi's management of `key` and persist it. The
     /// agent tears down or re-arms the device's capture session on reload.
     pub fn set_device_enabled(&mut self, key: &str, enabled: bool) {
