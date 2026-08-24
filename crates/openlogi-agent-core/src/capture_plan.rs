@@ -155,6 +155,35 @@ mod tests {
     }
 
     #[test]
+    fn bound_wheel_tilt_is_diverted_but_an_untouched_one_stays_native() {
+        // The main wheel's tilt scrolls horizontally in firmware, so the
+        // default binding must leave it native — diverting an untouched tilt
+        // would silently kill horizontal scrolling. Binding one side to a real
+        // action is what arms its `0x1b04` divert.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::WheelTiltLeft,
+            Binding::Single(Action::PrevTab),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0);
+        assert!(
+            plan.divert_buttons
+                .contains(&(0x005b, ButtonId::WheelTiltLeft)),
+            "a bound tilt must be diverted, or the binding can never fire: {:?}",
+            plan.divert_buttons
+        );
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::WheelTiltRight),
+            "the untouched right tilt must keep its native horizontal scroll"
+        );
+    }
+
+    #[test]
     fn haptic_panel_gestures_when_promoted() {
         // The MX Master 4 haptic panel is a HID++ gesture source: promoting it
         // into gesture mode must arm the raw-XY gesture divert, exactly like

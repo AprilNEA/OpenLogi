@@ -135,10 +135,18 @@ struct CaptureAccum {
 /// when its binding leaves the default, so an unbound button keeps its native
 /// HID behavior (no re-synthesis needed). The Haptic Sense Panel is a gesture
 /// source ([`GESTURE_SOURCE_BUTTONS`]), not a member of this table.
-pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 3] = [
+///
+/// The two wheel-tilt CIDs are the classic "Left/Right Scroll" controls that
+/// MX-line mice with a tilting main wheel (MX Anywhere 2S and friends) expose
+/// as divertable — the same mechanism Options+ uses to rebind a tilt. Arming
+/// only ever diverts what a device's own `getCtrlIdInfo` reports, so listing
+/// them here is inert on a mouse whose wheel does not tilt.
+pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 5] = [
     (0x0052, ButtonId::MiddleClick),
     (0x0053, ButtonId::Back),
     (0x0056, ButtonId::Forward),
+    (0x005b, ButtonId::WheelTiltLeft),
+    (0x005d, ButtonId::WheelTiltRight),
 ];
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
