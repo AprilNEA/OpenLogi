@@ -210,7 +210,7 @@ impl SettingsView {
                 // its per-frame render works off this cache instead of issuing
                 // CGGetEventTapList syscalls on every repaint.
                 let taps = openlogi_hook::Hook::list_event_taps();
-                let sender = AppState::global(cx).read(cx).ipc_sender();
+                let sender = cx.update(|cx| AppState::global(cx).read(cx).ipc_sender());
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let events = if sender
                     .send(crate::services::ipc::Command::PollEventMonitor(tx))
@@ -220,12 +220,14 @@ impl SettingsView {
                 } else {
                     Vec::new()
                 };
-                AppState::update(cx, |state, cx| {
-                    state.set_event_taps(taps);
-                    if !events.is_empty() {
-                        state.push_monitor_events(events);
-                    }
-                    cx.emit(StateEvent::DiagnosticsChanged);
+                cx.update(|cx| {
+                    AppState::update(cx, |state, cx| {
+                        state.set_event_taps(taps);
+                        if !events.is_empty() {
+                            state.push_monitor_events(events);
+                        }
+                        cx.emit(StateEvent::DiagnosticsChanged);
+                    });
                 });
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
