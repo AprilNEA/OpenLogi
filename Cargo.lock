@@ -420,26 +420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-hid"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f70c6f427f9dc3942b5863b2677a34dfcdd5ec46fe3c21a57883c50403269c5"
-dependencies = [
- "async-io",
- "atomic-waker",
- "block2 0.6.2",
- "crossbeam-queue",
- "dispatch2",
- "futures-lite",
- "log",
- "nix 0.29.0",
- "objc2-core-foundation",
- "objc2-io-kit",
- "static_assertions",
- "windows 0.61.3",
-]
-
-[[package]]
 name = "async-io"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5306,6 +5286,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-async-hid"
+version = "0.5.3-openlogi.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "883f2f413df036fd1b943bcd99d83cb0cfd76d0dc2586a16773f6d9aee1f5887"
+dependencies = [
+ "async-io",
+ "atomic-waker",
+ "block2 0.6.2",
+ "crossbeam-queue",
+ "dispatch2",
+ "futures-lite",
+ "log",
+ "nix 0.29.0",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "static_assertions",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "openlogi-camera"
 version = "0.7.10"
 dependencies = [
@@ -5426,11 +5426,11 @@ version = "0.7.10"
 name = "openlogi-hid"
 version = "0.7.10"
 dependencies = [
- "async-hid",
  "atomic-write-file",
  "futures-concurrency",
  "futures-lite",
  "objc2-io-kit",
+ "openlogi-async-hid",
  "openlogi-core",
  "openlogi-device",
  "openlogi-hidpp",
