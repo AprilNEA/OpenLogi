@@ -134,12 +134,15 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => next_desktop(),
         NativeAction::ShowDesktop => show_desktop(),
         NativeAction::LaunchpadShow => launchpad(),
-        // Lock screen = Cmd+Ctrl+Q (kVK_ANSI_Q = 0x0C)
-        NativeAction::LockScreen => post_key(0x0C, cmd | ctrl),
-        // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
-        NativeAction::Screenshot => post_key(0x14, cmd | shift),
-        // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
-        NativeAction::CaptureRegion => post_key(0x15, cmd | shift | ctrl),
+        // Lock screen = Cmd+Ctrl+Q. Layout-aware lookup with the QWERTY
+        // kVK_ANSI_Q fallback (see post_keycombo / issue #343).
+        NativeAction::LockScreen => post_key(vk_for_char('q').unwrap_or(0x0C), cmd | ctrl),
+        // Screenshot = Cmd+Shift+3, same fallback pattern.
+        NativeAction::Screenshot => post_key(vk_for_char('3').unwrap_or(0x14), cmd | shift),
+        // Capture region to clipboard = Cmd+Shift+Ctrl+4, same fallback pattern.
+        NativeAction::CaptureRegion => {
+            post_key(vk_for_char('4').unwrap_or(0x15), cmd | shift | ctrl);
+        }
         // Sleep has no CGEvent equivalent (the WindowServer ignores a
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
@@ -285,19 +288,6 @@ fn post_unicode(text: &str) {
     }
 }
 
-/// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
-/// keycode. Used by the workflow sequencer's `PressKey` step.
-fn post_keycombo(combo: &KeyCombo) {
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
-        post_key(vk, combo_flags(combo));
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
-        );
-    }
-}
-
 /// Emit the physical-key edges whose shared ownership changed, preserving the
 /// aggregate synthetic modifier state on every event.
 pub(super) fn hold_keys(
@@ -383,6 +373,30 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     flags
 }
 
+/// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
+/// keycode. Used by the workflow sequencer's `PressKey` step.
+fn post_keycombo(combo: &KeyCombo) {
+    let flags = combo_flags(combo);
+    // Layout-aware lookup first (issue #343): resolve the vk that currently
+    // produces this character under the active layout. Falls back to the
+    // static positional table when the key isn't a single ASCII character
+    // (function/arrow/editing keys — unaffected by layout switches) or when
+    // TIS/UCKeyTranslate can't resolve one (e.g. no active console session).
+    let vk = combo
+        .key()
+        .ascii_char()
+        .and_then(vk_for_char)
+        .or_else(|| hid_usage_to_macos(combo.key().code()));
+    if let Some(vk) = vk {
+        post_key(vk, flags);
+    } else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no macOS mapping"
+        );
+    }
+}
+
 /// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.
 fn hid_usage_to_macos(usage: u8) -> Option<u16> {
     const LETTERS: [u16; 26] = [
@@ -433,7 +447,7 @@ mod tests {
     use core_graphics::event::CGEventFlags;
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, held_key_event, hid_usage_to_macos};
+    use super::{combo, held_key_event, hid_usage_to_macos, keyboard_layout::vk_for_char};
     use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
     #[test]
@@ -444,6 +458,45 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
         assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
         assert_eq!(hid_usage_to_macos(0xff), None);
+    }
+
+    /// Exercises the real TIS/UCKeyTranslate path (not just the static
+    /// fallback table) against whatever keyboard layout is actually active
+    /// on the machine running this test. Deliberately does not assert
+    /// *which* vk comes back: unlike a QWERTY-only assumption, this repo's
+    /// own dev machines aren't guaranteed to run a "U.S." layout (issue #343
+    /// exists precisely because that assumption doesn't hold — this test was
+    /// first written on a machine with Dvorak active, where 's' legitimately
+    /// resolves to a different vk than `hid_usage_to_macos`'s QWERTY-pinned
+    /// one). Every keyboard layout maps the letter 'a' to *some* physical
+    /// key, so this should never be `None`.
+    #[test]
+    fn vk_for_char_resolves_a_common_letter() {
+        assert!(vk_for_char('a').is_some());
+    }
+
+    /// A character no physical key produces under any layout resolves to
+    /// `None` rather than panicking or looping forever.
+    #[test]
+    fn vk_for_char_returns_none_for_unmapped_characters() {
+        assert_eq!(vk_for_char('€'), None);
+    }
+
+    /// `TISCopyCurrentKeyboardLayoutInputSource` lazily bootstraps a shared
+    /// XPC connection inside HIToolbox on first use; two threads racing that
+    /// bootstrap crashes the whole process with `SIGABRT` deep inside
+    /// `_xpc_connection_activate_if_needed` (reproduced locally before
+    /// `keyboard_layout::TIS_LOCK` was added). Hammer `vk_for_char` from many
+    /// threads at once so a regression that drops the lock shows up as a
+    /// crashed test binary, not a quiet flake.
+    #[test]
+    fn vk_for_char_is_safe_under_concurrent_calls() {
+        let handles: Vec<_> = (0..32)
+            .map(|_| std::thread::spawn(|| vk_for_char('a')))
+            .collect();
+        for handle in handles {
+            assert!(handle.join().expect("thread panicked").is_some());
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
@@ -1127,6 +1180,7 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
 }
 
 use dock::{app_expose, launchpad, mission_control, show_desktop};
+use keyboard_layout::vk_for_char;
 use symbolic_hotkey::{next_desktop, previous_desktop};
 
 use app_services::symbol as app_services_symbol;
@@ -1424,5 +1478,142 @@ mod symbolic_hotkey {
             assert!(result.is_err());
             assert_eq!(RESTORED_HOTKEY.load(Ordering::Relaxed), super::SPACE_LEFT);
         }
+    }
+}
+
+/// Translate a printable character to the macOS virtual keycode that
+/// currently produces it (unshifted) under the user's active keyboard
+/// layout — fixes issue #343, where a hardcoded QWERTY-positional vk fires
+/// the wrong shortcut under Dvorak/Workman/etc.
+///
+/// Uses the Carbon Text Input Source Services API
+/// (`TISCopyCurrentKeyboardLayoutInputSource` / `TISGetInputSourceProperty` /
+/// `UCKeyTranslate` / `LMGetKbdType`) — no typed bindings exist for these in
+/// any objc2 umbrella crate, so this is a raw `extern "C"` block against
+/// `Carbon.framework`, same pattern as [`ax_nav`] above for `AXUIElement`.
+/// `CFType`/`CFData` from `core_foundation` still handle ownership of the
+/// Copy-rule input source and the Get-rule layout-data blob, rather than
+/// hand-declaring a second `CFRelease`.
+#[expect(
+    unsafe_code,
+    reason = "Carbon Text Input Source Services APIs require raw FFI"
+)]
+mod keyboard_layout {
+    use std::ffi::c_void;
+    use std::sync::{Mutex, PoisonError};
+
+    use core_foundation::base::{CFType, TCFType as _};
+    use core_foundation::data::CFData;
+    use core_foundation::string::CFStringRef;
+
+    type CFTypeRef = *const c_void;
+
+    /// Serializes every call into the Text Input Source Services API below.
+    ///
+    /// `TISCopyCurrentKeyboardLayoutInputSource` lazily bootstraps a shared
+    /// XPC connection inside HIToolbox on first use; two threads racing that
+    /// bootstrap (e.g. two shortcuts firing back to back on the hook/gesture
+    /// dispatch threads) crashes the process with a `SIGABRT` deep inside
+    /// `_xpc_connection_activate_if_needed` — reproduced locally via a
+    /// multi-threaded test run. A process-wide mutex avoids the race; the
+    /// call is cheap enough (sub-millisecond once warm) that serializing it
+    /// is not a meaningful bottleneck at button-press frequency.
+    static TIS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+        fn TISGetInputSourceProperty(
+            input_source: CFTypeRef,
+            property_key: CFStringRef,
+        ) -> CFTypeRef;
+        fn LMGetKbdType() -> u8;
+        fn UCKeyTranslate(
+            key_layout_ptr: *const c_void,
+            virtual_key_code: u16,
+            key_action: u16,
+            modifier_key_state: u32,
+            keyboard_type: u32,
+            key_translate_options: u32,
+            dead_key_state: *mut u32,
+            max_string_length: u32,
+            actual_string_length: *mut u32,
+            unicode_string: *mut u16,
+        ) -> i32;
+        static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
+    }
+
+    const KEY_ACTION_DOWN: u16 = 0; // kUCKeyActionDown
+    // kUCKeyTranslateNoDeadKeysBit is bit 0 in <Carbon/Carbon.h>; the option
+    // flags value UCKeyTranslate takes is the mask, i.e. `1 << 0`.
+    const NO_DEAD_KEYS: u32 = 1;
+
+    /// Return the vk that currently produces `target` unshifted under the
+    /// active keyboard layout, or `None` if it can't be determined (no
+    /// active layout/console session, or no key produces this character).
+    pub(super) fn vk_for_char(target: char) -> Option<u16> {
+        let _guard = TIS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+
+        // SAFETY: TISCopyCurrentKeyboardLayoutInputSource follows the CF
+        // Copy rule (+1); CFType::wrap_under_create_rule takes ownership and
+        // releases it on drop, matching that rule exactly.
+        let source_ptr = unsafe { TISCopyCurrentKeyboardLayoutInputSource() };
+        if source_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: source_ptr is a live, non-null +1 CFTypeRef-compatible
+        // TISInputSourceRef (Apple's documented Copy-rule contract for TIS).
+        let source = unsafe { CFType::wrap_under_create_rule(source_ptr) };
+
+        // SAFETY: source is alive for this call; kTISPropertyUnicodeKeyLayoutData
+        // is a valid CFStringRef exported by Carbon.framework.
+        let layout_data_ptr = unsafe {
+            TISGetInputSourceProperty(
+                source.as_concrete_TypeRef(),
+                kTISPropertyUnicodeKeyLayoutData,
+            )
+        };
+        if layout_data_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: Get rule — not retained; the CFData is owned by `source`,
+        // which stays alive for the rest of this function, so this borrow is
+        // sound. wrap_under_get_rule does not release on drop.
+        let layout_data = unsafe { CFData::wrap_under_get_rule(layout_data_ptr.cast()) };
+        let layout_ptr = layout_data.bytes().as_ptr().cast::<c_void>();
+
+        // SAFETY: LMGetKbdType has no preconditions.
+        let kbd_type = u32::from(unsafe { LMGetKbdType() });
+
+        let mut unichar_buf = [0u16; 4];
+        for vk in 0u16..128 {
+            let mut dead_key_state: u32 = 0;
+            let mut actual_len: u32 = 0;
+            // SAFETY: layout_ptr points into layout_data's live backing
+            // buffer for the duration of this call; dead_key_state,
+            // actual_len and unichar_buf are valid, correctly-sized
+            // out-parameters.
+            let status = unsafe {
+                UCKeyTranslate(
+                    layout_ptr,
+                    vk,
+                    KEY_ACTION_DOWN,
+                    0, // no modifiers: translate the unshifted base glyph
+                    kbd_type,
+                    NO_DEAD_KEYS,
+                    &raw mut dead_key_state,
+                    u32::try_from(unichar_buf.len()).unwrap_or_default(),
+                    &raw mut actual_len,
+                    unichar_buf.as_mut_ptr(),
+                )
+            };
+            if status == 0
+                && actual_len == 1
+                && char::from_u32(u32::from(unichar_buf[0])) == Some(target)
+            {
+                return Some(vk);
+            }
+        }
+        None
     }
 }

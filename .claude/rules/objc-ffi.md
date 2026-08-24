@@ -180,7 +180,12 @@ its single user. The current set, all deliberate:
   same reason.
 - `openlogi-inject`: the `AXUIElement` subset it navigates with, plus
   `CFRetain`/`CFRelease`, and the `dlopen`/`dlsym`-resolved private SPIs
-  (`CoreDockSendNotification`, the CGS symbolic-hotkey trio).
+  (`CoreDockSendNotification`, the CGS symbolic-hotkey trio); also the Carbon
+  Text Input Source Services API (`TISCopyCurrentKeyboardLayoutInputSource` /
+  `TISGetInputSourceProperty` / `UCKeyTranslate` / `LMGetKbdType`) in
+  `keyboard_layout`, used to translate a shortcut's character to the vk that
+  currently produces it under the active keyboard layout (issue #343) — no
+  objc2 umbrella crate covers these.
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
 Two of those are on the migrate-when-touched list rather than permanent:
@@ -219,6 +224,16 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `camera/{capture,uvc/iokit}.rs` — the AVFoundation capture FFI and the IOKit
   USB plug-in; `uvc/iokit.rs` deliberately concentrates every `unsafe` of the
   macOS UVC backend so the descriptor parser above it is ordinary safe code.
+- `inject/macos.rs` — the `AXUIElement` browser-navigation walk, the
+  `dlopen`/`dlsym`-resolved Dock/CGS SPIs, `post_media_key`'s `NSEvent`
+  synthesis (with its own `autoreleasepool`, see below), and
+  `keyboard_layout`'s Carbon Text Input Source Services calls — the last
+  guarded by a process-wide `Mutex` (`TIS_LOCK`), not just a `SAFETY`
+  comment: `TISCopyCurrentKeyboardLayoutInputSource` lazily bootstraps a
+  shared XPC connection on first use, and two threads racing that bootstrap
+  crashes the process (`SIGABRT` inside `_xpc_connection_activate_if_needed`,
+  reproduced locally) — memory-safety per block isn't enough here, the calls
+  themselves aren't safe to interleave.
 
 ## CGEventTap stays on `core-graphics` — on purpose
 
