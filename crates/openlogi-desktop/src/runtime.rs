@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AsyncApp, BorrowAppContext as _, Task};
+use gpui::{App, AppContext as _, AsyncApp, Task};
 use openlogi_camera::Camera;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{AssetSourcePreference, Config};
@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::services::assets::sync::{AssetCommand, AssetTarget};
 use crate::services::assets::{self, sync};
 use crate::services::ipc;
-use crate::state::{self, AppState, ConfigPersistence};
+use crate::state::{self, AppState, ConfigPersistence, DeviceKey, StateEvent};
 use crate::{app, windows};
 
 /// How often the UI re-enumerates USB cameras. They are UVC devices the agent
@@ -67,24 +67,28 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             .spawn(async { openlogi_camera::enumerate_cameras() })
             .await;
 
-        // Install the hook-shared AppState up front, then open the window at
+        // Install the shared AppState entity up front, then open the window at
         // launch; closing it leaves the app live in the menu bar. Start with no
         // devices and never block startup on HID enumeration — a sleeping or
         // unresponsive device must not be able to wedge the main thread before
         // the window opens. The agent's first snapshot wires up devices,
         // bindings and the hook live.
         cx.update(|cx| {
-            if !cx.has_global::<AppState>() {
+            if AppState::try_global(cx).is_none() {
                 let cache = assets::AssetResolver::new();
-                cx.set_global(AppState::with_runtime(
-                    config,
-                    &[],
-                    &[],
-                    &cache,
-                    &cams,
-                    persistence,
-                    ipc_commands,
-                ));
+                let state = cx.new(|_| {
+                    AppState::with_runtime(
+                        config,
+                        &[],
+                        &[],
+                        &cache,
+                        &cams,
+                        persistence,
+                        ipc_commands,
+                    )
+                });
+                AppState::set_global(state, cx);
+                AppState::load_current_device_reads(cx);
             }
             windows::main_window::open(&[], cx);
         });
@@ -92,9 +96,8 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // First launch only: offer to opt in to the update check, since it
         // defaults to off. Marked seen either way so it shows just once.
         cx.update(|cx| {
-            let show = cx
-                .try_global::<AppState>()
-                .is_some_and(|s| !s.app_settings().update_prompt_seen);
+            let show = AppState::try_global(cx)
+                .is_some_and(|state| !state.read(cx).app_settings().update_prompt_seen);
             if show {
                 windows::update_consent::open(cx);
             }
@@ -228,24 +231,26 @@ impl Runtime {
                 command,
                 result,
             } => {
-                let changed = cx.update_global::<AppState, _>(|state, _| {
-                    state.apply_light_command_result(key, request_id, command, result)
+                cx.update(|cx| {
+                    let event_key = DeviceKey::from(key.as_str());
+                    AppState::update(cx, |state, cx| {
+                        if state.apply_light_command_result(key, request_id, command, result) {
+                            cx.emit(StateEvent::LightingChanged(event_key));
+                        }
+                    });
                 });
-                if changed {
-                    cx.update(gpui::App::refresh_windows);
-                }
             }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
-                cx.update(gpui::App::refresh_windows);
             }
             ipc::GuiUpdate::ConfigReloadResult(result) => {
-                let changed = cx.update_global::<AppState, _>(|state, _| {
-                    state.apply_config_reload_result(result)
+                cx.update(|cx| {
+                    AppState::update(cx, |state, cx| {
+                        if state.apply_config_reload_result(result) {
+                            cx.emit(StateEvent::SettingsChanged);
+                        }
+                    });
                 });
-                if changed {
-                    cx.update(gpui::App::refresh_windows);
-                }
             }
         }
     }
@@ -267,11 +272,12 @@ impl Runtime {
             self.inventories.clone_from(&snapshot.inventory);
             self.standalone.clone_from(&snapshot.standalone);
         }
-        let pairing_changed =
-            cx.update(|cx| windows::add_device::apply_state(cx, snapshot.pairing.clone()));
+        cx.update(|cx| {
+            windows::add_device::apply_state(cx, snapshot.pairing.clone());
+        });
         let (auto_download, asset_source, models) = cx.update(|cx| {
-            let (changed, merged, auto_download, asset_source, models) = cx
-                .update_global::<AppState, _>(|state, _| {
+            let (merged, auto_download, asset_source, models) =
+                AppState::update(cx, |state, cx| {
                     // Merge only completed enumerations. A scanning agent serves
                     // an empty pre-enumeration list, which must not burn the GUI's
                     // miss grace or replace the last known device set.
@@ -285,22 +291,31 @@ impl Runtime {
                     if inventory_ready {
                         state.store_inventory_snapshot(&snapshot.inventory);
                     }
-                    // Bitwise `|`: the link must be set even when the
-                    // merge already reported a change.
-                    let changed = merged
-                        | state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()))
-                        | state.set_camera_active(snapshot.camera_active);
+                    let agent_changed =
+                        state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
+                    let camera_changed = state.set_camera_active(snapshot.camera_active);
+                    if merged {
+                        cx.emit(StateEvent::InventoryChanged);
+                    }
+                    if agent_changed {
+                        cx.emit(StateEvent::AgentChanged);
+                    }
+                    if camera_changed {
+                        cx.emit(StateEvent::CameraChanged);
+                    }
                     let settings = state.app_settings();
                     (
-                        changed,
                         merged,
                         settings.auto_download_assets,
                         settings.asset_source,
                         state.asset_models(),
                     )
                 });
-            if changed || pairing_changed {
-                cx.refresh_windows();
+            // A reconnect can drop an in-flight reply without changing the
+            // inventory. Retry any cache entry that the reply lifecycle reset
+            // to Unknown on every completed snapshot; resolved entries no-op.
+            if inventory_ready {
+                AppState::load_current_device_reads(cx);
             }
             if merged {
                 app::menu::rebuild(cx);
@@ -370,7 +385,8 @@ impl Runtime {
     /// anyway.
     fn on_asset_command(&mut self, cmd: AssetCommand, cx: &AsyncApp) {
         let (models, asset_source) = cx.update(|cx| {
-            let state = cx.global::<AppState>();
+            let state = AppState::global(cx);
+            let state = state.read(cx);
             (state.asset_models(), state.app_settings().asset_source)
         });
         if cmd == AssetCommand::ClearCache {
@@ -404,16 +420,21 @@ impl Runtime {
     /// Rebuild the UI's device records against the current resolver.
     fn refresh_devices(&self, cx: &AsyncApp) {
         cx.update(|cx| {
-            let changed = cx.update_global::<AppState, _>(|state, _| {
-                state.refresh_inventories(
+            let changed = AppState::update(cx, |state, cx| {
+                let changed = state.refresh_inventories(
                     &self.inventories,
                     &self.standalone,
                     &self.cache,
                     &self.cams,
-                )
+                );
+                if changed {
+                    cx.emit(StateEvent::InventoryChanged);
+                }
+                changed
             });
             if changed {
-                cx.refresh_windows();
+                AppState::load_current_device_reads(cx);
+                app::menu::rebuild(cx);
             }
         });
     }
@@ -524,10 +545,11 @@ fn camera_targets(cams: &[Camera]) -> impl Iterator<Item = AssetTarget> + '_ {
 /// actually changed (the IPC client may repeat a notice across reconnect
 /// episodes).
 fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
-    let changed = cx.update_global::<AppState, _>(|state, _| state.set_agent_link(link));
-    if changed {
-        cx.refresh_windows();
-    }
+    AppState::update(cx, |state, cx| {
+        if state.set_agent_link(link) {
+            cx.emit(StateEvent::AgentChanged);
+        }
+    });
 }
 
 #[cfg(test)]

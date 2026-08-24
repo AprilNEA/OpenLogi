@@ -26,10 +26,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, point,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, PathBuilder, Render, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, canvas, div, hsla, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
@@ -45,7 +44,7 @@ use crate::features::mouse::picker::{
     scroll_list,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
@@ -134,7 +133,18 @@ pub struct FunctionRowView {
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |_view, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::BindingsChanged(key) => AppState::try_read(cx)
+                    .and_then(AppState::current_record)
+                    .is_some_and(|record| record.device_key() == *key),
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             selected_key: None,
             hovered_key: None,
@@ -239,8 +249,7 @@ type StateSnapshot = (
 impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (asset, bindings, glow): StateSnapshot = cx
-            .try_global::<AppState>()
+        let (asset, bindings, glow): StateSnapshot = AppState::try_read(cx)
             .map(|s| {
                 (
                     s.current_record().and_then(|r| r.asset.clone()),
@@ -795,15 +804,17 @@ fn config_panel(
         );
     }
 
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| s.keyboard_bindings.get(&trigger).cloned());
+    let current = AppState::try_read(cx).and_then(|s| s.keyboard_bindings.get(&trigger).cloned());
 
     let view_for_pick = view.clone();
     let trigger_for_pick = trigger.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| {
+        AppState::update(cx, |state, cx| {
+            let key = state.current_record().map(DeviceRecord::device_key);
             state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
+            if let Some(key) = key {
+                cx.emit(StateEvent::BindingsChanged(key));
+            }
         });
         view_for_pick.update(cx, |_, vcx| vcx.notify());
     });

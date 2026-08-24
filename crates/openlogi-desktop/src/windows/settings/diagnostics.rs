@@ -95,7 +95,8 @@ fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
 fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
     #[cfg(debug_assertions)]
     {
-        cx.try_global::<AppState>()
+        AppState::try_global(cx)
+            .map(|state| state.read(cx))
             .map(|s| s.event_taps().to_vec())
             .unwrap_or_default()
     }
@@ -111,8 +112,8 @@ fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
 /// [`SettingsView`](super::SettingsView)'s task.
 #[cfg(debug_assertions)]
 fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
-    let lines: Vec<String> = cx
-        .try_global::<AppState>()
+    let lines: Vec<String> = AppState::try_global(cx)
+        .map(|state| state.read(cx))
         .map(|s| {
             s.monitor_events()
                 .iter()

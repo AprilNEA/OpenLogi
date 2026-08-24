@@ -1,6 +1,7 @@
 //! DPI presets and live writes. Capability discovery itself lives in
 //! [`super::load::LazyDeviceData`], reached directly as `self.reads.dpi`.
 
+use gpui::{App, Context};
 use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities, DpiInfo, WriteError};
 use tracing::debug;
 
@@ -8,9 +9,50 @@ use crate::state::devices::DeviceRecord;
 
 use super::device_key::DeviceKey;
 use super::load::DpiStatus;
-use super::{AppState, DEFAULT_DPI};
+use super::{AppState, DEFAULT_DPI, StateEvent};
 
 impl AppState {
+    pub(super) fn load_current_dpi(&mut self, cx: &mut Context<Self>) {
+        let Some(record) = self.current_record() else {
+            return;
+        };
+        let key = record.device_key();
+        if !self.reads.dpi.unqueried(&key) {
+            return;
+        }
+        let Some(route) = record.route.clone() else {
+            return;
+        };
+        self.reads.dpi.mark_loading(&key);
+        self.issue_device_read(
+            cx,
+            (key.clone(), route),
+            crate::services::ipc::Command::ReadDpi,
+            |state, key, route, result, cx| {
+                state.store_dpi_info(key.clone(), route, result);
+                // Transient failures clear back to Unknown until the retry
+                // budget is exhausted; continue those retries off render.
+                if state.reads.dpi.unqueried(&key)
+                    && state
+                        .current_record()
+                        .is_some_and(|record| record.device_key() == key)
+                {
+                    state.load_current_dpi(cx);
+                }
+            },
+            |state, key| state.reads.dpi.clear_loading(key),
+            StateEvent::DpiChanged(key),
+        );
+    }
+
+    pub(crate) fn retry_dpi_read(cx: &mut App, key: DeviceKey) {
+        Self::update(cx, |state, cx| {
+            state.reads.dpi.retry(&key);
+            state.load_current_dpi(cx);
+            cx.emit(StateEvent::DpiChanged(key));
+        });
+    }
+
     /// Replace the DPI preset list for the currently selected device. The
     /// new list is persisted to `config.toml` and pushed into the shared
     /// hook map so the next `CycleDpiPresets` press sees it. The cycle

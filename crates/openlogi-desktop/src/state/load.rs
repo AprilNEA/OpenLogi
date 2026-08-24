@@ -3,16 +3,64 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_core::hid::{DpiInfo, SmartShiftStatus, WriteError};
+use gpui::Context;
+use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use tokio::sync::oneshot;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
+use super::{AppState, StateEvent};
+use crate::services::ipc::Command;
 
 /// How many times to retry a device read (DPI capability discovery or a
 /// SmartShift read) after a transient HID++ error (read timeout, busy device)
 /// before giving up. A genuine "feature not supported" reply is permanent and
 /// never retried.
 const LOAD_MAX_ATTEMPTS: u8 = 3;
+
+/// Issue one typed device read from the state entity and apply its result back
+/// to that same entity. The caller owns the feature-specific cache transition;
+/// this helper only owns the IPC/reply lifecycle.
+impl AppState {
+    pub(super) fn issue_device_read<T>(
+        &mut self,
+        cx: &mut Context<Self>,
+        target: (DeviceKey, DeviceRoute),
+        make_command: impl FnOnce(DeviceRoute, oneshot::Sender<T>) -> Command,
+        store: impl FnOnce(&mut Self, DeviceKey, &DeviceRoute, T, &mut Context<Self>) + 'static,
+        clear: impl Fn(&mut Self, &DeviceKey) + 'static,
+        event: StateEvent,
+    ) where
+        T: 'static,
+    {
+        let (key, route) = target;
+        let (tx, rx) = oneshot::channel();
+        if self
+            .ipc_sender()
+            .send(make_command(route.clone(), tx))
+            .is_err()
+        {
+            clear(self, &key);
+            cx.emit(event);
+            return;
+        }
+        cx.spawn(async move |entity, cx| {
+            let result = rx.await;
+            entity
+                .update(cx, move |state, cx| {
+                    match result {
+                        Ok(result) => store(state, key, &route, result, cx),
+                        // The client thread dropped the reply. Reset the loading
+                        // marker so a later inventory/selection event may retry.
+                        Err(_) => clear(state, &key),
+                    }
+                    cx.emit(event);
+                })
+                .ok();
+        })
+        .detach();
+    }
+}
 
 /// Lazy per-device load state for a background HID++ read: unqueried, in flight,
 /// resolved, transiently failed (retryable on re-select), or permanently
@@ -103,15 +151,16 @@ impl<T: Clone> LazyDeviceData<T> {
     }
 
     /// Reset a stuck `Loading` for `key` back to unqueried — the read worker
-    /// vanished (e.g. panicked) without delivering a result, so the next render
-    /// re-issues instead of wedging the device on "Reading…".
+    /// vanished without delivering a result, so the next completed inventory
+    /// snapshot or device selection can re-issue instead of wedging the device
+    /// on "Reading…".
     pub(crate) fn clear_loading(&mut self, key: &DeviceKey) {
         if matches!(self.by_device.get(key), Some(Load::Loading)) {
             self.by_device.remove(key);
         }
     }
 
-    /// Drop `key`'s recorded state and retry budget so the next render re-reads.
+    /// Drop `key`'s recorded state and retry budget so the caller can re-read.
     /// Backs the "click to retry" affordance and the re-select-grants-a-retry
     /// rule for a [`Load::Failed`] device.
     pub(crate) fn retry(&mut self, key: &DeviceKey) {
@@ -157,8 +206,8 @@ impl<T: Clone> LazyDeviceData<T> {
         if !matches_route {
             debug!(key = %key, label, "stale device read result ignored");
             // The device reconnected on a different route mid-read: drop the
-            // orphaned `Loading` marker so the next render re-reads against the
-            // live route instead of spinning on "Reading…" forever.
+            // orphaned `Loading` marker so the owning state update can re-read
+            // against the live route instead of spinning on "Reading…" forever.
             if still_present {
                 self.by_device.remove(&key);
             }
@@ -177,8 +226,9 @@ impl<T: Clone> LazyDeviceData<T> {
                 Load::Unsupported(error.to_string())
             }
             // Transient failures get a few more tries: clear the status so the
-            // next render re-reads, until the budget runs out, then settle on
-            // `Failed` (retryable on re-select) rather than `Unsupported`.
+            // owning state update can re-read, until the budget runs out, then
+            // settle on `Failed` (retryable on re-select) rather than
+            // `Unsupported`.
             Err(error) => {
                 let attempts = self.attempts.entry(key.clone()).or_insert(0);
                 *attempts = attempts.saturating_add(1);

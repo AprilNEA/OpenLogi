@@ -12,10 +12,10 @@
 pub(super) use std::rc::Rc;
 
 pub(super) use gpui::{
-    AnyElement, App, AppContext, Axis, BorrowAppContext, ClipboardItem, Context, Entity,
-    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Size, StatefulInteractiveElement, Styled, Subscription, Window, div, img,
-    prelude::FluentBuilder, px, rgb,
+    AnyElement, App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
+    Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
+    rgb,
 };
 pub(super) use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
@@ -37,7 +37,7 @@ pub(super) use openlogi_core::config::{Appearance, AssetSourcePreference, Thumbw
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
-pub(super) use crate::state::AppState;
+pub(super) use crate::state::{AppState, StateEvent};
 pub(super) use crate::ui::theme::{self, Palette};
 #[cfg(target_os = "macos")]
 pub(super) use openlogi_permissions::Permission;
@@ -104,6 +104,7 @@ pub(super) enum ThemeFilter {
 pub struct SettingsView {
     focus_handle: FocusHandle,
     appearance_obs: Option<Subscription>,
+    _state_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
@@ -149,6 +150,18 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+            if matches!(
+                event,
+                StateEvent::AgentChanged
+                    | StateEvent::DiagnosticsChanged
+                    | StateEvent::InventoryChanged
+                    | StateEvent::CameraPermissionChanged
+                    | StateEvent::SettingsChanged
+            ) {
+                cx.notify();
+            }
+        });
 
         let theme_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter themes…")));
@@ -158,20 +171,16 @@ impl SettingsView {
             }
         })
         .detach();
-        let current = cx
-            .try_global::<AppState>()
-            .and_then(|s| s.app_settings().language.clone());
+        let current = AppState::try_read(cx).and_then(|s| s.app_settings().language.clone());
         let options = language::language_options();
         let selected = language::selected_language_index(current.as_deref(), &options);
         let language_select = cx.new(|cx| SelectState::new(options, Some(selected), window, cx));
         cx.subscribe_in(&language_select, window, Self::on_language_select)
             .detach();
 
-        let current_source = cx
-            .try_global::<AppState>()
-            .map_or(AssetSourcePreference::Automatic, |s| {
-                s.app_settings().asset_source
-            });
+        let current_source = AppState::try_read(cx).map_or(AssetSourcePreference::Automatic, |s| {
+            s.app_settings().asset_source
+        });
         let source_options = assets::asset_source_options();
         let selected_source = assets::selected_source_index(current_source, &source_options);
         let asset_source_select =
@@ -179,11 +188,9 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let sensitivity = cx
-            .try_global::<AppState>()
-            .map_or(ThumbwheelSensitivity::DEFAULT, |s| {
-                s.app_settings().thumbwheel_sensitivity
-            });
+        let sensitivity = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |s| {
+            s.app_settings().thumbwheel_sensitivity
+        });
         let sensitivity_slider = cx.new(|_| {
             SliderState::new()
                 .min(f32::from(ThumbwheelSensitivity::MIN))
@@ -203,7 +210,7 @@ impl SettingsView {
                 // its per-frame render works off this cache instead of issuing
                 // CGGetEventTapList syscalls on every repaint.
                 let taps = openlogi_hook::Hook::list_event_taps();
-                let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
+                let sender = AppState::global(cx).read(cx).ipc_sender();
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let events = if sender
                     .send(crate::services::ipc::Command::PollEventMonitor(tx))
@@ -213,12 +220,12 @@ impl SettingsView {
                 } else {
                     Vec::new()
                 };
-                cx.update_global::<AppState, _>(|state, cx| {
+                AppState::update(cx, |state, cx| {
                     state.set_event_taps(taps);
                     if !events.is_empty() {
                         state.push_monitor_events(events);
                     }
-                    cx.refresh_windows();
+                    cx.emit(StateEvent::DiagnosticsChanged);
                 });
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
@@ -229,6 +236,7 @@ impl SettingsView {
         Self {
             focus_handle,
             appearance_obs: None,
+            _state_obs: state_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
@@ -261,7 +269,10 @@ impl SettingsView {
     ) {
         if let SliderEvent::Release(value) = event {
             let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-            cx.update_global::<AppState, _>(|s, _| s.set_thumbwheel_sensitivity(sensitivity));
+            AppState::update(cx, |state, cx| {
+                state.set_thumbwheel_sensitivity(sensitivity);
+                cx.emit(StateEvent::SettingsChanged);
+            });
         }
         cx.notify();
     }
@@ -282,7 +293,10 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        cx.update_global::<AppState, _>(|s, cx| s.set_language(language, cx));
+        AppState::update(cx, |state, cx| {
+            state.set_language(language, cx);
+            cx.emit(StateEvent::SettingsChanged);
+        });
     }
 
     fn on_asset_source_select(
@@ -299,11 +313,14 @@ impl SettingsView {
             .selected_value()
             .copied()
             .unwrap_or_default();
-        let refresh = cx.try_global::<AppState>().is_some_and(|state| {
+        let refresh = AppState::try_read(cx).is_some_and(|state| {
             state.app_settings().asset_source != source && state.app_settings().auto_download_assets
         });
 
-        cx.update_global::<AppState, _>(|state, _| state.set_asset_source(source));
+        AppState::update(cx, |state, cx| {
+            state.set_asset_source(source);
+            cx.emit(StateEvent::SettingsChanged);
+        });
         if refresh {
             assets::send_asset_command(cx, AssetCommand::Refresh);
         }
@@ -347,9 +364,7 @@ impl Render for SettingsView {
         // Gated to the platforms that register the permission page below (macOS
         // consent is the AVFoundation gate; Windows has no such page).
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let has_camera = cx
-            .try_global::<AppState>()
-            .is_some_and(AppState::has_camera);
+        let has_camera = AppState::try_read(cx).is_some_and(AppState::has_camera);
 
         // Filled group boxes use the theme's content-surface token, keeping
         // settings groups distinct from the page without borrowing a control

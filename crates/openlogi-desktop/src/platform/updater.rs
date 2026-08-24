@@ -105,8 +105,8 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     // later manual check — is honoured. Installed unconditionally; it's inert
     // until both the flag is on and a check resolves to `Available`.
     let auto_install = cx.observe(&updater, |updater, cx| {
-        let opted_in = cx
-            .try_global::<AppState>()
+        let opted_in = AppState::try_global(cx)
+            .map(|state| state.read(cx))
             .is_some_and(|s| s.app_settings().auto_install_updates);
         if opted_in && matches!(updater.read(cx).status(), UpdateStatus::Available(_)) {
             updater.update(cx, Updater::download_and_install);

@@ -223,7 +223,7 @@ pub fn register_builtin_themes(cx: &mut App) {
 /// appearance is read directly and it repaints; pass `None` from a settings
 /// edit (no window in hand) — every open window is refreshed instead.
 pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
-    let (appearance, light_name, dark_name, radius) = cx.try_global::<AppState>().map_or_else(
+    let (appearance, light_name, dark_name, radius) = AppState::try_read(cx).map_or_else(
         || (Appearance::default(), None, None, None),
         |state| {
             let s = state.app_settings();
@@ -287,6 +287,7 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     if let Some(radius) = radius {
         theme.radius = px(f32::from(radius));
     }
+    // Theme tokens are app-global and consumed by every open window.
     cx.refresh_windows();
 }
 

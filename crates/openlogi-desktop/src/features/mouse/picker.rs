@@ -25,9 +25,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
 use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
 use openlogi_core::binding::{
@@ -36,7 +36,7 @@ use openlogi_core::binding::{
 
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
@@ -49,6 +49,16 @@ pub(crate) const POPOVER_W: f32 = 128.;
 /// half a dozen categories; without a cap the list overflows the window.
 pub(crate) const POPOVER_LIST_MAX_H: f32 = 360.;
 
+fn update_bindings(cx: &mut App, update: impl FnOnce(&mut AppState)) {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
+        update(state);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
+    });
+}
+
 /// Build the popover body that re-binds a single `btn`.
 ///
 /// `observer` is whatever entity wraps the trigger — it's notified after the
@@ -59,9 +69,7 @@ pub fn action_picker<T: 'static>(
     observer: &Entity<T>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| s.button_bindings.get(&btn).cloned());
+    let current = AppState::try_read(cx).and_then(|s| s.button_bindings.get(&btn).cloned());
 
     let observer = observer.clone();
     let popover = cx.entity().downgrade();
@@ -69,7 +77,7 @@ pub fn action_picker<T: 'static>(
         let observer = observer.clone();
         let popover = popover.clone();
         move |action, window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.commit_binding(btn, action));
+            update_bindings(cx, |state| state.commit_binding(btn, action));
             observer.update(cx, |_, cx| cx.notify());
             if let Some(p) = popover.upgrade() {
                 p.update(cx, |s, cx| s.dismiss(window, cx));
@@ -106,7 +114,7 @@ pub(crate) fn thumbwheel_picker<T: 'static>(
     observer: &Entity<T>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
-    let current = cx.try_global::<AppState>().and_then(|state| {
+    let current = AppState::try_read(cx).and_then(|state| {
         let backward = state
             .button_bindings
             .get(&ButtonId::ThumbwheelScrollDown)
@@ -152,7 +160,7 @@ pub(crate) fn thumbwheel_picker<T: 'static>(
                     )
                 })
                 .on_click(move |_event, window, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
+                    update_bindings(cx, |state| {
                         state.commit_thumbwheel_preset(preset);
                     });
                     observer.update(cx, |_, cx| cx.notify());
@@ -215,7 +223,7 @@ fn gesture_mode_row<T: 'static>(
                 .text_color(pal.text_muted),
         )
         .on_click(move |_event, window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.commit_gesture_mode(btn, true));
+            update_bindings(cx, |state| state.commit_gesture_mode(btn, true));
             observer.update(cx, |_, cx| cx.notify());
             if let Some(p) = popover.upgrade() {
                 p.update(cx, |s, cx| s.dismiss(window, cx));
@@ -301,8 +309,7 @@ fn plus_card(
     let actions: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
         .into_iter()
         .map(|d| {
-            let action = cx
-                .try_global::<AppState>()
+            let action = AppState::try_read(cx)
                 .and_then(|s| {
                     s.gesture_bindings
                         .get(&btn)
@@ -362,7 +369,7 @@ fn plus_card(
                         .child(div().child(tr!("Turn off gestures"))),
                 )
                 .on_click(move |_event, window, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
+                    update_bindings(cx, |state| {
                         state.commit_gesture_mode(btn, false);
                     });
                     view_off.update(cx, |_, vcx| vcx.notify());
@@ -445,8 +452,7 @@ fn flyout_card(
     pal: Palette,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
+    let current = AppState::try_read(cx)
         .and_then(|s| {
             s.gesture_bindings
                 .get(&btn)
@@ -457,7 +463,9 @@ fn flyout_card(
 
     let view_pick = view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| state.commit_gesture_binding(btn, dir, action));
+        update_bindings(cx, |state| {
+            state.commit_gesture_binding(btn, dir, action);
+        });
         // Stay open; re-render so the level-1 cell + checkmark update.
         view_pick.update(cx, |_, vcx| vcx.notify());
     });

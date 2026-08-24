@@ -15,7 +15,7 @@
 )]
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement,
+    AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement,
     StatefulInteractiveElement as _, Styled, div, px, svg,
 };
 use gpui_component::{
@@ -31,7 +31,7 @@ use openlogi_core::config::KeyTrigger;
 
 use super::function_row::FunctionRowView;
 use crate::features::mouse::picker::{divider, menu_card, menu_row, scroll_list, title};
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{Palette, Typography as _};
 
 /// Which power-user editor is showing for the selected key.
@@ -170,8 +170,12 @@ fn editor_action_row(
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
                         PowerUserKind::Workflow => return,
                     };
-                    cx.update_global::<AppState, _>(|state, _| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
                         state.commit_keyboard_binding(trigger_save.clone(), Some(action));
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::BindingsChanged(key));
+                        }
                     });
                     view_save.update(cx, |v, vcx| v.close_editor(vcx));
                 }),
@@ -231,8 +235,12 @@ fn workflow_editor_card(
                             move |_e, _window, cx| {
                                 let steps = v.read(cx).workflow_draft().to_vec();
                                 let action = Action::Workflow(steps);
-                                cx.update_global::<AppState, _>(|state, _| {
+                                AppState::update(cx, |state, cx| {
+                                    let key = state.current_record().map(DeviceRecord::device_key);
                                     state.commit_keyboard_binding(trigger.clone(), Some(action));
+                                    if let Some(key) = key {
+                                        cx.emit(StateEvent::BindingsChanged(key));
+                                    }
                                 });
                                 v.update(cx, |v, vcx| v.close_editor(vcx));
                             }

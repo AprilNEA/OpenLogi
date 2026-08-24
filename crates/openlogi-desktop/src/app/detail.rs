@@ -2,8 +2,8 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, IntoElement, ParentElement, SharedString, Styled,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _,
@@ -34,7 +34,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
@@ -111,8 +111,7 @@ pub(super) fn detail_content(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let online = cx
-        .try_global::<AppState>()
+    let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
     let content = match active {
@@ -281,8 +280,7 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, inversion_supported, resolution, hires_supported) = cx
-        .try_global::<AppState>()
+    let (inverted, inversion_supported, resolution, hires_supported) = AppState::try_read(cx)
         .map_or((false, false, None, false), |state| {
             (
                 state.current_invert_scroll(),
@@ -393,10 +391,13 @@ fn wheel_resolution_control(
             let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
                 return;
             };
-            cx.update_global::<AppState, _>(|state, _| {
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
                 state.commit_scroll_resolution(*value);
+                if let Some(key) = key {
+                    cx.emit(StateEvent::DeviceConfigChanged(key));
+                }
             });
-            cx.refresh_windows();
         })
         .into_any_element()
 }
@@ -422,10 +423,13 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
         .label(label)
         .selected(on)
         .on_click(move |_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| {
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
                 state.commit_invert_scroll(!on);
+                if let Some(key) = key {
+                    cx.emit(StateEvent::DeviceConfigChanged(key));
+                }
             });
-            cx.refresh_windows();
         })
         .into_any_element()
 }
@@ -495,7 +499,7 @@ fn light_tab(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let (asset, online, enabled, settings) = cx.try_global::<AppState>().map_or_else(
+    let (asset, online, enabled, settings) = AppState::try_read(cx).map_or_else(
         || {
             (
                 None,
@@ -558,8 +562,7 @@ fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 }
 
 fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let content = cx
-        .try_global::<AppState>()
+    let content = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .cloned()
         .map_or_else(
@@ -596,16 +599,15 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
 }
 
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let device_enabled = cx
-        .try_global::<AppState>()
+    let device_enabled = AppState::try_read(cx)
         .and_then(|state| {
             state
                 .current_record()
                 .map(|r| state.device_enabled(&r.config_key))
         })
         .unwrap_or(true);
-    let (binding_count, gesture_count, preset_count, app_profile) =
-        cx.try_global::<AppState>().map_or_else(
+    let (binding_count, gesture_count, preset_count, app_profile) = AppState::try_read(cx)
+        .map_or_else(
             || (0, 0, 0, tr!("Default profile").to_string()),
             |state| {
                 (
@@ -642,13 +644,15 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         .checked(device_enabled)
                         .on_click(|checked, _window, cx| {
                             let enabled = *checked;
-                            cx.update_global::<AppState, _>(|state, _| {
-                                let key = state.current_record().map(|r| r.config_key.clone());
-                                if let Some(key) = key {
-                                    state.set_device_enabled(&key, enabled);
+                            AppState::update(cx, |state, cx| {
+                                let record = state
+                                    .current_record()
+                                    .map(|record| (record.config_key.clone(), record.device_key()));
+                                if let Some((config_key, event_key)) = record {
+                                    state.set_device_enabled(&config_key, enabled);
+                                    cx.emit(StateEvent::DeviceConfigChanged(event_key));
                                 }
                             });
-                            cx.refresh_windows();
                         }),
                 ),
         )

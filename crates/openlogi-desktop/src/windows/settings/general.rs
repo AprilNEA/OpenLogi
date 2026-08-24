@@ -1,9 +1,9 @@
 //! General settings page.
 
 use super::{
-    AnyElement, App, AppState, BorrowAppContext, Entity, FluentBuilder, IconName, IntoElement,
-    ParentElement, SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState,
-    Styled, ThumbwheelSensitivity, div, h_flex, px, theme, v_flex,
+    AnyElement, App, AppState, Entity, FluentBuilder, IconName, IntoElement, ParentElement,
+    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
+    ThumbwheelSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
@@ -25,14 +25,14 @@ pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPa
                 tr!("Launch at login"),
                 SettingField::switch(
                     |cx| {
-                        cx.try_global::<AppState>()
+                        AppState::try_read(cx)
                             .is_some_and(|s| s.app_settings().launch_at_login)
                     },
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_launch_at_login(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_launch_at_login(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
-                        cx.refresh_windows();
                     },
                 ),
             )
@@ -57,14 +57,14 @@ pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPa
             },
             SettingField::switch(
                 |cx| {
-                    cx.try_global::<AppState>()
+                    AppState::try_read(cx)
                         .is_some_and(|s| s.app_settings().show_in_menu_bar)
                 },
                 |enabled, cx| {
-                    cx.update_global::<AppState, _>(move |s, _| {
-                        s.set_show_in_menu_bar(enabled);
+                    AppState::update(cx, move |state, cx| {
+                        state.set_show_in_menu_bar(enabled);
+                        cx.emit(StateEvent::SettingsChanged);
                     });
-                    cx.refresh_windows();
                 },
             ),
         )

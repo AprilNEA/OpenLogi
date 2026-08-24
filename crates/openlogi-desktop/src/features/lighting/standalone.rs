@@ -1,11 +1,11 @@
 //! Controls for standalone lights.
 
-use crate::state::{AppState, LightCommandStatus};
+use crate::state::{AppState, DeviceRecord, LightCommandStatus, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle as _, Typography as _};
 use gpui::{
-    AppContext as _, BorrowAppContext as _, BoxShadow, Context, Entity, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, hsla, point, prelude::FluentBuilder as _, px, rgb,
+    App, AppContext as _, BoxShadow, Context, Entity, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    hsla, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, h_flex,
@@ -16,6 +16,16 @@ use openlogi_core::{
     config::LightSettings,
     device::{LightCapabilities, LightValueRange, LightValueUnit},
 };
+
+fn update_light(cx: &mut App, update: impl FnOnce(&mut AppState)) {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
+        update(state);
+        if let Some(key) = key {
+            cx.emit(StateEvent::LightingChanged(key));
+        }
+    });
+}
 
 /// Standalone-light panel. The UI is driven by the active device's advertised
 /// capabilities; the panel is not Litra-specific even though Litra is the
@@ -37,11 +47,23 @@ impl LightPanel {
     /// Construct the panel. Capability-shaped sliders are created lazily when
     /// the selected device is known.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let settings = cx
-            .try_global::<AppState>()
+        let settings = AppState::try_read(cx)
             .map(AppState::light)
             .unwrap_or_default();
-        let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged
+                | StateEvent::DeviceSelected(_)
+                | StateEvent::CameraChanged => true,
+                StateEvent::LightingChanged(key) => AppState::try_read(cx)
+                    .and_then(AppState::current_record)
+                    .is_some_and(|record| record.device_key() == *key),
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             brightness: None,
             temperature: None,
@@ -98,7 +120,7 @@ impl LightPanel {
                         let Some(percent) = range.percent_for_native(native) else {
                             return;
                         };
-                        cx.update_global::<AppState, _>(|state, _| {
+                        update_light(cx, |state| {
                             let mut light = state.light();
                             if !state.camera_automation_active() {
                                 light.enabled = true;
@@ -128,7 +150,7 @@ impl LightPanel {
                 cx.subscribe(&slider, move |_panel, _slider, event: &SliderEvent, cx| {
                     if let SliderEvent::Release(value) = event {
                         let kelvin = range.quantize(round_u16(value.start()));
-                        cx.update_global::<AppState, _>(|state, _| {
+                        update_light(cx, |state| {
                             let mut light = state.light();
                             if !state.camera_automation_active() {
                                 light.enabled = true;
@@ -148,12 +170,10 @@ impl LightPanel {
 impl Render for LightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let settings = cx
-            .try_global::<AppState>()
+        let settings = AppState::try_read(cx)
             .map(AppState::light)
             .unwrap_or_default();
-        let record = cx
-            .try_global::<AppState>()
+        let record = AppState::try_read(cx)
             .and_then(AppState::current_record)
             .cloned();
         let capabilities = record.as_ref().and_then(|record| record.light_capabilities);
@@ -193,9 +213,7 @@ impl Render for LightPanel {
             |record| record.display_name.clone(),
         );
         let online = record.as_ref().is_some_and(|record| record.online);
-        let effective_enabled = cx
-            .try_global::<AppState>()
-            .is_some_and(AppState::light_enabled);
+        let effective_enabled = AppState::try_read(cx).is_some_and(AppState::light_enabled);
         let power = capabilities.is_some_and(|caps| caps.power);
 
         let mut panel = v_flex().gap_4().w_full();
@@ -231,10 +249,7 @@ impl Render for LightPanel {
                 pal,
             ));
         }
-        if let Some(status) = cx
-            .try_global::<AppState>()
-            .and_then(AppState::light_command_status)
-        {
+        if let Some(status) = AppState::try_read(cx).and_then(AppState::light_command_status) {
             panel = panel.child(light_command_status(status, pal));
         }
         panel
@@ -367,12 +382,11 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
                     tr!("Off")
                 })
                 .on_click(|_event, _window, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
+                    update_light(cx, |state| {
                         let mut light = state.light();
                         light.auto_camera = !light.auto_camera;
                         state.commit_light(light);
                     });
-                    cx.refresh_windows();
                 }),
         )
 }
@@ -453,10 +467,9 @@ fn toggle(effective_enabled: bool, pal: Palette) -> impl IntoElement {
         .child(Icon::new(icon).size_3())
         .child(if on { tr!("On") } else { tr!("Off") })
         .on_click(move |_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| {
+            update_light(cx, |state| {
                 state.commit_manual_light_power(!state.light_enabled());
             });
-            cx.refresh_windows();
         })
 }
 

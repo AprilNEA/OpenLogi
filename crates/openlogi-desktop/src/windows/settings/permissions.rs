@@ -38,7 +38,10 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
                     // The agent owns the hook, so this is *its* grant,
                     // reported over IPC; while not connected the state is
                     // genuinely unknown, not denied.
-                    match cx.try_global::<AppState>().and_then(AppState::agent_status) {
+                    match AppState::try_global(cx)
+                        .map(|state| state.read(cx))
+                        .and_then(AppState::agent_status)
+                    {
                         Some(status) if status.accessibility_granted => PermissionStatus::Granted,
                         Some(_) => PermissionStatus::Denied,
                         None => PermissionStatus::Unknown,
@@ -117,7 +120,9 @@ fn input_monitoring_item(pal: Palette) -> SettingItem {
     SettingItem::new(
                 tr!("Input Monitoring"),
                 SettingField::render(move |_, _, cx| {
-                    let status = cx.try_global::<AppState>().and_then(AppState::agent_status);
+                    let status = AppState::try_global(cx)
+                        .map(|state| state.read(cx))
+                        .and_then(AppState::agent_status);
                     // Granted-but-still-failing is the one state the badge
                     // alone cannot express: the grant exists, yet every
                     // open is refused — an exclusive open elsewhere, or a
@@ -236,9 +241,9 @@ fn permission_field(
                     // hook); prompting in the GUI would authorize the wrong
                     // binary. Other panes just deep-link to System Settings.
                     if matches!(permission, Permission::Accessibility)
-                        && let Some(state) = cx.try_global::<crate::state::AppState>()
+                        && let Some(state) = crate::state::AppState::try_global(cx)
                     {
-                        state.request_accessibility_prompt();
+                        state.read(cx).request_accessibility_prompt();
                     }
                     // The Camera pane only lists an app after its first
                     // AVFoundation request, so a deep link can't grant it.

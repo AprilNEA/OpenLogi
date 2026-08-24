@@ -2,14 +2,103 @@
 //! cache itself lives in [`super::load::LazyDeviceData`], reached directly as
 //! `self.reads.smartshift`.
 
+use gpui::{App, Context};
 use openlogi_core::hid::{DeviceRoute, SmartShiftStatus, WriteError};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
+use super::devices::DeviceRecord;
 use super::load::SmartShiftLoad;
-use super::{AppState, SmartShiftWriteStatus};
+use super::{AppState, SmartShiftWriteStatus, StateEvent};
 
 impl AppState {
+    pub(super) fn load_current_smartshift(&mut self, cx: &mut Context<Self>) {
+        let Some((key, route, write_id)) = self.current_record().and_then(|record| {
+            let key = record.device_key();
+            if !self.reads.smartshift.unqueried(&key) {
+                return None;
+            }
+            let write_id = match self.current_smartshift_write_status() {
+                Some(SmartShiftWriteStatus::Applying { write_id, .. }) => Some(write_id),
+                Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => {
+                    None
+                }
+            };
+            Some((key, record.route.clone()?, write_id))
+        }) else {
+            return;
+        };
+        self.reads.smartshift.mark_loading(&key);
+        self.issue_smartshift_read(
+            key,
+            route,
+            write_id,
+            |state, key| {
+                state.reads.smartshift.clear_loading(key);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn confirm_current_smartshift(&mut self, cx: &mut Context<Self>) {
+        let Some((key, route, write_id)) = self.take_active_smartshift_confirm() else {
+            return;
+        };
+        self.issue_smartshift_read(
+            key,
+            route,
+            Some(write_id),
+            move |state, key| state.fail_smartshift_confirm(key, write_id),
+            cx,
+        );
+    }
+
+    fn issue_smartshift_read(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        write_id: Option<u64>,
+        clear: impl Fn(&mut AppState, &DeviceKey) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.issue_device_read(
+            cx,
+            (key.clone(), route),
+            crate::services::ipc::Command::ReadSmartShift,
+            move |state, key, route, result, cx| {
+                state.store_smartshift_status(key.clone(), route, write_id, result);
+                if state.reads.smartshift.unqueried(&key)
+                    && state
+                        .current_record()
+                        .is_some_and(|record| record.device_key() == key)
+                {
+                    state.load_current_smartshift(cx);
+                }
+            },
+            clear,
+            StateEvent::SmartShiftChanged(key),
+        );
+    }
+
+    pub(crate) fn retry_smartshift_read(cx: &mut App, key: DeviceKey) {
+        Self::update(cx, |state, cx| {
+            state.retry_smartshift(&key);
+            state.load_current_smartshift(cx);
+            cx.emit(StateEvent::SmartShiftChanged(key));
+        });
+    }
+
+    pub(crate) fn update_smartshift(cx: &mut App, status: SmartShiftStatus) {
+        Self::update(cx, |state, cx| {
+            let key = state.current_record().map(DeviceRecord::device_key);
+            state.commit_smartshift(status);
+            state.confirm_current_smartshift(cx);
+            if let Some(key) = key {
+                cx.emit(StateEvent::SmartShiftChanged(key));
+            }
+        });
+    }
+
     /// The active device's resolved SmartShift config, if the read succeeded.
     /// Callers use it to preserve fields they don't mean to change (e.g.
     /// tunable torque) when writing back.
@@ -34,7 +123,7 @@ impl AppState {
                 .and_then(|entry| entry.smartshift_write_status)
         })
     }
-    /// Drop `key`'s recorded SmartShift status so the next render re-runs
+    /// Drop `key`'s recorded SmartShift status so the caller can re-run
     /// discovery, and clear any post-write confirmation banner along with it.
     /// Backs the "click to retry" affordance on a [`SmartShiftLoad::Failed`]
     /// device and on a failed write confirmation.

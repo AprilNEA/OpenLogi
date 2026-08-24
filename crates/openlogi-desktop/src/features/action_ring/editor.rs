@@ -1,9 +1,8 @@
 //! Categorized action, shortcut, path, and icon editor for one ring slot.
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Entity, InteractiveElement, IntoElement, ParentElement,
-    Role, ScrollHandle, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
-    px, rgb, svg,
+    AnyElement, Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
@@ -20,7 +19,7 @@ use openlogi_core::binding::{
 
 use super::action_icons::action_icon_path;
 use crate::features::mouse::picker::popover_section;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) fn action_library(
@@ -303,17 +302,23 @@ fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
 }
 
 fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui::App) {
-    cx.update_global::<AppState, _>(|state, _| {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
         state.commit_action_ring_slot(slot, action);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
     });
-    cx.refresh_windows();
 }
 
 fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui::App) {
-    cx.update_global::<AppState, _>(|state, _| {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
         state.commit_action_ring_icon(slot, icon);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
     });
-    cx.refresh_windows();
 }
 
 #[cfg(test)]

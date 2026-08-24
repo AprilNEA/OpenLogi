@@ -6,8 +6,8 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, SharedString, Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
     IconName, Selectable as _, Sizable as _,
@@ -16,11 +16,10 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities};
+use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
-use crate::state::{AppState, DeviceKey, DpiStatus};
-use crate::ui::device_read::issue_device_read;
+use crate::state::{AppState, DeviceKey, DeviceRecord, DpiStatus, StateEvent};
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
 
@@ -56,7 +55,21 @@ impl DpiPanel {
         // completes. The slider entity is rebuilt in `render` whenever the
         // selected device or reported range changes, because SliderState's
         // range is builder-only.
-        let state_obs = cx.observe_global::<AppState>(|_panel, cx| cx.notify());
+        let state_obs = cx.subscribe(
+            &AppState::global(cx),
+            |_panel, _, event: &StateEvent, cx| {
+                let relevant = match event {
+                    StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                    StateEvent::DpiChanged(key) => AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .is_some_and(|record| record.device_key() == *key),
+                    _ => false,
+                };
+                if relevant {
+                    cx.notify();
+                }
+            },
+        );
 
         Self {
             slider_state: None,
@@ -65,36 +78,6 @@ impl DpiPanel {
             slider_shape: None,
             _state_obs: state_obs,
         }
-    }
-
-    /// Kick off a one-shot DPI capability read for the active device when it
-    /// hasn't been queried yet.
-    ///
-    /// This is the *only* place discovery is triggered, and it runs from
-    /// `render`, so a device's capabilities — and therefore the normalization
-    /// applied to the hook's DPI-cycle presets — only populate once this panel
-    /// has been rendered for that device. A user who only ever cycles DPI via
-    /// the hook (window never opened) keeps the raw, un-normalized presets,
-    /// which are still valid DPI values. This lazy coupling is intentional:
-    /// `AppState` is a global without its own GPUI context to spawn from.
-    fn ensure_dpi_load(cx: &mut Context<Self>) {
-        let Some((key, route)) = dpi_load_target(cx) else {
-            return;
-        };
-
-        cx.update_global::<AppState, _>(|state, _| state.reads.dpi.mark_loading(&key));
-        // The agent owns device I/O: request the DPI read over IPC and store the
-        // typed reply off the render thread. The typed `WriteError` reaches
-        // `store_dpi_info` intact, so a permanent `FeatureUnsupported` /
-        // `EmptyDpiList` stops the panel re-probing on every reselect.
-        issue_device_read(
-            cx,
-            key,
-            route,
-            crate::services::ipc::Command::ReadDpi,
-            AppState::store_dpi_info,
-            |state, key| state.reads.dpi.clear_loading(key),
-        );
     }
 
     fn ensure_slider(
@@ -151,23 +134,33 @@ impl DpiPanel {
                     // to keep us from spamming the device with intermediate values.
                     SliderEvent::Change(value) => {
                         let dpi = Dpi::from_rounded(value.start());
-                        let dpi = cx
-                            .try_global::<AppState>()
+                        let dpi = AppState::try_read(cx)
                             .map_or(dpi, |state| state.normalize_active_dpi(dpi));
                         debug!(%dpi, "slider change → AppState.dpi");
-                        cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
+                        AppState::update(cx, |state, cx| {
+                            let key = state.current_record().map(DeviceRecord::device_key);
+                            state.dpi = dpi;
+                            if let Some(key) = key {
+                                cx.emit(StateEvent::DpiChanged(key));
+                            }
+                        });
                         cx.notify();
                     }
                     SliderEvent::Release(value) => {
                         let dpi = Dpi::from_rounded(value.start());
-                        let dpi = cx
-                            .try_global::<AppState>()
+                        let dpi = AppState::try_read(cx)
                             .map_or(dpi, |state| state.normalize_active_dpi(dpi));
                         // `commit_dpi` resolves the target at fire-time, so
                         // carousel-driven device switches route the write to the
                         // now-current device, not whichever was active when this
                         // slider entity was constructed.
-                        cx.update_global::<AppState, _>(|state, _| state.commit_dpi(dpi));
+                        AppState::update(cx, |state, cx| {
+                            let key = state.current_record().map(DeviceRecord::device_key);
+                            state.commit_dpi(dpi);
+                            if let Some(key) = key {
+                                cx.emit(StateEvent::DpiChanged(key));
+                            }
+                        });
                     }
                 },
             );
@@ -181,8 +174,6 @@ impl DpiPanel {
 
 impl Render for DpiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::ensure_dpi_load(cx);
-
         let snapshot = dpi_panel_snapshot(cx);
         let pal = theme::palette(cx);
 
@@ -209,8 +200,7 @@ impl Render for DpiPanel {
             .iter()
             .enumerate()
             .map(|(idx, value)| {
-                let normalized = cx
-                    .try_global::<AppState>()
+                let normalized = AppState::try_read(cx)
                     .map_or(*value, |state| state.normalize_active_dpi(*value));
                 let active = !already_highlighted && normalized == snapshot.dpi;
                 already_highlighted |= active;
@@ -275,7 +265,7 @@ impl Render for DpiPanel {
 }
 
 fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
-    cx.try_global::<AppState>()
+    AppState::try_read(cx)
         .and_then(|s| {
             let record = s.current_record()?;
             let device_key = record.device_key();
@@ -349,8 +339,7 @@ fn slider_element(
             tr!("Couldn't read DPI — click to retry."),
             pal,
             move |cx| {
-                cx.update_global::<AppState, _>(|state, _| state.reads.dpi.retry(&key));
-                cx.refresh_windows();
+                AppState::retry_dpi_read(cx, key.clone());
             },
         ),
         (DpiStatus::Unsupported(_), _) => status_line(
@@ -390,14 +379,18 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palet
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
                     // clobbered by a discovery result that lands afterwards.
-                    let Some(dpi) = cx
-                        .try_global::<AppState>()
+                    let Some(dpi) = AppState::try_read(cx)
                         .and_then(|s| Some(s.active_dpi_capabilities()?.nearest(value)))
                     else {
                         return;
                     };
-                    cx.update_global::<AppState, _>(|state, _| state.commit_dpi(dpi));
-                    cx.refresh_windows();
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_dpi(dpi);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DpiChanged(key));
+                        }
+                    });
                 }),
         )
         .child(
@@ -410,8 +403,13 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palet
                     if idx < next.len() {
                         next.remove(idx);
                     }
-                    cx.update_global::<AppState, _>(|state, _| state.commit_dpi_presets(next));
-                    cx.refresh_windows();
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_dpi_presets(next);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DpiChanged(key));
+                        }
+                    });
                 }),
         )
         .into_any_element()
@@ -429,23 +427,15 @@ fn add_preset_chip() -> AnyElement {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value
             // appearing at multiple cycle positions for muscle-memory reasons.
-            cx.update_global::<AppState, _>(|state, _| {
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
                 let mut presets = state.dpi_presets();
                 presets.push(state.dpi);
                 state.commit_dpi_presets(presets);
+                if let Some(key) = key {
+                    cx.emit(StateEvent::DpiChanged(key));
+                }
             });
-            cx.refresh_windows();
         })
         .into_any_element()
-}
-
-fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(DeviceKey, DeviceRoute)> {
-    cx.try_global::<AppState>().and_then(|state| {
-        let record = state.current_record()?;
-        let key = record.device_key();
-        if !state.reads.dpi.unqueried(&key) {
-            return None;
-        }
-        Some((key, record.route.clone()?))
-    })
 }

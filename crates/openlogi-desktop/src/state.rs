@@ -1,4 +1,4 @@
-//! App-wide UI state stored as a GPUI global.
+//! App-wide UI state owned by a GPUI entity.
 //!
 //! Anything that more than one view needs to read (current device, currently
 //! armed button, the DPI value the panel and the dot-preview share) lives
@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui::Global;
+use gpui::{App, Context, Entity, EventEmitter, Global};
 use openlogi_core::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, ButtonId, GestureDirection,
     RingAction,
@@ -73,6 +73,47 @@ mod tests;
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
+
+/// Semantic changes emitted by the shared application-state entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StateEvent {
+    /// Agent connection or permission state changed.
+    AgentChanged,
+    /// Cached diagnostics/event-monitor data changed.
+    #[cfg_attr(
+        not(all(target_os = "macos", debug_assertions)),
+        expect(dead_code, reason = "the live event monitor is macOS debug-only")
+    )]
+    DiagnosticsChanged,
+    /// The merged device inventory changed.
+    InventoryChanged,
+    /// The active carousel device changed.
+    DeviceSelected(DeviceKey),
+    /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
+    BindingsChanged(DeviceKey),
+    /// DPI data or the active DPI value changed.
+    DpiChanged(DeviceKey),
+    /// SmartShift data or write status changed.
+    SmartShiftChanged(DeviceKey),
+    /// Device or standalone-light settings changed.
+    LightingChanged(DeviceKey),
+    /// Camera settings or activity changed.
+    CameraChanged,
+    /// Host camera-permission status may have changed.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "camera consent polling is macOS-only")
+    )]
+    CameraPermissionChanged,
+    /// Per-device preferences outside the feature-specific events changed.
+    DeviceConfigChanged(DeviceKey),
+    /// Application-wide preferences changed.
+    SettingsChanged,
+}
+
+struct GlobalAppState(Entity<AppState>);
+
+impl Global for GlobalAppState {}
 
 /// The GUI's view of the agent connection: the latest status snapshot, or the
 /// reason there isn't one. One value instead of per-fact mirror fields
@@ -233,7 +274,48 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build the global from a loaded config + enumerated inventories.
+    /// Return the shared state entity when runtime initialization has installed it.
+    pub(crate) fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalAppState>()
+            .map(|state| state.0.clone())
+    }
+
+    /// Return the shared state entity.
+    #[track_caller]
+    pub(crate) fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalAppState>().0.clone()
+    }
+
+    /// Borrow the shared state when runtime initialization has installed it.
+    pub(crate) fn try_read(cx: &App) -> Option<&Self> {
+        cx.try_global::<GlobalAppState>()
+            .map(|state| state.0.read(cx))
+    }
+
+    /// Update the shared state with its entity context.
+    pub(crate) fn update<R>(
+        cx: &mut App,
+        update: impl FnOnce(&mut Self, &mut Context<Self>) -> R,
+    ) -> R {
+        Self::global(cx).update(cx, update)
+    }
+
+    /// Start any pending DPI/SmartShift read for the selected device. Called
+    /// after inventory or selection changes; render paths only consume caches.
+    pub(crate) fn load_current_device_reads(cx: &mut App) {
+        Self::update(cx, |state, cx| {
+            state.load_current_dpi(cx);
+            state.load_current_smartshift(cx);
+            state.confirm_current_smartshift(cx);
+        });
+    }
+
+    /// Install the shared state entity behind its private global handle.
+    pub(crate) fn set_global(state: Entity<Self>, cx: &mut App) {
+        cx.set_global(GlobalAppState(state));
+    }
+
+    /// Build the state from a loaded config + enumerated inventories.
     ///
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
@@ -390,8 +472,8 @@ impl AppState {
         self.config_issue = next;
         true
     }
-    /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
-    /// can issue device reads and writes through the agent themselves.
+    /// A clone of the IPC command sender used by the state entity to issue
+    /// device reads and writes through the agent.
     #[must_use]
     pub fn ipc_sender(&self) -> mpsc::UnboundedSender<crate::services::ipc::Command> {
         self.ipc_commands.clone()
@@ -482,4 +564,4 @@ impl AppState {
     }
 }
 
-impl Global for AppState {}
+impl EventEmitter<StateEvent> for AppState {}

@@ -83,7 +83,7 @@ pub fn open(cx: &mut App) {
 /// The accumulation this used to do (collecting discovered devices out of an
 /// event stream) belongs to the agent, which is the side that knows what it has
 /// discovered; nothing is folded here any more.
-pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) -> bool {
+pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) {
     let next = match phase {
         None => PairingUi::Idle,
         Some(PairingPhase::Searching) => PairingUi::Searching,
@@ -94,10 +94,9 @@ pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) -> bool {
         Some(PairingPhase::Failed(failure)) => PairingUi::Failed(failure),
     };
     if cx.try_global::<PairingUi>() == Some(&next) {
-        return false;
+        return;
     }
     cx.set_global(next);
-    true
 }
 
 /// Report a pairing command the client could not deliver. No session will ever
@@ -144,8 +143,8 @@ fn pairing_failure_text(failure: &PairingFailure) -> String {
 }
 
 fn send(cx: &App, command: Command) {
-    if let Some(state) = cx.try_global::<AppState>() {
-        let _ = state.ipc_sender().send(command);
+    if let Some(state) = AppState::try_global(cx) {
+        let _ = state.read(cx).ipc_sender().send(command);
     }
 }
 

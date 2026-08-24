@@ -5,10 +5,10 @@ use gpui::img;
 use openlogi_core::config::AppIcon;
 
 use super::{
-    ActiveTheme, AnyElement, App, AppState, Appearance, Axis, BorrowAppContext, Button,
-    ButtonGroup, Entity, FluentBuilder, Hsla, IconName, Input, InputState, InteractiveElement,
-    IntoElement, Palette, ParentElement, Rc, SelectState, Selectable, SettingField, SettingGroup,
-    SettingItem, SettingPage, SettingsView, SharedString, Sizable, StatefulInteractiveElement,
+    ActiveTheme, AnyElement, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity,
+    FluentBuilder, Hsla, IconName, Input, InputState, InteractiveElement, IntoElement, Palette,
+    ParentElement, Rc, SelectState, Selectable, SettingField, SettingGroup, SettingItem,
+    SettingPage, SettingsView, SharedString, Sizable, StateEvent, StatefulInteractiveElement,
     Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px,
     rgb, theme, v_flex,
 };
@@ -92,20 +92,25 @@ pub(super) fn appearance_page(
 
 /// The stored light/dark preference (defaults to following the OS).
 fn appearance_of(cx: &App) -> Appearance {
-    cx.try_global::<AppState>()
-        .map_or(Appearance::System, |s| s.app_settings().appearance)
+    AppState::try_read(cx).map_or(Appearance::System, |s| s.app_settings().appearance)
 }
 
 /// Persist an appearance-mode choice and re-apply the live theme.
 fn set_appearance(cx: &mut App, appearance: Appearance) {
-    cx.update_global::<AppState, _>(|s, _| s.set_appearance(appearance));
+    AppState::update(cx, |state, cx| {
+        state.set_appearance(appearance);
+        cx.emit(StateEvent::SettingsChanged);
+    });
     theme::apply_from_settings(None, cx);
 }
 
 /// Persist a corner-radius choice and re-apply the live theme. `None` defers to
 /// the active theme's own radius.
 fn set_radius(cx: &mut App, radius: Option<u8>) {
-    cx.update_global::<AppState, _>(|s, _| s.set_ui_radius(radius));
+    AppState::update(cx, |state, cx| {
+        state.set_ui_radius(radius);
+        cx.emit(StateEvent::SettingsChanged);
+    });
     theme::apply_from_settings(None, cx);
 }
 
@@ -219,9 +224,8 @@ fn mode_card(
 /// compiled icon rather than its artwork, so the choice looks like what macOS
 /// will draw.
 fn icon_picker(pal: Palette, cx: &App) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
+    let current =
+        AppState::try_read(cx).map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
     let accent = cx.theme().primary;
     h_flex()
         .gap_4()
@@ -262,7 +266,10 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
                 .child(div().text_body().child(icon_label(icon))),
         )
         .on_click(move |_, _, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.set_app_icon(icon));
+            AppState::update(cx, |state, cx| {
+                state.set_app_icon(icon);
+                cx.emit(StateEvent::SettingsChanged);
+            });
         })
 }
 
@@ -351,9 +358,7 @@ fn radio_dot(selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
 /// it neither mis-highlights under themes with a different radius nor traps the
 /// user away from the theme default.
 fn radius_segment(cx: &App) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| s.app_settings().ui_radius);
+    let current = AppState::try_read(cx).and_then(|s| s.app_settings().ui_radius);
     let options: [Option<u8>; 3] = [Some(0), None, Some(12)];
     ButtonGroup::new("corner-radius")
         .outline()
@@ -599,7 +604,7 @@ fn theme_card(
         )
         .on_click(move |_, _, cx| {
             let chosen = stored.to_string();
-            cx.update_global::<AppState, _>(move |s, _| {
+            AppState::update(cx, move |s, cx| {
                 s.set_theme(dark, Some(chosen.clone()));
                 // Picking a theme configures the light or dark *slot*. Only pin
                 // the mode when the user has already chosen an explicit
@@ -613,6 +618,7 @@ fn theme_card(
                         Appearance::Light
                     });
                 }
+                cx.emit(StateEvent::SettingsChanged);
             });
             theme::apply_from_settings(None, cx);
         })

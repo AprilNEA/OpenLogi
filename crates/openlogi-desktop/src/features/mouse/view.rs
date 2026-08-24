@@ -20,7 +20,7 @@ use super::picker::{
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::AppState;
+use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 const SIDE_W: f32 = 180.;
@@ -66,7 +66,21 @@ pub struct MouseModelView {
 impl MouseModelView {
     /// Create the mouse model view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
+        let state = AppState::global(cx);
+        let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::BindingsChanged(key) | StateEvent::LightingChanged(key) => {
+                    AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .is_some_and(|record| record.device_key() == *key)
+                }
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             current_device_key: None,
             hovered: None,
@@ -104,17 +118,20 @@ enum BindingPopover {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (device_key, asset, active, bindings, gesture_buttons, glow, thumbwheel) = cx
-            .try_global::<AppState>()
-            .map(|s| {
+        let state = AppState::try_global(cx);
+        let (device_key, asset, active, bindings, gesture_buttons, glow, thumbwheel) = state
+            .as_ref()
+            .map(|state| state.read(cx))
+            .map(|state| {
                 (
-                    s.current_record().map(|r| r.config_key.clone()),
-                    s.current_record().and_then(|r| r.asset.clone()),
-                    s.active_button.map(MouseControlId::from_active_button),
-                    s.button_bindings.clone(),
-                    s.gesture_bindings.keys().copied().collect::<Vec<_>>(),
-                    s.current_record().and_then(|r| keyboard_glow(s, r)),
-                    s.current_record()
+                    state.current_record().map(|r| r.config_key.clone()),
+                    state.current_record().and_then(|r| r.asset.clone()),
+                    state.active_button.map(MouseControlId::from_active_button),
+                    state.button_bindings.clone(),
+                    state.gesture_bindings.keys().copied().collect::<Vec<_>>(),
+                    state.current_record().and_then(|r| keyboard_glow(state, r)),
+                    state
+                        .current_record()
                         .and_then(|r| r.capabilities)
                         .is_some_and(|capabilities| capabilities.thumbwheel),
                 )

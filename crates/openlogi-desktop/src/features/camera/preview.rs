@@ -13,8 +13,7 @@
 //! ([`crate::features::camera::request_camera_access`]) — the prompt must
 //! originate in-app because macOS only lists an app under Privacy → Camera
 //! after it has requested access at least once. Once the grant lands, the
-//! helper's window refresh re-runs [`Self::set_target`], which starts the
-//! deferred stream.
+//! helper's typed permission event starts the deferred stream.
 //!
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
@@ -25,12 +24,13 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, img, px,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, div, img, px,
 };
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
 
+use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 const PREVIEW_W: f32 = 480.;
@@ -48,10 +48,24 @@ pub struct CameraPreview {
     /// Target is set but the stream isn't running because Camera permission
     /// wasn't granted yet; retried once access appears.
     awaiting_access: bool,
+    _permission_obs: Subscription,
 }
 
 impl CameraPreview {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let permission_obs = cx.subscribe(
+            &AppState::global(cx),
+            |preview, _, event: &StateEvent, cx| {
+                if !matches!(event, StateEvent::CameraPermissionChanged) {
+                    return;
+                }
+                if preview.awaiting_access && openlogi_camera::camera_access_granted() {
+                    preview.awaiting_access = false;
+                    preview.start_stream(cx);
+                }
+                cx.notify();
+            },
+        );
         Self {
             stream: None,
             streaming_uid: None,
@@ -59,6 +73,7 @@ impl CameraPreview {
             last_generation: 0,
             repaint_task: None,
             awaiting_access: false,
+            _permission_obs: permission_obs,
         }
     }
 

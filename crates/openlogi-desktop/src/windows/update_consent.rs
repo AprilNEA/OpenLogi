@@ -8,9 +8,8 @@
 
 use crate::ui::theme::Typography as _;
 use gpui::{
-    App, BorrowAppContext as _, Context, FocusHandle, InteractiveElement, IntoElement,
-    ParentElement as _, Render, Size, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Size,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -19,7 +18,7 @@ use gpui_component::{
 use gpui_updater::Updater;
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
-use crate::state::AppState;
+use crate::state::{AppState, StateEvent};
 use crate::ui::theme;
 use crate::windows::{self, AuxWindow};
 
@@ -59,7 +58,10 @@ pub fn open(cx: &mut App) {
 
 /// Persist the user's answer, run one check if they opted in, and close.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
-    cx.update_global::<AppState, _>(|state, _| state.record_update_consent(enabled));
+    AppState::update(cx, |state, cx| {
+        state.record_update_consent(enabled);
+        cx.emit(StateEvent::SettingsChanged);
+    });
     if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
         updater.update(cx, Updater::check);
     }

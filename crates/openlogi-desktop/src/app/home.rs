@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, Div, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Role, SharedString, StatefulInteractiveElement as _, Styled, canvas, div, fill,
-    img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Role,
+    SharedString, StatefulInteractiveElement as _, Styled, canvas, div, fill, img, point,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName,
@@ -25,7 +25,7 @@ use super::status::{loading_body, notice_body};
 use super::widgets::{add_device_button, kind_label, settings_button};
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::carousel::Carousel;
 use crate::ui::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 
@@ -63,10 +63,14 @@ const GALLERY_GAP: f32 = 24.;
 /// detail screen shows; the active card wears an accent fill. A disabled
 /// device wears a persistent red ring so the unmanaged state stays visible.
 pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
-    let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
-        let len = s.device_list.len();
-        (len, s.current_device.min(len.saturating_sub(1)))
-    });
+    let state = AppState::try_global(cx);
+    let (len, active_idx) = state
+        .as_ref()
+        .map(|state| state.read(cx))
+        .map_or((0, 0), |state| {
+            let len = state.device_list.len();
+            (len, state.current_device.min(len.saturating_sub(1)))
+        });
     let view = cx.entity();
 
     v_flex().flex_1().w_full().min_h_0().child(
@@ -84,27 +88,24 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
             .accent(rgb(theme::ACCENT_BLUE).into())
             .render_item(move |idx, focused, _window, cx| {
                 let pal = theme::palette(cx);
-                let Some(record) = cx
-                    .try_global::<AppState>()
-                    .and_then(|s| s.device_list.get(idx).cloned())
+                let Some(record) = AppState::try_global(cx)
+                    .and_then(|state| state.read(cx).device_list.get(idx).cloned())
                 else {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
-                let enabled = cx
-                    .try_global::<AppState>()
-                    .is_some_and(|s| s.device_enabled(&record.config_key));
-                let light_enabled = cx.try_global::<AppState>().is_some_and(|state| {
-                    record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key())
+                let enabled = AppState::try_global(cx)
+                    .is_some_and(|state| state.read(cx).device_enabled(&record.config_key));
+                let light_enabled = AppState::try_global(cx).is_some_and(|state| {
+                    record.kind == DeviceKind::Light
+                        && state.read(cx).light_enabled_for(&record.device_key())
                 });
-                let light_settings = cx
-                    .try_global::<AppState>()
+                let light_settings = AppState::try_global(cx)
                     .map_or_else(LightSettings::default, |state| {
-                        state.light_for(&record.device_key())
+                        state.read(cx).light_for(&record.device_key())
                     });
-                let glow = cx
-                    .try_global::<AppState>()
-                    .and_then(|s| keyboard_glow(s, &record));
+                let glow = AppState::try_global(cx)
+                    .and_then(|state| keyboard_glow(state.read(cx), &record));
                 let view = view.clone();
                 device_card(
                     &record,
@@ -129,8 +130,16 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                 .into_any_element()
             })
             .on_select(cx.listener(|_, ix: &usize, _, cx| {
-                cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
-                cx.notify();
+                AppState::global(cx).update(cx, |state, cx| {
+                    if state.current_device == *ix || *ix >= state.device_list.len() {
+                        return;
+                    }
+                    state.set_current_device(*ix);
+                    cx.emit(StateEvent::DeviceSelected(
+                        state.device_list[*ix].device_key(),
+                    ));
+                });
+                AppState::load_current_device_reads(cx);
             })),
     )
 }

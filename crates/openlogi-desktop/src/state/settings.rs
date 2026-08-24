@@ -220,6 +220,7 @@ impl AppState {
         self.config.app_settings.language = language;
         self.persist_config("language setting");
         openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
+        // Locale lookup is process-global, so every open window must repaint.
         cx.refresh_windows();
         crate::app::menu::rebuild(cx);
     }

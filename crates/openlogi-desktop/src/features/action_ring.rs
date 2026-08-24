@@ -4,9 +4,9 @@ mod action_icons;
 mod editor;
 
 use gpui::{
-    AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
@@ -16,7 +16,7 @@ use openlogi_core::binding::{ActionRingEntry, ActionRingIcon, ActionRingLayout, 
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -26,19 +26,31 @@ pub struct ActionRingPanel {
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
-    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
 
 impl ActionRingPanel {
     /// Create the editor and repaint it after any config/device change.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::BindingsChanged(key) => AppState::try_read(cx)
+                    .and_then(AppState::current_record)
+                    .is_some_and(|record| record.device_key() == *key),
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             selected_slot: ActionRingSlot::Top,
             application_input: None,
             shortcut_input: None,
             library_scroll: ScrollHandle::new(),
-            state_obs: cx.observe_global::<AppState>(|_, cx| cx.notify()),
+            state_obs,
         }
     }
 }
@@ -46,8 +58,7 @@ impl ActionRingPanel {
 impl Render for ActionRingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let ring = cx
-            .try_global::<AppState>()
+        let ring = AppState::try_read(cx)
             .map(AppState::current_action_ring)
             .unwrap_or_default();
         let haptics_supported = current_device_supports_haptics(cx);
@@ -158,7 +169,7 @@ fn editor_input(
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
-    cx.try_global::<AppState>().is_some_and(|state| {
+    AppState::try_read(cx).is_some_and(|state| {
         state.current_record().is_some_and(|record| {
             record
                 .capabilities
@@ -180,8 +191,13 @@ fn toggle_button(
         .label(if enabled { tr!("On") } else { tr!("Off") })
         .selected(enabled)
         .on_click(move |_, _, cx| {
-            cx.update_global::<AppState, _>(|state, _| commit(state, !enabled));
-            cx.refresh_windows();
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
+                commit(state, !enabled);
+                if let Some(key) = key {
+                    cx.emit(StateEvent::BindingsChanged(key));
+                }
+            });
         })
 }
 

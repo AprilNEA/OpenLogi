@@ -216,7 +216,8 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
         MenuItem::separator(),
     ];
 
-    match cx.try_global::<AppState>() {
+    let state = AppState::try_global(cx);
+    match state.as_ref().map(|state| state.read(cx)) {
         Some(state) if !state.device_list.is_empty() => {
             for record in &state.device_list {
                 let title = match &record.battery {

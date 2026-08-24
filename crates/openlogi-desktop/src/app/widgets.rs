@@ -62,7 +62,8 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
     if !show_device {
         return SharedString::from("OpenLogi");
     }
-    cx.try_global::<AppState>()
+    AppState::try_global(cx)
+        .map(|state| state.read(cx))
         .and_then(AppState::current_record)
         .map_or_else(
             || SharedString::from("OpenLogi"),
