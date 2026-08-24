@@ -186,14 +186,14 @@ async fn probe_unifying_receiver(
     debug!(pairing_count, "receiver reports pairing count");
     let unique_id = unifying.get_unique_id().await.ok();
 
-    // Trigger device-arrival events and collect one event per online device.
-    // Each event carries the slot index, kind, wpid, and online flag — enough
-    // to build a PairedDevice entry for every currently-connected device.
+    // Trigger device-arrival events and collect one event per paired slot.
+    // Each event carries the slot index, kind, wpid, and a link-status bit —
+    // enough to build a PairedDevice entry, online or not.
     //
     // Note: the Unifying `0xB5/0x5N` pairing-info register uses a different
-    // sub-register base than Bolt, so we don't yet poll offline paired slots.
-    // Online devices are covered by the arrival drain; offline device support
-    // requires resolving the correct sub-register format.
+    // sub-register base than Bolt, so paired slots are not polled directly.
+    // A slot whose re-broadcast goes missing this tick cannot be backfilled
+    // until that register format is resolved.
     //
     // The drain is therefore the *only* device source on this path, so a
     // failed arrival trigger is "couldn't check", not "no devices online":
@@ -245,11 +245,13 @@ async fn probe_unifying_receiver(
         debug!(
             expected = pairing_count,
             found = paired.len(),
-            "online devices differ from pairing count; offline devices not yet surfaced for Unifying"
+            "arrival drain reported fewer slots than the pairing count"
         );
     }
-    // Unlike Bolt, a count/list shortfall is *expected* here (offline paired
-    // devices aren't enumerable yet), so ledger health can't ride on it. The
+    // Unlike Bolt, a count/list shortfall is tolerated here: not every
+    // firmware re-broadcasts all paired slots (offline slots in particular can
+    // go missing), and there is no register poll to backfill them, so ledger
+    // health can't ride on it. The
     // ledger health signal is the pairing-count register answering at all: that
     // proves the receiver round-trip worked this cycle, while `None` (e.g. a
     // parked channel) is "couldn't fully check" — the ledger then replays the
@@ -580,8 +582,13 @@ async fn drain_device_arrival_unifying(
     // wireless notifications are on. Fall back to enabling that flag when the
     // direct trigger produced no device, then retry once on the same listener.
     if let Err(error) = unifying.set_wireless_notifications(true).await {
+        // A register write the receiver stopped ACK'ing is "couldn't check",
+        // exactly like a failed trigger: settle it as a failed probe so the
+        // ledger replays the last snapshot, instead of publishing an
+        // authoritative empty inventory that overwrites the node's last-good
+        // device list.
         debug!(?error, "enable wireless notifications failed");
-        return Some(Vec::new());
+        return None;
     }
     if let Err(error) = unifying.trigger_device_arrival().await {
         debug!(?error, "arrival retry after enabling notifications failed");
@@ -605,7 +612,7 @@ async fn drain_device_arrival_unifying(
 /// working `get_device_pairing_information` call; we derive a stable cache key
 /// from the receiver UID + slot so the feature-table walk is amortised at ~30s
 /// and two receivers sharing a slot number don't collide in the cache.
-async fn probe_unifying_slot(
+pub(super) async fn probe_unifying_slot(
     channel: &Arc<HidppChannel>,
     event: &UnifyingDeviceConnection,
     receiver_uid: &str,
@@ -622,14 +629,17 @@ async fn probe_unifying_slot(
     let cached = cache.get(&id);
     let register_kind = map_unifying_kind(event.kind);
 
-    // A 0x41 event is itself the receiver's answer to TriggerDeviceArrival and
-    // is emitted for online devices. Keep the optional feature/battery refresh
-    // bounded, but don't turn a device that just announced itself offline when
-    // that follow-up read is the one reply the firmware happens to omit.
+    // The 0x41 re-broadcast is the receiver's own slot report and its
+    // link-status bit is the liveness authority (Solaar's trigger scan trusts
+    // the same bit). The feature/battery refresh below is optional metadata:
+    // keep it bounded, never let its one lost reply turn a device that just
+    // announced itself into "offline" — and don't probe an offline slot at
+    // all, which would burn the budget on a link the receiver just reported
+    // as not established.
     let probe_budget = unifying_probe_budget(cached, tick);
     let probe_result = timeout(
         probe_budget,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick),
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online, tick),
     )
     .await;
     let (probe, outcome) = if let Ok(result) = probe_result {
