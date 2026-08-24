@@ -310,6 +310,7 @@ mod tests {
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(0.into()),
             receiver_access: ReceiverAccess::default(),
+            device_io: openlogi_agent_core::hardware::DeviceIoGates::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
         }
     }

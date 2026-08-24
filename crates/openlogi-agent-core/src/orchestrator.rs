@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
-use crate::hardware::DeviceOp;
+use crate::hardware::{DeviceIoGates, DeviceOp};
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -97,6 +97,9 @@ pub struct SharedRuntime {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Per-transport turnstiles for agent-owned HID++ requests. Waiting for an
+    /// older request never spends the next request's device-response budget.
+    pub device_io: DeviceIoGates,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
 }
@@ -111,6 +114,7 @@ impl SharedRuntime {
             &self.capture_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -124,6 +128,7 @@ impl SharedRuntime {
             &self.keyboard_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -202,6 +207,7 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
+            device_io: DeviceIoGates::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
         };
         let orch = Self {

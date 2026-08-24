@@ -178,6 +178,7 @@ fn action_ring_runtime(
         shared.capture_channel.clone(),
         shared.channel_registry.clone(),
         shared.receiver_access.clone(),
+        shared.device_io.clone(),
         sender,
     );
     (manager, receiver, dispatcher)

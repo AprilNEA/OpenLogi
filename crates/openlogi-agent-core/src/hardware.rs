@@ -18,6 +18,7 @@
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
 use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -39,6 +40,79 @@ pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Physical HID transport behind a route. Receiver slots share one writer, so
+/// they must share one turnstile even though their HID++ device indices differ.
+#[derive(Clone, PartialEq, Eq)]
+enum DeviceIoTransport {
+    Bolt(String),
+    Unifying(String),
+    Direct(u16, u16),
+    RawHid(u16, u16, u16, u16, String),
+}
+
+impl From<&DeviceRoute> for DeviceIoTransport {
+    fn from(route: &DeviceRoute) -> Self {
+        match route {
+            DeviceRoute::Bolt { receiver_uid, .. } => Self::Bolt(receiver_uid.clone()),
+            DeviceRoute::Unifying { receiver_uid, .. } => Self::Unifying(receiver_uid.clone()),
+            DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            } => Self::Direct(*vendor_id, *product_id),
+            DeviceRoute::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            } => Self::RawHid(
+                *vendor_id,
+                *product_id,
+                *usage_page,
+                *usage_id,
+                identity.clone(),
+            ),
+        }
+    }
+}
+
+/// Per-transport FIFO turnstiles for agent-owned HID requests.
+///
+/// The HID channel's writer mutex serializes report writes, but its callers
+/// used to start their device-response timeout before they acquired that mutex.
+/// A slow background reconciliation could therefore consume a queued GUI
+/// write's entire budget before the GUI request sent its first report. These
+/// gates move that queue outside the response budget while preserving the
+/// existing timeout once a request owns the transport.
+#[derive(Clone, Default)]
+pub struct DeviceIoGates {
+    inner: Arc<Mutex<DeviceIoTurns>>,
+}
+
+type DeviceIoTurn = tokio::sync::Mutex<()>;
+type DeviceIoTurns = Vec<(DeviceIoTransport, Weak<DeviceIoTurn>)>;
+
+impl DeviceIoGates {
+    fn turn_for(&self, route: &DeviceRoute) -> Arc<DeviceIoTurn> {
+        let transport = DeviceIoTransport::from(route);
+        let mut entries = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.retain(|(_, turn)| turn.strong_count() != 0);
+        if let Some(turn) = entries.iter().find_map(|(candidate, turn)| {
+            (candidate == &transport).then(|| turn.upgrade()).flatten()
+        }) {
+            return turn;
+        }
+        let turn = Arc::new(DeviceIoTurn::new(()));
+        entries.push((transport, Arc::downgrade(&turn)));
+        turn
+    }
+}
+
+async fn with_io_turn<T>(turn: &DeviceIoTurn, operation: impl Future<Output = T>) -> T {
+    let _guard = turn.lock().await;
+    operation.await
+}
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
@@ -87,6 +161,7 @@ pub struct DeviceOp<'a> {
     capture: &'a CaptureChannel,
     registry: &'a ChannelRegistry,
     receiver_access: &'a ReceiverAccess,
+    device_io: &'a DeviceIoGates,
     route: DeviceRoute,
 }
 
@@ -95,12 +170,14 @@ impl<'a> DeviceOp<'a> {
         capture: &'a CaptureChannel,
         registry: &'a ChannelRegistry,
         receiver_access: &'a ReceiverAccess,
+        device_io: &'a DeviceIoGates,
         route: &DeviceRoute,
     ) -> Self {
         Self {
             capture,
             registry,
             receiver_access,
+            device_io,
             route: route.clone(),
         }
     }
@@ -113,34 +190,39 @@ impl<'a> DeviceOp<'a> {
         authoritative_channel(Some(self.capture), self.registry, &self.route)
     }
 
-    /// Lease the receiver, resolve the authoritative channel, then run `f`
-    /// against it under `WRITE_BUDGET`, mapping a timeout to
-    /// [`WriteError::RequestTimedOut`].
+    /// Wait for this transport's I/O turn, lease the receiver, resolve the
+    /// authoritative channel, then run `f` against it under `WRITE_BUDGET`,
+    /// mapping a timeout to [`WriteError::RequestTimedOut`]. Queue and lease
+    /// waits sit outside that budget; it measures only the device transaction.
     ///
-    /// Lease-then-resolve, not the other way around: the lease wait is
-    /// unbounded, and a channel resolved before it would risk being retired
-    /// by the inventory enumerator while still queued — the write itself
-    /// would likely still succeed on the stale handle, but anything that
-    /// caches a feature off it (see the haptic feature cache's
-    /// `EpochGuarded` note) would then pin a channel the enumerator can never
-    /// reopen. Used by every awaited device call: the IPC server's
-    /// DPI/SmartShift/lighting reads and writes, and the Actions Ring haptic
-    /// path.
+    /// Turn-then-lease-then-resolve, not the other way around: both waits are
+    /// unbounded, and a channel resolved before them could be retired by the
+    /// inventory enumerator while still queued — the write itself would likely
+    /// still succeed on the stale handle, but anything that caches a feature
+    /// off it (see the haptic feature cache's `EpochGuarded` note) would then
+    /// pin a channel the enumerator can never reopen. Used by every awaited
+    /// device call: the IPC server's DPI/SmartShift/lighting reads and writes,
+    /// and the Actions Ring haptic path.
     pub async fn run<F, Fut, T>(self, op: HidppOperation, f: F) -> Result<T, WriteError>
     where
         F: FnOnce(SharedChannel) -> Fut,
         Fut: Future<Output = Result<T, WriteError>>,
     {
-        let _lease = self.receiver_access.acquire_for_io().await;
-        let shared = self.resolve()?;
-        timed(op, f(shared)).await
+        let turn = self.device_io.turn_for(&self.route);
+        with_io_turn(&turn, async move {
+            let _lease = self.receiver_access.acquire_for_io().await;
+            let shared = self.resolve()?;
+            timed(op, f(shared)).await
+        })
+        .await
     }
 
     /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
     /// standard three-arm outcome logging: a completed write and a failed
-    /// write both log at their own level, keyed by `label`; a device that
-    /// never answers within `WRITE_BUDGET` warns instead of hanging the
-    /// thread forever.
+    /// write both log at their own level, keyed by `label`; a device that never
+    /// answers within `WRITE_BUDGET` warns instead of hanging the thread
+    /// forever. Like [`Self::run`], it waits for the transport turn before
+    /// starting that budget.
     ///
     /// Resolves the channel on the calling thread before spawning — every
     /// `*_in_background` write did this, so a resolution failure (no target,
@@ -185,15 +267,16 @@ impl<'a> DeviceOp<'a> {
             debug!(route = %self.route, label, "no inventory channel — write skipped");
             return;
         };
+        let turn = self.device_io.turn_for(&self.route);
         let receiver_access = self.receiver_access.clone();
         std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
-            let result = rt.block_on(async {
+            let result = rt.block_on(with_io_turn(&turn, async {
                 let _lease = receiver_access.acquire_for_io().await;
                 tokio::time::timeout(WRITE_BUDGET, f(shared)).await
-            });
+            }));
             log(result);
         });
     }
@@ -223,6 +306,7 @@ pub fn toggle_smartshift_in_background(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
+    device_io: &DeviceIoGates,
     target: Option<DeviceRoute>,
 ) {
     let Some(target) = target else {
@@ -230,7 +314,7 @@ pub fn toggle_smartshift_in_background(
         return;
     };
     let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+    DeviceOp::new(capture, registry, receiver_access, device_io, &target).spawn_write(
         "SmartShift toggle",
         |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
         move |result| match result {
@@ -290,12 +374,13 @@ pub fn reapply_mouse_volatile_in_background(
         return;
     };
     let receiver_access = op.receiver_access.clone();
+    let turn = op.device_io.turn_for(&op.route);
     let index = op.route.device_index();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
         };
-        rt.block_on(async {
+        rt.block_on(with_io_turn(&turn, async {
             let _lease = receiver_access.acquire_for_io().await;
             if resolution.is_some() || inverted.is_some() {
                 let result = tokio::time::timeout(WRITE_BUDGET, async {
@@ -338,7 +423,7 @@ pub fn reapply_mouse_volatile_in_background(
                     ),
                 }
             }
-        });
+        }));
     });
 }
 
@@ -394,6 +479,7 @@ pub fn write_dpi_in_background(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
+    device_io: &DeviceIoGates,
     target: Option<DeviceRoute>,
     dpi: Dpi,
 ) {
@@ -402,7 +488,7 @@ pub fn write_dpi_in_background(
         return;
     };
     let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+    DeviceOp::new(capture, registry, receiver_access, device_io, &target).spawn_write(
         "DPI write",
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
         move |result| match result {
@@ -568,6 +654,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn receiver_slots_share_one_io_turn() {
+        let gates = DeviceIoGates::default();
+        let first = DeviceRoute::Bolt {
+            receiver_uid: "receiver-a".into(),
+            slot: 1,
+        };
+        let second = DeviceRoute::Bolt {
+            receiver_uid: "receiver-a".into(),
+            slot: 2,
+        };
+
+        let first_turn = gates.turn_for(&first);
+        let second_turn = gates.turn_for(&second);
+
+        assert!(Arc::ptr_eq(&first_turn, &second_turn));
+    }
+
+    #[test]
+    fn independent_transports_get_independent_io_turns() {
+        let gates = DeviceIoGates::default();
+        let first = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb034,
+        };
+        let second = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb035,
+        };
+
+        let first_turn = gates.turn_for(&first);
+        let second_turn = gates.turn_for(&second);
+
+        assert!(!Arc::ptr_eq(&first_turn, &second_turn));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_operation_gets_its_full_response_budget() {
+        let gates = DeviceIoGates::default();
+        let route = unresolvable_route();
+        let turn = gates.turn_for(&route);
+        let held_turn = turn.lock().await;
+        let queued_turn = Arc::clone(&turn);
+        let queued = tokio::spawn(async move {
+            with_io_turn(&queued_turn, async {
+                timed(HidppOperation::WriteSmartShift, async {
+                    tokio::task::yield_now().await;
+                    Ok::<(), WriteError>(())
+                })
+                .await
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(WRITE_BUDGET + Duration::from_millis(1)).await;
+
+        assert!(
+            !queued.is_finished(),
+            "queue time must not consume the device-response budget"
+        );
+        drop(held_turn);
+        queued
+            .await
+            .expect("queued operation must not panic")
+            .expect("queue wait must not spend the response budget");
+    }
+
     /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`],
     /// the same path `authoritative_channel` uses to clear the haptic feature
     /// cache) and must never invoke `f` — a route that can't be resolved has no
@@ -578,11 +732,12 @@ mod tests {
         let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
+        let device_io = DeviceIoGates::default();
         let route = unresolvable_route();
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        let result = DeviceOp::new(&capture, &registry, &receiver_access, &route)
+        let result = DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route)
             .run(HidppOperation::WriteDpi, move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);
                 async move { Ok::<(), WriteError>(()) }
@@ -603,11 +758,12 @@ mod tests {
         let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
+        let device_io = DeviceIoGates::default();
         let route = unresolvable_route();
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        DeviceOp::new(&capture, &registry, &receiver_access, &route).detach(
+        DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route).detach(
             "test write",
             move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);
