@@ -1,8 +1,12 @@
 //! Profile context bar for the Buttons workspace.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use gpui::{
-    Anchor, AnyElement, App, BorrowAppContext as _, InteractiveElement, IntoElement, ParentElement,
-    Role, StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, BorrowAppContext as _, Image, InteractiveElement, IntoElement,
+    ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div, img,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
@@ -23,13 +27,34 @@ use super::mouse::picker::{divider, menu_card, title};
 struct ProfileChoice {
     app: String,
     name: String,
+    icon: Option<Arc<Image>>,
     override_count: usize,
     persisted: bool,
 }
 
+/// Installed application icons are immutable for a GUI session. Keep AppKit
+/// lookup and image encoding out of the render loop after the first sighting.
+#[derive(Default)]
+pub(crate) struct ProfileIconCache {
+    icons: HashMap<String, Option<Arc<Image>>>,
+}
+
+impl ProfileIconCache {
+    fn icon(&mut self, app: &str) -> Option<Arc<Image>> {
+        self.icons
+            .entry(app.to_string())
+            .or_insert_with(|| crate::platform::app_icon::application_icon(app))
+            .clone()
+    }
+}
+
 /// A direct profile switcher. The foreground app may change which profile is
 /// active, but never changes which profile this editor has open.
-pub fn profile_scope_bar(pal: Palette, cx: &App) -> Option<AnyElement> {
+pub fn profile_scope_bar(
+    pal: Palette,
+    icons: &mut ProfileIconCache,
+    cx: &App,
+) -> Option<AnyElement> {
     let state = cx.try_global::<AppState>()?;
     if !state.current_device_is_persistent() {
         return None;
@@ -45,6 +70,7 @@ pub fn profile_scope_bar(pal: Palette, cx: &App) -> Option<AnyElement> {
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
+            icon: icons.icon(app),
             override_count: count,
             persisted: true,
         })
@@ -58,6 +84,7 @@ pub fn profile_scope_bar(pal: Palette, cx: &App) -> Option<AnyElement> {
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
+            icon: icons.icon(app),
             override_count: 0,
             persisted: false,
         });
@@ -74,11 +101,18 @@ pub fn profile_scope_bar(pal: Palette, cx: &App) -> Option<AnyElement> {
         .filter(|profile| profile.persisted)
         .map(|profile| profile.app.clone())
         .collect();
-    let available_apps: Vec<(String, String)> = recent_apps
+    let available_apps: Vec<ProfileChoice> = recent_apps
         .into_iter()
         .filter(|(app, _)| {
             !persisted_ids.iter().any(|existing| existing == app)
                 && editing_app.as_deref() != Some(app.as_str())
+        })
+        .map(|(app, name)| ProfileChoice {
+            icon: icons.icon(&app),
+            app,
+            name,
+            override_count: 0,
+            persisted: false,
         })
         .collect();
 
@@ -96,7 +130,7 @@ fn profile_scope_content(
     editing_app: Option<&str>,
     active_profile: &gpui::SharedString,
     profiles: &[ProfileChoice],
-    available_apps: Vec<(String, String)>,
+    available_apps: Vec<ProfileChoice>,
     summary: gpui::SharedString,
     pal: Palette,
 ) -> AnyElement {
@@ -110,14 +144,19 @@ fn profile_scope_content(
         .map(|(index, profile)| {
             let selected = editing_app == Some(profile.app.as_str());
             let app = profile.app.clone();
-            profile_tab(("app-profile", index), profile.name.clone(), selected, pal).on_click(
-                move |_event, _window, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
-                        state.set_editing_app(Some(app.clone()));
-                    });
-                    cx.refresh_windows();
-                },
+            profile_tab(
+                ("app-profile", index),
+                profile.name.clone(),
+                Some(application_mark(profile.icon.clone(), &profile.name, pal)),
+                selected,
+                pal,
             )
+            .on_click(move |_event, _window, cx| {
+                cx.update_global::<AppState, _>(|state, _| {
+                    state.set_editing_app(Some(app.clone()));
+                });
+                cx.refresh_windows();
+            })
         })
         .collect::<Vec<_>>();
 
@@ -127,7 +166,7 @@ fn profile_scope_content(
         .gap_1p5()
         .border_b_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.bg)
         .px_4()
         .py_2()
         .child(
@@ -151,13 +190,19 @@ fn profile_scope_content(
                         .gap_1()
                         .overflow_x_scroll()
                         .child(
-                            profile_tab("default-profile", tr!("Default"), default_selected, pal)
-                                .on_click(|_event, _window, cx| {
-                                    cx.update_global::<AppState, _>(|state, _| {
-                                        state.set_editing_app(None);
-                                    });
-                                    cx.refresh_windows();
-                                }),
+                            profile_tab(
+                                "default-profile",
+                                tr!("Default"),
+                                None,
+                                default_selected,
+                                pal,
+                            )
+                            .on_click(|_event, _window, cx| {
+                                cx.update_global::<AppState, _>(|state, _| {
+                                    state.set_editing_app(None);
+                                });
+                                cx.refresh_windows();
+                            }),
                         )
                         .children(profile_tabs),
                 )
@@ -188,6 +233,7 @@ fn profile_scope_content(
 fn profile_tab(
     id: impl Into<gpui::ElementId>,
     label: impl Into<gpui::SharedString>,
+    leading: Option<AnyElement>,
     selected: bool,
     pal: Palette,
 ) -> gpui::Stateful<gpui::Div> {
@@ -197,6 +243,7 @@ fn profile_tab(
         .aria_selected(selected)
         .flex_none()
         .items_center()
+        .gap_1p5()
         .px_2p5()
         .py_1()
         .rounded(pal.control_radius)
@@ -211,7 +258,30 @@ fn profile_tab(
                 pal.surface_hover
             })
         })
+        .children(leading)
         .child(label.into())
+}
+
+fn application_mark(icon: Option<Arc<Image>>, name: &str, pal: Palette) -> AnyElement {
+    if let Some(icon) = icon {
+        return img(icon).size(px(18.)).flex_none().into_any_element();
+    }
+
+    let initial = name
+        .chars()
+        .find(|character| !character.is_whitespace())
+        .map_or_else(|| "?".to_string(), |character| character.to_string());
+    h_flex()
+        .size(px(18.))
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(pal.surface_hover)
+        .text_caption()
+        .text_color(pal.text_muted)
+        .child(initial)
+        .into_any_element()
 }
 
 fn profile_summary(editing_app: Option<&str>, profiles: &[ProfileChoice]) -> gpui::SharedString {
@@ -238,7 +308,7 @@ fn profile_summary(editing_app: Option<&str>, profiles: &[ProfileChoice]) -> gpu
     }
 }
 
-fn add_app_popover(apps: Vec<(String, String)>, pal: Palette) -> AnyElement {
+fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
     Popover::new("add-app-popover")
         .anchor(Anchor::TopRight)
         .trigger(
@@ -253,11 +323,17 @@ fn add_app_popover(apps: Vec<(String, String)>, pal: Palette) -> AnyElement {
             let rows = apps
                 .iter()
                 .enumerate()
-                .map(|(index, (app, name))| {
-                    let app = app.clone();
+                .map(|(index, choice)| {
+                    let app = choice.app.clone();
                     let popover = popover.clone();
                     MenuRow::new(("recent-app", index))
-                        .child(name.clone())
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(application_mark(choice.icon.clone(), &choice.name, pal))
+                                .child(choice.name.clone()),
+                        )
                         .on_click(move |_event, window, cx| {
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.set_editing_app(Some(app.clone()));

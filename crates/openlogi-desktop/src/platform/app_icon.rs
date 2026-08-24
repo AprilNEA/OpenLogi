@@ -1,4 +1,4 @@
-//! Wearing the icon the user picked.
+//! Application icon integration.
 //!
 //! The bundle ships every alternate under `Contents/Resources/Icons`, compiled
 //! by `cargo xtask macos icon`; applying one hands its `.icns` to macOS through
@@ -7,8 +7,12 @@
 //! applied — a bundle owned by another user, a build without the alternates —
 //! leaves the app wearing what it was signed with, which is a cosmetic loss
 //! rather than a reason to fail a launch.
+//!
+//! The profile switcher also resolves other installed applications through
+//! Launch Services so their real Finder icons can identify per-app profiles.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use openlogi_core::config::AppIcon;
 use tracing::{debug, warn};
@@ -58,6 +62,47 @@ fn alternate(icon: AppIcon) -> Option<PathBuf> {
 #[must_use]
 pub fn preview(icon: AppIcon) -> Option<PathBuf> {
     icons_dir(format!("{icon}.png"))
+}
+
+/// Resolve the installed application's icon for a per-app profile identifier.
+///
+/// macOS profile identifiers are bundle identifiers, so Launch Services can
+/// find the installed bundle and AppKit can return the same icon Finder uses.
+/// Other identifier namespaces have no equivalent portable lookup yet.
+#[must_use]
+#[cfg_attr(
+    target_os = "macos",
+    expect(
+        unsafe_code,
+        reason = "AppKit marks PNG encoding unsafe only because its properties dictionary is untyped"
+    )
+)]
+pub fn application_icon(identifier: &str) -> Option<Arc<gpui::Image>> {
+    #[cfg(target_os = "macos")]
+    {
+        use gpui::{Image, ImageFormat};
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+        use objc2_foundation::{NSDictionary, NSString};
+
+        let workspace = NSWorkspace::sharedWorkspace();
+        let identifier = NSString::from_str(identifier);
+        let application = workspace.URLForApplicationWithBundleIdentifier(&identifier)?;
+        let path = application.path()?;
+        let icon = workspace.iconForFile(&path);
+        let tiff = icon.TIFFRepresentation()?;
+        let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
+        let properties = NSDictionary::new();
+        // SAFETY: PNG encoding accepts an empty image-property dictionary.
+        let png = unsafe {
+            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)?
+        };
+        (!png.is_empty()).then(|| Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec())))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = identifier;
+        None
+    }
 }
 
 /// Resolve `file` inside the bundle's icon directory, if it is there.

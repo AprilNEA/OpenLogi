@@ -33,7 +33,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::profile_scope_bar;
+use crate::features::profile_scope::{ProfileIconCache, profile_scope_bar};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _};
@@ -116,6 +116,7 @@ pub(super) struct DetailPanels<'a> {
 /// device's tab set.
 pub(super) fn detail_content(
     panels: &DetailPanels<'_>,
+    profile_icons: &mut ProfileIconCache,
     tabs: &[DetailTab],
     active: DetailTab,
     pal: Palette,
@@ -125,7 +126,9 @@ pub(super) fn detail_content(
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
     let content = match active {
-        DetailTab::Buttons => buttons_tab(panels.mouse_model, pal, cx).into_any_element(),
+        DetailTab::Buttons => {
+            buttons_tab(panels.mouse_model, profile_icons, pal, cx).into_any_element()
+        }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
@@ -152,7 +155,7 @@ pub(super) fn detail_content(
                     .gap_2()
                     .border_b_1()
                     .border_color(pal.border)
-                    .bg(pal.surface)
+                    .bg(pal.bg)
                     .px_5()
                     .py_2()
                     .text_caption()
@@ -190,7 +193,7 @@ fn detail_navigation(
         .gap_1()
         .border_r_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.bg)
         .p_3()
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
@@ -249,6 +252,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
 /// binding inspector.
 fn buttons_tab(
     mouse_model: &gpui::Entity<MouseModelView>,
+    profile_icons: &mut ProfileIconCache,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
@@ -256,7 +260,7 @@ fn buttons_tab(
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(pal, cx))
+        .children(profile_scope_bar(pal, profile_icons, cx))
         .child(mouse_model.clone())
 }
 

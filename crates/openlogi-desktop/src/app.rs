@@ -23,6 +23,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::features::profile_scope::ProfileIconCache;
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -172,6 +173,7 @@ pub struct AppView {
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
+    profile_icons: ProfileIconCache,
     appearance_obs: Option<Subscription>,
     /// Invalidates the root only for semantic state changes its current route
     /// reads; feature entities subscribe to their own events directly.
@@ -278,6 +280,7 @@ impl AppView {
             camera_preview,
             camera_controls,
             light_panel,
+            profile_icons: ProfileIconCache::default(),
             appearance_obs: None,
             state_obs,
             config_issue_visible: false,
@@ -599,6 +602,7 @@ impl Render for AppView {
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
                     },
+                    &mut self.profile_icons,
                     &tabs,
                     active,
                     pal,
