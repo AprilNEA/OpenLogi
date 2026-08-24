@@ -27,7 +27,7 @@ pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> AnyElement {
 }
 
 /// A clickable accent line that re-arms a failed read on click. `on_retry` runs
-/// the panel's retry (e.g. `state.reads.dpi.retry(&key)`) — the only recovery
+/// the panel's query retry — the only recovery
 /// path when the carousel holds a single device, where re-selecting is a no-op.
 pub fn retry_line(
     id: impl Into<ElementId>,

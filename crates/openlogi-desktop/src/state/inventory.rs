@@ -92,8 +92,8 @@ impl AppState {
             "inventory refreshed"
         );
 
-        // A device that came back on a different route must re-discover DPI —
-        // its cached status/attempts were keyed to the now-dead route.
+        // A device that came back on a different route must re-run its device
+        // queries — their subscriptions targeted the now-dead route.
         let rerouted: Vec<DeviceKey> = merged_list
             .iter()
             .filter(|new| {
@@ -106,20 +106,18 @@ impl AppState {
 
         self.device_list = merged_list;
         for key in &rerouted {
-            self.reads.dpi.remove(key);
-            self.reads.smartshift.remove(key);
+            self.reads.remove(key);
             if let Some(entry) = self.device_ui.get_mut(key) {
                 entry.smartshift_pending_confirm = None;
                 entry.smartshift_write_status = None;
             }
         }
-        let present = |key: &str| {
-            self.device_list
-                .iter()
-                .any(|r| r.config_key.as_str() == key)
-        };
-        self.reads.dpi.retain_present(present);
-        self.reads.smartshift.retain_present(present);
+        let present: HashSet<_> = self
+            .device_list
+            .iter()
+            .map(|record| record.config_key.as_str())
+            .collect();
+        self.reads.retain_present(|key| present.contains(key));
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -286,10 +284,10 @@ impl AppState {
         // A device left in `Failed` (transient read errors exhausted its retry
         // budget) gets one fresh attempt each time it is re-selected.
         if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
-            if matches!(self.reads.dpi.get(&key), Some(Load::Failed(_))) {
-                self.reads.dpi.retry(&key);
+            if matches!(self.reads.dpi_load(&key), Some(Load::Failed(_))) {
+                self.reads.retry_dpi(&key);
             }
-            if matches!(self.reads.smartshift.get(&key), Some(Load::Failed(_))) {
+            if matches!(self.reads.smartshift_load(&key), Some(Load::Failed(_))) {
                 self.retry_smartshift(&key);
             }
         }

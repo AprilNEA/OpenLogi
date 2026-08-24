@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, AsyncApp, Task};
+use gpui::{AppContext as _, AsyncApp, Task};
 use openlogi_camera::Camera;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{AssetSourcePreference, Config};
@@ -73,11 +73,15 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // unresponsive device must not be able to wedge the main thread before
         // the window opens. The agent's first snapshot wires up devices,
         // bindings and the hook live.
-        cx.update(|cx| {
+        let swr = cx.update(|cx| {
+            let swr_runtime: Arc<dyn swr_core::Runtime> = Arc::new(GpuiRuntime::new(cx));
+            let swr = SwrClient::builder()
+                .default_options(assets::queries::default_options())
+                .build(swr_runtime.clone());
             if AppState::try_global(cx).is_none() {
                 let cache = assets::AssetResolver::new();
                 let state = cx.new(|_| {
-                    AppState::with_runtime(
+                    let mut state = AppState::with_runtime(
                         config,
                         &[],
                         &[],
@@ -85,12 +89,19 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                         &cams,
                         persistence,
                         ipc_commands,
-                    )
+                    );
+                    state.reads.connect(swr.clone(), swr_runtime.clone());
+                    state
                 });
                 AppState::set_global(state, cx);
                 AppState::load_current_device_reads(cx);
+            } else {
+                AppState::update(cx, |state, _| {
+                    state.reads.connect(swr.clone(), swr_runtime);
+                });
             }
             windows::main_window::open(&[], cx);
+            swr
         });
 
         // First launch only: offer to opt in to the update check, since it
@@ -109,7 +120,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
-        let mut rt = cx.update(|cx| Runtime::new(cams, sync_tx, cx));
+        let mut rt = Runtime::new(cams, sync_tx, swr);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
@@ -174,8 +185,9 @@ struct Runtime {
     /// snapshot was pure waste: the unchanged-list early-return discarded the
     /// fresh records anyway.
     cache: assets::AssetResolver,
-    /// The asset tier's cache. Owns the mirror probe and every depot download
-    /// as keyed entries — see [`assets::queries`].
+    /// The process-wide swr cache, shared with `AppState`'s device reads. This
+    /// runtime owns the asset mirror probe and depot-download subscriptions —
+    /// see [`assets::queries`].
     swr: SwrClient,
     /// Whether the *automatic* download path runs in this build at all: a
     /// release bundle already ships the art. Manual actions ignore it.
@@ -192,12 +204,9 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>, cx: &App) -> Self {
+    fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>, swr: SwrClient) -> Self {
         let cache = assets::AssetResolver::new();
         let auto_sync = sync::should_run(cache.has_bundle_root());
-        let swr = SwrClient::builder()
-            .default_options(assets::queries::default_options())
-            .build(Arc::new(GpuiRuntime::new(cx)));
         Self {
             cams,
             camera_misses: 0,

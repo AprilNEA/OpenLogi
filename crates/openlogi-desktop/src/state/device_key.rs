@@ -3,8 +3,8 @@
 use std::borrow::Borrow;
 
 /// Identifies one device across [`AppState`](super::AppState)'s per-device UI
-/// caches: the DPI/SmartShift lazy-read state
-/// ([`DeviceReads`](super::load::DeviceReads)) and the consolidated
+/// caches: the DPI/SmartShift query state
+/// ([`DeviceReads`](crate::services::device_reads::DeviceReads)) and the consolidated
 /// per-device row ([`DeviceUiState`](super::device_ui::DeviceUiState)).
 ///
 /// Wraps a device's config key — see

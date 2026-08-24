@@ -6,7 +6,7 @@ use super::SmartShiftWriteStatus;
 use super::light::PendingLightCommand;
 
 /// Everything `AppState` tracks per device outside the persisted config and
-/// the lazily-loaded DPI/SmartShift reads ([`super::load::LazyDeviceData`]).
+/// the swr-backed DPI/SmartShift reads.
 ///
 /// Replaces six parallel `BTreeMap<String, _>` fields that all shared the
 /// same device-key domain — manual camera-light override, volatile light

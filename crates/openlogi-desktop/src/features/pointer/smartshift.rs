@@ -330,7 +330,7 @@ impl Render for SmartShiftPanel {
         let (key, status) = AppState::try_read(cx)
             .and_then(|state| {
                 let key = state.current_record()?.device_key();
-                Some((Some(key.clone()), state.reads.smartshift.status(&key)))
+                Some((Some(key.clone()), state.reads.smartshift_status(&key)))
             })
             .unwrap_or((None, SmartShiftLoad::Unknown));
         let write_status =
@@ -341,7 +341,7 @@ impl Render for SmartShiftPanel {
 
         let show_write_status = matches!(status, SmartShiftLoad::Ready(_));
         let content: AnyElement = match status {
-            SmartShiftLoad::Ready(s) => self.ready_body(s, window, pal, cx),
+            SmartShiftLoad::Ready(s) => self.ready_body(*s, window, pal, cx),
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
                 status_line(tr!("Device offline — SmartShift unavailable."), pal)
             }

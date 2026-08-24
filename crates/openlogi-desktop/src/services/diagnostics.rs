@@ -125,7 +125,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
-                dpi: dpi_summary(state.reads.dpi.get(&record.device_key()).cloned()),
+                dpi: dpi_summary(state.reads.dpi_load(&record.device_key()).cloned()),
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),

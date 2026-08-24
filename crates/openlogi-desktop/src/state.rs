@@ -27,8 +27,7 @@ use tracing::warn;
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
-#[cfg(test)]
-pub use load::Load;
+pub(crate) use load::Load;
 pub use load::{DpiStatus, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -49,9 +48,9 @@ pub enum SmartShiftWriteStatus {
 
 use device_ui::DeviceUiState;
 pub(crate) use devices::camera_model_info;
-use load::DeviceReads;
 
 use crate::services::assets::AssetResolver;
+use crate::services::device_reads::DeviceReads;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
 mod agent;
@@ -248,11 +247,9 @@ pub struct AppState {
     /// Sorted (`BTreeMap`) for stable render order in the function-row view.
     pub keyboard_bindings: BTreeMap<KeyTrigger, Action>,
     pub dpi: Dpi,
-    /// Lazily-loaded DPI and SmartShift read caches, keyed by [`DeviceKey`].
-    /// HID++ reads must not block device switching or rendering, so callers
-    /// reach these directly (`state.reads.dpi.retry(&key)`,
-    /// `state.reads.smartshift.status(&key)`, …) rather than through a
-    /// per-subsystem forwarding method.
+    /// SWR-backed DPI and SmartShift reads keyed by [`DeviceKey`]. HID++ reads
+    /// must not block device switching or rendering; feature modules project
+    /// this service into synchronous [`Load`] values for their render paths.
     pub(crate) reads: DeviceReads,
     /// Monotonic identity assigned to the next confirmable SmartShift write.
     next_smartshift_write_id: u64,
