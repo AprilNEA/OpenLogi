@@ -860,12 +860,35 @@ impl RenderOnce for HotspotTrigger {
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
+    use openlogi_core::config::Config;
 
     use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::state::ConfigPersistence;
+
+    fn install_app_state(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let cache = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::with_runtime(
+                    Config::ephemeral(),
+                    &[],
+                    &[],
+                    &cache,
+                    &[],
+                    ConfigPersistence::MemoryOnly,
+                    commands,
+                )
+            });
+            AppState::set_global(state, cx);
+        });
+    }
 
     #[gpui::test]
     fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
+        install_app_state(cx);
         let (view, cx) = cx.add_window_view(MouseModelView::new);
         cx.run_until_parked();
 
@@ -907,6 +930,7 @@ mod tests {
     #[gpui::test]
     fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
+        install_app_state(cx);
         let (view, cx) = cx.add_window_view(MouseModelView::new);
         cx.run_until_parked();
 

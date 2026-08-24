@@ -4,12 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, BorrowAppContext as _, Image, InteractiveElement, IntoElement,
-    ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div, img,
-    prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, Image, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
+    Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
@@ -55,7 +54,7 @@ pub fn profile_scope_bar(
     icons: &mut ProfileIconCache,
     cx: &App,
 ) -> Option<AnyElement> {
-    let state = cx.try_global::<AppState>()?;
+    let state = AppState::try_read(cx)?;
     if !state.current_device_is_persistent() {
         return None;
     }
@@ -152,10 +151,9 @@ fn profile_scope_content(
                 pal,
             )
             .on_click(move |_event, _window, cx| {
-                cx.update_global::<AppState, _>(|state, _| {
+                AppState::update_bindings(cx, |state| {
                     state.set_editing_app(Some(app.clone()));
                 });
-                cx.refresh_windows();
             })
         })
         .collect::<Vec<_>>();
@@ -198,10 +196,9 @@ fn profile_scope_content(
                                 pal,
                             )
                             .on_click(|_event, _window, cx| {
-                                cx.update_global::<AppState, _>(|state, _| {
+                                AppState::update_bindings(cx, |state| {
                                     state.set_editing_app(None);
                                 });
-                                cx.refresh_windows();
                             }),
                         )
                         .children(profile_tabs),
@@ -335,10 +332,9 @@ fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
                                 .child(choice.name.clone()),
                         )
                         .on_click(move |_event, window, cx| {
-                            cx.update_global::<AppState, _>(|state, _| {
+                            AppState::update_bindings(cx, |state| {
                                 state.set_editing_app(Some(app.clone()));
                             });
-                            cx.refresh_windows();
                             if let Some(popover) = popover.upgrade() {
                                 popover.update(cx, |state, cx| state.dismiss(window, cx));
                             }
@@ -427,10 +423,9 @@ fn open_remove_confirmation(window: &mut Window, cx: &mut App, profile: &Profile
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
-                cx.update_global::<AppState, _>(|state, _| {
+                AppState::update_bindings(cx, |state| {
                     state.remove_editing_app_profile();
                 });
-                cx.refresh_windows();
                 true
             })
     });

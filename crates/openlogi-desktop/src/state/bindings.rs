@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use gpui::App;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::KeyTrigger;
@@ -10,7 +11,7 @@ use tracing::debug;
 use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
 use crate::state::devices::DeviceRecord;
 
-use super::AppState;
+use super::{AppState, StateEvent};
 
 /// Write both halves of a thumb-wheel preset into `app`'s profile, or the
 /// device's global bindings when `app` is `None`.
@@ -40,6 +41,17 @@ pub(super) fn apply_thumbwheel_pair(
 }
 
 impl AppState {
+    /// Apply an active-device binding edit and notify every subscribed editor.
+    pub(crate) fn update_bindings(cx: &mut App, update: impl FnOnce(&mut Self)) {
+        Self::update(cx, |state, cx| {
+            let key = state.current_record().map(DeviceRecord::device_key);
+            update(state);
+            if let Some(key) = key {
+                cx.emit(StateEvent::BindingsChanged(key));
+            }
+        });
+    }
+
     /// Update a single binding in memory, on disk, and in the shared hook
     /// map for the currently selected device — in whichever profile
     /// [`AppState::editing_app`] has open.

@@ -4,9 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Role, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
-    px, rgb, svg,
+    AnyElement, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
@@ -154,12 +153,11 @@ fn button_inspector(
     };
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| state.commit_binding(button, action));
+        AppState::update_bindings(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
         });
-        cx.refresh_windows();
     });
 
     v_flex()
@@ -175,14 +173,13 @@ fn button_inspector(
                     .icon(IconName::Undo)
                     .label(tr!("Use the default profile"))
                     .on_click(move |_, _, cx| {
-                        cx.update_global::<AppState, _>(|state, _| {
+                        AppState::update_bindings(cx, |state| {
                             state.clear_app_binding(button);
                         });
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();
                         });
-                        cx.refresh_windows();
                     }),
             )
         })
@@ -198,14 +195,13 @@ fn button_inspector(
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
                         .label(tr!("Use gestures"))
                         .on_click(move |_, _, cx| {
-                            cx.update_global::<AppState, _>(|state, _| {
+                            AppState::update_bindings(cx, |state| {
                                 state.commit_gesture_mode(button, true);
                             });
                             observer.update(cx, |view, cx| {
                                 view.set_gesture_selected_dir(Some(GestureDirection::Click));
                                 cx.notify();
                             });
-                            cx.refresh_windows();
                         }),
                 )
             },
@@ -232,12 +228,11 @@ fn inherited_gesture_inspector(
 ) -> AnyElement {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| state.commit_binding(button, action));
+        AppState::update_bindings(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
         });
-        cx.refresh_windows();
     });
     let edit_default = picker.view.clone();
     v_flex()
@@ -258,12 +253,11 @@ fn inherited_gesture_inspector(
                 .w_full()
                 .label(tr!("Edit Default gestures"))
                 .on_click(move |_, _, cx| {
-                    cx.update_global::<AppState, _>(|state, _| state.set_editing_app(None));
+                    AppState::update_bindings(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
                         view.set_gesture_selected_dir(Some(GestureDirection::Click));
                         cx.notify();
                     });
-                    cx.refresh_windows();
                 }),
         )
         .when(picker.open, |panel| {
@@ -291,14 +285,13 @@ fn gesture_inspector(
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| {
+        AppState::update_bindings(cx, |state| {
             state.commit_gesture_binding(button, direction, action);
         });
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
         });
-        cx.refresh_windows();
     });
     let turn_off = picker.view.clone();
 
@@ -323,14 +316,13 @@ fn gesture_inspector(
                 .w_full()
                 .label(tr!("Use a single action"))
                 .on_click(move |_, _, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
+                    AppState::update_bindings(cx, |state| {
                         state.commit_gesture_mode(button, false);
                     });
                     turn_off.update(cx, |view, cx| {
                         view.set_gesture_selected_dir(None);
                         cx.notify();
                     });
-                    cx.refresh_windows();
                 }),
         )
         .when(picker.open, |panel| {
@@ -473,14 +465,13 @@ fn thumbwheel_inspector(
                                     )
                                 })
                                 .on_click(move |_, _, cx| {
-                                    cx.update_global::<AppState, _>(|state, _| {
+                                    AppState::update_bindings(cx, |state| {
                                         state.commit_thumbwheel_preset(preset);
                                     });
                                     observer.update(cx, |view, cx| {
                                         view.close_action_picker();
                                         cx.notify();
                                     });
-                                    cx.refresh_windows();
                                 })
                         },
                     )),
@@ -495,14 +486,13 @@ fn thumbwheel_inspector(
                     .icon(IconName::Undo)
                     .label(tr!("Use the default profile"))
                     .on_click(move |_, _, cx| {
-                        cx.update_global::<AppState, _>(|state, _| {
+                        AppState::update_bindings(cx, |state| {
                             state.clear_app_thumbwheel();
                         });
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();
                         });
-                        cx.refresh_windows();
                     }),
             )
         })
