@@ -45,6 +45,7 @@ const CAMERA_PREVIEW_W: Rems = rems(32.125);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
 const LIGHT_CONTROLS_W: Rems = rems(25.);
 const LIGHT_CONTROLS_MIN_W: Rems = rems(22.5);
+const POINTER_CARD_MIN_W: Rems = rems(20.75);
 
 /// Compact device identity bar. Section navigation belongs to the workspace
 /// rail below; pairing belongs to the Devices screen, so neither competes with
@@ -340,7 +341,7 @@ fn pointer_tab(
             ))
             .child(
                 div()
-                    .min_w(px(332.))
+                    .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
             ),
@@ -352,7 +353,11 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // window minimum after this tab's 20 px side insets, while still leaving a
     // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
     // scales together.
-    div().min_w(rems(20.75)).flex_1().h_full().child(card)
+    div()
+        .min_w(POINTER_CARD_MIN_W)
+        .flex_1()
+        .h_full()
+        .child(card)
 }
 
 /// Scrolling card: per-device native inversion and wheel-resolution controls.
