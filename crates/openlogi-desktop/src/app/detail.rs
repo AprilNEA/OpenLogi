@@ -742,6 +742,7 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
         .child(
             v_flex()
                 .gap_1()
+                .flex_1()
                 .min_w_0()
                 .child(div().text_subheading().child(name.to_string()))
                 .child(
