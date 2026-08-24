@@ -372,6 +372,21 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
             && identity_is_resolved(existing)
             && same_model_identity(existing, &identity, record)
         {
+            // Backfill: if the persisted identity lacks a WPID but the live
+            // record provides one, record it now. This lets future re-pairings
+            // into the same slot be detected correctly — without it, legacy
+            // identities (created before WPID persistence existed) would never
+            // acquire a WPID and the anti-downgrade guard could not distinguish
+            // a different HID++ 1.0 device occupying the same slot.
+            if existing.wpid.is_none()
+                && let Some(live_wpid) = record.wpid
+                && live_wpid != 0
+            {
+                let mut patched = existing.clone();
+                patched.wpid = Some(live_wpid);
+                config.set_device_identity(config_key, patched);
+                changed = true;
+            }
             continue;
         }
 

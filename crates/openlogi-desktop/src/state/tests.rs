@@ -1013,3 +1013,71 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         "a promoted OS-hook button gets its own menu simultaneously"
     );
 }
+
+#[test]
+fn legacy_identity_without_wpid_gets_backfilled_from_live_device() {
+    // Regression: a persisted identity created before WPID persistence existed
+    // (wpid: None) should acquire the live device's WPID on the next inventory
+    // refresh — even when the anti-downgrade guard fires (incoming identity is
+    // fallback-quality). Without backfill, same_model_identity can never detect
+    // a re-pairing because it has no WPID to compare against.
+    use super::inventory::persist_identities;
+    use crate::state::devices::DeviceRecord;
+
+    let mut config = Config::default();
+    // Seed a legacy resolved identity WITHOUT a WPID.
+    config.set_device_identity(
+        "receiver:uni:slot:1",
+        DeviceIdentity {
+            display_name: "K540/K545".to_string(),
+            kind: DeviceKind::Keyboard,
+            capabilities: Capabilities::presumed_from_kind(DeviceKind::Keyboard),
+            light_capabilities: None,
+            model_info: None,
+            codename: None,
+            driver_id: None,
+            registry_model_id: None,
+            wpid: None,
+        },
+    );
+
+    // Simulate a live device in the same slot with a known WPID but no
+    // codename or model_info (typical HID++ 1.0 early-probe state).
+    let live = DeviceRecord {
+        config_key: "receiver:uni:slot:1".to_string(),
+        persistent: true,
+        model_key: String::new(),
+        display_name: "Slot 1".to_string(), // fallback-quality name
+        asset: None,
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
+        light_capabilities: None,
+        model_info: None,
+        codename: None,
+        serial_number: None,
+        unit_id: [0; 4],
+        slot: 1,
+        online: true,
+        battery: None,
+        wpid: Some(0x4076),
+        route: None,
+        capture_id: None,
+        driver_id: None,
+        registry_model_id: None,
+    };
+
+    let changed = persist_identities(&mut config, &[live]);
+
+    // The WPID must have been backfilled into the existing identity.
+    let identity = config
+        .device_identity("receiver:uni:slot:1")
+        .expect("identity must still exist");
+    assert_eq!(
+        identity.wpid,
+        Some(0x4076),
+        "legacy identity must be backfilled with the live WPID"
+    );
+    // The resolved display_name must NOT be downgraded.
+    assert_eq!(identity.display_name, "K540/K545");
+    assert!(changed, "backfill must mark config as changed");
+}
