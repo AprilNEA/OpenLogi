@@ -1,6 +1,6 @@
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, px, rgb};
 use gpui_component::{
-    Icon, IconName, Sizable as _,
+    Disableable, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
@@ -103,12 +103,21 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let keyboard_name = AppState::try_read(cx)
         .and_then(AppState::host_switch_keyboard_name)
         .unwrap_or_else(|| "未选择发起键盘".to_string());
+    let warning = AppState::try_read(cx).and_then(|state| {
+        state
+            .host_switch_warning()
+            .map(std::string::ToString::to_string)
+    });
     panel_card(
         "Easy-Switch 设置".into(),
         Icon::empty().path("action-icons/monitor.svg"),
         pal,
         v_flex()
             .gap_4()
+            .child(match warning {
+                Some(warning) => warning_banner(warning, pal).into_any_element(),
+                None => div().into_any_element(),
+            })
             .child(
                 div()
                     .text_caption()
@@ -139,7 +148,7 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                                 div()
                                     .text_caption()
                                     .text_color(pal.text_muted)
-                                    .child("关闭后保留所有显示器绑定，但按键盘 Easy-Switch 时不再切显示器。测试只会立即切到目标端口，不会自动切回。"),
+                                    .child("关闭后保留所有显示器绑定，但按键盘 Easy-Switch 时不再切显示器。测试只会立即切到目标输入源，不会自动切回。"),
                             ),
                     )
                     .child(
@@ -181,7 +190,7 @@ fn keyboard_selector(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
                             div()
                                 .text_caption()
                                 .text_color(pal.text_muted)
-                                .child("多键盘时必须明确选择哪一把键盘的 Easy-Switch 负责这些绑定，避免写到错误设备。"),
+                                .child("多键盘时必须明确选择哪一把键盘的 Easy-Switch 负责这些绑定；离线键盘不可编辑，避免写到旧设备。"),
                         ),
                 )
                 .child(status_pill(format!("{} 把键盘", keyboards.len()), pal)),
@@ -224,7 +233,8 @@ fn keyboard_choice(keyboard: HostSwitchKeyboardDevice, pal: Palette) -> impl Int
                 "离线"
             }
         ))
-        .tooltip("选择这把键盘作为 Easy-Switch 联动的发起设备")
+        .tooltip("选择这把已连接键盘作为 Easy-Switch 联动的发起设备；离线键盘不能写入新绑定")
+        .disabled(!keyboard.online)
         .on_click(move |_, _, cx| {
             AppState::update(cx, |state, cx| {
                 state.set_host_switch_keyboard_key(key.clone());
@@ -372,7 +382,30 @@ fn logic_diagram(enabled: bool, pal: Palette) -> impl IntoElement {
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child("这里的 1 / 2 / 3 对应键盘实体切换键，不是普通快捷键。多显示器联动会按副屏优先、主屏随后连续发送切换命令，不再额外等待。"),
+                .child("这里的 1 / 2 / 3 对应键盘实体切换键，不是普通快捷键。OpenLogi 会先检查键盘和跟随设备是否能切到目标序号，再切鼠标/指针设备，最后切键盘；设备成功后才会连续切显示器，不再额外等待。若设备切换失败，会尝试把已切换的设备恢复，并在本页提示用户检查。"),
+        )
+}
+
+fn warning_banner(message: String, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .items_start()
+        .gap_2()
+        .p_3()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(rgb(0xf97316))
+        .bg(rgb(0xfff7ed))
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size_4()
+                .text_color(rgb(0xc2410c)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_caption()
+                .text_color(rgb(0x9a3412))
+                .child(message),
         )
 }
 

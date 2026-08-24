@@ -115,6 +115,7 @@ impl AppState {
         } else if identities_changed {
             self.persist_config("device identity");
         }
+        let keyboard_changed = self.reconcile_host_switch_keyboard_key_for(&merged_list);
         // Whole-record equality, not a field allowlist. Most fields of a
         // `DeviceRecord` are rendered somewhere, so almost any of them
         // differing is a real change; an allowlist silently drops the fields
@@ -122,7 +123,7 @@ impl AppState {
         // both being swallowed here. Structural comparison also makes the
         // guard immune to new fields, which is what an allowlist can never
         // be.
-        if merged_list == self.devices.records {
+        if merged_list == self.devices.records && !keyboard_changed {
             return false;
         }
 

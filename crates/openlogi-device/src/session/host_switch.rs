@@ -185,17 +185,55 @@ pub async fn switch_linked_hosts(
     // the keyboard leaves this host its channel can no longer command a mouse
     // sharing the same receiver.
     let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
+    let mut target_changes = Vec::with_capacity(targets.len());
     for target in targets {
-        let change = prepare_host_change(target, host, keyboard, &channel, channel_pool)
-            .await
-            .inspect_err(|error| {
+        match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
+            Ok(change) => target_changes.push((target, change)),
+            Err(error) => {
                 debug!(%error, route = %target, host, "linked device host switch preparation failed");
-            })?;
-        apply_host_change(change).await.inspect_err(|error| {
-            debug!(%error, route = %target, host, "linked device host switch failed");
-        })?;
+                return Err(error);
+            }
+        }
     }
-    let changed = apply_host_change(keyboard_change).await?;
+
+    let mut applied_rollbacks = Vec::new();
+    for (target, change) in target_changes {
+        let rollback = change.rollback();
+        match apply_host_change(change).await {
+            Ok(changed) => {
+                if changed && let Some(rollback) = rollback {
+                    applied_rollbacks.push(rollback);
+                }
+            }
+            Err(error) => {
+                debug!(%error, route = %target, host, "linked device host switch failed");
+                if let Some(rollback) = rollback {
+                    applied_rollbacks.push(rollback);
+                }
+                rollback_host_changes(applied_rollbacks).await;
+                return Err(error);
+            }
+        }
+    }
+
+    let keyboard_rollback = keyboard_change.rollback();
+    let changed = match apply_host_change(keyboard_change).await {
+        Ok(changed) => changed,
+        Err(error) => {
+            debug!(%error, route = %keyboard, host, "keyboard host switch failed");
+            if let Some(rollback) = keyboard_rollback {
+                applied_rollbacks.push(rollback);
+            }
+            rollback_host_changes(applied_rollbacks).await;
+            return Err(error);
+        }
+    };
+    if !applied_rollbacks.is_empty() {
+        debug!(
+            applied = applied_rollbacks.len(),
+            "host switch completed after moving linked devices"
+        );
+    }
     if changed {
         debug!(host, route = %keyboard, "keyboard host switched");
     }
@@ -325,8 +363,21 @@ fn restoration_change(control: ArmedControl) -> reprog_controls::CidReportingCha
 struct PreparedHostChange {
     feature: Arc<ChangeHostFeature>,
     device_index: u8,
+    original_host: u8,
     host: u8,
     required: bool,
+}
+
+impl PreparedHostChange {
+    fn rollback(&self) -> Option<Self> {
+        self.required.then(|| Self {
+            feature: Arc::clone(&self.feature),
+            device_index: self.device_index,
+            original_host: self.host,
+            host: self.original_host,
+            required: true,
+        })
+    }
 }
 
 async fn prepare_host_change(
@@ -371,6 +422,7 @@ async fn prepare_host_change_on(
     Ok(PreparedHostChange {
         feature: change_host,
         device_index,
+        original_host: state.current_host,
         host,
         required,
     })
@@ -390,6 +442,14 @@ async fn apply_host_change(change: PreparedHostChange) -> Result<bool, HostSwitc
     )
     .await?;
     Ok(true)
+}
+
+async fn rollback_host_changes(changes: Vec<PreparedHostChange>) {
+    for change in changes.into_iter().rev() {
+        if let Err(error) = apply_host_change(change).await {
+            debug!(%error, "could not roll back host switch change");
+        }
+    }
 }
 
 async fn open_channel(

@@ -11,7 +11,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use crate::observable::ObservableState;
 use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess, ReceiverRequestState};
+use std::sync::Arc;
 
 const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -32,7 +34,12 @@ pub struct HostSwitchLink {
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
 /// Spawn the host switch session manager.
-pub fn spawn(links: &HostSwitchLinks, channel_pool: ChannelPool, receiver_access: ReceiverAccess) {
+pub fn spawn(
+    links: &HostSwitchLinks,
+    channel_pool: ChannelPool,
+    receiver_access: ReceiverAccess,
+    observable: Arc<ObservableState>,
+) {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     thread::spawn(move || {
@@ -51,6 +58,7 @@ pub fn spawn(links: &HostSwitchLinks, channel_pool: ChannelPool, receiver_access
             channel_pool,
             receiver_access,
             receiver_requests,
+            observable,
         ));
     });
 }
@@ -128,6 +136,7 @@ async fn manage(
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
+    observable: Arc<ObservableState>,
 ) {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionCompletion>();
     let mut state = HostSwitchManagerState::new();
@@ -166,7 +175,15 @@ async fn manage(
                     let _ = completed.task.await;
                     if let Some((link, host)) = completion.request {
                         stop_all(&mut state.sessions, HostSwitchStopReason::Graceful).await;
-                        run_transition(&mut links, &channel_pool, &receiver_access, link, host).await;
+                        run_transition(
+                            &mut links,
+                            &channel_pool,
+                            &receiver_access,
+                            Arc::clone(&observable),
+                            link,
+                            host,
+                        )
+                        .await;
                     } else {
                         state.restart_after.push((completed.link, Instant::now() + RETRY_DELAY));
                     }
@@ -274,6 +291,7 @@ async fn run_transition(
     links: &mut watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>,
     channel_pool: &ChannelPool,
     receiver_access: &ReceiverAccess,
+    observable: Arc<ObservableState>,
     link: HostSwitchLink,
     host: u8,
 ) {
@@ -282,12 +300,16 @@ async fn run_transition(
         .await;
     match switch_linked_hosts(&link.keyboard, &link.targets, host, channel_pool).await {
         Ok(true) => {
+            observable.set_host_switch_warning(None);
             wait_for_departure(links, &link.keyboard).await;
             apply_monitor_inputs(&link, host).await;
         }
         Ok(false) => {}
         Err(error) => {
-            debug!(%error, route = %link.keyboard, host, "keyboard host switch failed");
+            warn!(%error, route = %link.keyboard, host, "host switch transition failed");
+            observable.set_host_switch_warning(Some(format!(
+                "Easy-Switch 联动失败：{error}。OpenLogi 已尝试把已切换的设备切回原电脑，但设备或接收器离开当前电脑后可能无法保证恢复；请检查键盘、鼠标和显示器输入源。"
+            )));
         }
     }
 }
