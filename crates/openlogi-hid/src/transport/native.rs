@@ -32,11 +32,30 @@ pub(crate) fn native_backend() -> Arc<dyn HidBackend> {
     Arc::clone(&NATIVE_BACKEND) as Arc<dyn HidBackend>
 }
 
+/// Cache key for one enumerated HID node: its reported id plus the usage pair
+/// that distinguishes the collections sharing that id. See [`NativeBackend`].
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct NodeKey {
+    id: NodeId,
+    usage_page: u16,
+    usage_id: u16,
+}
+
+impl NodeKey {
+    fn of(info: &NodeInfo) -> Self {
+        Self {
+            id: info.id.clone(),
+            usage_page: info.usage_page,
+            usage_id: info.usage_id,
+        }
+    }
+}
+
 /// [`HidBackend`] over `async-hid`.
 #[derive(Default)]
 pub(crate) struct NativeBackend {
     /// OS handles from the most recent enumeration, keyed by the id that
-    /// enumeration reported them under.
+    /// enumeration reported them under *plus its usage pair*.
     ///
     /// `async_hid::Device` is an OS handle, not a value: it cannot be rebuilt
     /// from a [`NodeId`], and re-finding one costs another enumeration. Since
@@ -44,7 +63,22 @@ pub(crate) struct NativeBackend {
     /// the handles from that enumeration is both cheaper and a truer model
     /// than looking them up again. Held behind an `Arc` so an open can borrow
     /// one without keeping the map locked across its await.
-    nodes: Mutex<HashMap<NodeId, Arc<Device>>>,
+    ///
+    /// The usage pair belongs in the key because macOS reports one
+    /// `DeviceInfo` per usage pair while giving them all the *same*
+    /// `DeviceId::RegistryEntryId`. Keying on the id alone collapses every
+    /// collection of a multi-collection device onto one entry and the last
+    /// enumerated one wins, so `handle()` can hand back a different collection
+    /// than the caller enumerated. That mis-sourced `usage_page`/`usage_id`
+    /// then flows into `is_long_only_collection()` in `open_hidpp_channel`,
+    /// which decides whether the channel advertises HID++ *short* report
+    /// support. A BLE-direct mouse (e.g. MX Master 4) is long-only, but if the
+    /// generic-desktop or haptics collection wins the key it is judged
+    /// short-capable, the `hidpp` channel skips up-converting short messages,
+    /// and every write goes out as report `0x10` — a report id that does not
+    /// exist on that device — which macOS rejects with `kIOReturnNotFound`
+    /// (0xE00002F0) before it ever reaches the radio.
+    nodes: Mutex<HashMap<NodeKey, Arc<Device>>>,
 }
 
 impl NativeBackend {
@@ -57,7 +91,7 @@ impl NativeBackend {
             .collect();
         let handles = devices
             .iter()
-            .map(|device| (super::node_id(device), Arc::clone(device)))
+            .map(|device| (NodeKey::of(&super::node_info(device)), Arc::clone(device)))
             .collect();
         *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
         Ok(devices)
@@ -68,7 +102,7 @@ impl NativeBackend {
         self.nodes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&node.id)
+            .get(&NodeKey::of(node))
             .map(Arc::clone)
             .ok_or(BackendError::Disconnected)
     }
