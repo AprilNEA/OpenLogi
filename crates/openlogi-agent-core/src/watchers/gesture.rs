@@ -432,12 +432,39 @@ struct WheelAccumulators {
 struct WheelDirection {
     /// Fractional line accumulator for continuous scroll.
     scroll: f32,
+    /// Scroll binding whose fractional progress is currently retained.
+    scroll_binding: Option<ScrollBinding>,
     /// Integer rotation-increment accumulator for a custom (non-scroll) action.
     action: i32,
     /// When the last rotation event for this direction arrived (decay clock).
     last_event: Option<Instant>,
     /// When this direction last fired its custom action (cooldown clock).
     last_fired: Option<Instant>,
+}
+
+/// Identity of a continuous scroll binding.
+///
+/// A direction's effective binding can change with configuration or the
+/// foreground application. Retained fractional progress belongs to the
+/// binding that earned it and must not leak into another axis or sign.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollBinding {
+    Up,
+    Down,
+    Right,
+    Left,
+}
+
+impl ScrollBinding {
+    fn from_action(action: &Action) -> Option<Self> {
+        match action {
+            Action::ScrollUp => Some(Self::Up),
+            Action::ScrollDown => Some(Self::Down),
+            Action::HorizontalScrollRight => Some(Self::Right),
+            Action::HorizontalScrollLeft => Some(Self::Left),
+            _ => None,
+        }
+    }
 }
 
 /// What advancing a direction's accumulator should produce.
@@ -602,6 +629,11 @@ fn advance(
     now: Instant,
 ) -> WheelOutput {
     let sensitivity = scale.sensitivity;
+    let scroll_binding = ScrollBinding::from_action(action);
+    if dir.scroll_binding != scroll_binding {
+        dir.scroll = 0.0;
+        dir.scroll_binding = scroll_binding;
+    }
     match action {
         // Suppressed: captured but produces nothing.
         Action::None => WheelOutput::Idle,

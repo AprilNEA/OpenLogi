@@ -164,6 +164,31 @@ fn vertical_scroll_actions_emit_on_the_vertical_axis() {
 }
 
 #[test]
+fn binding_changes_do_not_reuse_fractional_scroll_progress() {
+    let mut dir = WheelDirection::default();
+    let now = Instant::now();
+    let half = unscaled(ThumbwheelSensitivity::from_rounded(7.0));
+
+    assert_eq!(
+        advance(&mut dir, &Action::HorizontalScrollRight, 1, half, now),
+        WheelOutput::Idle
+    );
+    // The half-line earned horizontally must not complete a vertical line
+    // after a live binding or application-context change.
+    assert_eq!(
+        advance(&mut dir, &Action::ScrollUp, 1, half, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        advance(&mut dir, &Action::ScrollUp, 1, half, now),
+        WheelOutput::Scroll {
+            delta_x: 0,
+            delta_y: 1,
+        }
+    );
+}
+
+#[test]
 fn directions_accumulate_independently() {
     let mut up = WheelDirection::default();
     let mut down = WheelDirection::default();
