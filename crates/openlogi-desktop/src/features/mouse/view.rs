@@ -115,7 +115,7 @@ impl<'a> MouseWorkspaceData<'a> {
             glow: None,
             // No device at all: presume the same full model the tab gate
             // presumes for an unprobed mouse, rather than the empty `Default`,
-            // which would read as "hook-only" and silently filter the diagram.
+            // which would read as undivertable and silently filter the diagram.
             controls: ModelControls::for_device(None, DeviceKind::Mouse),
             editing_app: None,
             overridden: None,
@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_model_for_hook_only_mouse_drops_hidpp_controls() {
+    fn asset_model_without_diversion_drops_hidpp_controls() {
         let asset = asset_with_slots(&[
             "SLOT_NAME_MIDDLE_BUTTON",
             "SLOT_NAME_BACK_BUTTON",
@@ -1114,7 +1114,7 @@ mod tests {
     /// hotspots, so a filtered model that forgets its labels leaves leader
     /// lines aimed at nothing.
     #[test]
-    fn fallback_model_for_hook_only_mouse_draws_only_os_hook_controls() {
+    fn fallback_model_without_diversion_draws_only_os_hook_controls() {
         let controls = ModelControls {
             thumbwheel: true,
             can_divert: false,

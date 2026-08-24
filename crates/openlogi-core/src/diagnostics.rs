@@ -326,8 +326,8 @@ impl DiagnosticsReport {
                     // bury it.
                     "buttons={}{}, pointer={}, lighting={}",
                     yes_no(c.buttons),
-                    if c.hook_only_buttons {
-                        " (OS hook only — no ReprogControls)"
+                    if c.no_button_diversion {
+                        " (no ReprogControls — cannot divert)"
                     } else {
                         ""
                     },
@@ -600,7 +600,7 @@ mod tests {
                     battery: None,
                     capabilities: Some(Capabilities {
                         buttons: true,
-                        hook_only_buttons: false,
+                        no_button_diversion: false,
                         pointer: true,
                         lighting: false,
                         scroll_inversion: false,

@@ -569,7 +569,7 @@ fn bolt_mouse(battery: BatteryInfo) -> PairedDevice {
         }),
         capabilities: Some(Capabilities {
             buttons: true,
-            hook_only_buttons: false,
+            no_button_diversion: false,
             pointer: true,
             lighting: false,
             scroll_inversion: true,
@@ -582,7 +582,7 @@ fn bolt_mouse(battery: BatteryInfo) -> PairedDevice {
 }
 
 /// A G-series mouse, with capabilities as a real G502 LIGHTSPEED reports
-/// them: `buttons` from the gaming control tables, `hook_only_buttons`
+/// them: `buttons` from the gaming control tables, `no_button_diversion`
 /// because there is no `0x1b04` to divert through, and no thumb wheel or
 /// haptics. Scripted because that path is otherwise unreachable without
 /// G-series hardware.
@@ -615,7 +615,7 @@ fn bolt_gaming_mouse() -> PairedDevice {
         }),
         capabilities: Some(Capabilities {
             buttons: true,
-            hook_only_buttons: true,
+            no_button_diversion: true,
             pointer: true,
             lighting: true,
             scroll_inversion: false,
@@ -670,7 +670,7 @@ fn bolt_keyboard() -> PairedDevice {
         }),
         capabilities: Some(Capabilities {
             buttons: false,
-            hook_only_buttons: false,
+            no_button_diversion: false,
             pointer: false,
             lighting: true,
             scroll_inversion: false,
@@ -718,7 +718,7 @@ fn direct_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities {
                 buttons: true,
-                hook_only_buttons: false,
+                no_button_diversion: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,

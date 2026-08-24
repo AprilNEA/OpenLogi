@@ -59,7 +59,7 @@ pub use succession::Identity;
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
-/// v29: `Capabilities::hook_only_buttons` appended — `buttons` widened to cover
+/// v29: `Capabilities::no_button_diversion` appended — `buttons` widened to cover
 ///      the gaming control tables, so the two are no longer the same question
 ///      (see [`openlogi_core::device::Capabilities`]).
 pub const PROTOCOL_VERSION: u32 = 29;

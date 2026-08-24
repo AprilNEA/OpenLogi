@@ -105,19 +105,25 @@ pub struct Capabilities {
     /// (`0x8100` OnboardProfiles / `0x8110` MouseButtonFilter), whose
     /// OS-visible middle/back/forward the input hook remaps host-side.
     pub buttons: bool,
-    /// The OS input hook is the *only* thing that can remap this device's
-    /// buttons, because it has no ReprogControls to divert through — a G-series
-    /// mouse, which carries the gaming control tables instead. The hook sees
-    /// exactly middle/back/forward, so panels use this to narrow what they
-    /// offer; whether a panel appears at all is [`Self::buttons`].
+    /// This device has no ReprogControls to divert controls through — a
+    /// G-series mouse, which carries the gaming control tables instead. Panels
+    /// use it to narrow what they offer; whether a panel appears at all is
+    /// [`Self::buttons`].
+    ///
+    /// Scoped to *diversion* specifically, and deliberately not phrased as
+    /// "only the OS hook can remap this". The hook is the only remaining path
+    /// today, but it is not the only conceivable one: writing the device's
+    /// onboard button map over `0x8100` OnboardProfiles would be another, and
+    /// this flag must stay true for such a device even then — the absence of
+    /// `0x1b04` is what it records.
     ///
     /// Phrased as a restriction, not as a capability, so that a config or cache
     /// written before this field existed reads back as the world those builds
     /// described: they set `buttons` only for ReprogControls devices, which are
-    /// exactly the ones that are *not* hook-only. See
+    /// exactly the ones diversion *does* work on. See
     /// [`Self::can_divert_buttons`] for the positive form.
     #[serde(default)]
-    pub hook_only_buttons: bool,
+    pub no_button_diversion: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
     /// Solid-colour RGB the lighting panel can actually drive — HID++
@@ -149,7 +155,7 @@ pub struct Capabilities {
 impl Capabilities {
     /// Whether controls beyond the OS-visible middle/back/forward can be
     /// diverted over HID++ and rebound — the positive reading of
-    /// [`Self::hook_only_buttons`], which is what every caller actually wants
+    /// [`Self::no_button_diversion`], which is what every caller actually wants
     /// to ask.
     ///
     /// "Divert" is the same sense the agent's capture plan uses: a diverted
@@ -157,7 +163,7 @@ impl Capabilities {
     /// notification instead.
     #[must_use]
     pub const fn can_divert_buttons(&self) -> bool {
-        self.buttons && !self.hook_only_buttons
+        self.buttons && !self.no_button_diversion
     }
 
     /// Derive capabilities from the set of HID++ feature IDs a device reports.
@@ -169,7 +175,7 @@ impl Capabilities {
         // — a G502 LIGHTSPEED carries 0x8100/0x8110 and nothing in the 0x1b0x
         // family, over the receiver and over USB alike. Their middle/back/
         // forward are still ordinary HID buttons the input hook can remap, so
-        // they earn the panel; `hook_only_buttons` records that nothing beyond
+        // they earn the panel; `no_button_diversion` records that nothing beyond
         // those three can be diverted.
         const GAMING_BUTTONS: [u16; 2] = [0x8100, 0x8110];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
@@ -182,7 +188,7 @@ impl Capabilities {
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS) || has(&GAMING_BUTTONS),
-            hook_only_buttons: !has(&BUTTONS) && has(&GAMING_BUTTONS),
+            no_button_diversion: !has(&BUTTONS) && has(&GAMING_BUTTONS),
             pointer: has(&POINTER),
             lighting: has(&LIGHTING),
             scroll_inversion: false,
@@ -205,7 +211,7 @@ impl Capabilities {
                 buttons: true,
                 // Optimistic, like `buttons`: an unprobed mouse keeps the full
                 // model until a real feature table says otherwise.
-                hook_only_buttons: false,
+                no_button_diversion: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -511,7 +517,7 @@ mod tests {
                 }),
                 capabilities: Some(Capabilities {
                     buttons: true,
-                    hook_only_buttons: false,
+                    no_button_diversion: false,
                     pointer: true,
                     lighting: false,
                     scroll_inversion: false,
@@ -579,7 +585,7 @@ mod tests {
             mouse,
             Capabilities {
                 buttons: true,
-                hook_only_buttons: false,
+                no_button_diversion: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -596,7 +602,7 @@ mod tests {
             keyboard,
             Capabilities {
                 buttons: false,
-                hook_only_buttons: false,
+                no_button_diversion: false,
                 pointer: false,
                 lighting: true,
                 scroll_inversion: false,
@@ -669,7 +675,7 @@ mod tests {
         assert!(g502.pointer);
     }
 
-    /// A config or probe cache written before `hook_only_buttons` existed has
+    /// A config or probe cache written before `no_button_diversion` existed has
     /// no key for it, and those builds set `buttons` only for ReprogControls
     /// devices. So absence must read back as "divertable" — otherwise every
     /// stored MX Master loses its DPI, gesture and thumb-wheel hotspots on the
@@ -687,7 +693,7 @@ mod tests {
         .expect("a pre-field capability table must still deserialize");
         assert!(
             stored.can_divert_buttons(),
-            "an absent hook_only_buttons must not silently demote a stored MX mouse"
+            "an absent no_button_diversion must not silently demote a stored MX mouse"
         );
     }
 
