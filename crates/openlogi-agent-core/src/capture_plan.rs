@@ -67,7 +67,7 @@ pub fn plan_for_device(
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the watcher
     // derives the CIDs to divert from this map's keys).
-    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
