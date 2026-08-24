@@ -1,5 +1,6 @@
 //! Keep configured keyboard → pointing-device host-switch links armed.
 
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 
@@ -23,6 +24,8 @@ pub struct HostSwitchLink {
     pub keyboard: DeviceRoute,
     /// Pointing devices that follow the keyboard.
     pub targets: Vec<DeviceRoute>,
+    /// Monitor DDC/CI input switches keyed by zero-based host index.
+    pub monitor_inputs: BTreeMap<u8, Vec<openlogi_monitor::MonitorInputAssignment>>,
 }
 
 /// Read-only, lossless, coalescing view of resolved links.
@@ -278,12 +281,28 @@ async fn run_transition(
         .acquire_exclusive(ExclusiveAccessReason::HostTransition)
         .await;
     match switch_linked_hosts(&link.keyboard, &link.targets, host, channel_pool).await {
-        Ok(true) => wait_for_departure(links, &link.keyboard).await,
+        Ok(true) => {
+            wait_for_departure(links, &link.keyboard).await;
+            apply_monitor_inputs(&link, host).await;
+        }
         Ok(false) => {}
         Err(error) => {
             debug!(%error, route = %link.keyboard, host, "keyboard host switch failed");
         }
     }
+}
+
+async fn apply_monitor_inputs(link: &HostSwitchLink, host: u8) {
+    let Some(assignments) = link.monitor_inputs.get(&host).cloned() else {
+        return;
+    };
+    if assignments.is_empty() {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        openlogi_monitor::apply_input_assignments(&assignments);
+    })
+    .await;
 }
 
 async fn wait_for_departure(

@@ -10,6 +10,7 @@ description = "The tarpc contract and local-socket transport shared by the OpenL
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core", version = "0.8.1" }
+openlogi-monitor = { path = "../openlogi-monitor", version = "0.8.1" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tarpc = { workspace = true }

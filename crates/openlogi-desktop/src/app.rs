@@ -32,6 +32,7 @@ pub(crate) mod deeplink;
 mod detail;
 mod home;
 pub(crate) mod menu;
+mod monitor;
 mod status;
 mod widgets;
 
@@ -55,6 +56,8 @@ pub(crate) use home::{glow_canvas, keyboard_glow};
 enum Route {
     /// The device gallery.
     Home,
+    /// Monitor DDC/CI input mapping.
+    Monitors,
     /// A single device's settings, identified by its user-facing record key.
     Device { record_key: String },
 }
@@ -350,6 +353,87 @@ impl AppView {
         cx.notify();
     }
 
+    fn open_monitors(&mut self, cx: &mut Context<Self>) {
+        self.route = Route::Monitors;
+        self.refresh_monitors(cx);
+        cx.notify();
+    }
+
+    fn refresh_monitors(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = AppState::try_read(cx).map(AppState::ipc_sender) else {
+            return;
+        };
+        AppState::update(cx, |state, cx| {
+            state.set_monitor_loading();
+            cx.emit(StateEvent::SettingsChanged);
+        });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(crate::services::ipc::Command::ReadMonitors(tx))
+            .is_err()
+        {
+            AppState::update(cx, |state, cx| {
+                state.store_monitors(Err("agent unavailable".into()));
+                cx.emit(StateEvent::SettingsChanged);
+            });
+            return;
+        }
+        cx.spawn(async move |_view, cx| {
+            let result = match rx.await {
+                Ok(Ok(monitors)) => Ok(monitors),
+                Ok(Err(error)) => Err(error.message),
+                Err(_) => Err("monitor request was cancelled".to_string()),
+            };
+            cx.update(|cx| {
+                AppState::update(cx, |state, cx| {
+                    state.store_monitors(result);
+                    cx.emit(StateEvent::SettingsChanged);
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn test_monitor_input(&mut self, monitor_id: String, input: u32, cx: &mut Context<Self>) {
+        let Some(sender) = AppState::try_read(cx).map(AppState::ipc_sender) else {
+            return;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(crate::services::ipc::Command::TestMonitorInput {
+                monitor_id,
+                input,
+                restore_after_ms: 0,
+                reply: tx,
+            })
+            .is_err()
+        {
+            AppState::update(cx, |state, cx| {
+                state.store_monitors(Err("agent unavailable".into()));
+                cx.emit(StateEvent::SettingsChanged);
+            });
+            return;
+        }
+        cx.spawn(async move |view, cx| {
+            let result = match rx.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(error.message),
+                Err(_) => Err("monitor test was cancelled".to_string()),
+            };
+            if let Err(error) = result {
+                cx.update(|cx| {
+                    AppState::update(cx, |state, cx| {
+                        state.store_monitors(Err(error));
+                        cx.emit(StateEvent::SettingsChanged);
+                    });
+                });
+                return;
+            }
+            let _ = view.update(cx, |this, cx| this.refresh_monitors(cx));
+        })
+        .detach();
+    }
+
     /// Attach the window-level back-navigation listeners to `root`: a mouse
     /// configurator should honor the hardware it configures. Two routes reach
     /// us — the native navigate button (its default binding never diverts, so
@@ -559,13 +643,13 @@ impl Render for AppView {
         // the selection fell back to another device) pop quietly back to the
         // gallery rather than render a different device under the same screen.
         let show_device = match &self.route {
-            Route::Home => false,
+            Route::Home | Route::Monitors => false,
             Route::Device { record_key } => AppState::try_global(cx)
                 .map(|state| state.read(cx))
                 .and_then(AppState::current_record)
                 .is_some_and(|record| record.record_key() == *record_key),
         };
-        if !show_device {
+        if matches!(self.route, Route::Device { .. }) && !show_device {
             self.route = Route::Home;
         }
 
@@ -622,6 +706,13 @@ impl Render for AppView {
                     cx,
                 )
                 .into_any_element(),
+            )
+        } else if matches!(self.route, Route::Monitors) {
+            self.camera_preview
+                .update(cx, |preview, cx| preview.set_target(None, cx));
+            (
+                monitor::monitor_header(pal, cx).into_any_element(),
+                monitor::monitor_content(pal, cx).into_any_element(),
             )
         } else {
             self.camera_preview

@@ -23,7 +23,7 @@ mod settings;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides, MonitorInputAssignment};
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]

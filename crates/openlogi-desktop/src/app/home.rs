@@ -78,6 +78,12 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
                 ),
         )
         .child(views::device_view_switcher(current_mode, view))
+        .child(
+            Button::new("home-monitors")
+                .icon(Icon::empty().path("action-icons/monitor.svg"))
+                .tooltip(tr!("Monitors"))
+                .on_click(move |_, _, cx| view.update(cx, AppView::open_monitors)),
+        )
         .child(settings_button())
         .child(add_device_button())
 }
