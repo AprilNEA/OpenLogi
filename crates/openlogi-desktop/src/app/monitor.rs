@@ -1,4 +1,6 @@
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, px, rgb};
+use gpui::{
+    AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder, px, rgb,
+};
 use gpui_component::{
     Disableable, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -45,13 +47,20 @@ pub(super) fn monitor_header(pal: Palette, cx: &mut Context<AppView>) -> impl In
             Button::new("monitor-refresh")
                 .icon(Icon::empty().path("action-icons/refresh-cw.svg"))
                 .label("重新扫描")
-                .on_click(move |_, _, cx| view.update(cx, AppView::refresh_monitors)),
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |_this, cx| AppView::refresh_monitors(cx));
+                }),
         )
 }
 
 pub(super) fn monitor_content(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let discovery = AppState::try_read(cx).map_or(MonitorDiscovery::Idle, |state| {
         state.monitor_discovery().clone()
+    });
+    let warning = AppState::try_read(cx).and_then(|state| {
+        state
+            .host_switch_warning()
+            .map(std::string::ToString::to_string)
     });
     v_flex()
         .flex_1()
@@ -65,19 +74,29 @@ pub(super) fn monitor_content(pal: Palette, cx: &mut Context<AppView>) -> impl I
                 .w_full()
                 .max_w(px(980.))
                 .gap_4()
-                .child(control_panel(pal, cx))
+                .when_some(warning, |this, warning| {
+                    this.child(warning_banner(warning, pal))
+                })
+                .child(easy_switch_panel(pal, cx))
+                .child(monitor_link_panel(pal, cx))
                 .child(match discovery {
                     MonitorDiscovery::Idle => empty_card(pal).into_any_element(),
                     MonitorDiscovery::Loading => loading_card(pal).into_any_element(),
                     MonitorDiscovery::Failed(error) => error_card(error, pal).into_any_element(),
-                    MonitorDiscovery::Ready(monitors) => monitors_card(monitors, pal, cx),
+                    MonitorDiscovery::Ready(monitors) => monitors_card(&monitors, pal, cx),
                 }),
         )
 }
 
-fn panel_card(title: String, icon: Icon, pal: Palette, content: AnyElement) -> impl IntoElement {
+fn panel_card(
+    title: String,
+    subtitle: impl Into<Option<String>>,
+    icon: Icon,
+    pal: Palette,
+    content: AnyElement,
+) -> impl IntoElement {
     v_flex()
-        .gap_3()
+        .gap_4()
         .border_1()
         .border_color(pal.border)
         .rounded(pal.card_radius)
@@ -86,46 +105,58 @@ fn panel_card(title: String, icon: Icon, pal: Palette, content: AnyElement) -> i
         .child(
             h_flex()
                 .items_center()
-                .gap_2()
+                .gap_3()
                 .child(icon.size_5().text_color(theme::accent()))
                 .child(
-                    div()
-                        .text_subheading()
-                        .text_color(pal.text_primary)
-                        .child(title),
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_subheading()
+                                .text_color(pal.text_primary)
+                                .child(title),
+                        )
+                        .when_some(subtitle.into(), |this, subtitle| {
+                            this.child(
+                                div()
+                                    .text_caption()
+                                    .text_color(pal.text_muted)
+                                    .child(subtitle),
+                            )
+                        }),
                 ),
         )
         .child(content)
 }
 
-fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let enabled = AppState::try_read(cx).is_none_or(AppState::host_monitor_enabled);
+fn easy_switch_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let keyboard_name = AppState::try_read(cx)
         .and_then(AppState::host_switch_keyboard_name)
         .unwrap_or_else(|| "未选择发起键盘".to_string());
-    let warning = AppState::try_read(cx).and_then(|state| {
-        state
-            .host_switch_warning()
-            .map(std::string::ToString::to_string)
-    });
     panel_card(
-        "Easy-Switch 设置".into(),
+        "Easy-Switch 设备跟随".into(),
+        Some(format!(
+            "发起设备：{keyboard_name}。按这把键盘的 1 / 2 / 3 时，开启的鼠标或指针设备会跟随到同一个电脑。"
+        )),
+        Icon::empty().path("action-icons/keyboard.svg"),
+        pal,
+        v_flex()
+            .gap_4()
+            .child(keyboard_selector(pal, cx))
+            .child(follow_devices_panel(pal, cx))
+            .into_any_element(),
+    )
+}
+
+fn monitor_link_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let enabled = AppState::try_read(cx).is_none_or(AppState::host_monitor_enabled);
+    panel_card(
+        "Easy-Switch 显示器联动".into(),
+        Some("把键盘 Easy-Switch 1 / 2 / 3 和下面的显示器输入源绑定起来；键鼠切换成功后才执行显示器切换。".into()),
         Icon::empty().path("action-icons/monitor.svg"),
         pal,
         v_flex()
             .gap_4()
-            .child(match warning {
-                Some(warning) => warning_banner(warning, pal).into_any_element(),
-                None => div().into_any_element(),
-            })
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(format!("发起设备：{keyboard_name}。按这把键盘的 Easy-Switch 1 / 2 / 3 时，下面开启的设备会跟随切到同一个电脑。")),
-            )
-            .child(keyboard_selector(pal, cx))
-            .child(follow_devices_panel(pal, cx))
             .child(
                 h_flex()
                     .justify_between()
@@ -136,12 +167,12 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_body()
+                                    .text_subheading()
                                     .text_color(pal.text_primary)
                                     .child(if enabled {
-                        "显示器联动已开启"
+                        "显示器输入源会跟随切换"
                     } else {
-                        "显示器联动已关闭"
+                        "显示器输入源不会自动切换"
                     }),
                             )
                             .child(
@@ -171,7 +202,7 @@ fn control_panel(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 fn keyboard_selector(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
     let keyboards =
         AppState::try_read(cx).map_or_else(Vec::new, AppState::host_switch_keyboard_devices);
-    v_flex()
+    section_block(pal)
         .gap_2()
         .child(
             h_flex()
@@ -211,7 +242,7 @@ fn keyboard_selector(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
                 .flex_wrap()
                 .children(
                     keyboards
-                        .into_iter()
+                        .iter()
                         .map(|keyboard| keyboard_choice(keyboard, pal).into_any_element()),
                 )
                 .into_any_element()
@@ -219,7 +250,7 @@ fn keyboard_selector(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
         .into_any_element()
 }
 
-fn keyboard_choice(keyboard: HostSwitchKeyboardDevice, pal: Palette) -> impl IntoElement {
+fn keyboard_choice(keyboard: &HostSwitchKeyboardDevice, pal: Palette) -> impl IntoElement {
     let key = keyboard.config_key.clone();
     let button = Button::new(format!("host-switch-keyboard-{key}"))
         .small()
@@ -251,7 +282,7 @@ fn keyboard_choice(keyboard: HostSwitchKeyboardDevice, pal: Palette) -> impl Int
 fn follow_devices_panel(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
     let devices =
         AppState::try_read(cx).map_or_else(Vec::new, AppState::host_switch_target_devices);
-    v_flex()
+    section_block(pal)
         .gap_2()
         .child(
             h_flex()
@@ -296,6 +327,15 @@ fn follow_devices_panel(pal: Palette, cx: &mut Context<AppView>) -> AnyElement {
                 .into_any_element()
         })
         .into_any_element()
+}
+
+fn section_block(pal: Palette) -> gpui::Div {
+    v_flex()
+        .p_3()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.control)
 }
 
 fn follow_device_row(device: HostSwitchTargetDevice, pal: Palette) -> impl IntoElement {
@@ -363,7 +403,7 @@ fn follow_device_row(device: HostSwitchTargetDevice, pal: Palette) -> impl IntoE
 }
 
 fn logic_diagram(enabled: bool, pal: Palette) -> impl IntoElement {
-    v_flex()
+    section_block(pal)
         .gap_3()
         .child(
             h_flex()
@@ -393,18 +433,18 @@ fn warning_banner(message: String, pal: Palette) -> impl IntoElement {
         .p_3()
         .rounded(pal.control_radius)
         .border_1()
-        .border_color(rgb(0xf97316))
-        .bg(rgb(0xfff7ed))
+        .border_color(rgb(0x00f9_7316))
+        .bg(rgb(0x00ff_f7ed))
         .child(
             Icon::new(IconName::TriangleAlert)
                 .size_4()
-                .text_color(rgb(0xc2410c)),
+                .text_color(rgb(0x00c2_410c)),
         )
         .child(
             div()
                 .flex_1()
                 .text_caption()
-                .text_color(rgb(0x9a3412))
+                .text_color(rgb(0x009a_3412))
                 .child(message),
         )
 }
@@ -474,7 +514,7 @@ fn keycap(number: u8, pal: Palette) -> impl IntoElement {
         .bg(pal.panel)
         .child(
             Icon::empty()
-                .path("action-icons/monitor.svg")
+                .path("action-icons/keyboard.svg")
                 .size_3()
                 .text_color(pal.text_muted),
         )
@@ -543,6 +583,7 @@ fn follow_kind_label(kind: DeviceKind) -> &'static str {
 fn empty_card(pal: Palette) -> impl IntoElement {
     panel_card(
         "显示器输入源".into(),
+        None,
         Icon::empty().path("action-icons/monitor.svg"),
         pal,
         v_flex()
@@ -561,6 +602,7 @@ fn empty_card(pal: Palette) -> impl IntoElement {
 fn loading_card(pal: Palette) -> impl IntoElement {
     panel_card(
         "显示器输入源".into(),
+        None,
         Icon::empty().path("action-icons/refresh-cw.svg"),
         pal,
         div()
@@ -574,6 +616,7 @@ fn loading_card(pal: Palette) -> impl IntoElement {
 fn error_card(error: String, pal: Palette) -> impl IntoElement {
     panel_card(
         "显示器输入源".into(),
+        None,
         Icon::new(IconName::TriangleAlert),
         pal,
         v_flex()
@@ -590,13 +633,14 @@ fn error_card(error: String, pal: Palette) -> impl IntoElement {
 }
 
 fn monitors_card(
-    monitors: Vec<openlogi_monitor::MonitorInfo>,
+    monitors: &[openlogi_monitor::MonitorInfo],
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> AnyElement {
     if monitors.is_empty() {
         return panel_card(
             "显示器输入源".into(),
+            None,
             Icon::empty().path("action-icons/monitor.svg"),
             pal,
             v_flex()
@@ -617,16 +661,12 @@ fn monitors_card(
     }
     v_flex()
         .gap_3()
-        .children(
-            monitors
-                .into_iter()
-                .map(|monitor| monitor_row(monitor, pal, cx)),
-        )
+        .children(monitors.iter().map(|monitor| monitor_row(monitor, pal, cx)))
         .into_any_element()
 }
 
 fn monitor_row(
-    monitor: openlogi_monitor::MonitorInfo,
+    monitor: &openlogi_monitor::MonitorInfo,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> AnyElement {
@@ -690,7 +730,6 @@ fn monitor_row(
                     monitor
                         .inputs
                         .iter()
-                        .cloned()
                         .map(|input| input_row(&monitor.id, input, pal, cx)),
                 )
                 .into_any_element()
@@ -713,11 +752,12 @@ fn input_header(pal: Palette) -> impl IntoElement {
 
 fn input_row(
     monitor_id: &str,
-    input: openlogi_monitor::MonitorInput,
+    input: &openlogi_monitor::MonitorInput,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> AnyElement {
     let monitor_id = monitor_id.to_string();
+    let input_value = input.value;
     let view = cx.entity();
     h_flex()
         .items_center()
@@ -734,16 +774,16 @@ fn input_row(
                 .min_w_0()
                 .gap_2()
                 .items_center()
-                .child(input_icon(input.value, pal))
+                .child(input_icon(input_value, pal))
                 .child(
                     div()
                         .text_body()
                         .text_color(pal.text_primary)
-                        .child(readable_input(input.value)),
+                        .child(readable_input(input_value)),
                 ),
         )
         .child(
-            Button::new(format!("monitor-test-{monitor_id}-{}", input.value))
+            Button::new(format!("monitor-test-{monitor_id}-{input_value}"))
                 .small()
                 .outline()
                 .label("测试切到此显示器")
@@ -751,8 +791,8 @@ fn input_row(
                 .on_click({
                     let monitor_id = monitor_id.clone();
                     move |_, _, cx| {
-                        view.update(cx, |this, cx| {
-                            this.test_monitor_input(monitor_id.clone(), input.value, cx);
+                        view.update(cx, |_this, cx| {
+                            AppView::test_monitor_input(monitor_id.clone(), input_value, cx);
                         });
                     }
                 }),
@@ -761,7 +801,7 @@ fn input_row(
             h_flex()
                 .gap_2()
                 .children((0_u8..3).map(|host| {
-                    host_button(host, monitor_id.clone(), input.value, pal, cx).into_any_element()
+                    host_button(host, monitor_id.clone(), input_value, pal, cx).into_any_element()
                 })),
         )
         .into_any_element()
