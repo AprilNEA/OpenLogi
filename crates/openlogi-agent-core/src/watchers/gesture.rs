@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute, run_capture_session_with_registry,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -55,6 +57,7 @@ pub fn spawn(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    registry: ChannelRegistry,
     dispatcher: ActionDispatcher,
 ) {
     thread::spawn(move || {
@@ -72,6 +75,7 @@ pub fn spawn(
             capture_plans,
             capture_channel,
             receiver_access,
+            registry,
             dispatcher,
         ));
     });
@@ -153,6 +157,7 @@ async fn manage(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    registry: ChannelRegistry,
     dispatcher: ActionDispatcher,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
@@ -258,6 +263,7 @@ async fn manage(
                         &tx,
                         &done_tx,
                         &capture_channel,
+                        &registry,
                     );
                     sessions.insert(key, session);
                 }
@@ -297,6 +303,7 @@ fn spawn_session(
     inputs: &mpsc::UnboundedSender<(String, CapturedInput)>,
     done: &mpsc::UnboundedSender<(String, u64)>,
     capture_channel: &CaptureChannel,
+    registry: &ChannelRegistry,
 ) -> RunningSession {
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
@@ -313,16 +320,16 @@ fn spawn_session(
     let session_route = route.clone();
     let session_spec = spec.clone();
     let slot = Arc::clone(capture_channel);
+    let session_registry = registry.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        let backend = openlogi_hid::host::backend();
-        if let Err(e) = run_capture_session(
-            &*backend,
+        if let Err(e) = run_capture_session_with_registry(
             session_route,
             session_spec,
             session_tx,
             stop_rx,
             slot,
+            &session_registry,
         )
         .await
         {

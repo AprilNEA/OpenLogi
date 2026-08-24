@@ -7,6 +7,15 @@ const BOTH: &[u16] = &[
     reprog_controls::HAPTIC_PANEL_CID,
 ];
 
+#[test]
+fn empty_capture_state_does_not_pin_an_idle_channel() {
+    let mut armed = ArmedControls::default();
+    assert!(armed.is_empty());
+
+    armed.dpi_cids.push(reprog_controls::DPI_MODE_SHIFT_CIDS[0]);
+    assert!(!armed.is_empty());
+}
+
 fn reporting(
     diverted: bool,
     remap: Option<reprog_controls::ControlId>,
