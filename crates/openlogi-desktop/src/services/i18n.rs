@@ -41,6 +41,8 @@ mod tests {
     fn locale_file_resolves_keys() {
         use openlogi_core::binding::{Action, ButtonId, GestureDirection};
 
+        use crate::features::mouse::thumbwheel::ThumbwheelPreset;
+
         // The accessibility blurb is the longest, most typo-prone key.
         const BLURB: &str = "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.";
 
@@ -100,6 +102,24 @@ mod tests {
                 a.category()
             );
         }
+
+        // Thumb-wheel preset labels are flat full-phrase keys ("Back /
+        // Forward", not a composition of the two action names) with reviewed
+        // translations in every catalog. #910 replaced them with per-action
+        // composition on the wrong belief that these keys were untranslated;
+        // these assertions pin both the coverage and the full-phrase wording
+        // so that diagnosis cannot recur.
+        for preset in ThumbwheelPreset::ALL {
+            assert!(covered(preset.label()), "no zh-CN for {preset:?}");
+        }
+        assert_eq!(
+            rust_i18n::t!(ThumbwheelPreset::BackForward.label()),
+            "后退 / 前进"
+        );
+        assert_eq!(
+            rust_i18n::t!(ThumbwheelPreset::VerticalScroll.label()),
+            "垂直滚动"
+        );
 
         rust_i18n::set_locale("ja");
         assert_eq!(rust_i18n::t!("Settings"), "設定");
