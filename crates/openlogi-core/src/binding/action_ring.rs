@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::Action;
+use crate::app_selector::overlay_for;
 
 mod icon;
 
@@ -324,10 +325,14 @@ impl ActionRingConfig {
     }
 
     /// Resolve the complete layout for the foreground application.
+    ///
+    /// Keys are matched the same way as every other per-app overlay (see
+    /// [`crate::app_selector`]), so a Windows `exe:<filename>.exe` selector
+    /// covers the ring as well as the button bindings.
     #[must_use]
     pub fn effective_layout(&self, app_id: Option<&str>) -> ActionRingLayout {
         app_id
-            .and_then(|app| self.per_app.get(app))
+            .and_then(|app| overlay_for(&self.per_app, app))
             .cloned()
             .unwrap_or_else(|| self.default.clone())
     }
@@ -492,5 +497,52 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
 
         assert_eq!(config.effective_layout(Some("com.apple.Safari")), safari);
         assert_eq!(config.effective_layout(Some("other")), config.default);
+    }
+
+    fn single_slot_layout(action: Action) -> ActionRingLayout {
+        ActionRingLayout {
+            slots: BTreeMap::from([(
+                ActionRingSlot::Top,
+                ActionRingEntry::new(
+                    RingAction::new(action).unwrap_or_else(|error| panic!("{error}")),
+                ),
+            )]),
+        }
+    }
+
+    #[test]
+    fn a_windows_executable_selector_covers_the_ring() {
+        let mut config = ActionRingConfig::default();
+        let sharex = single_slot_layout(Action::Copy);
+        config
+            .per_app
+            .insert("exe:sharex.exe".to_string(), sharex.clone());
+
+        // The install directory carries the version, so the layout has to
+        // survive an update that moves the executable.
+        assert_eq!(
+            config.effective_layout(Some(
+                r"c:\program files\windowsapps\sharex_17.1_x64\sharex.exe"
+            )),
+            sharex
+        );
+        assert_eq!(
+            config.effective_layout(Some(r"c:\program files\microsoft vs code\code.exe")),
+            config.default
+        );
+    }
+
+    #[test]
+    fn an_exact_ring_path_outranks_the_executable_selector() {
+        let mut config = ActionRingConfig::default();
+        let exact = single_slot_layout(Action::Copy);
+        let fallback = single_slot_layout(Action::Paste);
+        let path = r"c:\program files\windowsapps\sharex_17.1_x64\sharex.exe";
+        config.per_app.insert(path.to_string(), exact.clone());
+        config
+            .per_app
+            .insert("exe:sharex.exe".to_string(), fallback);
+
+        assert_eq!(config.effective_layout(Some(path)), exact);
     }
 }

@@ -59,7 +59,8 @@ Common device fields are:
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`
-- `action_ring`: default and complete per-application eight-slot layouts
+- `action_ring`: default and complete per-application eight-slot layouts;
+  `action_ring.per_app` takes the same selectors as `per_app_bindings`
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `identity` and `disabled_gestures`, which are application-managed metadata
