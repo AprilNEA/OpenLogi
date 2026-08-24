@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
-use crate::hardware::DeviceOp;
+use crate::hardware::{DeviceIoGates, DeviceOp};
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -97,6 +97,9 @@ pub struct SharedRuntime {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Per-transport turnstiles for agent-owned HID++ requests. Waiting for an
+    /// older request never spends the next request's device-response budget.
+    pub device_io: DeviceIoGates,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
 }
@@ -111,6 +114,7 @@ impl SharedRuntime {
             &self.capture_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -124,6 +128,7 @@ impl SharedRuntime {
             &self.keyboard_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -202,6 +207,7 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
+            device_io: DeviceIoGates::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
         };
         let orch = Self {
@@ -584,18 +590,19 @@ impl Orchestrator {
         true
     }
 
-    /// Reconcile native wheel resolution/inversion after a config reload.
-    ///
-    /// Every persisted GUI edit reloads the whole config. Starting an unchanged
-    /// wheel-mode transaction for a SmartShift-only edit makes that transaction
-    /// race the explicit SmartShift write on the same HID writer; a slow wheel
-    /// read can then consume the SmartShift write and confirmation budgets. An
-    /// ordinary reload still retries unchanged wheel settings so it can recover
-    /// from an earlier transient write failure while the device stayed online.
-    fn apply_reload_native_wheel_modes(&self, previous_config: &Config) {
-        for (route, resolution, inverted) in
-            wheel_mode_reapply_plan(previous_config, &self.config, &self.devices)
-        {
+    /// Push the saved native wheel resolution/inversion to every currently online
+    /// device. Separated from [`Self::rebuild`] (which also runs on
+    /// foreground-app changes) because the HID++ write is only needed when
+    /// config or device presence changes. The write short-circuits at the
+    /// `0x2121` layer when the wheel already holds the desired state, so calling
+    /// it on every reload costs at most one wheel-mode read per device — and
+    /// still recovers a device whose earlier write timed out while it was waking.
+    fn apply_native_wheel_modes(&self) {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
                 resolution,
@@ -744,7 +751,7 @@ impl Orchestrator {
     pub fn reload_config(&mut self, config: Config) {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
-        let previous_config = std::mem::replace(&mut self.config, config);
+        self.config = config;
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -761,7 +768,7 @@ impl Orchestrator {
             .retain(|key, _| retained_overrides.contains(key));
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
-        self.apply_reload_native_wheel_modes(&previous_config);
+        self.apply_native_wheel_modes();
         self.apply_fn_locks();
         self.reapply_light_settings();
     }
@@ -818,32 +825,6 @@ fn configured_wheel_mode(
         .scroll_inversion
         .then(|| config.invert_scroll(&dev.config_key));
     (resolution, inverted)
-}
-
-/// Plan the native wheel writes required by a config reload. Returning data
-/// keeps change detection independent from thread spawning and device I/O.
-///
-/// An unchanged wheel configuration is normally retried: the preceding
-/// fire-and-forget write may have failed while the device was waking. The one
-/// exception is a SmartShift change for the same device, because the GUI follows
-/// that reload with an explicit SmartShift transaction on the shared writer.
-fn wheel_mode_reapply_plan(
-    previous_config: &Config,
-    config: &Config,
-    devices: &[AgentDevice],
-) -> Vec<(DeviceRoute, Option<ScrollResolution>, Option<bool>)> {
-    devices
-        .iter()
-        .filter(|device| device.online)
-        .filter_map(|device| {
-            let route = device.route.clone()?;
-            let previous = configured_wheel_mode(previous_config, device);
-            let current = configured_wheel_mode(config, device);
-            let smartshift_changed = previous_config.smartshift(&device.config_key)
-                != config.smartshift(&device.config_key);
-            (previous != current || !smartshift_changed).then_some((route, current.0, current.1))
-        })
-        .collect()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

@@ -23,7 +23,7 @@ use openlogi_hook::{
 use tracing::{info, warn};
 
 use crate::event_monitor::SharedEventMonitor;
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+use crate::hardware::{DeviceIoGates, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
@@ -35,6 +35,7 @@ pub struct ActionDispatcher {
     capture: CaptureChannel,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
+    device_io: DeviceIoGates,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
@@ -46,6 +47,7 @@ impl ActionDispatcher {
         capture: CaptureChannel,
         registry: ChannelRegistry,
         receiver_access: ReceiverAccess,
+        device_io: DeviceIoGates,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> Self {
         Self {
@@ -53,6 +55,7 @@ impl ActionDispatcher {
             capture,
             registry,
             receiver_access,
+            device_io,
             action_ring,
         }
     }
@@ -76,6 +79,7 @@ impl ActionDispatcher {
             &self.capture,
             Some(&self.registry),
             &self.receiver_access,
+            &self.device_io,
         );
     }
 }
@@ -574,6 +578,7 @@ pub fn dispatch_action(
     capture: &CaptureChannel,
     registry: Option<&ChannelRegistry>,
     receiver_access: &ReceiverAccess,
+    device_io: &DeviceIoGates,
 ) {
     let next = match action {
         Action::CycleDpiPresets => match dpi_cycle.write() {
@@ -596,7 +601,13 @@ pub fn dispatch_action(
             let target = dpi_cycle.read().ok().and_then(|g| g.target_for(device_key));
             info!("SmartShift toggle → flipping wheel mode");
             if let Some(registry) = registry {
-                toggle_smartshift_in_background(capture, registry, receiver_access, target);
+                toggle_smartshift_in_background(
+                    capture,
+                    registry,
+                    receiver_access,
+                    device_io,
+                    target,
+                );
             } else {
                 warn!("no inventory registry — SmartShift toggle skipped");
             }
@@ -626,7 +637,7 @@ pub fn dispatch_action(
     if let Some((dpi, target)) = next {
         info!(%dpi, "DPI action → writing to device");
         if let Some(registry) = registry {
-            write_dpi_in_background(capture, registry, receiver_access, target, dpi);
+            write_dpi_in_background(capture, registry, receiver_access, device_io, target, dpi);
         } else {
             warn!("no inventory registry — DPI action skipped");
         }
