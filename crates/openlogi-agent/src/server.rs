@@ -25,8 +25,8 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    ConfigReloadError, Generation, Identity, MonitorCommandError, MonitorEvent, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 
@@ -288,6 +288,35 @@ impl Agent for AgentServer {
         // A failed send is the designed steady state: the gate drops its
         // receiver at arming, and an armed agent no longer cares.
         let _ = self.demand.send(kind);
+    }
+
+    async fn list_monitors(
+        self,
+        _: Context,
+    ) -> Result<Vec<openlogi_monitor::MonitorInfo>, MonitorCommandError> {
+        openlogi_monitor::list_monitors().map_err(|error| MonitorCommandError {
+            message: error.to_string(),
+        })
+    }
+
+    async fn test_monitor_input(
+        self,
+        _: Context,
+        monitor_id: String,
+        input: u32,
+        restore_after_ms: u64,
+    ) -> Result<(), MonitorCommandError> {
+        let restore_after = std::time::Duration::from_millis(restore_after_ms);
+        tokio::task::spawn_blocking(move || {
+            openlogi_monitor::test_monitor_input(&monitor_id, input, restore_after)
+        })
+        .await
+        .map_err(|error| MonitorCommandError {
+            message: error.to_string(),
+        })?
+        .map_err(|error| MonitorCommandError {
+            message: error.to_string(),
+        })
     }
 
     async fn action_ring_hover(

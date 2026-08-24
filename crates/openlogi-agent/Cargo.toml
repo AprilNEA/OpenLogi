@@ -27,6 +27,7 @@ openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+openlogi-monitor = { path = "../openlogi-monitor" }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }

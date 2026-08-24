@@ -68,6 +68,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod monitor;
 mod pointer;
 mod scroll;
 mod settings;
@@ -151,6 +152,23 @@ pub enum AgentLink {
     Ready(openlogi_ipc::AgentStatus),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorDiscovery {
+    Idle,
+    Loading,
+    Ready(Vec<openlogi_monitor::MonitorInfo>),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSwitchTargetDevice {
+    pub config_key: String,
+    pub display_name: String,
+    pub kind: openlogi_core::device::DeviceKind,
+    pub online: bool,
+    pub selected: bool,
+}
+
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
 /// consecutive misses so a transient probe timeout does not make the device card
@@ -174,6 +192,7 @@ pub struct AppState {
     lighting: LightingState,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    monitor_discovery: MonitorDiscovery,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
     /// entity owns it because permission can resolve after the initiating view
     /// or window closes; dropping the entity at process shutdown cancels it.
@@ -271,6 +290,7 @@ impl AppState {
             pointer: PointerState::default(),
             lighting: LightingState::default(),
             ipc_commands,
+            monitor_discovery: MonitorDiscovery::Idle,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
         };

@@ -57,8 +57,8 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    MonitorCommandError, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -813,6 +813,23 @@ impl Agent for MockAgent {
             generation: 1,
             invocation: None,
         }
+    }
+
+    async fn list_monitors(
+        self,
+        _: Context,
+    ) -> Result<Vec<openlogi_monitor::MonitorInfo>, MonitorCommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn test_monitor_input(
+        self,
+        _: Context,
+        _monitor_id: String,
+        _input: u32,
+        _restore_after_ms: u64,
+    ) -> Result<(), MonitorCommandError> {
+        Ok(())
     }
 
     async fn action_ring_hover(

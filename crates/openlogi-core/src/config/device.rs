@@ -14,6 +14,16 @@ use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirecti
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::Dpi;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// One DDC/CI monitor input switch executed during a keyboard host transition.
+pub struct MonitorInputAssignment {
+    /// Stable monitor id printed by `openlogi monitor list`.
+    pub monitor_id: String,
+    /// MCCS VCP `0x60` input value, for example `0x0f` DisplayPort or `0x11` HDMI.
+    pub input: u32,
+}
+
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
 /// completes — or while the device is asleep and can't be probed at all.
@@ -264,6 +274,14 @@ pub struct DeviceConfig {
     /// lets the keyboard leave the current host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_switch_targets: Vec<String>,
+    /// Whether Easy-Switch host changes should also apply monitor input
+    /// assignments. Disabling keeps the saved assignments but stops using them.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub host_switch_monitor_enabled: bool,
+    /// Monitor DDC/CI input switches keyed by zero-based host index. Pressing
+    /// Easy-Switch 1/2/3 maps to host indexes 0/1/2.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_switch_monitor_inputs: BTreeMap<String, Vec<MonitorInputAssignment>>,
     /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
     /// means the F-row sends F1–F12 without holding Fn. The state lives in
     /// device RAM per host, so the agent re-applies it on reconnect like
@@ -369,6 +387,8 @@ impl Default for DeviceConfig {
             invert_scroll: false,
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
+            host_switch_monitor_enabled: true,
+            host_switch_monitor_inputs: BTreeMap::new(),
             fn_lock: None,
         }
     }
@@ -488,6 +508,10 @@ struct RawDeviceConfig {
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
     host_switch_targets: Vec<String>,
+    #[serde(default = "default_true")]
+    host_switch_monitor_enabled: bool,
+    #[serde(default)]
+    host_switch_monitor_inputs: BTreeMap<String, Vec<MonitorInputAssignment>>,
     #[serde(default)]
     fn_lock: Option<bool>,
     #[serde(default = "default_true")]
@@ -549,6 +573,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
+            host_switch_monitor_enabled: raw.host_switch_monitor_enabled,
+            host_switch_monitor_inputs: raw.host_switch_monitor_inputs,
             fn_lock: raw.fn_lock,
         }
     }
@@ -573,6 +599,24 @@ mod tests {
         );
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
+        Ok(())
+    }
+
+    #[test]
+    fn host_switch_monitor_inputs_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let config: DeviceConfig = toml::from_str(
+            r#"[host_switch_monitor_inputs]
+"1" = [{ monitor_id = "\\\\.\\DISPLAY1:0:abc", input = 17 }]
+"#,
+        )?;
+
+        assert_eq!(
+            config.host_switch_monitor_inputs["1"][0].monitor_id,
+            r"\\.\DISPLAY1:0:abc"
+        );
+        assert_eq!(config.host_switch_monitor_inputs["1"][0].input, 17);
+        let serialized = toml::to_string(&config)?;
+        assert!(serialized.contains("host_switch_monitor_inputs"));
         Ok(())
     }
 }
