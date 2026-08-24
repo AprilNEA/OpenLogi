@@ -2,8 +2,10 @@ use super::*;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::SharedChannel;
+use crate::channel::DeviceCacheIdentity;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
@@ -339,6 +341,17 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
         ]
     );
 
+    // The feature address and immutable range belong to this open channel.
+    // A second panel load should read only the volatile current DPI instead of
+    // repeating the root handshake, feature lookups, sensor count and range.
+    let reports_before_cached_read = handle.written_reports().len();
+    let cached = get_dpi_info_on(&shared).await?;
+    assert_eq!(cached, dpi);
+    let cached_read_reports = &handle.written_reports()[reports_before_cached_read..];
+    assert_eq!(cached_read_reports.len(), 1);
+    assert_eq!(cached_read_reports[0][2], 0x05);
+    assert_eq!(cached_read_reports[0][3] >> 4, 0x05);
+
     set_dpi_on(&shared, Dpi::new(1200)).await?;
 
     // setSensorDpiParameters is a long request on function 6 of feature index
@@ -355,6 +368,143 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     // no "leave alone" encoding, so writing a bare 0 would retune the sensor.
     assert_eq!(write[9], u8::from(Lod::Medium));
     Ok(())
+}
+
+#[tokio::test]
+async fn replacing_a_mouse_in_one_receiver_slot_reprobes_dpi_capabilities() -> Result<(), WriteError>
+{
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "AABB".into(),
+        slot: 2,
+    };
+    let first_identity = DeviceCacheIdentity::Physical {
+        unit_id: Some([1, 2, 3, 4]),
+        serial_number: None,
+    };
+    let first_mouse = SharedChannel::with_cache_identity(
+        Arc::clone(&channel),
+        route.clone(),
+        Some(first_identity.clone()),
+    );
+    get_dpi_info_on(&first_mouse).await?;
+
+    let reports_before_refresh = handle.written_reports().len();
+    let refreshed_handle = SharedChannel::with_cache_identity(
+        Arc::clone(&channel),
+        route.clone(),
+        Some(first_identity),
+    );
+    get_dpi_info_on(&refreshed_handle).await?;
+    assert_eq!(
+        handle.written_reports().len() - reports_before_refresh,
+        1,
+        "a normal inventory refresh for the same mouse should keep the fast path"
+    );
+
+    let reports_before_replacement = handle.written_reports().len();
+    let replacement = SharedChannel::with_cache_identity(
+        channel,
+        route,
+        Some(DeviceCacheIdentity::Physical {
+            unit_id: Some([5, 6, 7, 8]),
+            serial_number: None,
+        }),
+    );
+    get_dpi_info_on(&replacement).await?;
+    let replacement_reports = &handle.written_reports()[reports_before_replacement..];
+
+    assert!(
+        replacement_reports
+            .iter()
+            .any(|report| report[2] == 0x00 && report[3] >> 4 == 0x00),
+        "a replacement device must resolve its DPI feature instead of inheriting the old index"
+    );
+    assert!(
+        replacement_reports.len() > 1,
+        "a replacement device must reload its range instead of reading only current DPI"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_extended_dpi_skips_the_firmware_write() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(800)).await?;
+
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| report.len() != 20 || report[2] != 0x05 || report[3] >> 4 != 0x06)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_dpi_retries_a_transient_firmware_rejection() -> Result<(), WriteError> {
+    EXTENDED_DPI_TRANSIENT_WRITES.store(0, Ordering::SeqCst);
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(extended_dpi_transient_write_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(1200)).await?;
+
+    let write_count = handle
+        .written_reports()
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
+        .count();
+    assert_eq!(write_count, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_dpi_stops_after_the_bounded_transient_retries() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_rejected_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    let error = set_dpi_on(&shared, Dpi::new(1200))
+        .await
+        .expect_err("a persistently rejected write must still fail");
+    assert!(matches!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::WriteDpi,
+            kind: HidppFeatureErrorKind::LogitechInternal,
+            ..
+        }
+    ));
+    let write_count = handle
+        .written_reports()
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
+        .count();
+    assert_eq!(write_count, 3);
 }
 
 #[test]
@@ -552,6 +702,23 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     let payload_len = response.len() - 4;
     response[4..].copy_from_slice(&payload[..payload_len]);
     Some(response)
+}
+
+static EXTENDED_DPI_TRANSIENT_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+fn extended_dpi_transient_write_response(request: &[u8]) -> Option<Vec<u8>> {
+    let is_set = request.len() == 20 && request[2] == 0x05 && request[3] >> 4 == 0x06;
+    if is_set && EXTENDED_DPI_TRANSIENT_WRITES.fetch_add(1, Ordering::SeqCst) == 0 {
+        return Some(feature_error(request, 0x05));
+    }
+    extended_dpi_scripted_response(request)
+}
+
+fn extended_dpi_rejected_response(request: &[u8]) -> Option<Vec<u8>> {
+    let is_set = request.len() == 20 && request[2] == 0x05 && request[3] >> 4 == 0x06;
+    is_set
+        .then(|| feature_error(request, 0x05))
+        .or_else(|| extended_dpi_scripted_response(request))
 }
 
 /// A keyboard that exposes `0x8081 PerKeyLighting2` and neither `0x8070`
