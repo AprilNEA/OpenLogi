@@ -72,21 +72,24 @@ impl ThumbwheelPreset {
         })
     }
 
+    /// Localized display label, rendered as "<backward> / <forward>" composed
+    /// from each side's already-translated action name. The flat "X / Y"
+    /// strings are keys in no locale file — every preset row used to fall back
+    /// to English regardless of app language — while per-action names carry
+    /// translations for all locales, so composing reuses that reviewed
+    /// coverage instead of duplicating it. CycleDpi fires one action in both
+    /// directions and renders as a single name without the separator.
     #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::BackForward => "Back / Forward",
-            Self::UndoRedo => "Undo / Redo",
-            Self::BrowserHistory => "Browser Back / Forward",
-            Self::Tabs => "Previous / Next Tab",
-            Self::Desktops => "Previous / Next Desktop",
-            Self::Tracks => "Previous / Next Track",
-            Self::Volume => "Volume Down / Up",
-            Self::VolumeReversed => "Volume Up / Down",
-            Self::CycleDpi => "Cycle DPI Presets",
-            Self::VerticalScroll => "Vertical Scroll",
-            Self::HorizontalScroll => "Horizontal Scroll",
+    pub(crate) fn label(self) -> String {
+        let pair = self.pair();
+        if pair.backward == pair.forward {
+            return rust_i18n::t!(pair.backward.label()).into_owned();
         }
+        format!(
+            "{} / {}",
+            rust_i18n::t!(pair.backward.label()),
+            rust_i18n::t!(pair.forward.label())
+        )
     }
 
     #[must_use]
@@ -129,6 +132,20 @@ mod tests {
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
             assert_eq!(preset.pair(), ThumbwheelPair { backward, forward });
         }
+    }
+
+    #[test]
+    fn label_composes_translated_sides_and_keeps_single_action_undivided() {
+        // Locale-independent shape assertions: a two-action preset renders
+        // both sides around the separator; the one-action preset (CycleDpi)
+        // must not grow one.
+        assert!(ThumbwheelPreset::BackForward.label().contains(" / "));
+        let dpi = ThumbwheelPreset::CycleDpi.label();
+        assert!(!dpi.contains(" / "));
+        assert_eq!(
+            dpi,
+            rust_i18n::t!(Action::CycleDpiPresets.label()).into_owned()
+        );
     }
 
     #[test]
