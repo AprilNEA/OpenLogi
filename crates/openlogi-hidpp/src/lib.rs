@@ -70,7 +70,7 @@
 //!
 //! // HID++2.0 includes an arbitrary "software ID" in every message.
 //! // This ID is meant to differentiate messages of different
-//! // softwares, but it can also be used to ease the mapping of
+//! // software, but it can also be used to ease the mapping of
 //! // incoming messages to previously sent outgoing messages by
 //! // rotating it after every sent message.
 //! // By default, the software ID is `0x01` and will not rotate.

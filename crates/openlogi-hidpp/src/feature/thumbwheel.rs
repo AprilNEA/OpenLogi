@@ -113,7 +113,7 @@ pub struct ThumbwheelInfo {
     /// [`ThumbwheelStatusUpdate::rotation`] value.
     pub default_direction: ThumbwheelDirection,
 
-    /// The capabilites of the thumbwheel.
+    /// The capabilities of the thumbwheel.
     pub capabilities: ThumbwheelCapabilities,
 }
 

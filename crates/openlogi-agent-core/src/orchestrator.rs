@@ -1048,7 +1048,7 @@ fn is_hidpp_device(device: &AgentDevice) -> bool {
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
-/// background thread that paniced while holding the lock can't take the agent
+/// background thread that panicked while holding the lock can't take the agent
 /// down — it just keeps the stale value until the next successful rebuild.
 fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
     match lock.write() {
