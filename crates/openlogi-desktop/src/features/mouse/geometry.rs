@@ -184,8 +184,12 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         // The main wheel's tilt. Logi names the two slots after the scroll they
         // produce in firmware; each is its own reprogrammable control
         // (`0x1b04` CIDs `0x005b` / `0x005d`), not part of the middle click.
-        "SLOT_NAME_LEFT_SCROLL_BUTTON" => Some(MouseControlId::Button(ButtonId::WheelTiltLeft)),
-        "SLOT_NAME_RIGHT_SCROLL_BUTTON" => Some(MouseControlId::Button(ButtonId::WheelTiltRight)),
+        "SLOT_NAME_LEFT_SCROLL_BUTTON" | "SLOT_NAME_SCROLL_LEFT" => {
+            Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
+        }
+        "SLOT_NAME_RIGHT_SCROLL_BUTTON" | "SLOT_NAME_SCROLL_RIGHT" => {
+            Some(MouseControlId::Button(ButtonId::WheelTiltRight))
+        }
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
         "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
@@ -229,18 +233,20 @@ mod tests {
     }
 
     #[test]
-    fn wheel_tilt_slots_map_to_their_own_controls() {
-        // Logi ships the tilt as two slots named after the scroll it produces
-        // (MX Anywhere 2S and friends). Leaving them unmapped is what used to
-        // hide the tilt from the buttons panel entirely.
-        assert_eq!(
-            map_slot_name("SLOT_NAME_LEFT_SCROLL_BUTTON"),
-            Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
-        );
-        assert_eq!(
-            map_slot_name("SLOT_NAME_RIGHT_SCROLL_BUTTON"),
-            Some(MouseControlId::Button(ButtonId::WheelTiltRight))
-        );
+    fn wheel_tilt_slot_names_map_to_their_own_controls() {
+        // MX Anywhere uses the longer names; MX Ergo uses the shorter aliases.
+        for name in ["SLOT_NAME_LEFT_SCROLL_BUTTON", "SLOT_NAME_SCROLL_LEFT"] {
+            assert_eq!(
+                map_slot_name(name),
+                Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
+            );
+        }
+        for name in ["SLOT_NAME_RIGHT_SCROLL_BUTTON", "SLOT_NAME_SCROLL_RIGHT"] {
+            assert_eq!(
+                map_slot_name(name),
+                Some(MouseControlId::Button(ButtonId::WheelTiltRight))
+            );
+        }
     }
 
     #[test]
