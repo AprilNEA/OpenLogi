@@ -198,7 +198,7 @@ async fn probe_unifying_receiver(
     // The drain is therefore the *only* device source on this path, so a
     // failed arrival trigger is "couldn't check", not "no devices online":
     // settle it as a failed probe and let the ledger replay the last snapshot.
-    let Some(connections) = drain_device_arrival_unifying(&unifying).await else {
+    let Some(connections) = drain_device_arrival_unifying(&unifying, pairing_count).await else {
         return NodeProbe::failed();
     };
     debug!(events = connections.len(), "drained device-arrival events");
@@ -556,6 +556,7 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
 /// empty receiver.
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
+    pairing_count: u8,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
     let rx = unifying.listen();
     // Newer Lightspeed receivers can already have notifications enabled (or
@@ -575,7 +576,10 @@ async fn drain_device_arrival_unifying(
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    if !out.is_empty() {
+    // A receiver with no pairings legitimately emits nothing: don't pay a
+    // notification-register round trip and a second drain window for it on
+    // every watcher tick.
+    if !out.is_empty() || pairing_count == 0 {
         return Some(out);
     }
 
