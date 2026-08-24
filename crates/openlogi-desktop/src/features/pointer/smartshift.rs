@@ -343,19 +343,20 @@ impl Render for SmartShiftPanel {
         let content: AnyElement = match status {
             SmartShiftLoad::Ready(s) => self.ready_body(s, window, pal, cx),
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
-                status_line(tr!("Device offline — SmartShift unavailable."), pal)
+                status_line(tr!("Device offline — SmartShift unavailable."), pal).into_any_element()
             }
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown => {
-                status_line(tr!("Reading SmartShift settings…"), pal)
+                status_line(tr!("Reading SmartShift settings…"), pal).into_any_element()
             }
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
                 tr!("Couldn't read SmartShift — click to retry."),
                 pal,
                 retry_smartshift_closure(key.clone()),
-            ),
+            )
+            .into_any_element(),
             SmartShiftLoad::Unsupported(_) => {
-                status_line(tr!("This device does not support SmartShift."), pal)
+                status_line(tr!("This device does not support SmartShift."), pal).into_any_element()
             }
         };
 
@@ -382,15 +383,20 @@ fn smartshift_write_feedback(
 ) -> Option<AnyElement> {
     match status {
         Some(SmartShiftWriteStatus::Applying { .. }) => {
-            Some(status_line(tr!("Reading SmartShift settings…"), pal))
+            Some(status_line(tr!("Reading SmartShift settings…"), pal).into_any_element())
         }
-        Some(SmartShiftWriteStatus::Confirmed) => Some(status_line(tr!("Done"), pal)),
-        Some(SmartShiftWriteStatus::Failed) => Some(retry_line(
-            "smartshift-confirm-retry",
-            tr!("Couldn't read SmartShift — click to retry."),
-            pal,
-            retry_smartshift_closure(key),
-        )),
+        Some(SmartShiftWriteStatus::Confirmed) => {
+            Some(status_line(tr!("Done"), pal).into_any_element())
+        }
+        Some(SmartShiftWriteStatus::Failed) => Some(
+            retry_line(
+                "smartshift-confirm-retry",
+                tr!("Couldn't read SmartShift — click to retry."),
+                pal,
+                retry_smartshift_closure(key),
+            )
+            .into_any_element(),
+        ),
         None => None,
     }
 }
