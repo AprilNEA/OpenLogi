@@ -44,6 +44,8 @@ pub struct LightingPanel {
     /// must be resynced; an unchanged value during a drag must not, or we'd
     /// fight the user's in-progress drag (which only commits on release).
     last_brightness: u8,
+    /// The live drag value, shown in the numeric label until release commits.
+    pending_brightness: Option<u8>,
     _brightness_sub: Subscription,
     _state_obs: Subscription,
 }
@@ -55,15 +57,22 @@ impl LightingPanel {
             SliderState::new()
                 .max(100.)
                 .min(0.)
-                .step(5.)
+                .step(1.)
                 .default_value(f32::from(initial))
         });
         // The slider drives the device only on release, to avoid streaming a
         // frame burst to the keyboard for every intermediate drag value.
-        let brightness_sub =
-            cx.subscribe(&brightness, |_panel, _slider, event: &SliderEvent, cx| {
-                if let SliderEvent::Release(value) = event {
+        let brightness_sub = cx.subscribe(
+            &brightness,
+            |panel, _slider, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => {
+                    panel.pending_brightness = Some(clamp_brightness(value.start()));
+                    cx.notify();
+                }
+                SliderEvent::Release(value) => {
                     let pct = clamp_brightness(value.start());
+                    panel.pending_brightness = None;
+                    panel.last_brightness = pct;
                     AppState::update(cx, |state, cx| {
                         let key = state.current_record().map(DeviceRecord::device_key);
                         let mut lighting = state.lighting();
@@ -76,7 +85,8 @@ impl LightingPanel {
                     });
                     cx.notify();
                 }
-            });
+            },
+        );
         let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
             let relevant = match event {
                 StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
@@ -92,6 +102,7 @@ impl LightingPanel {
         Self {
             brightness,
             last_brightness: initial,
+            pending_brightness: None,
             _brightness_sub: brightness_sub,
             _state_obs: state_obs,
         }
@@ -104,6 +115,8 @@ impl Render for LightingPanel {
         let lighting = AppState::try_read(cx)
             .map(AppState::lighting)
             .unwrap_or_default();
+
+        let display = self.pending_brightness.unwrap_or(lighting.brightness);
 
         // Pull the slider thumb to the active device's brightness whenever it
         // changed in `AppState` (device switch / external edit), without
@@ -165,7 +178,7 @@ impl Render for LightingPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_primary)
-                            .child(format!("{}%", lighting.brightness)),
+                            .child(format!("{display}%")),
                     ),
             )
             .child(Slider::new(&self.brightness).horizontal())
