@@ -6,8 +6,8 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
     IconName, Selectable as _, Sizable as _,
@@ -20,8 +20,9 @@ use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
 use crate::state::{AppState, DeviceKey, DeviceRecord, DpiStatus, StateEvent};
+use crate::ui::components::PresetChip;
 use crate::ui::status::{retry_line, status_line};
-use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
@@ -204,7 +205,7 @@ impl Render for DpiPanel {
                     .map_or(*value, |state| state.normalize_active_dpi(*value));
                 let active = !already_highlighted && normalized == snapshot.dpi;
                 already_highlighted |= active;
-                preset_chip(idx, *value, active, &snapshot.presets, pal)
+                preset_chip(idx, *value, active, &snapshot.presets)
             })
             .collect();
 
@@ -353,19 +354,10 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palette) -> AnyElement {
+fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> AnyElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
-    h_flex()
-        .id(("dpi-preset-chip", idx))
-        .h(px(CHIP_H))
-        .px_2()
-        .gap_2()
-        .items_center()
-        .rounded(pal.control_radius)
-        .selected_border(active, pal)
-        .bg(pal.surface)
-        .selected_fill(active)
-        .hover(|s| s.bg(pal.surface_hover))
+    PresetChip::new(("dpi-preset-chip", idx))
+        .selected(active)
         .child(
             Button::new(("dpi-preset-apply", idx))
                 .compact()

@@ -10,7 +10,7 @@ use gpui::{
     Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
-    h_flex,
+    Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -18,7 +18,8 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::ui::components::Toggle;
+use crate::ui::theme::{self, Palette, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -133,7 +134,21 @@ impl Render for LightingPanel {
                             .text_color(pal.text_muted)
                             .child(tr!("Lighting")),
                     )
-                    .child(toggle(&lighting, pal)),
+                    .child(
+                        Toggle::new("light-toggle")
+                            .selected(lighting.enabled)
+                            .on_change(|enabled, _window, cx| {
+                                AppState::update(cx, |state, cx| {
+                                    let key = state.current_record().map(DeviceRecord::device_key);
+                                    let mut next = state.lighting();
+                                    next.enabled = *enabled;
+                                    state.commit_lighting(next);
+                                    if let Some(key) = key {
+                                        cx.emit(StateEvent::LightingChanged(key));
+                                    }
+                                });
+                            }),
+                    ),
             )
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
@@ -178,34 +193,6 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
                 let mut next = state.lighting();
                 next.enabled = true;
                 next.color = color;
-                state.commit_lighting(next);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::LightingChanged(key));
-                }
-            });
-        })
-        .into_any_element()
-}
-
-/// On/off pill.
-fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
-    let on = current.enabled;
-    div()
-        .id("light-toggle")
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .child(if on { tr!("On") } else { tr!("Off") })
-        .on_click(|_event, _window, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                let mut next = state.lighting();
-                next.enabled = !next.enabled;
                 state.commit_lighting(next);
                 if let Some(key) = key {
                     cx.emit(StateEvent::LightingChanged(key));

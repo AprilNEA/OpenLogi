@@ -3,11 +3,10 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::FluentBuilder as _, px, relative, rgb,
+    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, px, relative, rgb,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _,
+    IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -68,58 +67,6 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
         .map_or_else(
             || SharedString::from("OpenLogi"),
             |record| SharedString::from(format!("OpenLogi - {}", record.display_name)),
-        )
-}
-
-pub(super) fn panel_card(
-    title: SharedString,
-    icon: Icon,
-    pal: Palette,
-    content: AnyElement,
-) -> impl IntoElement {
-    panel_card_inner(title, icon, pal, content, false)
-}
-
-pub(super) fn panel_card_fill(
-    title: SharedString,
-    icon: Icon,
-    pal: Palette,
-    content: AnyElement,
-) -> impl IntoElement {
-    panel_card_inner(title, icon, pal, content, true)
-}
-
-fn panel_card_inner(
-    title: SharedString,
-    icon: Icon,
-    pal: Palette,
-    content: AnyElement,
-    fill_height: bool,
-) -> impl IntoElement {
-    div()
-        .w_full()
-        .when(fill_height, gpui::Styled::h_full)
-        .max_w_full()
-        .min_w_0()
-        .rounded(pal.card_radius)
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .p(px(theme::CARD_PAD))
-        .child(
-            v_flex()
-                .gap(px(theme::CARD_GAP))
-                .when(!title.is_empty(), |this| {
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(pal.text_primary)
-                            .child(icon.size_4().text_color(pal.text_muted))
-                            .child(div().text_subheading().child(title)),
-                    )
-                })
-                .child(content),
         )
 }
 

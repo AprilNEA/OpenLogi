@@ -175,17 +175,16 @@ impl Render for MouseModelView {
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
         let breathing_art = breathing_art(asset.as_ref(), mouse_left, mouse_w, mouse_h, pal, glow);
-        let hotspots_layer = hotspots_layer(
-            &hotspots_outer,
-            mouse_left,
-            mouse_w,
-            mouse_h,
-            hovered,
-            active,
-            &gesture_buttons,
-            self.open_binding_popover,
-            &view,
-        );
+        let frame = ModelFrame {
+            left: mouse_left,
+            width: mouse_w,
+            height: mouse_h,
+        };
+        let hotspots_layer = HotspotsLayer::new(hotspots_outer, frame, view.clone())
+            .hovered(hovered)
+            .active(active)
+            .gesture_buttons(gesture_buttons.clone())
+            .open_popover(self.open_binding_popover);
         let canvas = div()
             .relative()
             .w(px(canvas_w))
@@ -194,22 +193,17 @@ impl Render for MouseModelView {
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
                 let binding = binding_label_for_control(label.id, &bindings, &gesture_buttons);
-                label_popover(
-                    idx,
-                    *label,
-                    binding,
-                    highlight == Some(label.id),
-                    mouse_left,
-                    mouse_w,
-                    hovered,
-                    active,
-                    label
-                        .id
-                        .button()
-                        .filter(|button| gesture_buttons.contains(button)),
-                    self.open_binding_popover == Some(BindingPopover::Label(label.id)),
-                    &view,
-                )
+                LabelPopover::new(idx, *label, binding, frame, view.clone())
+                    .highlighted(highlight == Some(label.id))
+                    .hovered(hovered)
+                    .active(active)
+                    .gesture_button(
+                        label
+                            .id
+                            .button()
+                            .filter(|button| gesture_buttons.contains(button)),
+                    )
+                    .open(self.open_binding_popover == Some(BindingPopover::Label(label.id)))
             }))
             .child(hotspots_layer);
 
@@ -321,41 +315,91 @@ fn breathing_art(
         .child(device_art)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "layout inputs + hover/active/gesture state; bundling would just hide the dependency"
-)]
-fn hotspots_layer(
-    hotspots: &[Hotspot],
-    mouse_left: f32,
-    mouse_w: f32,
-    mouse_h: f32,
+#[derive(Clone, Copy)]
+struct ModelFrame {
+    left: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(IntoElement)]
+struct HotspotsLayer {
+    hotspots: Vec<Hotspot>,
+    frame: ModelFrame,
     hovered: Option<MouseControlId>,
     active: Option<MouseControlId>,
-    gesture_buttons: &[ButtonId],
+    gesture_buttons: Vec<ButtonId>,
     open_popover: Option<BindingPopover>,
-    view: &Entity<MouseModelView>,
-) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(px(mouse_left))
-        .top(px(0.))
-        .w(px(mouse_w))
-        .h(px(mouse_h))
-        .children(hotspots.iter().enumerate().map(|(idx, hotspot)| {
-            hotspot_popover(
-                idx,
-                *hotspot,
-                hovered,
-                active,
-                hotspot
-                    .id
-                    .button()
-                    .filter(|button| gesture_buttons.contains(button)),
-                open_popover == Some(BindingPopover::Hotspot(hotspot.id)),
-                view,
-            )
-        }))
+    view: Entity<MouseModelView>,
+}
+
+impl HotspotsLayer {
+    fn new(hotspots: Vec<Hotspot>, frame: ModelFrame, view: Entity<MouseModelView>) -> Self {
+        Self {
+            hotspots,
+            frame,
+            hovered: None,
+            active: None,
+            gesture_buttons: Vec::new(),
+            open_popover: None,
+            view,
+        }
+    }
+
+    #[must_use]
+    fn hovered(mut self, hovered: impl Into<Option<MouseControlId>>) -> Self {
+        self.hovered = hovered.into();
+        self
+    }
+
+    #[must_use]
+    fn active(mut self, active: impl Into<Option<MouseControlId>>) -> Self {
+        self.active = active.into();
+        self
+    }
+
+    #[must_use]
+    fn gesture_buttons(mut self, gesture_buttons: Vec<ButtonId>) -> Self {
+        self.gesture_buttons = gesture_buttons;
+        self
+    }
+
+    #[must_use]
+    fn open_popover(mut self, open_popover: impl Into<Option<BindingPopover>>) -> Self {
+        self.open_popover = open_popover.into();
+        self
+    }
+}
+
+impl RenderOnce for HotspotsLayer {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let frame = self.frame;
+        let hovered = self.hovered;
+        let active = self.active;
+        let gesture_buttons = self.gesture_buttons;
+        let open_popover = self.open_popover;
+        let view = self.view;
+        div()
+            .absolute()
+            .left(px(frame.left))
+            .top(px(0.))
+            .w(px(frame.width))
+            .h(px(frame.height))
+            .children(self.hotspots.into_iter().enumerate().map(|(idx, hotspot)| {
+                hotspot_popover(
+                    idx,
+                    hotspot,
+                    hovered,
+                    active,
+                    hotspot
+                        .id
+                        .button()
+                        .filter(|button| gesture_buttons.contains(button)),
+                    open_popover == Some(BindingPopover::Hotspot(hotspot.id)),
+                    &view,
+                )
+            }))
+    }
 }
 
 /// Wrap `trigger` in a left-click [`Popover`] hosting the gesture button's
@@ -395,86 +439,135 @@ where
         .content(move |_state, _window, cx| gesture_overview(btn, &view, cx))
 }
 
-/// Position the popover wrapper at the label's slot in the side gutter and
-/// host a Popover whose trigger is the label card itself. Same picker
-/// content as the hotspot dot — clicking either entry point lands on the
-/// same binding flow.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "wrapper position + trigger \
-state both need this many inputs; bundling would just hide the dependency"
-)]
-fn label_popover(
+/// A label-side entry point for a control's binding popover.
+#[derive(IntoElement)]
+struct LabelPopover {
     idx: usize,
     label: Label,
     binding: BindingLabel,
     highlighted: bool,
-    mouse_left: f32,
-    mouse_w: f32,
+    frame: ModelFrame,
     hovered: Option<MouseControlId>,
     active: Option<MouseControlId>,
-    // `Some` exactly when the control is a button in gesture mode — that button
-    // opens its gesture menu instead of the plain picker.
     gesture_button: Option<ButtonId>,
     open: bool,
-    view: &Entity<MouseModelView>,
-) -> AnyElement {
-    let x = match label.side {
-        Side::Left => mouse_left - SIDE_GAP - SIDE_W,
-        Side::Right => mouse_left + mouse_w + SIDE_GAP,
-    };
-    let view = view.clone();
-    let binding_popover = BindingPopover::Label(label.id);
-    let trigger = LabelTrigger {
-        id: ("label-trigger", idx).into(),
-        label,
-        binding,
-        highlighted: highlighted || hovered == Some(label.id) || active == Some(label.id),
-        selected: false,
-        view: view.clone(),
-    };
-    let popover: AnyElement = if let Some(button) = gesture_button {
-        gesture_overview_popover(
-            ("label-popover", idx),
-            Anchor::TopLeft,
-            button,
-            trigger,
-            binding_popover,
-            open,
-            view.clone(),
-        )
-        .into_any_element()
-    } else {
-        let view_state = view.clone();
-        let view_content = view.clone();
-        Popover::new(("label-popover", idx))
-            // `action_picker` draws its own `menu_card` surface, matching the
-            // gesture menu — so suppress the framework popover surface.
-            .appearance(false)
-            .anchor(Anchor::TopLeft)
-            .mouse_button(MouseButton::Left)
-            .trigger(trigger)
-            .open(open)
-            .on_open_change(move |open, _window, cx| {
-                view_state.update(cx, |v, vcx| {
-                    v.set_binding_popover_open(binding_popover, *open);
-                    vcx.notify();
-                });
-            })
-            .content(move |_state, _window, cx| match label.id {
-                MouseControlId::Button(button) => action_picker(button, &view_content, cx),
-                MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
-            })
+    view: Entity<MouseModelView>,
+}
+
+impl LabelPopover {
+    fn new(
+        idx: usize,
+        label: Label,
+        binding: BindingLabel,
+        frame: ModelFrame,
+        view: Entity<MouseModelView>,
+    ) -> Self {
+        Self {
+            idx,
+            label,
+            binding,
+            highlighted: false,
+            frame,
+            hovered: None,
+            active: None,
+            gesture_button: None,
+            open: false,
+            view,
+        }
+    }
+
+    #[must_use]
+    fn highlighted(mut self, highlighted: bool) -> Self {
+        self.highlighted = highlighted;
+        self
+    }
+
+    #[must_use]
+    fn hovered(mut self, hovered: impl Into<Option<MouseControlId>>) -> Self {
+        self.hovered = hovered.into();
+        self
+    }
+
+    #[must_use]
+    fn active(mut self, active: impl Into<Option<MouseControlId>>) -> Self {
+        self.active = active.into();
+        self
+    }
+
+    #[must_use]
+    fn gesture_button(mut self, button: impl Into<Option<ButtonId>>) -> Self {
+        self.gesture_button = button.into();
+        self
+    }
+
+    #[must_use]
+    fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
+    }
+}
+
+impl RenderOnce for LabelPopover {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let x = match self.label.side {
+            Side::Left => self.frame.left - SIDE_GAP - SIDE_W,
+            Side::Right => self.frame.left + self.frame.width + SIDE_GAP,
+        };
+        let label = self.label;
+        let view = self.view;
+        let binding_popover = BindingPopover::Label(label.id);
+        let trigger = LabelTrigger {
+            id: ("label-trigger", self.idx).into(),
+            label,
+            binding: self.binding,
+            highlighted: self.highlighted
+                || self.hovered == Some(label.id)
+                || self.active == Some(label.id),
+            selected: false,
+            view: view.clone(),
+        };
+        let popover: AnyElement = if let Some(button) = self.gesture_button {
+            gesture_overview_popover(
+                ("label-popover", self.idx),
+                Anchor::TopLeft,
+                button,
+                trigger,
+                binding_popover,
+                self.open,
+                view.clone(),
+            )
             .into_any_element()
-    };
-    div()
-        .absolute()
-        .left(px(x))
-        .top(px(label.y - LABEL_H / 2.))
-        .w(px(LABEL_W))
-        .h(px(LABEL_H))
-        .child(popover)
-        .into_any_element()
+        } else {
+            let view_state = view.clone();
+            let view_content = view.clone();
+            Popover::new(("label-popover", self.idx))
+                // `action_picker` draws its own `menu_card` surface, matching the
+                // gesture menu — so suppress the framework popover surface.
+                .appearance(false)
+                .anchor(Anchor::TopLeft)
+                .mouse_button(MouseButton::Left)
+                .trigger(trigger)
+                .open(self.open)
+                .on_open_change(move |open, _window, cx| {
+                    view_state.update(cx, |v, vcx| {
+                        v.set_binding_popover_open(binding_popover, *open);
+                        vcx.notify();
+                    });
+                })
+                .content(move |_state, _window, cx| match label.id {
+                    MouseControlId::Button(button) => action_picker(button, &view_content, cx),
+                    MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
+                })
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(label.y - LABEL_H / 2.))
+            .w(px(LABEL_W))
+            .h(px(LABEL_H))
+            .child(popover)
+    }
 }
 
 struct BindingLabel {

@@ -18,7 +18,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    h_flex,
+    Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -27,6 +27,7 @@ use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::{AppState, StateEvent};
+use crate::ui::components::ProfileTab;
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
@@ -720,7 +721,7 @@ impl Render for CameraControlsPanel {
         let lens: Vec<usize> = section_indices(&self.sliders, true);
         let image: Vec<usize> = section_indices(&self.sliders, false);
 
-        let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, pal, cx));
+        let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, cx));
         if !lens.is_empty() && !image.is_empty() {
             panel = panel.child(section_label(tr!("Lens"), pal).mt_1());
         }
@@ -754,7 +755,7 @@ fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usize> {
 }
 
 /// The one-click profile chips: built-ins, saved customs, then Save.
-fn profiles_row(key: &str, pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
+fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
     let state = AppState::try_read(cx);
     let active = state.and_then(|s| s.camera_active_profile(key));
     let customs: Vec<String> = state
@@ -764,115 +765,39 @@ fn profiles_row(key: &str, pal: Palette, cx: &mut Context<CameraControlsPanel>) 
     let mut row = h_flex().flex_wrap().gap_1p5().items_center();
     for (ix, builtin) in BUILTIN_PROFILES.iter().enumerate() {
         let id = builtin.id;
-        row = row.child(profile_chip(
-            ("camera-profile-builtin", ix),
-            builtin_label(id),
-            active.as_deref() == Some(id),
-            pal,
-            cx.listener(move |panel, _: &ClickEvent, window, cx| {
-                panel.apply_profile(id, window, cx);
-            }),
-        ));
+        row = row.child(
+            ProfileTab::new(("camera-profile-builtin", ix), builtin_label(id))
+                .selected(active.as_deref() == Some(id))
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    panel.apply_profile(id, window, cx);
+                })),
+        );
     }
     for (ix, name) in customs.into_iter().enumerate() {
         let is_active = active.as_deref() == Some(name.as_str());
-        row = row.child(custom_profile_chip(ix, name, is_active, pal, cx));
+        let apply_name = name.clone();
+        let delete_name = name.clone();
+        let on_apply = cx.listener(move |panel, _: &ClickEvent, window, cx| {
+            panel.apply_profile(&apply_name, window, cx);
+        });
+        let on_delete = cx.listener(move |panel, _: &ClickEvent, _window, cx| {
+            panel.delete_profile(&delete_name, cx);
+        });
+        row = row.child(
+            ProfileTab::new(("camera-profile-custom", ix), name)
+                .selected(is_active)
+                .on_click(on_apply)
+                .on_delete(("camera-profile-del", ix), on_delete),
+        );
     }
     row = row.child(
-        div()
-            .id("camera-profile-save")
-            .px_2()
-            .py_0p5()
-            .rounded_full()
-            .border_1()
-            .border_color(pal.border)
-            .text_caption()
-            .text_color(pal.text_muted)
-            .hover(|s| s.bg(pal.surface_hover))
-            .child(format!("+ {}", tr!("New")))
-            .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
+        ProfileTab::new("camera-profile-save", format!("+ {}", tr!("New"))).on_click(cx.listener(
+            |panel, _: &ClickEvent, _window, cx| {
                 panel.save_profile(cx);
-            })),
+            },
+        )),
     );
     row.into_any_element()
-}
-
-fn profile_chip(
-    id: (&'static str, usize),
-    label: SharedString,
-    active: bool,
-    pal: Palette,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
-    let accent = rgb(ACCENT_BLUE);
-    div()
-        .id(id)
-        .px_2()
-        .py_0p5()
-        .rounded_full()
-        .border_1()
-        .border_color(if active { accent.into() } else { pal.border })
-        .text_caption()
-        .text_color(if active {
-            accent.into()
-        } else {
-            pal.text_muted
-        })
-        .when(active, |s| s.bg(pal.surface))
-        .hover(move |s| s.bg(pal.surface_hover))
-        .child(label)
-        .on_click(on_click)
-        .into_any_element()
-}
-
-/// A saved custom profile's chip: click applies it, the trailing `×` deletes
-/// it (stopping propagation so a delete never also applies the profile).
-fn custom_profile_chip(
-    ix: usize,
-    name: String,
-    active: bool,
-    pal: Palette,
-    cx: &mut Context<CameraControlsPanel>,
-) -> AnyElement {
-    let accent = rgb(ACCENT_BLUE);
-    let apply_name = name.clone();
-    let delete_name = name.clone();
-    h_flex()
-        .id(("camera-profile-custom", ix))
-        .pl_2()
-        .pr_1()
-        .py_0p5()
-        .gap_1()
-        .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(if active { accent.into() } else { pal.border })
-        .text_caption()
-        .text_color(if active {
-            accent.into()
-        } else {
-            pal.text_muted
-        })
-        .when(active, |s| s.bg(pal.surface))
-        .hover(move |s| s.bg(pal.surface_hover))
-        .child(SharedString::from(name))
-        .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
-            panel.apply_profile(&apply_name, window, cx);
-        }))
-        .child(
-            div()
-                .id(("camera-profile-del", ix))
-                .px_0p5()
-                .rounded_full()
-                .text_color(pal.text_muted)
-                .hover(|s| s.text_color(gpui::white()))
-                .child("×")
-                .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    panel.delete_profile(&delete_name, cx);
-                })),
-        )
-        .into_any_element()
 }
 
 /// One compact control line: label · slider · live value (· Auto chip when the

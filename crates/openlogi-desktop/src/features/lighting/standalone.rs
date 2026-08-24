@@ -1,14 +1,14 @@
 //! Controls for standalone lights.
 
 use crate::state::{AppState, DeviceRecord, LightCommandStatus, StateEvent};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::components::Toggle;
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
-    App, AppContext as _, BoxShadow, Context, Entity, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
-    hsla, point, prelude::FluentBuilder as _, px, rgb,
+    App, AppContext as _, BoxShadow, Context, Entity, Hsla, IntoElement, ParentElement, Render,
+    Styled, Subscription, Window, div, hsla, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    Icon, IconName, h_flex,
+    Icon, IconName, Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -274,7 +274,21 @@ fn light_hero(
                 .child(div().text_heading().child(device_name.to_owned()))
                 .child(light_status(online, effective_enabled, pal)),
         )
-        .child(toggle(effective_enabled, pal))
+        .child(
+            Toggle::new("standalone-light-toggle")
+                .selected(effective_enabled)
+                .icon(if effective_enabled {
+                    IconName::Sun
+                } else {
+                    IconName::Moon
+                })
+                .min_width(px(72.))
+                .on_change(|enabled, _window, cx| {
+                    update_light(cx, |state| {
+                        state.commit_manual_light_power(*enabled);
+                    });
+                }),
+        )
 }
 
 fn light_emblem(enabled: bool, pal: Palette) -> impl IntoElement {
@@ -357,34 +371,13 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
                 ))),
         )
         .child(
-            h_flex()
-                .id("standalone-light-camera-automation")
-                .min_w(px(72.))
-                .justify_center()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .rounded(pal.control_radius)
-                .selected_border(current.auto_camera, pal)
-                .selected_fill(current.auto_camera)
-                .text_caption()
-                .text_color(if current.auto_camera {
-                    pal.text_primary
-                } else {
-                    pal.text_muted
-                })
-                .cursor_pointer()
-                .hover(|style| style.bg(pal.surface_hover))
-                .child(if current.auto_camera {
-                    tr!("On")
-                } else {
-                    tr!("Off")
-                })
-                .on_click(|_event, _window, cx| {
+            Toggle::new("standalone-light-camera-automation")
+                .selected(current.auto_camera)
+                .min_width(px(72.))
+                .on_change(|auto_camera, _window, cx| {
                     update_light(cx, |state| {
                         let mut light = state.light();
-                        light.auto_camera = !light.auto_camera;
+                        light.auto_camera = *auto_camera;
                         state.commit_light(light);
                     });
                 }),
@@ -444,33 +437,6 @@ fn control_well(
                 .child(endpoints.0)
                 .child(endpoints.1),
         )
-}
-
-fn toggle(effective_enabled: bool, pal: Palette) -> impl IntoElement {
-    let on = effective_enabled;
-    let icon = if on { IconName::Sun } else { IconName::Moon };
-    h_flex()
-        .id("standalone-light-toggle")
-        .min_w(px(72.))
-        .justify_center()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .hover(|style| style.bg(pal.surface_hover))
-        .child(Icon::new(icon).size_3())
-        .child(if on { tr!("On") } else { tr!("Off") })
-        .on_click(move |_event, _window, cx| {
-            update_light(cx, |state| {
-                state.commit_manual_light_power(!state.light_enabled());
-            });
-        })
 }
 
 fn format_range_endpoints(range: LightValueRange) -> (String, String) {

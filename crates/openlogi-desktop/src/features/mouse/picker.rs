@@ -29,7 +29,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
     svg,
 };
-use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
+use gpui_component::{Icon, IconName, Selectable as _, h_flex, popover::PopoverState, v_flex};
 use openlogi_core::binding::{
     Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
 };
@@ -37,6 +37,7 @@ use openlogi_core::binding::{
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
@@ -138,7 +139,8 @@ pub(crate) fn thumbwheel_picker<T: 'static>(
             let label = tr!(preset.label());
             let observer = observer.clone();
             let popover = popover.clone();
-            menu_row(("thumbwheel-preset", idx), pal, selected)
+            MenuRow::new(("thumbwheel-preset", idx))
+                .selected(selected)
                 .child(
                     h_flex()
                         .items_center()
@@ -203,7 +205,7 @@ fn gesture_mode_row<T: 'static>(
 ) -> AnyElement {
     let observer = observer.clone();
     let popover = popover.clone();
-    menu_row("gesture-mode-row", pal, false)
+    MenuRow::new("gesture-mode-row")
         .child(
             h_flex()
                 .items_center()
@@ -354,7 +356,7 @@ fn plus_card(
         .child(
             // Demote back to a single action: the Click arm becomes the
             // button's action, and the reopened popover shows the plain picker.
-            menu_row("gesture-off-row", pal, false)
+            MenuRow::new("gesture-off-row")
                 .child(
                     h_flex()
                         .items_center()
@@ -589,7 +591,8 @@ pub(crate) fn action_rows(
             let row_id = idx;
             idx += 1;
             children.push(
-                menu_row((id_prefix, row_id), pal, selected)
+                MenuRow::new((id_prefix, row_id))
+                    .selected(selected)
                     .role(Role::MenuItem)
                     .aria_label(accessible_label)
                     .aria_selected(selected)
@@ -619,38 +622,6 @@ pub(crate) fn action_rows(
         }
     }
     children
-}
-
-/// A clickable, full-width menu row: `text-sm`, children spread left/right.
-/// The label stays in `text_primary` in both states for readability; selection
-/// is shown by a subtle accent fill (plus the caller's trailing check), and the
-/// fill deepens on hover. Unselected rows are transparent at rest, neutral on
-/// hover. One accent, one signal per state — no blue label text (which fails AA
-/// contrast on the near-white surface).
-pub(crate) fn menu_row(
-    id: impl Into<gpui::ElementId>,
-    pal: Palette,
-    selected: bool,
-) -> gpui::Stateful<gpui::Div> {
-    h_flex()
-        .id(id)
-        .w_full()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_2()
-        .py_1p5()
-        .rounded(pal.control_radius)
-        .text_body()
-        .text_color(pal.text_primary)
-        .selected_fill(selected)
-        .hover(move |s| {
-            s.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.surface_hover
-            })
-        })
 }
 
 /// A group heading in a popover list, inset to line up with the rows under it.

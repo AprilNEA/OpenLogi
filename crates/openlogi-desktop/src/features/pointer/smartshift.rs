@@ -31,6 +31,7 @@ use openlogi_core::hid::{
 };
 
 use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus, StateEvent};
+use crate::ui::components::Toggle;
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -415,13 +416,26 @@ fn permanent_row(
                         .child(tr!("Never auto-switch to free-spin.")),
                 ),
         )
-        .child(permanent_toggle(
-            permanent,
-            ratchet,
-            restore_threshold,
-            status,
-            pal,
-        ))
+        .child(
+            Toggle::new("smartshift-permanent")
+                .selected(permanent)
+                .disabled(!ratchet)
+                .on_change(move |permanent, _window, cx| {
+                    let auto_disengage = if *permanent {
+                        SmartShiftAutoDisengage::Permanent
+                    } else {
+                        SmartShiftAutoDisengage::Threshold(restore_threshold)
+                    };
+                    AppState::update_smartshift(
+                        cx,
+                        SmartShiftStatus {
+                            mode: SmartShiftMode::Ratchet,
+                            auto_disengage,
+                            ..status
+                        },
+                    );
+                }),
+        )
 }
 
 /// One wheel-mode pill. Clicking it writes `target` while preserving the
@@ -442,39 +456,6 @@ fn mode_pill(
         .selected(selected)
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);
-        })
-        .into_any_element()
-}
-
-/// The permanent-ratchet on/off pill. Disabled (muted, non-clickable) under
-/// free-spin, where it has no meaning.
-fn permanent_toggle(
-    on: bool,
-    enabled: bool,
-    restore_threshold: SmartShiftThreshold,
-    status: SmartShiftStatus,
-    _pal: Palette,
-) -> AnyElement {
-    let label = if on { tr!("On") } else { tr!("Off") };
-    Button::new("smartshift-permanent")
-        .compact()
-        .label(label)
-        .selected(on)
-        .disabled(!enabled)
-        .on_click(move |_event, _window, cx| {
-            let auto_disengage = if on {
-                SmartShiftAutoDisengage::Threshold(restore_threshold)
-            } else {
-                SmartShiftAutoDisengage::Permanent
-            };
-            AppState::update_smartshift(
-                cx,
-                SmartShiftStatus {
-                    mode: SmartShiftMode::Ratchet,
-                    auto_disengage,
-                    ..status
-                },
-            );
         })
         .into_any_element()
 }

@@ -2,8 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _,
@@ -19,8 +18,8 @@ use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
 
 use super::widgets::{
-    add_device_button, back_button, battery_summary, kind_label, panel_card, panel_card_fill,
-    route_label, sidebar_action, status_badge,
+    add_device_button, back_button, battery_summary, kind_label, route_label, sidebar_action,
+    status_badge,
 };
 use super::{AppView, DetailTab};
 use crate::app::menu::file_url;
@@ -35,6 +34,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
@@ -121,9 +121,9 @@ pub(super) fn detail_content(
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, pal, cx).into_any_element()
         }
-        DetailTab::Lighting => lighting_tab(panels.lighting_panel, pal).into_any_element(),
+        DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
-            camera_tab(panels.camera_preview, panels.camera_controls, pal).into_any_element()
+            camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, pal, cx).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
@@ -248,18 +248,22 @@ fn pointer_tab(
                 .items_stretch()
                 .gap_4()
                 .flex_wrap()
-                .child(pointer_grid_card(panel_card_fill(
-                    tr!("Pointer tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    pal,
-                    dpi_panel.clone().into_any_element(),
-                )))
-                .child(pointer_grid_card(panel_card_fill(
-                    tr!("SmartShift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    pal,
-                    smartshift_panel.clone().into_any_element(),
-                )))
+                .child(pointer_grid_card(
+                    PanelCard::new(
+                        tr!("Pointer tuning"),
+                        Icon::empty().path("action-icons/gauge.svg"),
+                        dpi_panel.clone().into_any_element(),
+                    )
+                    .fill(),
+                ))
+                .child(pointer_grid_card(
+                    PanelCard::new(
+                        tr!("SmartShift"),
+                        Icon::empty().path("action-icons/refresh-cw.svg"),
+                        smartshift_panel.clone().into_any_element(),
+                    )
+                    .fill(),
+                ))
                 .child(
                     div()
                         .min_w(px(332.))
@@ -313,7 +317,21 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(inversion_description),
                 ),
         )
-        .child(invert_scroll_toggle(inverted, inversion_supported, pal));
+        .child(
+            Toggle::new("invert-scroll-toggle")
+                .selected(inverted)
+                .disabled(!inversion_supported)
+                .label((!inversion_supported).then(|| tr!("Unavailable")))
+                .on_change(|inverted, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_invert_scroll(*inverted);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        );
     let resolution_description = if hires_supported {
         match resolution {
             None => tr!("OpenLogi does not change the wheel resolution."),
@@ -342,11 +360,10 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(resolution_description),
                 ),
         )
-        .child(wheel_resolution_control(resolution, hires_supported, pal));
-    panel_card(
+        .child(wheel_resolution_control(resolution, hires_supported));
+    PanelCard::new(
         tr!("Scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
-        pal,
         v_flex()
             .gap_4()
             .child(inversion_row)
@@ -355,11 +372,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     )
 }
 
-fn wheel_resolution_control(
-    selected: Option<ScrollResolution>,
-    enabled: bool,
-    _pal: Palette,
-) -> AnyElement {
+fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> AnyElement {
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -402,42 +415,10 @@ fn wheel_resolution_control(
         .into_any_element()
 }
 
-/// On/Off pill that flips the active device's scroll-wheel inversion, mirroring
-/// the SmartShift permanent-ratchet toggle.
-fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
-    let label: SharedString = if on { tr!("On") } else { tr!("Off") };
-    if !enabled {
-        return div()
-            .px_2()
-            .py_1()
-            .rounded(pal.control_radius)
-            .border_1()
-            .border_color(pal.border)
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(tr!("Unavailable"))
-            .into_any_element();
-    }
-    Button::new("invert-scroll-toggle")
-        .compact()
-        .label(label)
-        .selected(on)
-        .on_click(move |_event, _window, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_invert_scroll(!on);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::DeviceConfigChanged(key));
-                }
-            });
-        })
-        .into_any_element()
-}
-
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
 /// card. Shown when the device reports a lighting capability — see
 /// [`DetailTab::tabs_for`].
-fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> impl IntoElement {
+fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
     v_flex()
         .flex_1()
         .w_full()
@@ -445,10 +426,9 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         .items_center()
         .overflow_y_scrollbar()
         .p(px(SCREEN_PAD))
-        .child(div().w_full().max_w(px(560.)).child(panel_card(
+        .child(div().w_full().max_w(px(560.)).child(PanelCard::new(
             tr!("Lighting"),
             Icon::new(IconName::Palette),
-            pal,
             lighting_panel.clone().into_any_element(),
         )))
 }
@@ -462,7 +442,6 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
 fn camera_tab(
     camera_preview: &gpui::Entity<CameraPreview>,
     camera_controls: &gpui::Entity<CameraControlsPanel>,
-    pal: Palette,
 ) -> impl IntoElement {
     v_flex()
         .flex_1()
@@ -478,16 +457,14 @@ fn camera_tab(
                 .justify_center()
                 .items_start()
                 .gap_3()
-                .child(div().w(px(514.)).flex_shrink_0().child(panel_card(
+                .child(div().w(px(514.)).flex_shrink_0().child(PanelCard::new(
                     tr!("Camera"),
                     Icon::new(IconName::Eye),
-                    pal,
                     camera_preview.clone().into_any_element(),
                 )))
-                .child(div().w(px(500.)).flex_shrink_0().child(panel_card(
+                .child(div().w(px(500.)).flex_shrink_0().child(PanelCard::new(
                     tr!("Camera controls"),
                     Icon::new(IconName::Settings),
-                    pal,
                     camera_controls.clone().into_any_element(),
                 ))),
         )
@@ -533,10 +510,9 @@ fn light_tab(
                 .flex_wrap()
                 .items_start()
                 .child(light_visual::detail(asset, online, enabled, settings, pal))
-                .child(div().w(px(400.)).min_w(px(360.)).child(panel_card(
+                .child(div().w(px(400.)).min_w(px(360.)).child(PanelCard::new(
                     tr!("Lighting"),
                     Icon::new(IconName::Sun),
-                    pal,
                     light_panel.clone().into_any_element(),
                 ))),
         )
@@ -590,12 +566,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
             },
         );
 
-    panel_card(
-        tr!("Device details"),
-        Icon::new(IconName::Info),
-        pal,
-        content,
-    )
+    PanelCard::new(tr!("Device details"), Icon::new(IconName::Info), content)
 }
 
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -695,12 +666,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         )
         .into_any_element();
 
-    panel_card(
-        tr!("Configuration"),
-        Icon::new(IconName::Folder),
-        pal,
-        content,
-    )
+    PanelCard::new(tr!("Configuration"), Icon::new(IconName::Folder), content)
 }
 
 fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> impl IntoElement {

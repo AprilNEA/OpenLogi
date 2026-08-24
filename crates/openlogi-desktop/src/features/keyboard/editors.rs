@@ -30,8 +30,9 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 use openlogi_core::config::KeyTrigger;
 
 use super::function_row::FunctionRowView;
-use crate::features::mouse::picker::{divider, menu_card, menu_row, scroll_list, title};
+use crate::features::mouse::picker::{divider, menu_card, scroll_list, title};
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::components::MenuRow;
 use crate::ui::theme::{Palette, Typography as _};
 
 /// Which power-user editor is showing for the selected key.
@@ -267,7 +268,7 @@ fn workflow_step_row(
     };
     let view_remove = view.clone();
 
-    menu_row(("wf-step", idx), pal, false)
+    MenuRow::new(("wf-step", idx))
         .child(
             h_flex()
                 .w_full()
