@@ -11,6 +11,7 @@ use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, h_flex,
     input::{InputEvent, InputState},
+    v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -24,7 +25,7 @@ use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as pain
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profile_scope::friendly_app_name;
+use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -242,6 +243,7 @@ impl Render for MouseModelView {
         let view = cx.entity();
         let hovered = self.hovered;
         let pal = theme::palette(cx);
+        let profile_status = profile_canvas_status(pal, cx);
 
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
@@ -297,12 +299,18 @@ impl Render for MouseModelView {
             pal,
             cx,
         );
-        workspace_layout(canvas.into_any_element(), inspector, &self.focus_handle)
+        workspace_layout(
+            canvas.into_any_element(),
+            profile_status,
+            inspector,
+            &self.focus_handle,
+        )
     }
 }
 
 fn workspace_layout(
     canvas: AnyElement,
+    profile_status: Option<AnyElement>,
     inspector: AnyElement,
     focus_handle: &FocusHandle,
 ) -> AnyElement {
@@ -314,16 +322,24 @@ fn workspace_layout(
         .tab_group()
         .track_focus(focus_handle)
         .child(
-            div()
+            v_flex()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .overflow_hidden()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .child(canvas),
+                .children(profile_status)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .child(canvas),
+                ),
         )
         .child(inspector)
         .into_any_element()

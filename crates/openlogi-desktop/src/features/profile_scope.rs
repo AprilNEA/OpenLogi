@@ -14,7 +14,6 @@ use gpui_component::{
     dialog::DialogButtonProps,
     h_flex,
     popover::Popover,
-    v_flex,
 };
 
 use crate::state::AppState;
@@ -22,6 +21,8 @@ use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 use super::mouse::picker::{divider, menu_card, title};
+
+const PROFILE_CONTROL_H: f32 = 30.;
 
 #[derive(Clone)]
 struct ProfileChoice {
@@ -60,9 +61,6 @@ pub fn profile_scope_bar(
         return None;
     }
     let editing_app = state.editing_app().map(str::to_string);
-    let active_profile = state
-        .active_profile_name()
-        .map_or_else(|| tr!("Default"), gpui::SharedString::from);
     let mut profiles: Vec<ProfileChoice> = state
         .app_profiles()
         .map(|(app, count)| ProfileChoice {
@@ -95,7 +93,6 @@ pub fn profile_scope_bar(
         .map(|(app, name)| (app.to_string(), name.to_string()))
         .collect();
 
-    let summary = profile_summary(editing_app.as_deref(), &profiles);
     let persisted_ids: Vec<String> = profiles
         .iter()
         .filter(|profile| profile.persisted)
@@ -118,20 +115,52 @@ pub fn profile_scope_bar(
 
     Some(profile_scope_content(
         editing_app.as_deref(),
-        &active_profile,
         &profiles,
         available_apps,
-        summary,
         pal,
     ))
 }
 
+/// Profile inheritance and active-app context shown above the device canvas.
+pub(crate) fn profile_canvas_status(pal: Palette, cx: &App) -> Option<AnyElement> {
+    let state = AppState::try_read(cx)?;
+    if !state.current_device_is_persistent() {
+        return None;
+    }
+    let editing_app = state.editing_app().map(|app| {
+        state
+            .recent_app_name(app)
+            .map_or_else(|| friendly_app_name(app), str::to_string)
+    });
+    let summary = profile_summary(editing_app.as_deref(), state.editing_app_overrides().len());
+    let active = state
+        .active_profile_name()
+        .map_or_else(|| tr!("Default"), gpui::SharedString::from);
+
+    Some(
+        h_flex()
+            .flex_none()
+            .w_full()
+            .items_start()
+            .gap_3()
+            .px_4()
+            .pt_4()
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(div().flex_1().min_w_0().child(summary))
+            .child(
+                div()
+                    .flex_none()
+                    .child(tr!("Active: %{profile}", profile => active)),
+            )
+            .into_any_element(),
+    )
+}
+
 fn profile_scope_content(
     editing_app: Option<&str>,
-    active_profile: &gpui::SharedString,
     profiles: &[ProfileChoice],
     available_apps: Vec<ProfileChoice>,
-    summary: gpui::SharedString,
     pal: Palette,
 ) -> AnyElement {
     let default_selected = editing_app.is_none();
@@ -159,71 +188,51 @@ fn profile_scope_content(
         })
         .collect::<Vec<_>>();
 
-    v_flex()
+    h_flex()
         .flex_shrink_0()
         .w_full()
-        .gap_1p5()
+        .items_center()
+        .gap_2()
         .border_b_1()
         .border_color(pal.border)
         .bg(pal.panel)
         .px_4()
         .py_2()
         .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_none()
-                        .text_body()
-                        .text_color(pal.text_muted)
-                        .child(tr!("Profile")),
-                )
-                .child(
-                    h_flex()
-                        .id("profile-tabs-scroll")
-                        .flex_1()
-                        .min_w_0()
-                        .items_center()
-                        .gap_1()
-                        .overflow_x_scroll()
-                        .child(
-                            profile_tab(
-                                "default-profile",
-                                tr!("Default"),
-                                None,
-                                default_selected,
-                                pal,
-                            )
-                            .on_click(|_event, _window, cx| {
-                                AppState::update_bindings(cx, |state| {
-                                    state.set_editing_app(None);
-                                });
-                            }),
-                        )
-                        .children(profile_tabs),
-                )
-                .child(add_app_popover(available_apps, pal))
-                .when_some(
-                    selected_profile.filter(|profile| profile.persisted),
-                    |row, profile| row.child(profile_options_popover(profile, pal)),
-                ),
+            div()
+                .flex_none()
+                .text_body()
+                .text_color(pal.text_muted)
+                .child(tr!("Profile")),
         )
         .child(
             h_flex()
-                .w_full()
+                .id("profile-tabs-scroll")
+                .flex_1()
+                .min_w_0()
                 .items_center()
-                .justify_between()
-                .gap_4()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(summary)
+                .gap_1()
+                .overflow_x_scroll()
                 .child(
-                    div()
-                        .flex_none()
-                        .child(tr!("Active: %{profile}", profile => active_profile.clone())),
-                ),
+                    profile_tab(
+                        "default-profile",
+                        tr!("Default"),
+                        None,
+                        default_selected,
+                        pal,
+                    )
+                    .on_click(|_event, _window, cx| {
+                        AppState::update_bindings(cx, |state| {
+                            state.set_editing_app(None);
+                        });
+                    }),
+                )
+                .children(profile_tabs),
+        )
+        .child(add_app_popover(available_apps, pal))
+        .when_some(
+            selected_profile.filter(|profile| profile.persisted),
+            |row, profile| row.child(profile_options_popover(profile, pal)),
         )
         .into_any_element()
 }
@@ -245,8 +254,8 @@ fn profile_tab(
         .flex_none()
         .items_center()
         .gap_1p5()
+        .h(px(PROFILE_CONTROL_H))
         .px_2p5()
-        .py_1()
         .rounded(pal.control_radius)
         .cursor_pointer()
         .text_body()
@@ -292,25 +301,22 @@ fn application_mark(icon: Option<Arc<Image>>, name: &str, pal: Palette) -> AnyEl
         .into_any_element()
 }
 
-fn profile_summary(editing_app: Option<&str>, profiles: &[ProfileChoice]) -> gpui::SharedString {
+fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::SharedString {
     let Some(app) = editing_app else {
         return tr!("Default bindings apply unless an app profile overrides them.");
     };
-    let Some(profile) = profiles.iter().find(|profile| profile.app == app) else {
-        return gpui::SharedString::default();
-    };
-    match profile.override_count {
+    match override_count {
         0 => tr!(
             "No overrides yet. Select a button to customize for %{app}.",
-            app => profile.name.clone()
+            app => app
         ),
         1 => tr!(
             "%{app} overrides 1 button. Others inherit Default.",
-            app => profile.name.clone()
+            app => app
         ),
         count => tr!(
             "%{app} overrides %{count} buttons. Others inherit Default.",
-            app => profile.name.clone(),
+            app => app,
             count => count
         ),
     }
@@ -322,7 +328,8 @@ fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
         .trigger(
             Button::new("add-app-profile")
                 .outline()
-                .xsmall()
+                .small()
+                .h(px(PROFILE_CONTROL_H))
                 .icon(IconName::Plus)
                 .label(tr!("Add app")),
         )
