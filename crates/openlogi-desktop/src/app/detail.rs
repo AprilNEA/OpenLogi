@@ -2,7 +2,8 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _,
@@ -11,15 +12,14 @@ use gpui_component::{
     h_flex,
     scroll::ScrollableElement as _,
     switch::Switch,
-    tab::TabBar,
     v_flex,
 };
 use openlogi_core::config::ScrollResolution;
-use openlogi_core::device::DeviceKind;
+use openlogi_core::device::{BatteryStatus, DeviceKind};
 
 use super::widgets::{
-    add_device_button, back_button, battery_summary, kind_label, route_label, sidebar_action,
-    status_badge,
+    back_button, battery_charging_no_reading, battery_summary, kind_label, route_label,
+    sidebar_action, status_badge,
 };
 use super::{AppView, DetailTab};
 use crate::app::menu::file_url;
@@ -36,34 +36,47 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profile_scope::profile_scope_bar;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::{PanelCard, Toggle};
-use crate::ui::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
+use crate::ui::theme::{DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
-/// Device-detail top bar, in three zones: a back affordance + device name
-/// (leading), the section tabs as a centred segmented control (middle), and the
-/// connection status + Add-Device button (trailing). Hoisting the tabs here —
-/// rather than a separate row beneath the bar — gives the section body the full
-/// remaining height. A device with a single section shows no tab strip.
+/// Compact device identity bar. Section navigation belongs to the workspace
+/// rail below; pairing belongs to the Devices screen, so neither competes with
+/// the device name and status here.
 pub(super) fn detail_header(
     record: Option<&DeviceRecord>,
-    tabs: &[DetailTab],
-    active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
     let online = record.map(|r| r.online);
-    // Only a real choice gets a strip; a lone section (e.g. a keyboard with just
-    // the info tab) would render a one-segment control, which reads as broken.
-    // `into_any_element` here severs the returned element from `cx`'s lifetime
-    // (RPIT would otherwise capture it), so the borrow ends with this call and
-    // `back_button` below can take `cx` again.
-    let tab_strip = (tabs.len() > 1).then(|| detail_tabs(tabs, active, cx).into_any_element());
+    let battery = record.and_then(|r| r.battery.as_ref()).map(|battery| {
+        let icon = if matches!(
+            battery.status,
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow
+        ) {
+            IconName::BatteryCharging
+        } else if battery.percentage < 20 {
+            IconName::BatteryLow
+        } else if battery.percentage < 60 {
+            IconName::BatteryMedium
+        } else {
+            IconName::BatteryFull
+        };
+        let label = if battery_charging_no_reading(battery) {
+            tr!("Charging").to_string()
+        } else {
+            format!("{}%", battery.percentage)
+        };
+        h_flex()
+            .items_center()
+            .gap_1()
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(Icon::new(icon).size_4())
+            .child(label)
+            .into_any_element()
+    });
     h_flex()
         .h(px(HEADER_H))
-        // Fixed-height chrome must never shrink: a tab whose body overflows the
-        // viewport would otherwise squeeze this shrinkable bar, so the header
-        // height would visibly change between tabs. The body (flex_1 + its own
-        // scroll) absorbs the overflow instead.
         .flex_shrink_0()
         .w_full()
         .px_5()
@@ -80,20 +93,12 @@ pub(super) fn detail_header(
                 .text_heading()
                 .child(name),
         )
-        // Flexible spacers on either side centre the segmented tabs in the space
-        // left between the leading and trailing zones.
         .child(div().flex_1())
-        .children(tab_strip)
-        .child(div().flex_1())
+        .children(battery)
         .when_some(online, |this, online| this.child(status_badge(online, pal)))
-        .child(add_device_button())
 }
 
-/// The device-detail body: the active section, filling the height between the
-/// header and the footer. Which sections exist — and the segmented control that
-/// switches them — is the header's job (see [`detail_header`] and
-/// [`DetailTab::tabs_for`]); `active` arrives pre-resolved against this device's
-/// tab set, so this only has to render the chosen section.
+/// Long-lived child panels rendered by the device workspace.
 pub(super) struct DetailPanels<'a> {
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
@@ -106,8 +111,12 @@ pub(super) struct DetailPanels<'a> {
     pub light_panel: &'a gpui::Entity<LightPanel>,
 }
 
+/// The device-detail workspace below the identity bar: stable navigation rail
+/// beside the active section. `active` arrives pre-resolved against this
+/// device's tab set.
 pub(super) fn detail_content(
     panels: &DetailPanels<'_>,
+    tabs: &[DetailTab],
     active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
@@ -129,6 +138,7 @@ pub(super) fn detail_content(
         DetailTab::Light => light_tab(panels.light_panel, pal, cx).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     };
+    let navigation = detail_navigation(tabs, active, pal, cx).into_any_element();
     v_flex()
         .flex_1()
         .min_h_0()
@@ -153,39 +163,90 @@ pub(super) fn detail_content(
                     )),
             )
         })
-        .child(content)
+        .child(
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .items_stretch()
+                .child(navigation)
+                .child(content),
+        )
 }
 
-/// The device's sections as a compact, centred segmented control for the
-/// header. Clicking a segment swaps the active section. Only called with more
-/// than one tab — see [`detail_header`].
-fn detail_tabs(
+/// Stable workspace navigation. Keeping the section names visible makes the
+/// device page scan like a settings workspace rather than a toolbar full of
+/// modes, while the selected fill supplies one strong location signal.
+fn detail_navigation(
     tabs: &[DetailTab],
     active: DetailTab,
+    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let active_ix = tabs.iter().position(|t| *t == active).unwrap_or(0);
-    // Owned copy so the click handler can map a clicked index back to its tab
-    // without borrowing the caller's slice.
-    let order = tabs.to_vec();
-    TabBar::new("detail-tabs")
-        .segmented()
-        .selected_index(active_ix)
-        .children(tabs.iter().map(|t| t.label()))
-        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-            this.active_tab = order.get(*ix).copied().unwrap_or(DetailTab::Device);
-            cx.notify();
+    v_flex()
+        .w(px(DETAIL_RAIL_W))
+        .h_full()
+        .flex_shrink_0()
+        .gap_1()
+        .border_r_1()
+        .border_color(pal.border)
+        .bg(pal.surface)
+        .p_3()
+        .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
+            let selected = tab == active;
+            h_flex()
+                .id(("detail-navigation", index))
+                .role(Role::Tab)
+                .aria_selected(selected)
+                .w_full()
+                .items_center()
+                .gap_2p5()
+                .px_3()
+                .py_2()
+                .rounded(pal.control_radius)
+                .cursor_pointer()
+                .text_body()
+                .text_color(if selected {
+                    pal.text_primary
+                } else {
+                    pal.text_muted
+                })
+                .when(selected, |row| row.bg(crate::ui::theme::accent_tint()))
+                .hover(move |row| {
+                    row.bg(if selected {
+                        crate::ui::theme::accent_tint_hover()
+                    } else {
+                        pal.surface_hover
+                    })
+                })
+                .child(
+                    Icon::empty()
+                        .path(detail_tab_icon(tab))
+                        .size_4()
+                        .flex_none(),
+                )
+                .child(tab.label())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.active_tab = tab;
+                    cx.notify();
+                }))
         }))
 }
 
-/// Buttons tab: the mouse model with clickable hotspots, horizontally centred
-/// with a max width so it doesn't stretch across a wide window.
-///
-/// A `v_flex` (top-aligned), like the pointer/device/lighting tabs — *not* an
-/// `h_flex`, which carries an implicit `items_center` and would vertically
-/// centre the fixed-height model. That left a tall header-to-content gap that
-/// collapsed to the top-aligned card tabs on switch — a visible vertical jump.
-/// Top-aligning every tab keeps the content's start fixed across switches.
+fn detail_tab_icon(tab: DetailTab) -> &'static str {
+    match tab {
+        DetailTab::Buttons => "action-icons/mouse-pointer-click.svg",
+        DetailTab::ActionsRing => "action-icons/layout-grid.svg",
+        DetailTab::Keys => "action-icons/keyboard.svg",
+        DetailTab::Pointer => "action-icons/gauge.svg",
+        DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
+        DetailTab::Camera => "action-icons/camera.svg",
+        DetailTab::Device => "action-icons/settings.svg",
+    }
+}
+
+/// Buttons tab: profile context above the selectable device canvas and fixed
+/// binding inspector.
 fn buttons_tab(
     mouse_model: &gpui::Entity<MouseModelView>,
     pal: Palette,
@@ -195,17 +256,8 @@ fn buttons_tab(
         .flex_1()
         .w_full()
         .min_h_0()
-        .items_center()
-        .justify_center()
-        .p(px(SCREEN_PAD))
-        .child(
-            v_flex()
-                .w_full()
-                .max_w(px(760.))
-                .gap_3()
-                .children(profile_scope_bar(pal, cx))
-                .child(mouse_model.clone()),
-        )
+        .children(profile_scope_bar(pal, cx))
+        .child(mouse_model.clone())
 }
 
 /// Keys tab: the function-row remapper for a keyboard.

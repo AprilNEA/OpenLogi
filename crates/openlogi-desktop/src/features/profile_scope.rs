@@ -1,313 +1,390 @@
-//! The profile scope bar: which profile the binding panels are editing.
-//!
-//! One row above the model — a label, a dropdown naming the open profile, and,
-//! inside a per-app one, a caption saying what that profile can express. The
-//! dropdown lists the device's existing application profiles, then offers to
-//! start one for an application the agent recently saw in front.
-//!
-//! That last part is why this is possible at all without any per-platform code:
-//! the identifiers per-app profiles key on come from four incompatible
-//! namespaces, and the agent is the only process holding the one its matcher
-//! will compare (see [`ForegroundApps`](openlogi_ipc::ForegroundApps)). The GUI
-//! picks from what the agent saw rather than enumerating installed
-//! applications, which would produce plausible strings that never match.
-//!
-//! Not under `mouse/`: nothing here is mouse-specific, and the Actions Ring
-//! tab — whose layouts are per-application too — can adopt the same bar.
+//! Profile context bar for the Buttons workspace.
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, Role, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, BorrowAppContext as _, InteractiveElement, IntoElement, ParentElement,
+    Role, StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::popover::{Popover, PopoverState};
-use gpui_component::{Icon, IconName, Selectable, h_flex, v_flex};
+use gpui_component::{
+    Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::DialogButtonProps,
+    h_flex,
+    popover::Popover,
+    v_flex,
+};
 
-use crate::features::mouse::picker::{POPOVER_W, divider, menu_card, menu_row, scroll_list, title};
 use crate::state::AppState;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::components::MenuRow;
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
-/// The bar, or nothing at all when the active device has no persistent config
-/// key — a transient probe cannot carry profiles, so offering to author one
-/// would be a promise the next enumeration breaks.
+use super::mouse::picker::{divider, menu_card, title};
+
+#[derive(Clone)]
+struct ProfileChoice {
+    app: String,
+    name: String,
+    override_count: usize,
+    persisted: bool,
+}
+
+/// A direct profile switcher. The foreground app may change which profile is
+/// active, but never changes which profile this editor has open.
 pub fn profile_scope_bar(pal: Palette, cx: &App) -> Option<AnyElement> {
     let state = cx.try_global::<AppState>()?;
-    // A transient probe carries no config key, so it can hold no profiles —
-    // offering to author one would be a promise the next enumeration breaks.
     if !state.current_device_is_persistent() {
         return None;
     }
-    let editing = state.editing_app().map(|app| display_name(state, app));
-    let open_label = editing
-        .clone()
-        .unwrap_or_else(|| tr!("Default profile").to_string());
-
-    Some(
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_caption()
-                            .text_color(pal.text_muted)
-                            .child(tr!("Profile")),
-                    )
-                    .child(scope_dropdown(open_label, pal)),
-            )
-            .when_some(editing, |bar, app| {
-                bar.child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!(
-                            "Applies only in %{app}. One action per button — gestures stay in the default profile.",
-                            app => app
-                        )),
-                )
-            })
-            .into_any_element(),
-    )
-}
-
-/// The application's human name as the agent last reported it, falling back to
-/// the identifier — which is what a hand-written `config.toml` entry, or a
-/// profile carried over from another machine, shows until that app is seen in
-/// front again.
-fn display_name(state: &AppState, app: &str) -> String {
-    state.recent_app_name(app).unwrap_or(app).to_string()
-}
-
-fn scope_dropdown(open_label: String, pal: Palette) -> impl IntoElement {
-    Popover::new("profile-scope")
-        // The menu draws its own `menu_card`, matching every other list in the
-        // binding flow.
-        .appearance(false)
-        .mouse_button(MouseButton::Left)
-        .trigger(ScopeTrigger {
-            label: open_label,
-            open: false,
-            pal,
-        })
-        .content(move |_state, _window, cx| scope_menu(cx))
-}
-
-/// The dropdown's trigger: the open profile's name and a chevron.
-///
-/// Its own type rather than a bare `div` because [`Popover`] hands the trigger
-/// its open state through [`Selectable`], which is how the control stays
-/// visibly pressed while its menu is up.
-#[derive(IntoElement)]
-struct ScopeTrigger {
-    label: String,
-    open: bool,
-    pal: Palette,
-}
-
-impl Selectable for ScopeTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.open = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.open
-    }
-}
-
-impl RenderOnce for ScopeTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let pal = self.pal;
-        h_flex()
-            .id("profile-scope-trigger")
-            .role(Role::Button)
-            .aria_label(tr!("Profile"))
-            .aria_expanded(self.open)
-            .items_center()
-            .gap_1p5()
-            .px_2()
-            .py_1()
-            .rounded(pal.control_radius)
-            .border_1()
-            .border_color(pal.border)
-            .bg(if self.open {
-                pal.surface_hover
-            } else {
-                pal.surface
-            })
-            .cursor_pointer()
-            .hover(move |s| s.bg(pal.surface_hover))
-            .text_body()
-            .text_color(pal.text_primary)
-            .child(self.label)
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .size_3()
-                    .text_color(pal.text_muted),
-            )
-    }
-}
-
-fn scope_menu(cx: &mut gpui::Context<PopoverState>) -> AnyElement {
-    let pal = theme::palette(cx);
-    let popover = cx.entity().downgrade();
-    // Everything the menu shows, read out of the global in one borrow.
-    let Some((editing, profiles, candidates)) = cx.try_global::<AppState>().map(|state| {
-        let profiles: Vec<(String, String, usize)> = state
-            .app_profiles()
-            .map(|(app, count)| (app.to_string(), display_name(state, app), count))
-            .collect();
-        // Only applications without a profile yet: the ones that have one are
-        // already rows above, and offering them twice would mean two things.
-        let candidates: Vec<(String, String)> = state
-            .recent_apps()
-            .filter(|(app, _)| !profiles.iter().any(|(existing, _, _)| existing == app))
-            .map(|(app, name)| (app.to_string(), name.to_string()))
-            .collect();
-        (
-            state.editing_app().map(str::to_string),
-            profiles,
-            candidates,
-        )
-    }) else {
-        return div().into_any_element();
-    };
-
-    let mut rows: Vec<AnyElement> = Vec::with_capacity(profiles.len() + 1);
-    rows.push(scope_row(
-        "profile-default",
-        None,
-        tr!("Default profile").to_string(),
-        None,
-        editing.is_none(),
-        &popover,
-        pal,
-    ));
-    for (index, (app, name, count)) in profiles.into_iter().enumerate() {
-        let selected = editing.as_deref() == Some(app.as_str());
-        rows.push(scope_row(
-            ("profile-app", index),
-            Some(app),
-            name,
-            Some(count),
-            selected,
-            &popover,
-            pal,
-        ));
-    }
-
-    menu_card(pal)
-        .min_w(px(POPOVER_W))
-        .child(title(tr!("Profile"), pal))
-        .child(divider(pal))
-        .child(scroll_list("profile-scope-scroll", rows))
-        .child(divider(pal))
-        .child(add_app_section(candidates, &popover, pal))
-        .when(editing.is_some(), |card| {
-            card.child(divider(pal)).child(remove_row(&popover, pal))
-        })
-        .into_any_element()
-}
-
-/// One profile row: `app` is its identifier, or `None` for the device's global
-/// profile. Selecting it only switches what the panels edit — nothing is
-/// written, so a profile the user opens and leaves alone stays absent from
-/// `config.toml`.
-fn scope_row(
-    id: impl Into<gpui::ElementId>,
-    app: Option<String>,
-    name: String,
-    overrides: Option<usize>,
-    selected: bool,
-    popover: &gpui::WeakEntity<PopoverState>,
-    pal: Palette,
-) -> AnyElement {
-    let popover = popover.clone();
-    menu_row(id, pal, selected)
-        .child(div().child(name))
-        .when_some(overrides, |row, count| {
-            row.child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(count.to_string()),
-            )
-        })
-        .when(selected, |row| {
-            row.child(Icon::new(IconName::Check).size_3())
-        })
-        .on_click(move |_event, window, cx| {
-            let app = app.clone();
-            cx.update_global::<AppState, _>(|state, _| state.set_editing_app(app));
-            cx.refresh_windows();
-            if let Some(p) = popover.upgrade() {
-                p.update(cx, |s, cx| s.dismiss(window, cx));
-            }
-        })
-        .into_any_element()
-}
-
-fn add_app_section(
-    candidates: Vec<(String, String)>,
-    popover: &gpui::WeakEntity<PopoverState>,
-    pal: Palette,
-) -> AnyElement {
-    if candidates.is_empty() {
-        return div()
-            .px_2()
-            .py_1p5()
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(tr!("No recent applications"))
-            .into_any_element();
-    }
-    let rows: Vec<AnyElement> = candidates
-        .into_iter()
-        .enumerate()
-        .map(|(index, (app, name))| {
-            let popover = popover.clone();
-            menu_row(("profile-add", index), pal, false)
-                .child(div().child(name))
-                .on_click(move |_event, window, cx| {
-                    let app = app.clone();
-                    cx.update_global::<AppState, _>(|state, _| state.set_editing_app(Some(app)));
-                    cx.refresh_windows();
-                    if let Some(p) = popover.upgrade() {
-                        p.update(cx, |s, cx| s.dismiss(window, cx));
-                    }
-                })
-                .into_any_element()
+    let editing_app = state.editing_app().map(str::to_string);
+    let active_profile = state
+        .active_profile_name()
+        .map_or_else(|| tr!("Default"), gpui::SharedString::from);
+    let mut profiles: Vec<ProfileChoice> = state
+        .app_profiles()
+        .map(|(app, count)| ProfileChoice {
+            app: app.to_string(),
+            name: state
+                .recent_app_name(app)
+                .map_or_else(|| friendly_app_name(app), str::to_string),
+            override_count: count,
+            persisted: true,
         })
         .collect();
+
+    if let Some(app) = editing_app.as_deref()
+        && !profiles.iter().any(|profile| profile.app == app)
+    {
+        profiles.push(ProfileChoice {
+            app: app.to_string(),
+            name: state
+                .recent_app_name(app)
+                .map_or_else(|| friendly_app_name(app), str::to_string),
+            override_count: 0,
+            persisted: false,
+        });
+    }
+    profiles.sort_by_key(|profile| profile.name.to_lowercase());
+    let recent_apps: Vec<(String, String)> = state
+        .recent_apps()
+        .map(|(app, name)| (app.to_string(), name.to_string()))
+        .collect();
+
+    let summary = profile_summary(editing_app.as_deref(), &profiles);
+    let persisted_ids: Vec<String> = profiles
+        .iter()
+        .filter(|profile| profile.persisted)
+        .map(|profile| profile.app.clone())
+        .collect();
+    let available_apps: Vec<(String, String)> = recent_apps
+        .into_iter()
+        .filter(|(app, _)| {
+            !persisted_ids.iter().any(|existing| existing == app)
+                && editing_app.as_deref() != Some(app.as_str())
+        })
+        .collect();
+
+    Some(profile_scope_content(
+        editing_app.as_deref(),
+        &active_profile,
+        &profiles,
+        available_apps,
+        summary,
+        pal,
+    ))
+}
+
+fn profile_scope_content(
+    editing_app: Option<&str>,
+    active_profile: &gpui::SharedString,
+    profiles: &[ProfileChoice],
+    available_apps: Vec<(String, String)>,
+    summary: gpui::SharedString,
+    pal: Palette,
+) -> AnyElement {
+    let default_selected = editing_app.is_none();
+    let selected_profile = editing_app
+        .and_then(|app| profiles.iter().find(|profile| profile.app == app))
+        .cloned();
+    let profile_tabs = profiles
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| {
+            let selected = editing_app == Some(profile.app.as_str());
+            let app = profile.app.clone();
+            profile_tab(("app-profile", index), profile.name.clone(), selected, pal).on_click(
+                move |_event, _window, cx| {
+                    cx.update_global::<AppState, _>(|state, _| {
+                        state.set_editing_app(Some(app.clone()));
+                    });
+                    cx.refresh_windows();
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
     v_flex()
+        .flex_shrink_0()
+        .w_full()
+        .gap_1p5()
+        .border_b_1()
+        .border_color(pal.border)
+        .bg(pal.surface)
+        .px_4()
+        .py_2()
         .child(
-            div()
-                .px_2()
-                .pt_1()
-                .pb_0p5()
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("Profile")),
+                )
+                .child(
+                    h_flex()
+                        .id("profile-tabs-scroll")
+                        .flex_1()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1()
+                        .overflow_x_scroll()
+                        .child(
+                            profile_tab("default-profile", tr!("Default"), default_selected, pal)
+                                .on_click(|_event, _window, cx| {
+                                    cx.update_global::<AppState, _>(|state, _| {
+                                        state.set_editing_app(None);
+                                    });
+                                    cx.refresh_windows();
+                                }),
+                        )
+                        .children(profile_tabs),
+                )
+                .child(add_app_popover(available_apps, pal))
+                .when_some(
+                    selected_profile.filter(|profile| profile.persisted),
+                    |row, profile| row.child(profile_options_popover(profile, pal)),
+                ),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_4()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!("Add app…")),
+                .child(summary)
+                .child(
+                    div()
+                        .flex_none()
+                        .child(tr!("Active: %{profile}", profile => active_profile.clone())),
+                ),
         )
-        .children(rows)
         .into_any_element()
 }
 
-/// Delete the open profile outright, falling back to the global one.
-fn remove_row(popover: &gpui::WeakEntity<PopoverState>, pal: Palette) -> AnyElement {
-    let popover = popover.clone();
-    menu_row("profile-remove", pal, false)
-        .child(div().child(tr!("Remove this app profile")))
-        .on_click(move |_event, window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.remove_editing_app_profile());
-            cx.refresh_windows();
-            if let Some(p) = popover.upgrade() {
-                p.update(cx, |s, cx| s.dismiss(window, cx));
-            }
+fn profile_tab(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    selected: bool,
+    pal: Palette,
+) -> gpui::Stateful<gpui::Div> {
+    h_flex()
+        .id(id)
+        .role(Role::Tab)
+        .aria_selected(selected)
+        .flex_none()
+        .items_center()
+        .px_2p5()
+        .py_1()
+        .rounded(pal.control_radius)
+        .cursor_pointer()
+        .text_body()
+        .text_color(pal.text_primary)
+        .selected_fill(selected)
+        .hover(move |tab| {
+            tab.bg(if selected {
+                theme::accent_tint_hover()
+            } else {
+                pal.surface_hover
+            })
+        })
+        .child(label.into())
+}
+
+fn profile_summary(editing_app: Option<&str>, profiles: &[ProfileChoice]) -> gpui::SharedString {
+    let Some(app) = editing_app else {
+        return tr!("Default bindings apply unless an app profile overrides them.");
+    };
+    let Some(profile) = profiles.iter().find(|profile| profile.app == app) else {
+        return gpui::SharedString::default();
+    };
+    match profile.override_count {
+        0 => tr!(
+            "No overrides yet. Select a button to customize for %{app}.",
+            app => profile.name.clone()
+        ),
+        1 => tr!(
+            "%{app} overrides 1 button. Others inherit Default.",
+            app => profile.name.clone()
+        ),
+        count => tr!(
+            "%{app} overrides %{count} buttons. Others inherit Default.",
+            app => profile.name.clone(),
+            count => count
+        ),
+    }
+}
+
+fn add_app_popover(apps: Vec<(String, String)>, pal: Palette) -> AnyElement {
+    Popover::new("add-app-popover")
+        .anchor(Anchor::TopRight)
+        .trigger(
+            Button::new("add-app-profile")
+                .outline()
+                .xsmall()
+                .icon(IconName::Plus)
+                .label(tr!("Add app")),
+        )
+        .content(move |_state, _window, cx| {
+            let popover = cx.entity().downgrade();
+            let rows = apps
+                .iter()
+                .enumerate()
+                .map(|(index, (app, name))| {
+                    let app = app.clone();
+                    let popover = popover.clone();
+                    MenuRow::new(("recent-app", index))
+                        .child(name.clone())
+                        .on_click(move |_event, window, cx| {
+                            cx.update_global::<AppState, _>(|state, _| {
+                                state.set_editing_app(Some(app.clone()));
+                            });
+                            cx.refresh_windows();
+                            if let Some(popover) = popover.upgrade() {
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            }
+                        })
+                })
+                .collect::<Vec<_>>();
+
+            menu_card(pal)
+                .w(px(260.))
+                .child(title(tr!("Add app profile"), pal))
+                .child(divider(pal))
+                .when(rows.is_empty(), |card| {
+                    card.child(
+                        div()
+                            .px_2()
+                            .py_2()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(tr!("Open an app to add it here.")),
+                    )
+                })
+                .children(rows)
         })
         .into_any_element()
+}
+
+fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
+    Popover::new("profile-options-popover")
+        .anchor(Anchor::TopRight)
+        .trigger(
+            Button::new("profile-options")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Ellipsis),
+        )
+        .content(move |_state, _window, cx| {
+            let popover = cx.entity().downgrade();
+            let profile = profile.clone();
+            menu_card(pal)
+                .w(px(224.))
+                .child(title(tr!("Profile options"), pal))
+                .child(divider(pal))
+                .child(
+                    MenuRow::new("remove-profile")
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Icon::new(IconName::Close).size_4())
+                                .child(tr!("Remove profile…")),
+                        )
+                        .on_click(move |_event, window, cx| {
+                            if let Some(popover) = popover.upgrade() {
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            }
+                            open_remove_confirmation(window, cx, &profile);
+                        }),
+                )
+        })
+        .into_any_element()
+}
+
+fn open_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {
+    let question = match profile.override_count {
+        1 => tr!(
+            "Remove %{app} profile and its 1 override?",
+            app => profile.name.clone()
+        ),
+        count => tr!(
+            "Remove %{app} profile and its %{count} overrides?",
+            app => profile.name.clone(),
+            count => count
+        ),
+    };
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title(question.clone())
+            .description(tr!(
+                "This deletes the custom button bindings in this profile. Default bindings are not affected."
+            ))
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("Remove profile"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(tr!("Cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_event, _window, cx| {
+                cx.update_global::<AppState, _>(|state, _| {
+                    state.remove_editing_app_profile();
+                });
+                cx.refresh_windows();
+                true
+            })
+    });
+}
+
+/// Derive a readable fallback from a profile identifier when the agent has not
+/// reported that application in this session. The identifier remains the
+/// matching key; only its last human-shaped component is presented.
+pub(crate) fn friendly_app_name(identifier: &str) -> String {
+    if let Some(path) = identifier.strip_prefix("exe:") {
+        let name = path
+            .rsplit(['/', '\\'])
+            .find(|part| !part.is_empty())
+            .unwrap_or(path);
+        return name.trim_end_matches(".exe").to_string();
+    }
+    identifier
+        .rsplit('.')
+        .find(|part| !part.is_empty())
+        .unwrap_or(identifier)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::friendly_app_name;
+
+    #[test]
+    fn profile_identifiers_have_a_readable_fallback() {
+        assert_eq!(friendly_app_name("com.google.Chrome"), "Chrome");
+        assert_eq!(friendly_app_name("exe:C:\\Tools\\Zed.exe"), "Zed");
+    }
 }

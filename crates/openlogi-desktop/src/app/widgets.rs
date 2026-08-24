@@ -27,7 +27,7 @@ pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
     ) && b.percentage == 0
 }
 
-/// "← Back" affordance on the detail screen; returns to the gallery without
+/// "← Devices" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
 pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
@@ -35,7 +35,7 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
         .ghost()
         .small()
         .icon(IconName::ChevronLeft)
-        .label(tr!("Back"))
+        .label(tr!("Devices"))
         .on_click(move |_, _, cx| view.update(cx, AppView::go_home))
 }
 

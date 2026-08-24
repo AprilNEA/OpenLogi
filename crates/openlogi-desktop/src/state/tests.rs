@@ -275,6 +275,32 @@ fn clearing_an_override_falls_back_to_the_global_binding() {
 }
 
 #[test]
+fn clearing_a_thumbwheel_override_drops_both_directions() {
+    let mut state = state_with_a_known_mouse();
+    state.commit_thumbwheel_preset(ThumbwheelPreset::Volume);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_thumbwheel_preset(ThumbwheelPreset::CycleDpi);
+
+    state.clear_app_thumbwheel();
+
+    assert_eq!(
+        state.button_bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Action::VolumeDown)
+    );
+    assert_eq!(
+        state.button_bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Action::VolumeUp)
+    );
+    assert!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .is_none(),
+        "both halves must be cleared so the empty profile is pruned"
+    );
+}
+
+#[test]
 fn gesture_mode_is_not_editable_from_inside_a_per_app_profile() {
     // The trap this guards: `set_gesture_mode` writes the device's global
     // bindings, so honouring it here would change every application from a

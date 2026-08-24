@@ -35,8 +35,9 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 
 /// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 80.;
-pub const FOOTER_H: f32 = 50.;
+pub const HEADER_H: f32 = 64.;
+pub const FOOTER_H: f32 = 40.;
+pub const DETAIL_RAIL_W: f32 = 168.;
 
 /// Semantic spacing tokens (px), so surfaces that must agree share one value
 /// instead of each call site hand-picking a `p_*` / `gap_*` step.

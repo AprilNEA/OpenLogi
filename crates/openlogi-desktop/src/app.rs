@@ -215,7 +215,7 @@ impl AppView {
             }
         }
 
-        let mouse_model = cx.new(MouseModelView::new);
+        let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
@@ -556,14 +556,11 @@ impl Render for AppView {
         window.set_window_title(&widgets::main_window_title(show_device, cx));
 
         let (header_el, content_el) = if show_device {
-            // Resolve the active section once and share it between the header
-            // (which renders the section tabs) and the body, so the two can't
-            // disagree about which tab is live. The stored tab may not belong to
-            // this device — it can linger across a hot-plug onto a different kind
-            // — so fall back to the device's first tab for display, without
-            // mutating `active_tab`.
-            let record = AppState::try_global(cx)
-                .map(|state| state.read(cx))
+            // Resolve the active section once for both the navigation rail and
+            // its workspace. The stored tab may not belong to this device — it
+            // can linger across a hot-plug onto a different kind — so fall back
+            // to the device's first tab without mutating `active_tab`.
+            let record = AppState::try_read(cx)
                 .and_then(AppState::current_record)
                 .cloned();
             let tabs = record
@@ -589,7 +586,7 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(camera_target, cx));
             (
-                detail::detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
+                detail::detail_header(record.as_ref(), pal, cx).into_any_element(),
                 detail::detail_content(
                     &detail::DetailPanels {
                         mouse_model: &self.mouse_model,
@@ -602,6 +599,7 @@ impl Render for AppView {
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
                     },
+                    &tabs,
                     active,
                     pal,
                     cx,
@@ -627,7 +625,7 @@ impl Render for AppView {
 
         root.child(header_el)
             .child(content_el)
-            .child(status::footer(pal, granted))
+            .when(!granted, |this| this.child(status::attention_footer(pal)))
             .into_any_element()
     }
 }

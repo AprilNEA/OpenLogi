@@ -79,6 +79,15 @@ impl AppState {
     /// device's global binding again. A no-op in the global profile, which has
     /// nothing to inherit from.
     pub fn clear_app_binding(&mut self, button: ButtonId) {
+        self.clear_app_bindings([button]);
+    }
+
+    /// Drop both halves of a thumb-wheel override together.
+    pub fn clear_app_thumbwheel(&mut self) {
+        self.clear_app_bindings([ButtonId::ThumbwheelScrollDown, ButtonId::ThumbwheelScrollUp]);
+    }
+
+    fn clear_app_bindings(&mut self, buttons: impl IntoIterator<Item = ButtonId>) {
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -89,7 +98,9 @@ impl AppState {
         let Some(app) = self.editing_app().map(str::to_string) else {
             return;
         };
-        self.config.set_per_app_binding(&key, &app, button, None);
+        for button in buttons {
+            self.config.set_per_app_binding(&key, &app, button, None);
+        }
         self.button_bindings = self.bindings_for_current();
         self.persist_and_reload("per-app binding");
     }
@@ -192,7 +203,9 @@ impl AppState {
     /// Device-level: direction maps live only in the global profile, so this
     /// does not vary with the profile this window has open.
     #[must_use]
-    fn device_gesture_maps(&self) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
+    pub(crate) fn device_gesture_maps(
+        &self,
+    ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
