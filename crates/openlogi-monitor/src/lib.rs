@@ -82,6 +82,7 @@ pub fn apply_input_assignments(assignments: &[MonitorInputAssignment]) {
     }
 }
 
+#[must_use]
 fn monitor_switch_order(monitor_id: &str) -> u8 {
     if monitor_id.starts_with(r"\\.\DISPLAY2") {
         0
@@ -92,6 +93,7 @@ fn monitor_switch_order(monitor_id: &str) -> u8 {
     }
 }
 
+#[must_use]
 pub fn input_label(value: u32) -> String {
     match value {
         0x01 => "DVI-1",
@@ -101,10 +103,8 @@ pub fn input_label(value: u32) -> String {
         0x05 => "Composite-1",
         0x06 => "Component-1",
         0x07 => "Component-2",
-        0x08 => "DisplayPort-1",
-        0x09 => "DisplayPort-2",
-        0x0f => "DisplayPort-1",
-        0x10 => "DisplayPort-2",
+        0x08 | 0x0f => "DisplayPort-1",
+        0x09 | 0x10 => "DisplayPort-2",
         0x11 => "HDMI-1",
         0x12 => "HDMI-2",
         0x13 => "USB-C",

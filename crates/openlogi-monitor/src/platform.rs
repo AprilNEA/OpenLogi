@@ -54,13 +54,13 @@ pub fn list_monitors() -> Result<Vec<MonitorInfo>, MonitorError> {
             let capabilities = capabilities(&physical).unwrap_or_default();
             let current_input = current_input(&physical).ok();
             let mut inputs = parse_vcp_60_inputs(&capabilities);
-            if inputs.is_empty() {
-                if let Some(input) = current_input {
-                    inputs.push(MonitorInput {
-                        value: input,
-                        label: input_label(input),
-                    });
-                }
+            if inputs.is_empty()
+                && let Some(input) = current_input
+            {
+                inputs.push(MonitorInput {
+                    value: input,
+                    label: input_label(input),
+                });
             }
             monitors.push(MonitorInfo {
                 id: monitor_id(&display_name, physical_index, &description),
@@ -158,7 +158,10 @@ fn logical_display_name(handle: HMONITOR) -> Result<String, MonitorError> {
     // SAFETY: MONITORINFOEXW is zero-initialized then cbSize is set as required
     // by GetMonitorInfoW.
     let mut info: MONITORINFOEXW = unsafe { zeroed() };
-    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    info.monitorInfo.cbSize =
+        u32::try_from(size_of::<MONITORINFOEXW>()).map_err(|_| MonitorError::WindowsApi {
+            operation: "sizing monitor info",
+        })?;
     // SAFETY: handle is from EnumDisplayMonitors and info points to writable memory.
     let ok = unsafe { GetMonitorInfoW(handle, (&raw mut info).cast()) };
     if ok == 0 {
@@ -175,7 +178,7 @@ fn friendly_monitor_name(display_name: &str, physical_index: usize) -> Option<St
     let edid_name = edid_name_for_device_id(&device_id);
     edid_name.or_else(|| {
         let device_string = wide_z_to_string(&device.DeviceString);
-        meaningful_name(device_string)
+        meaningful_name(&device_string)
     })
 }
 
@@ -184,12 +187,15 @@ fn display_device(display_name: &str, physical_index: usize) -> Option<DISPLAY_D
     // EnumDisplayDevicesW. The display name is a null-terminated UTF-16 buffer
     // valid for the duration of the call.
     let mut device: DISPLAY_DEVICEW = unsafe { zeroed() };
-    device.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+    device.cb = u32::try_from(size_of::<DISPLAY_DEVICEW>()).ok()?;
     let display = wide_null(display_name);
+    let physical_index = u32::try_from(physical_index).ok()?;
+    // SAFETY: device is initialized with its byte size, display is
+    // null-terminated, and EnumDisplayDevicesW writes only to device.
     let ok = unsafe {
         EnumDisplayDevicesW(
             display.as_ptr(),
-            physical_index as u32,
+            physical_index,
             &raw mut device,
             EDD_GET_DEVICE_INTERFACE_NAME,
         )
@@ -201,7 +207,7 @@ fn edid_name_for_device_id(device_id: &str) -> Option<String> {
     let path = edid_registry_path(device_id)?;
     read_registry_binary(&path, "EDID")
         .and_then(|edid| parse_edid_display_name(&edid))
-        .and_then(meaningful_name)
+        .and_then(|name| meaningful_name(&name))
 }
 
 fn edid_registry_path(device_id: &str) -> Option<String> {
@@ -286,7 +292,7 @@ fn parse_edid_display_name(edid: &[u8]) -> Option<String> {
     None
 }
 
-fn meaningful_name(value: String) -> Option<String> {
+fn meaningful_name(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("Generic PnP Monitor") {
         None
@@ -296,7 +302,7 @@ fn meaningful_name(value: String) -> Option<String> {
 }
 
 fn fallback_monitor_name(display_name: &str, physical_index: usize, description: &str) -> String {
-    meaningful_name(description.to_string()).unwrap_or_else(|| {
+    meaningful_name(description).unwrap_or_else(|| {
         let number = display_name
             .trim_start_matches(r"\\.\DISPLAY")
             .parse::<usize>()

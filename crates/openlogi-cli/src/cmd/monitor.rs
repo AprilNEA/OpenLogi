@@ -23,7 +23,7 @@ impl MonitorCmd {
     pub fn run(self) -> Result<()> {
         match self {
             Self::List => list(),
-            Self::Set(args) => set(args),
+            Self::Set(args) => set(&args),
         }
     }
 }
@@ -57,7 +57,7 @@ fn list() -> Result<()> {
     Ok(())
 }
 
-fn set(args: SetArgs) -> Result<()> {
+fn set(args: &SetArgs) -> Result<()> {
     openlogi_monitor::set_monitor_input(&args.monitor, args.input)?;
     println!("Set {} to {}", args.monitor, format_input(args.input));
     Ok(())
