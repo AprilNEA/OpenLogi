@@ -33,6 +33,7 @@ pub(super) const INSPECTOR_W: f32 = 328.;
 #[derive(Clone, Copy)]
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
+    pub gesture_direction: Option<GestureDirection>,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub editing_app: Option<&'a str>,
@@ -113,7 +114,15 @@ fn button_inspector(
     if data.editing_app.is_none()
         && let Some(gesture_map) = gesture_map
     {
-        return gesture_inspector(button, gesture_map, action_search, view, pal, cx);
+        return gesture_inspector(
+            button,
+            gesture_map,
+            data.gesture_direction,
+            action_search,
+            view,
+            pal,
+            cx,
+        );
     }
     if let Some(app) = data.editing_app
         && !overridden
@@ -255,15 +264,13 @@ fn inherited_gesture_inspector(
 fn gesture_inspector(
     button: ButtonId,
     gesture_map: &BTreeMap<GestureDirection, Action>,
+    selected_direction: Option<GestureDirection>,
     action_search: &Entity<InputState>,
     view: &Entity<MouseModelView>,
     pal: Palette,
     cx: &mut Context<MouseModelView>,
 ) -> AnyElement {
-    let direction = view
-        .read(cx)
-        .gesture_selected_dir()
-        .unwrap_or(GestureDirection::Click);
+    let direction = selected_direction.unwrap_or(GestureDirection::Click);
     let current = gesture_action(gesture_map, button, direction);
     let observer = view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {

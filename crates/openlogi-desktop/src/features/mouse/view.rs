@@ -146,11 +146,6 @@ impl MouseModelView {
         }
     }
 
-    /// The gesture direction whose level-2 flyout is open, if any.
-    pub(crate) fn gesture_selected_dir(&self) -> Option<GestureDirection> {
-        self.gesture_active_dir
-    }
-
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
     /// `cx.notify()` to re-render.
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
@@ -265,6 +260,7 @@ impl Render for MouseModelView {
         let inspector = binding_inspector(
             BindingInspectorData {
                 selected: self.selected,
+                gesture_direction: self.gesture_active_dir,
                 bindings: &bindings,
                 gesture_maps: &gesture_maps,
                 editing_app: editing_app.as_deref(),
@@ -828,7 +824,49 @@ impl RenderOnce for HotspotTrigger {
 
 #[cfg(test)]
 mod tests {
+    use gpui::TestAppContext;
+
     use super::*;
+
+    #[gpui::test]
+    fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| {
+            view.set_gesture_selected_dir(Some(GestureDirection::Up));
+            let gesture_maps = BTreeMap::from([(
+                ButtonId::MiddleClick,
+                BTreeMap::from([(
+                    GestureDirection::Click,
+                    default_binding(ButtonId::MiddleClick),
+                )]),
+            )]);
+            let bindings = BTreeMap::new();
+            let overridden = BTreeSet::new();
+            let entity = cx.entity();
+
+            binding_inspector(
+                BindingInspectorData {
+                    selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
+                    gesture_direction: Some(GestureDirection::Up),
+                    bindings: &bindings,
+                    gesture_maps: &gesture_maps,
+                    editing_app: None,
+                    overridden: &overridden,
+                },
+                &view.action_search,
+                &entity,
+                theme::palette(cx),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
 
     #[test]
     fn active_thumbwheel_directions_highlight_the_paired_control() {
