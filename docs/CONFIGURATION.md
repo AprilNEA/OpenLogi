@@ -84,6 +84,17 @@ Back = { CustomShortcut = "Cmd+Shift+P" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
 ```
 
+Shortcut modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Fn`; `Fn` is a
+macOS-specific modifier that other injection backends ignore. macOS reproduces
+the native navigation events for `Fn+Left`, `Fn+Right`, `Fn+Up`, and `Fn+Down`,
+including the SecondaryFn event flag. Direct `PageUp` and `PageDown` shortcuts
+also preserve that flag:
+
+```toml
+Back = { CustomShortcut = "Fn+Down" }
+Forward = { CustomShortcut = "Fn+Up" }
+```
+
 An Actions Ring entry wraps the action and may add an icon or literal label:
 
 ```toml
