@@ -18,6 +18,7 @@ ui_scale = "normal"
 app_icon = "openlogi"
 
 [devices."receiver:aabbccdd:slot:1"]
+custom_name = "Office mouse"
 dpi = 1600
 dpi_presets = [800, 1600, 3200]
 thumbwheel_sensitivity = 20

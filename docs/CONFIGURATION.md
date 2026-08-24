@@ -34,7 +34,7 @@ be copied manually to the generated physical keys.
 
 ## Shape
 
-`schema_version` is required and currently `4`. `selected_device` is an
+`schema_version` is required and currently `5`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -50,8 +50,8 @@ other generated keys. Do not substitute a model id such as `2b042`.
 
 Common device fields are:
 
-- `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity, scroll inversion,
-  and scroll resolution
+- `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
+  scroll inversion, and scroll resolution
 - `bindings`: a button maps either to one action or to a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
   stays inert unless bound here, because the wheel reports taps from incidental

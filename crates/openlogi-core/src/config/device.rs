@@ -88,6 +88,12 @@ pub struct DeviceConfig {
     /// is only serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// User-assigned name for this physical device. The persisted
+    /// [`DeviceIdentity::display_name`] remains the hardware model name so an
+    /// inventory refresh can never overwrite this alias or mistake it for
+    /// model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
     /// Legacy owner-lock carrier, deserialize-only: the v3-and-older
     /// `gesture_owner` field, held here just long enough for the version-gated
     /// load migration (`Config::migrate_owner_locked_gestures`) to consume it.
@@ -213,6 +219,7 @@ impl Default for DeviceConfig {
             // A fresh entry (e.g. created by a first DPI write) must stay
             // managed — `enabled: false` is an explicit user choice only.
             enabled: true,
+            custom_name: None,
             gesture_owner: None,
             identity: None,
             bindings: BTreeMap::new(),
@@ -351,6 +358,8 @@ struct RawDeviceConfig {
     fn_lock: Option<bool>,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default)]
+    custom_name: Option<String>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -386,6 +395,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 
         DeviceConfig {
             enabled: raw.enabled,
+            custom_name: raw.custom_name,
             gesture_owner: raw.gesture_owner,
             identity: raw.identity.map(DeviceIdentity::without_unit_identifiers),
             bindings,
