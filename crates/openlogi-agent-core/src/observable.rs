@@ -60,6 +60,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                host_switch_warning: None,
             },
         });
         Self { tx }
@@ -250,6 +251,29 @@ impl ObservableState {
                 recent.truncate(RECENT_APPS);
             }
             snapshot.foreground.current = app;
+            true
+        });
+    }
+
+    /// Publish whether the OS input hook is currently installed.
+    pub fn set_hook_installed(&self, installed: bool) {
+        self.update(|snapshot| {
+            if snapshot.status.hook_installed == installed {
+                return false;
+            }
+            snapshot.status.hook_installed = installed;
+            true
+        });
+    }
+
+    /// Publish the latest user-visible warning from Easy-Switch follower
+    /// transitions, or clear it after a later successful transition.
+    pub fn set_host_switch_warning(&self, warning: Option<String>) {
+        self.update(|snapshot| {
+            if snapshot.host_switch_warning == warning {
+                return false;
+            }
+            snapshot.host_switch_warning = warning;
             true
         });
     }

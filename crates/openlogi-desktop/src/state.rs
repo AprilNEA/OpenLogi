@@ -233,6 +233,8 @@ pub struct AppState {
     /// Keyboard whose Easy-Switch buttons own the monitor/follower bindings
     /// edited on the monitor-linking page.
     host_switch_keyboard_key: Option<String>,
+    /// Last user-visible warning from the agent's Easy-Switch follower flow.
+    host_switch_warning: Option<String>,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     monitor_discovery: MonitorDiscovery,
@@ -335,6 +337,7 @@ impl AppState {
             pointer: PointerState::default(),
             lighting: LightingState::default(),
             host_switch_keyboard_key,
+            host_switch_warning: None,
             ipc_commands,
             monitor_discovery: MonitorDiscovery::Idle,
             #[cfg(target_os = "macos")]

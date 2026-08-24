@@ -254,7 +254,11 @@ impl Armed {
         request_input_monitoring().await;
 
         // HID++ watchers need no Accessibility — start them up front.
-        startup::spawn_hidpp_watchers(&running.shared, &running.inputs);
+        startup::spawn_hidpp_watchers(
+            &running.shared,
+            &running.inputs,
+            Arc::clone(&running.observable),
+        );
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
 
         info!("openlogi-agent started");

@@ -65,6 +65,8 @@ pub use succession::Identity;
 /// v31: `MonitorInfo::friendly_name` appended.
 /// v32: monitor input test RPC appended.
 /// v33: monitor input test can request a delayed restore.
+/// v34: `AgentSnapshot::host_switch_warning` appended.
+pub const PROTOCOL_VERSION: u32 = 34;
 pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -142,6 +144,8 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// Last user-visible warning from Easy-Switch follower transitions.
+    pub host_switch_warning: Option<String>,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
