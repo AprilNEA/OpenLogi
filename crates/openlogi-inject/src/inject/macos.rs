@@ -136,12 +136,19 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::LaunchpadShow => launchpad(),
         // Lock screen = Cmd+Ctrl+Q. Layout-aware lookup with the QWERTY
         // kVK_ANSI_Q fallback (see post_keycombo / issue #343).
-        NativeAction::LockScreen => post_key(vk_for_char('q').unwrap_or(0x0C), cmd | ctrl),
+        NativeAction::LockScreen => {
+            let (vk, extra) = resolve_or('q', 0x0C);
+            post_key(vk, cmd | ctrl | extra);
+        }
         // Screenshot = Cmd+Shift+3, same fallback pattern.
-        NativeAction::Screenshot => post_key(vk_for_char('3').unwrap_or(0x14), cmd | shift),
+        NativeAction::Screenshot => {
+            let (vk, extra) = resolve_or('3', 0x14);
+            post_key(vk, cmd | shift | extra);
+        }
         // Capture region to clipboard = Cmd+Shift+Ctrl+4, same fallback pattern.
         NativeAction::CaptureRegion => {
-            post_key(vk_for_char('4').unwrap_or(0x15), cmd | shift | ctrl);
+            let (vk, extra) = resolve_or('4', 0x15);
+            post_key(vk, cmd | shift | ctrl | extra);
         }
         // Sleep has no CGEvent equivalent (the WindowServer ignores a
         // synthesised power key), so ask powermanagement directly. `pmset
@@ -373,20 +380,49 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     flags
 }
 
+/// Resolve `ch` to the vk that currently produces it under the active
+/// keyboard layout, plus any extra Shift/Option flags needed to reach it
+/// (e.g. digits sitting behind Shift on AZERTY — issue #343 follow-up).
+/// Falls back to `(fallback_vk, no extra flags)`, matching the pre-#343
+/// positional behavior, when the layout lookup can't resolve one.
+fn resolve_or(ch: char, fallback_vk: u16) -> (u16, CGEventFlags) {
+    match resolve_char(ch) {
+        Some(resolved) => {
+            let mut extra = CGEventFlags::CGEventFlagNull;
+            if resolved.needs_shift {
+                extra |= CGEventFlags::CGEventFlagShift;
+            }
+            if resolved.needs_option {
+                extra |= CGEventFlags::CGEventFlagAlternate;
+            }
+            (resolved.vk, extra)
+        }
+        None => (fallback_vk, CGEventFlags::CGEventFlagNull),
+    }
+}
+
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
 fn post_keycombo(combo: &KeyCombo) {
-    let flags = combo_flags(combo);
+    let mut flags = combo_flags(combo);
     // Layout-aware lookup first (issue #343): resolve the vk that currently
-    // produces this character under the active layout. Falls back to the
-    // static positional table when the key isn't a single ASCII character
-    // (function/arrow/editing keys — unaffected by layout switches) or when
-    // TIS/UCKeyTranslate can't resolve one (e.g. no active console session).
-    let vk = combo
-        .key()
-        .ascii_char()
-        .and_then(vk_for_char)
-        .or_else(|| hid_usage_to_macos(combo.key().code()));
+    // produces this character under the active layout, ORing in any extra
+    // Shift/Option needed to reach it. Falls back to the static positional
+    // table when the key isn't a single ASCII character (function/arrow/
+    // editing keys — unaffected by layout switches) or when TIS/UCKeyTranslate
+    // can't resolve one (e.g. no active console session).
+    let vk = match combo.key().ascii_char().and_then(resolve_char) {
+        Some(resolved) => {
+            if resolved.needs_shift {
+                flags |= CGEventFlags::CGEventFlagShift;
+            }
+            if resolved.needs_option {
+                flags |= CGEventFlags::CGEventFlagAlternate;
+            }
+            Some(resolved.vk)
+        }
+        None => hid_usage_to_macos(combo.key().code()),
+    };
     if let Some(vk) = vk {
         post_key(vk, flags);
     } else {
@@ -447,7 +483,7 @@ mod tests {
     use core_graphics::event::CGEventFlags;
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, held_key_event, hid_usage_to_macos, keyboard_layout::vk_for_char};
+    use super::{combo, held_key_event, hid_usage_to_macos, keyboard_layout::resolve_char};
     use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
     #[test]
@@ -469,33 +505,65 @@ mod tests {
     /// first written on a machine with Dvorak active, where 's' legitimately
     /// resolves to a different vk than `hid_usage_to_macos`'s QWERTY-pinned
     /// one). Every keyboard layout maps the letter 'a' to *some* physical
-    /// key, so this should never be `None`.
+    /// key, so this should never be `None`, and 'a' never needs a modifier
+    /// to reach on any real layout.
     #[test]
-    fn vk_for_char_resolves_a_common_letter() {
-        assert!(vk_for_char('a').is_some());
+    fn resolve_char_resolves_a_common_letter() {
+        let resolved = resolve_char('a').expect("no key produces 'a' under the active layout");
+        assert!(!resolved.needs_shift);
+        assert!(!resolved.needs_option);
     }
 
-    /// A character no physical key produces under any layout resolves to
-    /// `None` rather than panicking or looping forever.
+    /// A character no physical key produces under any layout/modifier
+    /// combination resolves to `None` rather than panicking or looping
+    /// forever. '€' deliberately isn't used here: with Shift/Option now
+    /// searched too, it's reachable via Option+Shift+2 on common Mac
+    /// layouts, so it doesn't exercise the "truly unmapped" path. A CJK
+    /// character needs IME composition, not a bare modifier layer, on every
+    /// standard macOS keyboard layout.
     #[test]
-    fn vk_for_char_returns_none_for_unmapped_characters() {
-        assert_eq!(vk_for_char('€'), None);
+    fn resolve_char_returns_none_for_unmapped_characters() {
+        assert!(resolve_char('好').is_none());
+    }
+
+    /// Regression test for the Greptile review on PR #948: the original
+    /// `vk_for_char` only searched the unshifted layer, so a character
+    /// sitting behind Shift or Option on the active layout (e.g. digits on
+    /// AZERTY) fell through to the QWERTY-positional fallback — reproducing
+    /// the exact bug #343 exists to fix, just for a narrower set of
+    /// characters. `resolve_char` must search the shifted/optioned layers
+    /// too. This can't be pinned to a specific vk without controlling the
+    /// test runner's active layout, but it proves the modifier search
+    /// itself is wired up: translating the resolved vk back under the
+    /// reported modifier state must reproduce the target character.
+    #[test]
+    fn resolve_char_finds_characters_needing_shift_or_option() {
+        // '!' through ')' sit behind Shift on a "U.S." layout and behind no
+        // modifier on some others — whichever this runner's layout does,
+        // resolve_char must find *a* key, proving the shifted/optioned
+        // search paths are reachable and correct, not just present in name.
+        for ch in ['!', '@', '#', '$', '%'] {
+            assert!(
+                resolve_char(ch).is_some(),
+                "no key on any modifier layer produces {ch:?}"
+            );
+        }
     }
 
     /// `TISCopyCurrentKeyboardLayoutInputSource` lazily bootstraps a shared
     /// XPC connection inside HIToolbox on first use; two threads racing that
     /// bootstrap crashes the whole process with `SIGABRT` deep inside
     /// `_xpc_connection_activate_if_needed` (reproduced locally before
-    /// `keyboard_layout::TIS_LOCK` was added). Hammer `vk_for_char` from many
-    /// threads at once so a regression that drops the lock shows up as a
-    /// crashed test binary, not a quiet flake.
+    /// `keyboard_layout::TIS_LOCK` was added). Hammer `resolve_char` from
+    /// many threads at once so a regression that drops the lock shows up as
+    /// a crashed test binary, not a quiet flake.
     #[test]
-    fn vk_for_char_is_safe_under_concurrent_calls() {
+    fn resolve_char_is_safe_under_concurrent_calls() {
         let handles: Vec<_> = (0..32)
-            .map(|_| std::thread::spawn(|| vk_for_char('a')))
+            .map(|_| std::thread::spawn(|| resolve_char('a').is_some()))
             .collect();
         for handle in handles {
-            assert!(handle.join().expect("thread panicked").is_some());
+            assert!(handle.join().expect("thread panicked"));
         }
     }
 
@@ -1180,7 +1248,7 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
 }
 
 use dock::{app_expose, launchpad, mission_control, show_desktop};
-use keyboard_layout::vk_for_char;
+use keyboard_layout::resolve_char;
 use symbolic_hotkey::{next_desktop, previous_desktop};
 
 use app_services::symbol as app_services_symbol;
@@ -1482,9 +1550,13 @@ mod symbolic_hotkey {
 }
 
 /// Translate a printable character to the macOS virtual keycode that
-/// currently produces it (unshifted) under the user's active keyboard
-/// layout — fixes issue #343, where a hardcoded QWERTY-positional vk fires
-/// the wrong shortcut under Dvorak/Workman/etc.
+/// currently produces it under the user's active keyboard layout — fixes
+/// issue #343, where a hardcoded QWERTY-positional vk fires the wrong
+/// shortcut under Dvorak/Workman/etc. Also reports whether Shift and/or
+/// Option must be held to reach that character (e.g. digits sit behind
+/// Shift on AZERTY) — searching only the unshifted layer would otherwise
+/// leave those shortcuts falling back to the same QWERTY-positional bug
+/// this module exists to fix.
 ///
 /// Uses the Carbon Text Input Source Services API
 /// (`TISCopyCurrentKeyboardLayoutInputSource` / `TISGetInputSourceProperty` /
@@ -1548,10 +1620,31 @@ mod keyboard_layout {
     // flags value UCKeyTranslate takes is the mask, i.e. `1 << 0`.
     const NO_DEAD_KEYS: u32 = 1;
 
-    /// Return the vk that currently produces `target` unshifted under the
-    /// active keyboard layout, or `None` if it can't be determined (no
-    /// active layout/console session, or no key produces this character).
-    pub(super) fn vk_for_char(target: char) -> Option<u16> {
+    // UCKeyTranslate's modifierKeyState packs the classic Toolbox modifier
+    // mask into bits 8-15: `(eventModifiers >> 8) & 0xFF`. shiftKey = 0x0200,
+    // optionKey = 0x0800, so shifted right 8 gives 0x02 / 0x08.
+    const MOD_SHIFT: u32 = 0x02;
+    const MOD_OPTION: u32 = 0x08;
+
+    /// A character's key press under the active keyboard layout: which
+    /// physical key produces it, and whether Shift and/or Option must be
+    /// held to select that character's layer (e.g. digits sit behind Shift
+    /// on AZERTY). The caller ORs these into whatever modifiers the shortcut
+    /// itself already wants — holding Shift/Option to reach a character is
+    /// no different from what a real key press on that layout requires, so
+    /// it never conflicts with the shortcut's own modifier intent.
+    pub(super) struct ResolvedKey {
+        pub(super) vk: u16,
+        pub(super) needs_shift: bool,
+        pub(super) needs_option: bool,
+    }
+
+    /// Resolve `target` to the vk that currently produces it under the
+    /// active keyboard layout, trying the unshifted layer first, then
+    /// Shift, then Option, then Shift+Option. Returns `None` if it can't be
+    /// determined (no active layout/console session, or no key on any of
+    /// those layers produces this character).
+    pub(super) fn resolve_char(target: char) -> Option<ResolvedKey> {
         let _guard = TIS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
         // SAFETY: TISCopyCurrentKeyboardLayoutInputSource follows the CF
@@ -1585,12 +1678,37 @@ mod keyboard_layout {
         // SAFETY: LMGetKbdType has no preconditions.
         let kbd_type = u32::from(unsafe { LMGetKbdType() });
 
+        for &(modifier_state, needs_shift, needs_option) in &[
+            (0, false, false),
+            (MOD_SHIFT, true, false),
+            (MOD_OPTION, false, true),
+            (MOD_SHIFT | MOD_OPTION, true, true),
+        ] {
+            if let Some(vk) = find_vk(layout_ptr, kbd_type, modifier_state, target) {
+                return Some(ResolvedKey {
+                    vk,
+                    needs_shift,
+                    needs_option,
+                });
+            }
+        }
+        None
+    }
+
+    /// Search every virtual keycode for one that translates to `target`
+    /// under `modifier_state` on the given layout.
+    fn find_vk(
+        layout_ptr: *const c_void,
+        kbd_type: u32,
+        modifier_state: u32,
+        target: char,
+    ) -> Option<u16> {
         let mut unichar_buf = [0u16; 4];
         for vk in 0u16..128 {
             let mut dead_key_state: u32 = 0;
             let mut actual_len: u32 = 0;
-            // SAFETY: layout_ptr points into layout_data's live backing
-            // buffer for the duration of this call; dead_key_state,
+            // SAFETY: layout_ptr points into the caller's live layout-data
+            // backing buffer for the duration of this call; dead_key_state,
             // actual_len and unichar_buf are valid, correctly-sized
             // out-parameters.
             let status = unsafe {
@@ -1598,7 +1716,7 @@ mod keyboard_layout {
                     layout_ptr,
                     vk,
                     KEY_ACTION_DOWN,
-                    0, // no modifiers: translate the unshifted base glyph
+                    modifier_state,
                     kbd_type,
                     NO_DEAD_KEYS,
                     &raw mut dead_key_state,
