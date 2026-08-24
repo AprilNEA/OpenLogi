@@ -1,6 +1,6 @@
-//! Auxiliary application windows (Settings, Add Device, …) and a registry that
-//! keeps each one a singleton. About and Updates are pages inside Settings, not
-//! their own windows.
+//! Application windows — the main window plus the auxiliary ones (Settings,
+//! Add Device, …) — and a registry that keeps each one a singleton. About and
+//! Updates are pages inside Settings, not their own windows.
 //!
 //! macOS apps open exactly one Settings window: re-triggering the menu item, ⌘,
 //! or a footer link focuses the existing window rather than stacking a second
@@ -10,6 +10,7 @@
 //! [`crate::ui::theme::apply_from_settings`].
 
 pub mod add_device;
+pub mod main_window;
 pub mod settings;
 pub mod update_consent;
 
@@ -20,6 +21,7 @@ use gpui::{
     WindowOptions, div,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
+use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
 /// One live handle per auxiliary window, stored as a GPUI global so the menu
@@ -117,7 +119,11 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
         // makes it the floor too, the way the main window sets one in
         // `main_window_options` — below it rows clip their trailing controls.
         window_min_size: Some(size),
-        app_id: Some("openlogi".to_string()),
+        // Same identity as the main window (see `main_window`): a Wayland
+        // app_id that doesn't match the desktop file's `StartupWMClass` leaves
+        // the window ungrouped under the launcher icon and unrecognized by our
+        // own `gnome_shell` frontmost backend.
+        app_id: Some(APP_ID.into()),
         titlebar: Some(titlebar_options(title.clone())),
         ..WindowOptions::default()
     };

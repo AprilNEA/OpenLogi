@@ -15,12 +15,13 @@
     windows_subsystem = "windows"
 )]
 
+mod binary_watch;
 mod launch_agent;
+mod logging;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "windows")]
 mod resume_windows;
-mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
 mod status_item;
@@ -47,12 +48,11 @@ use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::server::AgentServer;
 
 fn main() {
-    init_tracing();
+    logging::init();
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and
     // the IPC socket, so a second agent must never start — launchd's KeepAlive
@@ -81,9 +81,9 @@ fn main() {
     };
 
     // Watch our own executable and restart as the new image when an app update
-    // replaces it — see `self_restart`. Only the lock-holding (real) agent
+    // replaces it — see `binary_watch`. Only the lock-holding (real) agent
     // watches, so a losing duplicate can't restart anything.
-    self_restart::spawn();
+    let uninstalled = binary_watch::spawn();
     overlay::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
@@ -111,16 +111,17 @@ fn main() {
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
+        let app_icon = config.app_settings.app_icon;
         let resume_pending = Arc::new(AtomicBool::new(false));
         let core_resume_pending = Arc::clone(&resume_pending);
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
-            .spawn(move || runtime.block_on(run(config, core_resume_pending)))
+            .spawn(move || runtime.block_on(run(config, core_resume_pending, uninstalled)))
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        tray::run_app_loop(show_in_menu_bar, resume_pending);
+        tray::run_app_loop(show_in_menu_bar, app_icon, resume_pending);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -134,10 +135,10 @@ fn main() {
             // when the flag is set.
             let resume_pending = Arc::new(AtomicBool::new(false));
             resume_windows::register(Arc::clone(&resume_pending));
-            runtime.block_on(run(config, resume_pending));
+            runtime.block_on(run(config, resume_pending, uninstalled));
         }
         #[cfg(not(target_os = "windows"))]
-        runtime.block_on(run(config));
+        runtime.block_on(run(config, uninstalled));
     }
 }
 
@@ -227,36 +228,155 @@ async fn begin_action_ring(
     }
 }
 
-/// Fire the macOS permission prompts this process needs, at startup.
+/// A future that fires when `signal` does, or never when the handler could not
+/// be installed.
+#[cfg(unix)]
+async fn fires(signal: &mut Option<tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => {
+            signal.recv().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Resolves on the first signal that means *stop now*: `SIGTERM` from launchd
+/// (logout, `bootout`) or from an incoming agent's takeover, `SIGINT` from a
+/// dev-run Ctrl-C. Both default to killing the process where it stands, which
+/// on macOS would strand an armed HID event tap in the system's tap chain.
+#[cfg(unix)]
+async fn shutdown_signal(
+    sigterm: &mut Option<tokio::signal::unix::Signal>,
+    sigint: &mut Option<tokio::signal::unix::Signal>,
+) {
+    tokio::select! {
+        () = fires(sigterm) => {}
+        () = fires(sigint) => {}
+    }
+}
+
+/// No signal to wait for off unix; the arm simply never fires.
+#[cfg(not(unix))]
+async fn shutdown_signal(_sigterm: &mut Option<()>, _sigint: &mut Option<()>) {
+    std::future::pending::<()>().await;
+}
+
+/// Install the shutdown-signal handlers, `(SIGTERM, SIGINT)`. A handler that
+/// cannot be installed is `None`, which simply never fires.
+#[cfg(unix)]
+fn shutdown_signals() -> (
+    Option<tokio::signal::unix::Signal>,
+    Option<tokio::signal::unix::Signal>,
+) {
+    fn listen(kind: tokio::signal::unix::SignalKind) -> Option<tokio::signal::unix::Signal> {
+        tokio::signal::unix::signal(kind)
+            .inspect_err(|error| warn!(%error, ?kind, "could not install signal handler"))
+            .ok()
+    }
+    (
+        listen(tokio::signal::unix::SignalKind::terminate()),
+        listen(tokio::signal::unix::SignalKind::interrupt()),
+    )
+}
+
+#[cfg(not(unix))]
+fn shutdown_signals() -> (Option<()>, Option<()>) {
+    (None, None)
+}
+
+/// Release the input hook, then end the process.
 ///
-/// The agent (not the GUI) owns both the CGEventTap and every HID++ device
-/// open, so it must be the binary the user authorizes for Accessibility and
-/// Input Monitoring — a grant is scoped to the code-signing identity that
-/// asks for it. macOS only shows a dialog when the process isn't already
-/// listed, so this doesn't nag on every login. The GUI's Accessibility grant
-/// button drives the same prompt on demand over IPC
-/// (`request_accessibility_prompt`); Input Monitoring has no on-demand IPC
-/// path yet, so it is only requested here, at startup.
-fn prompt_missing_permissions(capture_mouse_events: bool) {
+/// Dropping the hook detaches the macOS event tap; a signal's default
+/// disposition would have killed the process with the tap still armed, and so
+/// would any other way of leaving that skips destructors. The agent's run loop
+/// is not the process — macOS keeps the AppKit tray loop on the main thread —
+/// so the exit has to be explicit.
+fn release_hook_and_exit(hook: Option<Hook>, reason: &str) -> ! {
+    info!(reason, "releasing the input hook and exiting");
+    drop(hook);
+    #[expect(
+        clippy::exit,
+        reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"
+    )]
+    std::process::exit(0)
+}
+
+/// Prompt for Accessibility when the enabled mouse hook needs it.
+fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
     // opt-out also silences that prompt.
     if capture_mouse_events && !Hook::has_accessibility() {
         Hook::prompt_accessibility();
     }
+}
 
+/// Request Input Monitoring before starting the HID inventory on macOS.
+///
+/// The agent (not the GUI) owns every HID++ device open, so it must be the
+/// binary the user authorizes. A newly granted permission requires a process
+/// relaunch before macOS lets the agent open HID devices.
+#[cfg(target_os = "macos")]
+async fn request_input_monitoring() {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
-    // discovered. `request_access` blocks on the consent dialog, so it runs
-    // on a blocking thread rather than stalling startup.
+    // discovered. Wait for the blocking consent dialog before starting the
+    // inventory so it cannot cache the pre-grant access state.
     if !openlogi_hid::permissions::has_access() {
-        tokio::task::spawn_blocking(openlogi_hid::permissions::request_access);
+        let access_after_prompt = tokio::task::spawn_blocking(|| {
+            openlogi_hid::permissions::request_access();
+            openlogi_hid::permissions::has_access()
+        })
+        .await;
+        match access_after_prompt {
+            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
+            Ok(false) => {}
+            Err(e) => {
+                warn!(error = %e, "Input Monitoring permission request task failed");
+            }
+        }
+    }
+}
+
+/// Fold one inventory-watcher event into the orchestrator.
+async fn apply_inventory_event(
+    event: watchers::inventory::InventoryEvent,
+    orchestrator: &Mutex<Orchestrator>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: &AtomicBool,
+) {
+    match event {
+        watchers::inventory::InventoryEvent::Snapshot {
+            inventories,
+            standalone,
+            hid_open_failures,
+        } => {
+            let mut orchestrator = orchestrator.lock().await;
+            // The portable watcher catches long sleeps from a polling gap.
+            // Native notifications (macOS workspace wakes, Windows
+            // suspend/resume) also cover the sleeps that gap misses; consume
+            // the coalesced signal at the exact point that can replay it.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if resume_pending.swap(false, Ordering::Relaxed) {
+                info!("native resume notification — replaying volatile settings");
+                orchestrator.reapply_volatile_on_next_refresh();
+            }
+            orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+        }
+        watchers::inventory::InventoryEvent::Unavailable => {
+            orchestrator.lock().await.mark_inventory_unavailable();
+        }
+        // Devices likely power-cycled during the sleep; the next snapshot
+        // re-applies their volatile settings (#189).
+        watchers::inventory::InventoryEvent::SystemWake => {
+            orchestrator.lock().await.reapply_volatile_on_next_refresh();
+        }
     }
 }
 
 async fn run(
     config: Config,
     #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+    mut uninstalled: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -267,7 +387,9 @@ async fn run(
     // an agent restart, which the config docs state.
     let capture_mouse_events = config.app_settings.capture_mouse_events;
 
-    prompt_missing_permissions(capture_mouse_events);
+    prompt_missing_accessibility(capture_mouse_events);
+    #[cfg(target_os = "macos")]
+    request_input_monitoring().await;
 
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives
@@ -305,6 +427,9 @@ async fn run(
     let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
     let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
     let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
+    let mut input_monitoring_rx = watchers::input_monitoring::spawn(Duration::from_millis(1200));
+
+    let (mut sigterm, mut sigint) = shutdown_signals();
 
     // IPC server: the GUI connects here for device state + "apply now" commands.
     // The endpoint (Unix socket / Windows named pipe) is resolved inside
@@ -333,36 +458,20 @@ async fn run(
     let mut camera_open = true;
     loop {
         tokio::select! {
-            event = inventory_rx.recv(), if inventory_open => match event {
-                Some(watchers::inventory::InventoryEvent::Snapshot { inventories, standalone }) => {
-                    let mut orchestrator = orchestrator.lock().await;
-                    // The portable watcher catches long sleeps from a polling
-                    // gap. Native notifications (macOS workspace wakes,
-                    // Windows suspend/resume) also cover the sleeps that gap
-                    // misses; consume the coalesced signal at the exact point
-                    // that can replay it.
+            event = inventory_rx.recv(), if inventory_open => if let Some(event) = event {
+                apply_inventory_event(
+                    event,
+                    &orchestrator,
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
-                    if resume_pending.swap(false, Ordering::Relaxed) {
-                        info!("native resume notification — replaying volatile settings");
-                        orchestrator.reapply_volatile_on_next_refresh();
-                    }
-                    orchestrator.refresh_inventory(&inventories, &standalone);
-                }
-                Some(watchers::inventory::InventoryEvent::Unavailable) => {
-                    orchestrator.lock().await.mark_inventory_unavailable();
-                }
-                Some(watchers::inventory::InventoryEvent::SystemWake) => {
-                    // Devices likely power-cycled during the sleep; the next
-                    // snapshot re-applies their volatile settings (#189).
-                    orchestrator.lock().await.reapply_volatile_on_next_refresh();
-                }
+                    &resume_pending,
+                )
+                .await;
+            } else {
                 // Watcher thread death (e.g. a panic inside the HID backend's
                 // enumerate) — without a snapshot the GUI would scan forever.
-                None => {
-                    warn!("inventory watcher channel closed — marking enumeration unavailable");
-                    orchestrator.lock().await.mark_inventory_unavailable();
-                    inventory_open = false;
-                }
+                warn!("inventory watcher channel closed — marking enumeration unavailable");
+                orchestrator.lock().await.mark_inventory_unavailable();
+                inventory_open = false;
             },
             event = camera_rx.recv(), if camera_open => if let Some(active) = event {
                 orchestrator.lock().await.set_camera_active(active);
@@ -394,16 +503,18 @@ async fn run(
                 // or never installed because capture is off.
                 observable.set_hook_installed(hook.is_some());
             }
+            () = shutdown_signal(&mut sigterm, &mut sigint) => {
+                release_hook_and_exit(hook.take(), "shutdown signal")
+            }
+            // The app was removed while we kept running from its bundle. Leave
+            // through the same door, so the event tap goes with us (#807).
+            Some(()) = uninstalled.recv() => {
+                release_hook_and_exit(hook.take(), "the app was uninstalled")
+            }
+            Some(granted) = input_monitoring_rx.recv() => {
+                observable.set_input_monitoring_granted(granted);
+            }
             else => break,
         }
     }
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
 }

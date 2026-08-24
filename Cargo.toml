@@ -7,6 +7,7 @@ members = [
     "crates/openlogi-hidpp",
     "crates/openlogi-hidpp-derive",
     "crates/openlogi-hid",
+    "crates/openlogi-device",
     "crates/openlogi-camera",
     "crates/openlogi-permissions",
     "crates/openlogi-assets",
@@ -26,28 +27,28 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.10"
 edition = "2024"
-rust-version = "1.96"
+# Tracks current stable rather than trailing it. OpenLogi ships as an app —
+# prebuilt installers, and no crate here has an external reverse dependency —
+# so a floor below stable buys nobody compatibility and only costs us APIs.
+# Raise this freely the day a release lands something worth using; the `msrv`
+# CI matrix keeps the number honest for `cargo install`.
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AprilNEA/OpenLogi"
 authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.1" }
-async-hid = "0.5.2"
-# Cross-platform local IPC for the agent <-> GUI tarpc transport: a Unix-domain
-# socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
-# Stream/Listener used by serde_transport.
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.10" }
+async-hid = "0.5.3"
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
 # 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
 # feature-gated — google/tarpc#564), which drags the vulnerable
 # opentelemetry_sdk 0.30 into the graph (GHSA-w9wp-h8wv-79jx).
 tarpc = { version = "0.38", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
-# Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
-# synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"
@@ -69,20 +70,15 @@ core-foundation = { version = "0.10", default-features = false, features = ["lin
 opener = "0.8.5"
 shellexpand = "3.1.2"
 evdev = "0.13"
-# macOS ObjC / C FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
-# bindings, and the framework crates give typed bindings for the C APIs (privacy
-# permissions included) instead of hand-written `#[link] extern "C"` blocks.
-# Feature lists are selected per crate — these crates are huge, so every entry is
-# `default-features = false`. The version stays unified so a resolve can't move
-# gpui's Cargo.lock pin out from under the GUI.
+# Kept on one version across the workspace (block2 included) so a resolve can't
+# move gpui's Cargo.lock pin out from under the GUI.
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2-application-services = { version = "0.3.2", default-features = false }
+objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }
-# The block ABI crate objc2's generated bindings use for handler arguments;
-# same unified-version rationale as the objc2 crates above.
 block2 = "0.6.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component
@@ -96,6 +92,13 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 # that the `IconName` enum is macro-generated from, so the two must agree.
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 
+# swr-gpui declares gpui from crates.io. A registry dependency and a git one are
+# different crates to cargo even at the same version, so without the
+# `[patch.crates-io]` below the tree would carry two incompatible `gpui`s and
+# `swr_gpui::Query` would not accept this app's `App`.
+swr-core = "0.1"
+swr-gpui = "0.1"
+
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
 # needs FFI can opt in locally with `#[expect(unsafe_code, reason = "…")]`.
@@ -107,6 +110,12 @@ unwrap_used = "warn"
 expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
+# Machine-checks the suppression policy in .claude/rules/rust.md: every
+# suppression states a reason, and reaches for `expect` unless it cannot work.
+# Blind spot worth knowing: `allow_attributes` only sees outer `#[allow]`, so a
+# module-wide `#![allow(…)]` — the shape that rots worst — still needs review.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 # Shared lint set, kept in sync with
 # https://gist.github.com/AprilNEA/cdf81f76840fcb883a32503ee7caa539.
 # `cast_*` and `ptr_as_ptr` are pedantic members already; they are listed
@@ -132,3 +141,10 @@ debug = false
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+# Redirect swr-gpui's registry `gpui` onto the git source the rest of the tree
+# uses, so one `gpui` reaches the lock instead of two. No rev here for the same
+# reason the dependency above carries none — the exact commit stays pinned in
+# Cargo.lock, and this patch must not fork the git source.
+[patch.crates-io]
+gpui = { git = "https://github.com/zed-industries/zed" }

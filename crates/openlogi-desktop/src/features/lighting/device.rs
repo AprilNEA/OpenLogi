@@ -120,7 +120,7 @@ impl Render for LightingPanel {
                         div()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("LIGHTING")),
+                            .child(tr!("Lighting")),
                     )
                     .child(toggle(&lighting, pal)),
             )
@@ -133,7 +133,7 @@ impl Render for LightingPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(tr!("BRIGHTNESS")),
+                            .child(tr!("Brightness")),
                     )
                     .child(
                         div()
@@ -199,7 +199,7 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
 }
 
 /// Snap a raw slider read to a 0–100 brightness percent.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "value is rounded and clamped into 0..=100 before the cast"

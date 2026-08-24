@@ -1,9 +1,15 @@
-use std::process::ExitCode;
+use std::{
+    fmt::{self, Write as _},
+    process::ExitCode,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
+use openlogi_ipc::{AgentSnapshot, AgentStatus, PROTOCOL_VERSION, client};
+use tarpc::context;
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
@@ -14,28 +20,36 @@ const NOTHING_FOUND: u8 = 2;
 
 /// Print every connected receiver, paired device and Logitech webcam.
 ///
+/// Reads the running agent's inventory when one is reachable — the agent is
+/// the process that actually holds device permissions, so its answer is the
+/// GUI's answer and no second identity opens the same HID nodes. Falls back
+/// to direct enumeration (this process's own permission identity) when no
+/// agent responds; the provenance goes to stderr so scripts keep parsing
+/// stdout.
+///
 /// Returns the `NOTHING_FOUND` status when neither a HID++ device nor a webcam
 /// is present, so scripts can tell "no hardware" apart from a failed
 /// enumeration.
 pub async fn run(_args: ListArgs) -> Result<ExitCode> {
-    let inventories = openlogi_hid::enumerate()
-        .await
-        .context("failed to enumerate HID++ devices")?;
+    let (inventories, agent_status) = if let Some(snapshot) = agent_snapshot().await {
+        eprintln!("(inventory read from the running agent)");
+        (snapshot.inventory, Some(snapshot.status))
+    } else {
+        eprintln!(
+            "(no agent reachable — reading hardware directly; macOS judges this \
+             process's Input Monitoring grant, not the agent's)"
+        );
+        let inventories = openlogi_hid::enumerate()
+            .await
+            .context("failed to enumerate HID++ devices")?;
+        (inventories, None)
+    };
     let cameras = openlogi_camera::enumerate_cameras();
 
     if inventories.is_empty() && cameras.is_empty() {
         println!("No Logitech HID++ devices or webcams found.");
         println!();
-        println!("Notes:");
-        println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
-        println!(
-            "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
-             permission: System Settings → Privacy & Security → Input Monitoring."
-        );
-        println!(
-            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-             receivers (Unifying) aren't surfaced yet."
-        );
+        print_empty_notes(agent_status.as_ref());
         return Ok(ExitCode::from(NOTHING_FOUND));
     }
 
@@ -56,20 +70,99 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// One agent snapshot, or `None` when the CLI should read hardware itself:
+/// no agent listening, a hung handshake, a protocol mismatch, or a stalled
+/// snapshot call.
+async fn agent_snapshot() -> Option<AgentSnapshot> {
+    let conn = tokio::time::timeout(Duration::from_secs(2), client::connect())
+        .await
+        .ok()?
+        .ok()?;
+    if conn.version != PROTOCOL_VERSION {
+        eprintln!(
+            "note: the agent speaks protocol v{}, this CLI expects v{PROTOCOL_VERSION} — \
+             reading hardware directly",
+            conn.version
+        );
+        return None;
+    }
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.client.snapshot(context::current()),
+    )
+    .await
+    .ok()?
+    .ok()
+}
+
+/// Why the list is empty. With an agent status in hand the reason is known;
+/// without one, fall back to the generic checklist.
+fn print_empty_notes(status: Option<&AgentStatus>) {
+    match status {
+        Some(status) if !status.input_monitoring_granted => {
+            println!("Notes:");
+            println!(
+                "  - The agent does not hold Input Monitoring. Grant it to OpenLogi Agent: \
+                 System Settings → Privacy & Security → Input Monitoring (the + picker \
+                 cannot browse into the app bundle — use Go to Folder)."
+            );
+        }
+        Some(status) if status.hid_open_failures => {
+            println!("Notes:");
+            println!(
+                "  - Input Monitoring is granted, but the agent's device opens keep \
+                 failing — another app may hold the devices (quit Logi Options+), or \
+                 macOS is serving a stale permission session: log out and back in."
+            );
+        }
+        _ => {
+            println!("Notes:");
+            println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
+            println!(
+                "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
+                 permission: System Settings → Privacy & Security → Input Monitoring."
+            );
+            println!(
+                "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
+                 receivers (Unifying) aren't surfaced yet."
+            );
+        }
+    }
+}
+
 fn print_cameras(cameras: &[Camera]) {
     println!("Cameras ({} Logitech UVC)", cameras.len());
     let last = cameras.len() - 1;
     for (i, cam) in cameras.iter().enumerate() {
         let prefix = if i == last { "  └─" } else { "  ├─" };
-        let caps = match (cam.max_resolution, cam.max_fps) {
-            (Some((w, h)), Some(fps)) => format!(", up to {w}x{h}@{fps}"),
-            (Some((w, h)), None) => format!(", up to {w}x{h}"),
-            _ => String::new(),
-        };
         println!(
             "{prefix} ● {} (camera, vid={:04x} pid={:04x}{caps}, id={})",
-            cam.name, cam.vendor_id, cam.product_id, cam.unique_id
+            cam.name,
+            cam.vendor_id,
+            cam.product_id,
+            cam.unique_id,
+            caps = CameraCapabilitiesDisplay {
+                resolution: cam.max_resolution,
+                fps: cam.max_fps,
+            },
         );
+    }
+}
+
+struct CameraCapabilitiesDisplay {
+    resolution: Option<(u32, u32)>,
+    fps: Option<u32>,
+}
+
+impl fmt::Display for CameraCapabilitiesDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.resolution, self.fps) {
+            (Some((width, height)), Some(fps)) => {
+                write!(f, ", up to {width}x{height}@{fps}")
+            }
+            (Some((width, height)), None) => write!(f, ", up to {width}x{height}"),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -88,82 +181,126 @@ fn print_inventory(inv: &DeviceInventory) {
     let last = inv.paired.len() - 1;
     for (i, d) in inv.paired.iter().enumerate() {
         let prefix = if i == last { "  └─" } else { "  ├─" };
-        println!("{prefix} {}", format_device(d));
+        println!("{prefix} {}", PairedDeviceDisplay(d));
         if let Some(model) = d.model_info.as_ref() {
             let cont = if i == last { "     " } else { "  │  " };
-            println!("{cont}{}", format_model(model));
+            println!("{cont}{}", DeviceModelDisplay(model));
         }
     }
 }
 
-fn format_device(d: &PairedDevice) -> String {
-    let dot = if d.online { "●" } else { "○" };
-    let codename = d.codename.as_deref().unwrap_or("Unknown device");
-    let wpid = d
-        .wpid
-        .map_or_else(|| "wpid=?".to_string(), |w| format!("wpid={w:04x}"));
-    let battery = d
-        .battery
-        .as_ref()
-        .map_or_else(|| "battery=—".to_string(), format_battery);
-    let kind = format!("{:?}", d.kind).to_lowercase();
-    format!(
-        "slot {} {dot} {codename} ({kind}, {wpid}, {battery})",
-        d.slot
-    )
-}
+struct PairedDeviceDisplay<'a>(&'a PairedDevice);
 
-fn format_battery(b: &BatteryInfo) -> String {
-    let level = format!("{:?}", b.level).to_lowercase();
-    let status = format!("{:?}", b.status).to_lowercase();
-    format!("battery={}% {level} ({status})", b.percentage)
-}
-
-fn format_model(m: &DeviceModelInfo) -> String {
-    let transports = {
-        let mut t = Vec::new();
-        if m.transports.usb {
-            t.push("usb");
+impl fmt::Display for PairedDeviceDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let device = self.0;
+        let dot = if device.online { "●" } else { "○" };
+        let codename = device.codename.as_deref().unwrap_or("Unknown device");
+        write!(
+            f,
+            "slot {} {dot} {codename} ({}, ",
+            device.slot,
+            LowercaseDebug(device.kind)
+        )?;
+        match device.wpid {
+            Some(wpid) => write!(f, "wpid={wpid:04x}, ")?,
+            None => write!(f, "wpid=?, ")?,
         }
-        if m.transports.equad {
-            t.push("equad");
+        match device.battery.as_ref() {
+            Some(battery) => write!(f, "{}", BatteryDisplay(battery))?,
+            None => write!(f, "battery=—")?,
         }
-        if m.transports.btle {
-            t.push("btle");
-        }
-        if m.transports.bluetooth {
-            t.push("bt");
-        }
-        if t.is_empty() {
-            "—".to_string()
-        } else {
-            t.join("+")
-        }
-    };
-    let ids = m
-        .model_ids
-        .iter()
-        .map(|id| format!("{id:04x}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut unit = String::with_capacity(8);
-    for b in m.unit_id {
-        use std::fmt::Write as _;
-        let _ = write!(unit, "{b:02x}");
+        write!(f, ")")
     }
-    let serial = m.serial_number.as_deref().unwrap_or("—");
-    format!(
-        "     model_ids=[{ids}] ext={:02x} serial={serial} unit_id={unit} transports={transports}",
-        m.extended_model_id
-    )
+}
+
+struct BatteryDisplay<'a>(&'a BatteryInfo);
+
+impl fmt::Display for BatteryDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let battery = self.0;
+        write!(
+            f,
+            "battery={}% {} ({})",
+            battery.percentage,
+            LowercaseDebug(battery.level),
+            LowercaseDebug(battery.status)
+        )
+    }
+}
+
+struct DeviceModelDisplay<'a>(&'a DeviceModelInfo);
+
+impl fmt::Display for DeviceModelDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let model = self.0;
+        write!(f, "     model_ids=[")?;
+        let mut separator = "";
+        for id in model.model_ids {
+            write!(f, "{separator}{id:04x}")?;
+            separator = ",";
+        }
+        write!(
+            f,
+            "] ext={:02x} serial={} unit_id=",
+            model.extended_model_id,
+            model.serial_number.as_deref().unwrap_or("—")
+        )?;
+        for byte in model.unit_id {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " transports=")?;
+
+        separator = "";
+        for (enabled, name) in [
+            (model.transports.usb, "usb"),
+            (model.transports.equad, "equad"),
+            (model.transports.btle, "btle"),
+            (model.transports.bluetooth, "bt"),
+        ] {
+            if enabled {
+                write!(f, "{separator}{name}")?;
+                separator = "+";
+            }
+        }
+        if separator.is_empty() {
+            write!(f, "—")?;
+        }
+
+        Ok(())
+    }
+}
+
+/// The CLI historically rendered these enums by lowercasing their `Debug`
+/// names. Keep that exact spelling without allocating an intermediate string.
+struct LowercaseDebug<T>(T);
+
+impl<T: fmt::Debug> fmt::Display for LowercaseDebug<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(LowercaseWriter(f), "{:?}", self.0)
+    }
+}
+
+struct LowercaseWriter<'a, 'b>(&'a mut fmt::Formatter<'b>);
+
+impl fmt::Write for LowercaseWriter<'_, '_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        for character in value.chars().flat_map(char::to_lowercase) {
+            self.0.write_char(character)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod format_tests {
     use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports};
 
+    use super::{
+        BatteryDisplay, CameraCapabilitiesDisplay, DeviceModelDisplay, PairedDevice,
+        PairedDeviceDisplay,
+    };
     use super::{BatteryInfo, DeviceModelInfo};
-    use super::{PairedDevice, format_battery, format_device, format_model};
 
     fn base_device() -> PairedDevice {
         PairedDevice {
@@ -181,7 +318,7 @@ mod format_tests {
     #[test]
     fn online_device_uses_filled_dot_and_reports_fields() {
         let d = base_device();
-        let out = format_device(&d);
+        let out = PairedDeviceDisplay(&d).to_string();
         assert_eq!(out, "slot 1 ● MX Master 3S (mouse, wpid=4082, battery=—)");
     }
 
@@ -189,7 +326,7 @@ mod format_tests {
     fn offline_device_uses_hollow_dot() {
         let mut d = base_device();
         d.online = false;
-        let out = format_device(&d);
+        let out = PairedDeviceDisplay(&d).to_string();
         assert!(out.starts_with("slot 1 ○ "));
     }
 
@@ -198,7 +335,7 @@ mod format_tests {
         let mut d = base_device();
         d.codename = None;
         d.wpid = None;
-        let out = format_device(&d);
+        let out = PairedDeviceDisplay(&d).to_string();
         assert_eq!(out, "slot 1 ● Unknown device (mouse, wpid=?, battery=—)");
     }
 
@@ -210,7 +347,7 @@ mod format_tests {
             level: BatteryLevel::Low,
             status: BatteryStatus::Discharging,
         });
-        let out = format_device(&d);
+        let out = PairedDeviceDisplay(&d).to_string();
         assert!(out.contains("battery=42% low (discharging)"));
     }
 
@@ -223,7 +360,38 @@ mod format_tests {
             level: BatteryLevel::Critical,
             status: BatteryStatus::ChargingSlow,
         };
-        assert_eq!(format_battery(&b), "battery=10% critical (chargingslow)");
+        assert_eq!(
+            BatteryDisplay(&b).to_string(),
+            "battery=10% critical (chargingslow)"
+        );
+    }
+
+    #[test]
+    fn camera_capabilities_include_resolution_and_optional_fps() {
+        assert_eq!(
+            CameraCapabilitiesDisplay {
+                resolution: Some((1920, 1080)),
+                fps: Some(60),
+            }
+            .to_string(),
+            ", up to 1920x1080@60"
+        );
+        assert_eq!(
+            CameraCapabilitiesDisplay {
+                resolution: Some((1920, 1080)),
+                fps: None,
+            }
+            .to_string(),
+            ", up to 1920x1080"
+        );
+        assert_eq!(
+            CameraCapabilitiesDisplay {
+                resolution: None,
+                fps: Some(60),
+            }
+            .to_string(),
+            ""
+        );
     }
 
     fn base_model() -> DeviceModelInfo {
@@ -240,7 +408,7 @@ mod format_tests {
     #[test]
     fn model_with_no_transports_shows_placeholder_and_missing_serial() {
         let m = base_model();
-        let out = format_model(&m);
+        let out = DeviceModelDisplay(&m).to_string();
         assert_eq!(
             out,
             "     model_ids=[b042,0000,0000] ext=02 serial=— unit_id=00010203 transports=—"
@@ -257,7 +425,7 @@ mod format_tests {
             bluetooth: true,
         };
         m.serial_number = Some("SN123".to_string());
-        let out = format_model(&m);
+        let out = DeviceModelDisplay(&m).to_string();
         assert!(out.contains("transports=usb+btle+bt"));
         assert!(out.contains("serial=SN123"));
     }

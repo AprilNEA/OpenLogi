@@ -4,7 +4,7 @@
 //! descriptor, but `async-hid 0.4` only exposes descriptors on Linux. We avoid
 //! that path by pre-filtering to the Logitech HID++ vendor collections at
 //! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
-//! straight from [`AsyncHidChannel::supports_short_long_hidpp`]: USB / receiver
+//! straight from [`hidpp::channel::RawHidChannel::supports_short_long_hidpp`]: USB / receiver
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
 
 #[cfg(not(target_os = "windows"))]
-use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
-use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
-use futures_lite::StreamExt as _;
+use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter};
+use async_hid::{DeviceInfo, HidBackend};
+use futures_lite::{Stream, StreamExt as _};
 use hidpp::channel::HidppChannel;
 use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
@@ -28,7 +28,76 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::LOGITECH_VENDOR_ID;
-use crate::write::{WriteError, classify_hid_error, matches_litra};
+use openlogi_device::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
+use openlogi_device::write::matches_litra;
+
+/// Collapses `async-hid`'s error taxonomy into the backend-agnostic
+/// [`BackendError`] every caller above this module sees.
+///
+/// A named function, not a `From` impl: both types are foreign to this crate
+/// now that the contract lives in `openlogi-device`, which is the orphan rule
+/// saying out loud what the layering already did — an adapter belongs to the
+/// backend it adapts. `Disconnected` and `NotConnected` fold together; nothing
+/// above the transport acts on the distinction.
+fn backend_error(error: async_hid::HidError) -> BackendError {
+    match error {
+        async_hid::HidError::Disconnected | async_hid::HidError::NotConnected => {
+            BackendError::Disconnected
+        }
+        other => BackendError::Backend(other.to_string()),
+    }
+}
+
+/// Classify a failed device open. On macOS `IOHIDDeviceOpen` denies silently —
+/// the error is indistinguishable from exclusive access — so fold the Input
+/// Monitoring state into the message: it is the difference between "grant the
+/// permission" and "close the other app, or log out and back in".
+#[cfg(not(target_os = "windows"))]
+fn open_error(error: async_hid::HidError) -> BackendError {
+    match backend_error(error) {
+        #[cfg(target_os = "macos")]
+        BackendError::Backend(message) => {
+            let hint = if crate::permissions::has_access() {
+                "Input Monitoring is granted to this process — another app may \
+                 hold the device exclusively, or macOS is serving a stale \
+                 permission session (log out and back in)"
+            } else {
+                "Input Monitoring is NOT granted to this process; grant it to \
+                 OpenLogi Agent under System Settings → Privacy & Security → \
+                 Input Monitoring"
+            };
+            BackendError::Backend(format!("{message}: {hint}"))
+        }
+        other => other,
+    }
+}
+
+/// `DeviceId` is an opaque OS handle (a hidraw path, a Windows device path, an
+/// IOKit entry), so [`NodeId`] carries its `Debug` rendering verbatim.
+///
+/// Verbatim matters: that string is what [`NodeInfo::identity`] has always
+/// embedded for serial-less nodes, so keeping it byte-identical keeps existing
+/// raw-HID routes resolving across this refactor.
+fn node_id(info: &DeviceInfo) -> NodeId {
+    NodeId::from(format!("{:?}", info.id))
+}
+
+/// Restates an `async-hid` node as the backend-agnostic [`NodeInfo`] every
+/// layer above this module stores, filters and routes on.
+fn node_info(info: &DeviceInfo) -> NodeInfo {
+    {
+        NodeInfo {
+            id: node_id(info),
+            vendor_id: info.vendor_id,
+            product_id: info.product_id,
+            usage_page: info.usage_page,
+            usage_id: info.usage_id,
+            name: info.name.clone(),
+            manufacturer: info.manufacturer.clone(),
+            serial_number: info.serial_number.clone(),
+        }
+    }
+}
 
 /// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
 ///
@@ -40,8 +109,15 @@ use crate::write::{WriteError, classify_hid_error, matches_litra};
 /// channels) and frees it on drop via [`HidppChannel::set_sw_id_lease`].
 static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
 
+mod native;
+pub(crate) use native::native_backend;
+
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+// Native Win32 HID report-write fallback, used by the Windows composite
+// channel in `windows` when async-hid's async write path fails.
+#[cfg(target_os = "windows")]
+mod windows_hid;
 #[cfg(target_os = "windows")]
 use windows::WindowsHidppChannel;
 #[cfg(test)]
@@ -90,8 +166,11 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 // Windows routes short vs long by report id over the composite channel
 // (WindowsHidppChannel), so the long-only up-conversion path — and thus this
 // helper — is only reached off Windows. Still compiled + unit-tested there.
+// Not `expect`: the lint fires in the `--lib` build and not in the `--test`
+// one, so an expectation is always unfulfilled for one of them.
 #[cfg_attr(
     target_os = "windows",
+    expect(clippy::allow_attributes, reason = "see above"),
     allow(
         dead_code,
         reason = "long-only up-conversion is the non-Windows AsyncHidChannel path"
@@ -120,13 +199,27 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// across threads is the model hidapi uses too.
 static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
 
-/// The process-wide HID backend shared by enumeration and hotplug watching.
-pub(crate) fn hid_backend() -> &'static HidBackend {
-    &HID_BACKEND
+/// Subscribe to the backend's node connect/disconnect events, restated as the
+/// backend-agnostic [`HotplugEvent`].
+///
+/// The node identity `async-hid` attaches is dropped: every consumer reacts by
+/// re-enumerating, so carrying it would only invite someone to trust it.
+pub(crate) fn watch_nodes() -> Result<impl Stream<Item = HotplugEvent> + Send + Unpin, BackendError>
+{
+    let stream = HID_BACKEND.watch().map_err(backend_error)?;
+    Ok(stream.map(|event| match event {
+        async_hid::DeviceEvent::Connected(_) => HotplugEvent::Connected,
+        async_hid::DeviceEvent::Disconnected(_) => HotplugEvent::Disconnected,
+    }))
 }
 
-pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError> {
-    let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
+pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, BackendError> {
+    let all: Vec<async_hid::Device> = HID_BACKEND
+        .enumerate()
+        .await
+        .map_err(backend_error)?
+        .collect()
+        .await;
 
     // One-time visibility into what the OS actually reports for Logitech nodes,
     // so a transport that uses an unexpected vendor page (e.g. a new BLE mouse)
@@ -145,40 +238,18 @@ pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, async_
     Ok(all)
 }
 
-/// Stable opaque identity used by raw-device routes. Prefer the HID serial;
-/// otherwise retain the backend's platform identifier as a runtime identity.
-/// The latter is deliberately not treated as a cross-machine portable key,
-/// but it is stronger than enumeration order and lets duplicate nodes be
-/// rejected deterministically.
-pub(crate) fn device_identity(info: &DeviceInfo) -> String {
-    info.serial_number
-        .as_deref()
-        .filter(|serial| !serial.is_empty())
-        .map_or_else(
-            // `DeviceInfo::id` is an OS-node identity (hidraw path, registry
-            // entry, or Windows device path). It is useful to re-find a node
-            // during this process lifetime, but it is intentionally marked as
-            // transient and must never become a persisted physical key.
-            || format!("id:{:?}", info.id),
-            |serial| format!("serial:{}", serial.to_ascii_lowercase()),
-        )
-}
-
-pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
-{
-    Ok(enumerate_devices()
-        .await?
-        .into_iter()
-        .filter(|d| {
-            is_hidpp_candidate(
-                d.vendor_id,
-                d.product_id,
-                d.usage_page,
-                d.usage_id,
-                is_receiver_child_node(&d.id),
-            )
-        })
-        .collect())
+/// Whether an enumerated node belongs to the HID++ channel path.
+///
+/// Wraps [`is_hidpp_candidate`] with the parts only this backend can answer:
+/// the platform node id needed to recognise a `hid-logitech-dj` child node.
+pub(crate) fn is_hidpp_node(device: &async_hid::Device) -> bool {
+    is_hidpp_candidate(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+        is_receiver_child_node(&device.id),
+    )
 }
 
 /// Whether an enumerated node belongs to the HID++ channel path.
@@ -255,65 +326,6 @@ fn is_receiver_child_node(_id: &async_hid::DeviceId) -> bool {
     false
 }
 
-/// Open the raw HID writer for a directly-attached (USB) device, for sending
-/// reports the HID++ wrapper can't model — e.g. the 64-byte `0x12` lighting
-/// frames G-series keyboards use. Returns `None` for Bolt routes or when no
-/// matching node is connected.
-pub(crate) async fn open_route_writer(
-    route: &crate::route::DeviceRoute,
-) -> Result<Option<DeviceWriter>, WriteError> {
-    let candidates = match route {
-        crate::route::DeviceRoute::Direct { .. } => enumerate_hidpp_devices()
-            .await
-            .map_err(|e| classify_hid_error(&e))?,
-        crate::route::DeviceRoute::RawHid { .. } => enumerate_devices()
-            .await
-            .map_err(|e| classify_hid_error(&e))?,
-        _ => return Ok(None),
-    };
-    let mut matched = None;
-    for dev in candidates {
-        let is_match = match route {
-            crate::route::DeviceRoute::Direct {
-                vendor_id,
-                product_id,
-            } => dev.vendor_id == *vendor_id && dev.product_id == *product_id,
-            crate::route::DeviceRoute::RawHid {
-                vendor_id,
-                product_id,
-                usage_page,
-                usage_id,
-                identity,
-            } => {
-                dev.vendor_id == *vendor_id
-                    && dev.product_id == *product_id
-                    && dev.usage_page == *usage_page
-                    && dev.usage_id == *usage_id
-                    && device_identity(&dev) == *identity
-            }
-            _ => false,
-        };
-        if is_match {
-            if matches!(route, crate::route::DeviceRoute::Direct { .. }) {
-                let (_reader, writer) = dev.open().await.map_err(|e| classify_hid_error(&e))?;
-                return Ok(Some(writer));
-            }
-            if matched.is_some() {
-                tracing::warn!("multiple raw HID nodes matched one route");
-                return Err(WriteError::AmbiguousRawDevice);
-            }
-            matched = Some(dev);
-        }
-    }
-    match matched {
-        Some(dev) => {
-            let (_reader, writer) = dev.open().await.map_err(|e| classify_hid_error(&e))?;
-            Ok(Some(writer))
-        }
-        None => Ok(None),
-    }
-}
-
 /// Lease one free software id in `1..=15`, or `None` if all 15 are held.
 fn try_lease_sw_id() -> Option<u8> {
     loop {
@@ -353,18 +365,20 @@ fn configure_channel_sw_ids(channel: &mut HidppChannel) {
 }
 
 pub(crate) async fn open_hidpp_channel(
-    dev: async_hid::Device,
-) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {
-    // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we can
-    // keep using `dev` (which `to_device_info` would consume).
-    let info: DeviceInfo = (*dev).clone();
+    dev: &async_hid::Device,
+) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+    // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value because
+    // the channel keeps it for the lifetime of the open.
+    let info: DeviceInfo = (**dev).clone();
     // On Windows the short (0x10) and long (0x11) HID++ report collections are
     // exposed as separate device interfaces, so the channel must open both and
     // route by report id (see WindowsHidppChannel). Elsewhere one node carries
     // both reports (or is long-only), handled by AsyncHidChannel.
     #[cfg(target_os = "windows")]
     {
-        let raw = WindowsHidppChannel::open(dev, info.clone()).await?;
+        let raw = WindowsHidppChannel::open(dev, info.clone())
+            .await
+            .map_err(backend_error)?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
                 configure_channel_sw_ids(&mut c);
@@ -375,12 +389,12 @@ pub(crate) async fn open_hidpp_channel(
                 return Ok(None);
             }
         };
-        Ok(Some((info, channel)))
+        Ok(Some(channel))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let (reader, writer) = dev.open().await?;
+        let (reader, writer) = dev.open().await.map_err(open_error)?;
         // BLE-direct devices expose only the long HID++ report; flag the channel so
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
@@ -399,7 +413,7 @@ pub(crate) async fn open_hidpp_channel(
         // ticks, so a steadily-connected device should log this on first sight (and
         // on reconnect) only — not every ~2s tick.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
-        Ok(Some((info, channel)))
+        Ok(Some(channel))
     }
 }
 

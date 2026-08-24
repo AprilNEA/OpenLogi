@@ -21,6 +21,13 @@ use crate::{
     protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
+/// A live channel over the mock transport.
+pub(crate) async fn channel_with_reader(raw: MockRawHidChannel) -> HidppChannel {
+    HidppChannel::from_raw_channel(raw)
+        .await
+        .expect("the mock transport speaks HID++")
+}
+
 #[test]
 fn short_payload_widens_preserving_header_and_padding() {
     // [device, feature, function|sw, p0, p1, p2]
@@ -44,7 +51,7 @@ fn widening_an_already_long_message_is_a_no_op() {
 fn send_returns_response_before_timeout() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let request = short_msg(0x10);
         let response = short_msg(0x20);
@@ -69,7 +76,7 @@ fn send_returns_response_before_timeout() {
 fn send_times_out_and_removes_pending_message() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
         let request = short_msg(0x10);
         let response = short_msg(0x20);
 
@@ -94,7 +101,7 @@ fn send_times_out_and_removes_pending_message() {
 fn timeout_removes_only_its_own_pending_message() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let never_answered = short_msg(0x20);
         let slow_response = short_msg(0x21);
@@ -128,7 +135,7 @@ fn timeout_removes_only_its_own_pending_message() {
 fn late_response_after_timeout_is_ignored() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener_events = Arc::clone(&events);
         channel.add_msg_listener(move |msg, matched| {
@@ -177,7 +184,7 @@ fn late_response_after_timeout_is_ignored() {
 fn send_and_forget_writes_without_pending_message() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         channel.send_and_forget(short_msg(0x10)).await.unwrap();
 
@@ -190,7 +197,7 @@ fn send_and_forget_writes_without_pending_message() {
 fn raw_report_write_forwards_exact_bytes_and_length() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
         let report = [0x12; MAX_RAW_REPORT_LENGTH];
 
         let written = channel.write_raw_report(&report).await.unwrap();
@@ -204,7 +211,7 @@ fn raw_report_write_forwards_exact_bytes_and_length() {
 fn raw_report_write_rejects_empty_and_oversized_inputs_without_io() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let empty = channel.write_raw_report(&[]).await.unwrap_err();
         let oversized = channel
@@ -226,7 +233,7 @@ fn raw_report_write_times_out_when_the_transport_parks() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
         handle.park_writes();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
         let started = Instant::now();
 
         let error = channel
@@ -243,7 +250,7 @@ fn raw_report_write_times_out_when_the_transport_parks() {
 fn listener_can_remove_another_listener_during_dispatch() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = Arc::new(HidppChannel::from_raw_channel(raw).await.unwrap());
+        let channel = Arc::new(channel_with_reader(raw).await);
         let removed_listener_calls = Arc::new(AtomicUsize::new(0));
         let removing_listener_calls = Arc::new(AtomicUsize::new(0));
 
@@ -283,7 +290,7 @@ fn listener_can_remove_another_listener_during_dispatch() {
 fn send_v20_matches_response_by_header_ignoring_unrelated_messages() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let header = v20::MessageHeader {
             device_index: 0x01,
@@ -337,7 +344,7 @@ fn send_v20_matches_response_by_header_ignoring_unrelated_messages() {
 fn send_v20_broadcast_event_does_not_resolve_pending_request() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener_events = Arc::clone(&events);
         channel.add_msg_listener(move |msg, matched| {
@@ -395,7 +402,7 @@ fn send_v20_broadcast_event_does_not_resolve_pending_request() {
 fn send_v20_response_may_arrive_as_a_different_report_width() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let header = v20::MessageHeader {
             device_index: 0x01,
@@ -422,7 +429,7 @@ fn send_v20_response_may_arrive_as_a_different_report_width() {
 fn send_v20_error_frame_resolves_to_feature_error() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let header = v20::MessageHeader {
             device_index: 0x01,
@@ -448,7 +455,7 @@ fn send_v20_error_frame_resolves_to_feature_error() {
 fn send_v20_error_frame_with_unmapped_code_is_unsupported_response() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let channel = channel_with_reader(raw).await;
 
         let header = v20::MessageHeader {
             device_index: 0x01,

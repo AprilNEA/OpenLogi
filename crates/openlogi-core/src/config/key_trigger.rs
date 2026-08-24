@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::binding::Action;
 
@@ -54,22 +55,24 @@ pub struct KeyTrigger {
 
 impl std::fmt::Display for KeyTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts: Vec<&str> = Vec::new();
-        let m = &self.modifiers;
-        if m.shift {
-            parts.push("shift");
+        let modifiers = &self.modifiers;
+        let mut separator = "";
+        for (enabled, name) in [
+            (modifiers.shift, "shift"),
+            (modifiers.control, "control"),
+            (modifiers.option, "option"),
+            (modifiers.command, "command"),
+        ] {
+            if enabled {
+                write!(f, "{separator}{name}")?;
+                separator = "+";
+            }
         }
-        if m.control {
-            parts.push("control");
-        }
-        if m.option {
-            parts.push("option");
-        }
-        if m.command {
-            parts.push("command");
-        }
-        parts.push(keycode_to_name(self.keycode).ok_or(std::fmt::Error)?);
-        write!(f, "{}", parts.join("+"))
+        write!(
+            f,
+            "{separator}{}",
+            keycode_to_name(self.keycode).ok_or(std::fmt::Error)?
+        )
     }
 }
 
@@ -115,14 +118,9 @@ impl<'de> Deserialize<'de> for KeyTrigger {
 }
 
 /// Error returned by [`KeyTrigger`]'s `FromStr` impl.
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("invalid key trigger: {0}")]
 pub struct ParseTriggerError(pub String);
-impl std::fmt::Display for ParseTriggerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid key trigger: {}", self.0)
-    }
-}
-impl std::error::Error for ParseTriggerError {}
 
 impl std::str::FromStr for KeyTrigger {
     type Err = ParseTriggerError;

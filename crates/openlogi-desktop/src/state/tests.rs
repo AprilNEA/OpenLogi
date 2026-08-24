@@ -1,23 +1,20 @@
 //! AppState unit tests.
 
-#![allow(
-    clippy::expect_used,
-    reason = "state fixture construction is intentionally asserted in tests"
-)]
-
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_core::config::{Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution};
-use openlogi_core::device::{
-    Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, LightValueRange, LightValueUnit, PairedDevice, RawDeviceAddress,
-    ReceiverInfo, StandaloneDevice,
+use openlogi_core::config::{
+    Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
 };
-use openlogi_core::hid::WriteError;
+use openlogi_core::device::{
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
+    PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+};
+use openlogi_core::hid::{
+    Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, WriteError,
+};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
-
-use openlogi_core::hid::{SmartShiftMode, SmartShiftStatus};
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
@@ -39,11 +36,11 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
         commands,
     );
 
-    state.set_thumbwheel_sensitivity(50);
+    state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
 
     assert_eq!(
         state.app_settings().thumbwheel_sensitivity,
-        openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY
+        ThumbwheelSensitivity::DEFAULT
     );
     assert_eq!(state.config_issue(), Some("invalid config"));
     assert!(receiver.try_recv().is_err());
@@ -203,7 +200,7 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
 
     assert_eq!(state.device_list.len(), 1);
     assert!(state.config.device_identity(transient_key).is_none());
-    state.commit_dpi(2400);
+    state.commit_dpi(Dpi::new(2400));
     assert!(state.config.dpi(transient_key).is_none());
 
     let stable_list = build_device_list(
@@ -385,8 +382,8 @@ fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
 fn smartshift_write_feedback_requires_the_written_value() {
     let expected = SmartShiftStatus {
         mode: SmartShiftMode::Ratchet,
-        auto_disengage: 12,
-        tunable_torque: 0,
+        auto_disengage: SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(12.0)),
+        tunable_torque: None,
     };
     assert_eq!(smartshift_write_outcome(expected, None), None);
     assert_eq!(
@@ -397,7 +394,9 @@ fn smartshift_write_feedback_requires_the_written_value() {
         smartshift_write_outcome(
             expected,
             Some(&Load::Ready(SmartShiftStatus {
-                auto_disengage: 13,
+                auto_disengage: SmartShiftAutoDisengage::Threshold(
+                    SmartShiftThreshold::from_rounded(13.0),
+                ),
                 ..expected
             })),
         ),
@@ -416,8 +415,8 @@ fn smartshift_write_feedback_requires_the_written_value() {
 fn stale_smartshift_reads_do_not_resolve_newer_writes() {
     let expected = SmartShiftStatus {
         mode: SmartShiftMode::Ratchet,
-        auto_disengage: 12,
-        tunable_torque: 0,
+        auto_disengage: SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(12.0)),
+        tunable_torque: None,
     };
     let applying = SmartShiftWriteStatus::Applying {
         expected,
@@ -1006,4 +1005,71 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         maps.contains_key(&ButtonId::Back),
         "a promoted OS-hook button gets its own menu simultaneously"
     );
+}
+
+/// A battery reading that changed on an otherwise identical device must reach
+/// the device list. The old guard compared nine hand-picked fields and
+/// `battery` was not among them, so the rebuilt list — carrying the fresh
+/// percentage — was discarded and every battery readout in the UI (gallery
+/// card, detail page, native Device menu) stayed frozen until some *other*
+/// compared field happened to move.
+#[test]
+fn a_battery_only_change_reaches_the_device_list() {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let unit_id = [1, 2, 3, 4];
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[inventory_with_battery(unit_id, 50)],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    assert_eq!(
+        state.device_list[0].battery.as_ref().map(|b| b.percentage),
+        Some(50)
+    );
+
+    let changed =
+        state.refresh_inventories(&[inventory_with_battery(unit_id, 40)], &[], &cache, &[]);
+
+    assert!(changed, "a battery change is a change");
+    assert_eq!(
+        state.device_list[0].battery.as_ref().map(|b| b.percentage),
+        Some(40),
+        "the fresh reading must replace the stale one"
+    );
+}
+
+/// The guard still exists: an identical snapshot is a no-op, so quiet cycles
+/// cost no window refresh. Without this the previous test could be satisfied
+/// by simply always returning `true`.
+#[test]
+fn an_identical_snapshot_is_still_a_no_op() {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let unit_id = [1, 2, 3, 4];
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[inventory_with_battery(unit_id, 50)],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    assert!(!state.refresh_inventories(&[inventory_with_battery(unit_id, 50)], &[], &cache, &[]));
+}
+
+fn inventory_with_battery(unit_id: [u8; 4], percentage: u8) -> DeviceInventory {
+    let mut inventory = direct_inventory(unit_id);
+    inventory.paired[0].battery = Some(BatteryInfo {
+        percentage,
+        level: BatteryLevel::Good,
+        status: BatteryStatus::Discharging,
+    });
+    inventory
 }

@@ -519,7 +519,7 @@ pub(super) fn post_horizontal_scroll(delta: i32) {
 /// Raw FFI surface for the AXUIElement/CF calls used by [`ax_browser_navigate`]
 /// and its helpers below. Kept as module-level items (rather than nested in
 /// `ax_browser_navigate`) so each helper is independently readable and short.
-#[allow(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
 mod ax_nav {
     use std::ffi::c_void;
 
@@ -565,7 +565,7 @@ struct AxAttrs {
 /// SAFETY: `el` must be a valid AXUIElementRef and `attr` a valid CFStringRef
 /// (the CF memory rules — Get Rule = no extra retain, Create/Copy Rule = +1
 /// retain, caller releases — apply throughout this module).
-#[allow(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
 unsafe fn copy_attr(
     el: ax_nav::AXUIElementRef,
     attr: core_foundation::string::CFStringRef,
@@ -583,7 +583,7 @@ unsafe fn copy_attr(
 /// Read an AX attribute as a String. Internally copies + releases.
 ///
 /// SAFETY: same contract as [`copy_attr`].
-#[allow(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
 unsafe fn attr_string(
     el: ax_nav::AXUIElementRef,
     attr: core_foundation::string::CFStringRef,
@@ -602,7 +602,7 @@ unsafe fn attr_string(
 ///
 /// SAFETY: `el` must be a valid AXUIElementRef and every field of `attrs` a
 /// valid CFStringRef.
-#[allow(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
 unsafe fn find_button(
     el: ax_nav::AXUIElementRef,
     target_id: &str,
@@ -694,12 +694,16 @@ unsafe fn find_button(
 
 /// Positional fallback: locate the Back (idx=0) or Forward (idx=1) button by
 /// structure rather than by attribute text. The Safari toolbar layout is:
-///   AXWindow → AXToolbar → AXGroup[1] → AXGroup[0] → AXButton[0/1]
+///
+/// ```text
+/// AXWindow → AXToolbar → AXGroup[1] → AXGroup[0] → AXButton[0/1]
+/// ```
+///
 /// This is locale-independent and works when no AX attribute names the button.
 ///
 /// SAFETY: `win` must be a valid AXUIElementRef and `attr_role`/`attr_children`
 /// valid CFStringRefs.
-#[allow(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
 unsafe fn find_nav_button_by_position(
     win: ax_nav::AXUIElementRef,
     forward: bool,
@@ -819,7 +823,7 @@ unsafe fn find_nav_button_by_position(
 ///
 /// Returns `true` when an AX button was found and pressed (result `kAXErrorSuccess`),
 /// `false` on any failure — the caller should fall back to a keyboard shortcut.
-#[allow(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
 pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSWorkspace;
@@ -925,7 +929,7 @@ use app_services::symbol as app_services_symbol;
 
 /// Shared resolver for private ApplicationServices SPI used by the Dock and
 /// symbolic-hotkey helpers.
-#[allow(
+#[expect(
     unsafe_code,
     reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
 )]
@@ -973,7 +977,7 @@ mod app_services {
 ///
 /// Isolated in its own submodule so the `unsafe` the `dlopen`/`dlsym` FFI
 /// needs is scoped here rather than spread across the platform helpers.
-#[allow(
+#[expect(
     unsafe_code,
     reason = "the private CoreDockSendNotification SPI is only reachable via dlopen/dlsym FFI"
 )]
@@ -1037,7 +1041,7 @@ mod dock {
 /// "Move right a space" (81). That respects the user's configured shortcut
 /// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
 /// hotkey when the user has disabled it.
-#[allow(
+#[expect(
     unsafe_code,
     reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
 )]

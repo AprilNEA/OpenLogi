@@ -126,7 +126,6 @@ pub fn oshook_gestures_for(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use crate::binding::default_gesture_binding;
 
@@ -147,6 +146,35 @@ mod tests {
             projected.get(&ButtonId::GestureButton),
             Some(&default_binding(ButtonId::GestureButton)),
             "a Click-less gesture must keep the default click, not None"
+        );
+    }
+
+    #[test]
+    fn a_rotation_rebind_leaves_the_wheels_tap_inert() {
+        // Rebinding rotation (or moving the sensitivity slider) diverts the
+        // wheel over 0x2150, which is what starts delivering its capacitive
+        // taps. Those taps must stay inert until the user binds the tap
+        // itself — a seeded action here fires from incidental thumb contact.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b034",
+            ButtonId::ThumbwheelScrollUp,
+            Action::VolumeUp.into(),
+        );
+
+        let projected = bindings_for(&cfg, Some("2b034"), None);
+        assert_eq!(projected.get(&ButtonId::Thumbwheel), Some(&Action::None));
+    }
+
+    #[test]
+    fn an_explicitly_bound_tap_survives_the_inert_default() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b034", ButtonId::Thumbwheel, Action::AppExpose.into());
+
+        let projected = bindings_for(&cfg, Some("2b034"), None);
+        assert_eq!(
+            projected.get(&ButtonId::Thumbwheel),
+            Some(&Action::AppExpose)
         );
     }
 

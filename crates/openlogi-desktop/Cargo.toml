@@ -29,12 +29,12 @@ gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
+swr-core = { workspace = true }
+swr-gpui = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror.workspace = true
-ureq.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -43,35 +43,29 @@ rust-i18n = "4"
 # *negotiation* lives in openlogi-ui.
 sys-locale = "0.3.2"
 gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.7", features = ["gpui"] }
-# Spawn the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
-# Cross-platform: a no-op pass-through to std::process::Command off macOS.
+# Spawns the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
 disclaim = "0.1"
 url = "2.5.8"
 walkdir = "2.5.0"
 backon.workspace = true
 opener = { workspace = true }
-succession = "0.1"
 derive_more = { version = "2.1.1", default-features = false, features = ["display", "from"] }
+# The user-picked app icon (Settings -> Appearance). Cross-platform: every
+# call is inert off macOS, which is the only OS that can change an installed
+# app's icon after the fact.
+appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
 
-# Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
-# version already in Cargo.lock as gpui's own build-dependency, so the resolve
-# adds an edge, not a crate, and the pinned gpui rev cannot move.
+# Held at the version Cargo.lock already has for gpui's own build-dependency;
+# bumping it independently would move the pinned gpui rev.
 [build-dependencies]
 embed-resource = "3.0.9"
 
-# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
-# `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
+# Window chrome and the host OS string only — the menu-bar status item lives in
+# the agent, not here.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow"] }
-objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
-# Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums —
-# see platform/permissions.rs.
-objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
 
-# unsafe_code stays denied (from [workspace.lints]); the status-item/tray modules
-# opt in locally with #[expect(unsafe_code)] for the few objc2 calls
-# (init-with-action, set-target, super-init) that remain unsafe.
 [lints]
 workspace = true
 

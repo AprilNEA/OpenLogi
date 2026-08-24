@@ -24,13 +24,15 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::config::{
-    DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
-    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
-use openlogi_core::hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartShiftStatus};
+use openlogi_core::hid::{
+    DeviceRoute, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+};
 
 use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus};
 use crate::ui::device_read::issue_device_read;
+use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
@@ -41,9 +43,12 @@ use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 /// floor and default are shared with the `openlogi-core` config contract. A device
 /// reporting a value outside the band is normalised for display by
 /// [`clamp_threshold`]; it is only rewritten once the user drags the slider.
-const THRESHOLD_MIN: u8 = SMARTSHIFT_MIN_AUTO_DISENGAGE;
-const THRESHOLD_MAX: u8 = 50;
-const DEFAULT_THRESHOLD: u8 = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
+const THRESHOLD_MIN: SmartShiftThreshold = SMARTSHIFT_MIN_AUTO_DISENGAGE;
+const THRESHOLD_MAX: SmartShiftThreshold = match SmartShiftThreshold::try_new(50) {
+    Ok(value) => value,
+    Err(_) => panic!("valid maximum SmartShift slider threshold"),
+};
+const DEFAULT_THRESHOLD: SmartShiftThreshold = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 
 pub struct SmartShiftPanel {
     /// The auto-disengage threshold slider. Always constructed (range is
@@ -52,17 +57,17 @@ pub struct SmartShiftPanel {
     /// Last threshold pushed into the slider from the device, so toggling
     /// "permanent" off restores it and an external change re-seats the thumb —
     /// but an in-progress drag (tracked by `pending_threshold`) doesn't.
-    last_threshold: u8,
+    last_threshold: SmartShiftThreshold,
     /// The live drag value, shown in the numeric label until release commits.
-    pending_threshold: Option<u8>,
+    pending_threshold: Option<SmartShiftThreshold>,
     _threshold_sub: Subscription,
     /// The per-device thumb-wheel sensitivity slider (device override; devices
     /// without one follow the app-wide default from Settings → General).
     wheel_sensitivity: Entity<SliderState>,
     /// Last committed sensitivity, to re-seat the thumb on a device switch.
-    last_wheel_sensitivity: i32,
+    last_wheel_sensitivity: ThumbwheelSensitivity,
     /// Live drag value shown in the numeric label until release commits.
-    pending_wheel_sensitivity: Option<i32>,
+    pending_wheel_sensitivity: Option<ThumbwheelSensitivity>,
     _wheel_sensitivity_sub: Subscription,
     _state_obs: Subscription,
 }
@@ -83,47 +88,44 @@ impl SmartShiftPanel {
                 &threshold,
                 |panel, _slider, event: &SliderEvent, cx| match event {
                     SliderEvent::Change(value) => {
-                        panel.pending_threshold = Some(raw_to_threshold(value.start()));
+                        panel.pending_threshold = Some(threshold_from_slider(value.start()));
                         cx.notify();
                     }
                     SliderEvent::Release(value) => {
-                        let t = raw_to_threshold(value.start());
+                        let threshold = threshold_from_slider(value.start());
                         panel.pending_threshold = None;
-                        panel.last_threshold = t;
+                        panel.last_threshold = threshold;
                         cx.update_global::<AppState, _>(|state, _| {
-                            let torque = state
-                                .current_smartshift_ready()
-                                .map_or(0, |s| s.tunable_torque);
-                            state.commit_smartshift(SmartShiftMode::Ratchet, t, torque);
+                            let Some(status) = state.current_smartshift_ready() else {
+                                return;
+                            };
+                            state.commit_smartshift(SmartShiftStatus {
+                                mode: SmartShiftMode::Ratchet,
+                                auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
+                                ..status
+                            });
                         });
                         cx.notify();
                     }
                 },
             );
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "sensitivity bounds are small 1..=100 integers — exact in f32"
-        )]
         let wheel_sensitivity = cx.new(|_| {
             SliderState::new()
-                .min(MIN_THUMBWHEEL_SENSITIVITY as f32)
-                .max(MAX_THUMBWHEEL_SENSITIVITY as f32)
+                .min(f32::from(ThumbwheelSensitivity::MIN))
+                .max(f32::from(ThumbwheelSensitivity::MAX))
                 .step(1.)
-                .default_value(DEFAULT_THUMBWHEEL_SENSITIVITY as f32)
+                .default_value(f32::from(ThumbwheelSensitivity::DEFAULT))
         });
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "slider values are small integers well inside i32"
-        )]
         let wheel_sensitivity_sub = cx.subscribe(
             &wheel_sensitivity,
             |panel, _slider, event: &SliderEvent, cx| match event {
                 SliderEvent::Change(value) => {
-                    panel.pending_wheel_sensitivity = Some(value.start().round() as i32);
+                    panel.pending_wheel_sensitivity =
+                        Some(ThumbwheelSensitivity::from_rounded(value.start()));
                     cx.notify();
                 }
                 SliderEvent::Release(value) => {
-                    let sensitivity = value.start().round() as i32;
+                    let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
                     panel.pending_wheel_sensitivity = None;
                     panel.last_wheel_sensitivity = sensitivity;
                     cx.update_global::<AppState, _>(|state, _| {
@@ -143,7 +145,7 @@ impl SmartShiftPanel {
             pending_threshold: None,
             _threshold_sub: threshold_sub,
             wheel_sensitivity,
-            last_wheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
+            last_wheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
             pending_wheel_sensitivity: None,
             _wheel_sensitivity_sub: wheel_sensitivity_sub,
             _state_obs: state_obs,
@@ -219,25 +221,21 @@ impl SmartShiftPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mode = status.mode;
-        let permanent = status.auto_disengage == AUTO_DISENGAGE_PERMANENT;
-        let torque = status.tunable_torque;
-        let cur_auto = status.auto_disengage;
+        let permanent = status.auto_disengage.is_permanent();
         let ratchet = matches!(mode, SmartShiftMode::Ratchet);
         let sensitivity_enabled = ratchet && !permanent;
 
-        let committed = if permanent {
-            self.last_threshold
-        } else {
-            clamp_threshold(status.auto_disengage)
-        };
+        let committed = status
+            .auto_disengage
+            .threshold()
+            .map_or(self.last_threshold, clamp_threshold);
         // Re-seat the thumb on an external change (device re-read / mode switch),
         // never mid-drag, and keep `last_threshold` tracking the real value so a
         // permanent→off toggle can restore it.
         if !permanent && self.pending_threshold.is_none() && committed != self.last_threshold {
             self.last_threshold = committed;
-            let v = f32::from(committed);
             self.threshold
-                .update(cx, |s, cx| s.set_value(v, window, cx));
+                .update(cx, |s, cx| s.set_value(f32::from(committed), window, cx));
         }
         let display = self.pending_threshold.unwrap_or(committed);
         let restore_threshold = if permanent {
@@ -255,21 +253,24 @@ impl SmartShiftPanel {
                     .child(mode_pill(
                         tr!("Free spin"),
                         !ratchet,
-                        SmartShiftMode::Free,
-                        cur_auto,
-                        torque,
+                        SmartShiftStatus {
+                            mode: SmartShiftMode::Free,
+                            ..status
+                        },
                         pal,
                     ))
                     .child(mode_pill(
                         tr!("Ratchet"),
                         ratchet,
-                        SmartShiftMode::Ratchet,
-                        // `committed`, not `cur_auto`: when the cached value is
+                        // `committed`, not the current setting: when the cached value is
                         // `0xFF` (permanent ratchet) this resolves to the last
                         // real threshold, so switching to ratchet mode doesn't
                         // silently re-arm permanent ratchet behind the toggle.
-                        committed,
-                        torque,
+                        SmartShiftStatus {
+                            mode: SmartShiftMode::Ratchet,
+                            auto_disengage: SmartShiftAutoDisengage::Threshold(committed),
+                            ..status
+                        },
                         pal,
                     )),
             );
@@ -304,7 +305,7 @@ impl SmartShiftPanel {
 
         let wheel_row = self.wheel_sensitivity_row(window, pal, cx);
 
-        let permanent_row = permanent_row(permanent, ratchet, restore_threshold, torque, pal);
+        let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
         v_flex()
             .gap_4()
@@ -334,15 +335,12 @@ impl SmartShiftPanel {
                     .current_record()
                     .map(|r| state.device_thumbwheel_sensitivity(&r.config_key))
             })
-            .unwrap_or(DEFAULT_THUMBWHEEL_SENSITIVITY);
+            .unwrap_or(ThumbwheelSensitivity::DEFAULT);
         if self.pending_wheel_sensitivity.is_none() && committed != self.last_wheel_sensitivity {
             self.last_wheel_sensitivity = committed;
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "sensitivity is a small 1..=100 integer — exact in f32"
-            )]
-            self.wheel_sensitivity
-                .update(cx, |s, cx| s.set_value(committed as f32, window, cx));
+            self.wheel_sensitivity.update(cx, |s, cx| {
+                s.set_value(f32::from(committed), window, cx);
+            });
         }
         let display = self.pending_wheel_sensitivity.unwrap_or(committed);
         v_flex()
@@ -467,8 +465,8 @@ fn smartshift_load_target(
 fn permanent_row(
     permanent: bool,
     ratchet: bool,
-    restore_threshold: u8,
-    torque: u8,
+    restore_threshold: SmartShiftThreshold,
+    status: SmartShiftStatus,
     pal: Palette,
 ) -> gpui::Div {
     h_flex()
@@ -488,18 +486,9 @@ fn permanent_row(
             permanent,
             ratchet,
             restore_threshold,
-            torque,
+            status,
             pal,
         ))
-}
-
-/// A small muted section heading.
-fn section_label(text: SharedString, pal: Palette) -> AnyElement {
-    div()
-        .text_body()
-        .text_color(pal.text_muted)
-        .child(text)
-        .into_any_element()
 }
 
 /// One wheel-mode pill. Clicking it writes `target` while preserving the
@@ -507,12 +496,10 @@ fn section_label(text: SharedString, pal: Palette) -> AnyElement {
 fn mode_pill(
     label: SharedString,
     selected: bool,
-    target: SmartShiftMode,
-    cur_auto: u8,
-    torque: u8,
+    status: SmartShiftStatus,
     _pal: Palette,
 ) -> AnyElement {
-    let id = match target {
+    let id = match status.mode {
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
@@ -522,7 +509,7 @@ fn mode_pill(
         .selected(selected)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
-                state.commit_smartshift(target, cur_auto, torque);
+                state.commit_smartshift(status);
             });
             cx.refresh_windows();
         })
@@ -534,8 +521,8 @@ fn mode_pill(
 fn permanent_toggle(
     on: bool,
     enabled: bool,
-    restore_threshold: u8,
-    torque: u8,
+    restore_threshold: SmartShiftThreshold,
+    status: SmartShiftStatus,
     _pal: Palette,
 ) -> AnyElement {
     let label = if on { tr!("On") } else { tr!("Off") };
@@ -546,12 +533,16 @@ fn permanent_toggle(
         .disabled(!enabled)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
-                let next = if on {
-                    restore_threshold
+                let auto_disengage = if on {
+                    SmartShiftAutoDisengage::Threshold(restore_threshold)
                 } else {
-                    AUTO_DISENGAGE_PERMANENT
+                    SmartShiftAutoDisengage::Permanent
                 };
-                state.commit_smartshift(SmartShiftMode::Ratchet, next, torque);
+                state.commit_smartshift(SmartShiftStatus {
+                    mode: SmartShiftMode::Ratchet,
+                    auto_disengage,
+                    ..status
+                });
             });
             cx.refresh_windows();
         })
@@ -569,26 +560,17 @@ fn disabled_track(pal: Palette) -> AnyElement {
 }
 
 /// Round + clamp a raw slider read into the friendly threshold range.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "value is rounded and clamped into THRESHOLD_MIN..=THRESHOLD_MAX before the cast"
-)]
-fn raw_to_threshold(raw: f32) -> u8 {
-    raw.round()
-        .clamp(f32::from(THRESHOLD_MIN), f32::from(THRESHOLD_MAX)) as u8
+fn threshold_from_slider(raw: f32) -> SmartShiftThreshold {
+    SmartShiftThreshold::from_rounded(raw).clamp(THRESHOLD_MIN, THRESHOLD_MAX)
 }
 
 /// Map a device-reported threshold into the slider's friendly band for display.
 ///
-/// A non-permanent auto-disengage below [`THRESHOLD_MIN`] — including the `0`
-/// "do not change"/unset sentinel — releases the wheel into free-spin on the
-/// gentlest scroll (#317), so it must never seed the slider or the
-/// permanent-ratchet restore at that runaway value. Such values are normalised
-/// to the default (the config parser rejects such persisted values); values above the
-/// band clamp down to [`THRESHOLD_MAX`]. (`0xFF` permanent ratchet never reaches
-/// here — the caller handles it before clamping.)
-fn clamp_threshold(value: u8) -> u8 {
+/// A non-permanent auto-disengage below [`THRESHOLD_MIN`] releases the wheel
+/// into free-spin on the gentlest scroll (#317), so it must never seed the
+/// slider or permanent-ratchet restore at that runaway value. Such values are
+/// normalised to the default; values above the band clamp to [`THRESHOLD_MAX`].
+fn clamp_threshold(value: SmartShiftThreshold) -> SmartShiftThreshold {
     if value < THRESHOLD_MIN {
         DEFAULT_THRESHOLD
     } else {
@@ -598,22 +580,32 @@ fn clamp_threshold(value: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::hid::SmartShiftThreshold;
+
     use super::{DEFAULT_THRESHOLD, THRESHOLD_MAX, THRESHOLD_MIN, clamp_threshold};
 
     #[test]
     fn clamp_threshold_heals_sub_floor_to_default() {
-        // 0 (the firmware "do not change" sentinel) and any sub-floor value
-        // used to seed the slider / permanent-ratchet restore with a runaway
-        // free-spin threshold (#317); they normalise to the default instead.
-        assert_eq!(clamp_threshold(0), DEFAULT_THRESHOLD);
-        assert_eq!(clamp_threshold(1), DEFAULT_THRESHOLD);
-        assert_eq!(clamp_threshold(THRESHOLD_MIN - 1), DEFAULT_THRESHOLD);
+        // A sub-floor device value used to seed the slider / permanent-ratchet
+        // restore with a runaway free-spin threshold (#317).
+        assert_eq!(
+            clamp_threshold(SmartShiftThreshold::from_rounded(1.0)),
+            DEFAULT_THRESHOLD
+        );
+        assert_eq!(
+            clamp_threshold(SmartShiftThreshold::from_rounded(7.0)),
+            DEFAULT_THRESHOLD
+        );
     }
 
     #[test]
     fn clamp_threshold_keeps_in_band_values_and_clamps_high() {
         assert_eq!(clamp_threshold(THRESHOLD_MIN), THRESHOLD_MIN);
-        assert_eq!(clamp_threshold(16), 16);
-        assert_eq!(clamp_threshold(200), THRESHOLD_MAX);
+        let default = SmartShiftThreshold::from_rounded(16.0);
+        assert_eq!(clamp_threshold(default), default);
+        assert_eq!(
+            clamp_threshold(SmartShiftThreshold::from_rounded(200.0)),
+            THRESHOLD_MAX
+        );
     }
 }

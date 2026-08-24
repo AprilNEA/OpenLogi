@@ -97,11 +97,6 @@ pub async fn run(args: LightingArgs) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod color_validation_tests {
     use openlogi_core::color::RgbParseError;
 

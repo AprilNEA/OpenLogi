@@ -8,9 +8,10 @@ use super::action::Action;
 use super::defaults::default_gesture_binding;
 use super::gesture::GestureDirection;
 
-/// What a single rebindable [`ButtonId`] does: either one [`Action`], or — for a
-/// raw-XY-capable button placed in gesture mode — a per-[`GestureDirection`]
-/// map (hold + swipe up/down/left/right, or a plain click).
+/// What a single rebindable [`ButtonId`](crate::binding::ButtonId) does: either
+/// one [`Action`], or — for a raw-XY-capable button placed in gesture mode — a
+/// per-[`GestureDirection`] map (hold + swipe up/down/left/right, or a plain
+/// click).
 ///
 /// There has only ever been one binding map per device; a gesture binding is
 /// just a binding whose payload is a direction map instead of a single action.

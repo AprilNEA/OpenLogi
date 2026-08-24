@@ -16,6 +16,7 @@
 mod glow;
 mod images;
 mod paths;
+pub(crate) mod queries;
 pub mod sync;
 
 pub(crate) use self::glow::GlowGeometry;
@@ -101,12 +102,8 @@ fn open_in_file_manager(path: &Path) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAsset {
-    #[allow(
-        dead_code,
-        reason = "depot label will be surfaced in the carousel tooltip (P0.4+)"
-    )]
     pub depot: String,
     pub display_name: String,
     /// The registry's curated device type for this model, normalized from the
@@ -473,7 +470,6 @@ fn suffix_candidates(model: &DeviceModelInfo) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use openlogi_assets::DeviceEntry;

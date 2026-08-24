@@ -16,8 +16,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -50,7 +50,12 @@ pub use succession::Identity;
 ///      not a stream of steps (see [`PairingPhase`]).
 /// v21: `observe_action_ring` appended — the showing ring is state too (see
 ///      [`RingObservation`]).
-pub const PROTOCOL_VERSION: u32 = 21;
+/// v22: DPI scalar values use the validated [`Dpi`] type end to end.
+/// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
+/// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
+/// v25: `AgentStatus::input_monitoring_granted` appended.
+/// v26: `AgentStatus::hid_open_failures` appended.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -89,6 +94,10 @@ pub enum InventoryHealth {
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "AgentStatus is a serialized health DTO; bools keep the IPC shape explicit"
+)]
 pub struct AgentStatus {
     pub accessibility_granted: bool,
     pub hook_installed: bool,
@@ -97,6 +106,12 @@ pub struct AgentStatus {
     pub inventory: InventoryHealth,
     pub protocol_version: u32,
     pub agent_version: String,
+    /// Whether the agent process holds Input Monitoring (HID) access.
+    pub input_monitoring_granted: bool,
+    /// Whether the last enumeration tick failed to open at least one HID++
+    /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
+    /// a missing grant from an exclusive open or a stale permission session.
+    pub hid_open_failures: bool,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
@@ -380,16 +395,12 @@ pub trait Agent {
     /// the GUI after it saves a config change.
     async fn reload_config() -> Result<(), ConfigReloadError>;
     /// Apply a DPI value to `route` now (slider preview / commit).
-    async fn set_dpi(route: DeviceRoute, dpi: u32) -> Result<(), WriteError>;
+    async fn set_dpi(route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError>;
     /// Apply a lighting config to `route` now.
     async fn set_lighting(route: DeviceRoute, lighting: Lighting) -> Result<(), WriteError>;
     /// Apply a full SmartShift config to `route` now.
-    async fn set_smartshift(
-        route: DeviceRoute,
-        mode: SmartShiftMode,
-        auto_disengage: u8,
-        tunable_torque: u8,
-    ) -> Result<(), WriteError>;
+    async fn set_smartshift(route: DeviceRoute, status: SmartShiftStatus)
+    -> Result<(), WriteError>;
     /// Read the current DPI + supported values from `route`. A permanent error
     /// (`FeatureUnsupported` / `EmptyDpiList`) reaches the GUI intact so it can
     /// stop re-probing a device that genuinely lacks the feature.

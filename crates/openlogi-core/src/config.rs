@@ -11,30 +11,36 @@ use std::{collections::BTreeMap, path::Path};
 use serde::{Deserialize, Serialize};
 
 mod device;
+#[cfg(feature = "fs")]
 mod file;
 mod key_trigger;
 mod settings;
 
+// Stacked, not `all(test, …)`: clippy reads the combined form as a test
+// outside a test module and withdraws the `unwrap`/`expect` exemption.
 #[cfg(test)]
+#[cfg(feature = "fs")]
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity};
+#[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
-#[cfg(test)]
+#[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppSettings, Appearance, AssetSourcePreference, CameraControls, DEFAULT_THUMBWHEEL_SENSITIVITY,
-    Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    WheelMode, clamp_thumbwheel_sensitivity,
+    ThumbwheelSensitivity, WheelMode,
 };
 
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
     RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
+use crate::hid::Dpi;
+#[cfg(feature = "fs")]
 use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
@@ -80,6 +86,14 @@ pub struct Config {
     /// this config never writes the on-disk file. Never true for a loaded or
     /// default-constructed config.
     #[serde(skip)]
+    // Read only by the `fs` half, which is where saving happens. The field
+    // stays in every build: `Config::ephemeral()` is public API, and a field
+    // that exists conditionally is a struct whose shape depends on a feature.
+    #[cfg_attr(
+        not(feature = "fs"),
+        expect(clippy::allow_attributes, reason = "see above"),
+        allow(dead_code, reason = "only the `fs` half suppresses a save")
+    )]
     ephemeral: bool,
     /// Per-device state, keyed by the stable physical-device identifier
     /// (e.g. `"receiver:abc123:slot:2"`) so two identical models never share
@@ -206,6 +220,7 @@ impl Config {
     /// gestures from, inferred from the binding shapes — the owner-lock-era
     /// resolution rule, retained solely for
     /// [`Self::migrate_owner_locked_gestures`]. `None` means gestures were off.
+    #[cfg(feature = "fs")]
     fn infer_gesture_owner(bindings: &BTreeMap<ButtonId, Binding>) -> Option<ButtonId> {
         // An OS-hook button left in gesture mode took the role over.
         if let Some((id, _)) = bindings
@@ -339,6 +354,7 @@ impl Config {
     ///   capture layer leaves native;
     /// - the consumed `gesture_owner` never serializes again — the shape is
     ///   the whole truth from here on.
+    #[cfg(feature = "fs")]
     fn migrate_owner_locked_gestures(&mut self) {
         for device in self.devices.values_mut() {
             let owner = match device.gesture_owner.take() {
@@ -521,7 +537,7 @@ impl Config {
     /// The ordered DPI preset list for `device_key`, or an empty `Vec` if the
     /// device has none configured yet.
     #[must_use]
-    pub fn dpi_presets(&self, device_key: &str) -> Vec<u32> {
+    pub fn dpi_presets(&self, device_key: &str) -> Vec<Dpi> {
         self.devices
             .get(device_key)
             .map(|d| d.dpi_presets.clone())
@@ -531,7 +547,7 @@ impl Config {
     /// Replace the DPI preset list for `device_key`. Pass an empty `Vec` to
     /// clear (the device block is kept; the field is just omitted on save
     /// thanks to `skip_serializing_if`).
-    pub fn set_dpi_presets(&mut self, device_key: &str, presets: Vec<u32>) {
+    pub fn set_dpi_presets(&mut self, device_key: &str, presets: Vec<Dpi>) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
@@ -670,13 +686,13 @@ impl Config {
 
     /// The committed sensor DPI for `device_key`, or `None` if never set.
     #[must_use]
-    pub fn dpi(&self, device_key: &str) -> Option<u32> {
+    pub fn dpi(&self, device_key: &str) -> Option<Dpi> {
         self.devices.get(device_key).and_then(|d| d.dpi)
     }
 
     /// Record the committed sensor DPI for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
-    pub fn set_dpi(&mut self, device_key: &str, dpi: u32) {
+    pub fn set_dpi(&mut self, device_key: &str, dpi: Dpi) {
         self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
     }
 
@@ -760,7 +776,7 @@ impl Config {
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
     /// override when set, else the app-wide default.
     #[must_use]
-    pub fn thumbwheel_sensitivity(&self, device_key: &str) -> i32 {
+    pub fn thumbwheel_sensitivity(&self, device_key: &str) -> ThumbwheelSensitivity {
         self.devices
             .get(device_key)
             .and_then(|d| d.thumbwheel_sensitivity)
@@ -772,12 +788,12 @@ impl Config {
     pub fn set_device_thumbwheel_sensitivity(
         &mut self,
         device_key: &str,
-        sensitivity: Option<i32>,
+        sensitivity: Option<ThumbwheelSensitivity>,
     ) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .thumbwheel_sensitivity = sensitivity.map(clamp_thumbwheel_sensitivity);
+            .thumbwheel_sensitivity = sensitivity;
     }
 }
 

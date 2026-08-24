@@ -6,7 +6,7 @@ use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
 
-/// What pressing a [`ButtonId`] should do.
+/// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
 ///
 /// Serialization uses serde's default external tagging: unit variants
 /// serialize as a bare string (`"BrowserBack"`) and the tuple variant

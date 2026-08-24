@@ -503,7 +503,6 @@ fn opt_num<T: std::fmt::Display>(value: Option<T>) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::{
         AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport,

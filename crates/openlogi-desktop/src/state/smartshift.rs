@@ -2,7 +2,7 @@
 //! cache itself lives in [`super::load::LazyDeviceData`], reached directly as
 //! `self.reads.smartshift`.
 
-use openlogi_core::hid::{DeviceRoute, SmartShiftMode, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, SmartShiftStatus, WriteError};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -100,12 +100,7 @@ impl AppState {
     /// `config.toml` — the values live in device RAM and reset on a power
     /// cycle (#189), so the agent re-applies them when the device reconnects.
     /// No-op when no device is selected.
-    pub fn commit_smartshift(
-        &mut self,
-        mode: SmartShiftMode,
-        auto_disengage: u8,
-        tunable_torque: u8,
-    ) {
+    pub fn commit_smartshift(&mut self, status: SmartShiftStatus) {
         let Some(record) = self.current_record() else {
             debug!("no active device — SmartShift change ignored");
             return;
@@ -117,34 +112,21 @@ impl AppState {
         if let Some(persistent_key) = persistent_key {
             self.config.set_smartshift(
                 &persistent_key,
-                openlogi_core::config::SmartShift {
-                    mode: mode.into(),
-                    auto_disengage,
-                    tunable_torque,
-                },
+                openlogi_core::config::SmartShift::from(status),
             );
             if !self.persist_and_reload("SmartShift") {
                 return;
             }
         }
         if let Some(route) = route {
-            self.send_ipc(crate::services::ipc::Command::SetSmartShift(
-                route,
-                mode,
-                auto_disengage,
-                tunable_torque,
-            ));
+            self.send_ipc(crate::services::ipc::Command::SetSmartShift(route, status));
         }
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming
         // re-read: the write is fire-and-forget, so a sleeping device that
         // rejected or timed it out would otherwise leave this optimistic value
         // showing as "applied" forever (Ready blocks any further read).
-        let expected = SmartShiftStatus {
-            mode,
-            auto_disengage,
-            tunable_torque,
-        };
+        let expected = status;
         self.reads.smartshift.set_ready(key.clone(), expected);
         let write_id = can_confirm.then(|| {
             let write_id = self.next_smartshift_write_id;

@@ -5,13 +5,14 @@
 //! stays whole instead of being cut off.
 
 use gpui::{
-    Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
+    Bounds, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
     SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla, point,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point,
     prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::ActionRingInvocation;
+use openlogi_ui::color;
 use tokio::sync::mpsc;
 
 use crate::agent::OverlayCommand;
@@ -20,6 +21,32 @@ use crate::platform;
 pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
+
+/// The ring's own neutral scale. It floats over whatever is on the desktop, so
+/// unlike the settings app it cannot take its surfaces from the OS appearance —
+/// it commits to a dark panel and rides its own contrast. Only the accent is
+/// shared (`openlogi_ui::color`); these greys are local by nature.
+const PANEL: Hsla = neutral(0.06, 0.82);
+const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
+const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
+const GLYPH: Hsla = neutral(0.98, 1.0);
+const LABEL: Hsla = neutral(0.94, 1.0);
+const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
+
+const fn neutral(lightness: f32, alpha: f32) -> Hsla {
+    Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: lightness,
+        a: alpha,
+    }
+}
+
+/// The accent deepened for the dark panel: the brand lightness sits too close to
+/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
+/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
+const SELECTED_FILL_L: f32 = 0.48;
+const SELECTED_BORDER_L: f32 = 0.78;
 
 pub(crate) struct RingView {
     invocation: ActionRingInvocation,
@@ -76,22 +103,18 @@ impl RingView {
                 .justify_center()
                 .rounded_full()
                 .bg(if selected {
-                    hsla(0.59, 0.72, 0.48, 1.0)
+                    color::accent_at_lightness(SELECTED_FILL_L)
                 } else {
-                    hsla(0.0, 0.0, 0.16, 0.98)
+                    SLOT_RESTING
                 })
                 .when(selected, |slot| {
-                    slot.border_2().border_color(hsla(0.59, 0.90, 0.72, 1.0))
+                    slot.border_2()
+                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
                 })
                 .shadow_md()
-                .text_color(hsla(0.0, 0.0, 0.98, 1.0))
+                .text_color(GLYPH)
                 .cursor_pointer()
-                .child(
-                    svg()
-                        .path(icon_path)
-                        .size(px(22.0))
-                        .text_color(hsla(0.0, 0.0, 0.98, 1.0)),
-                )
+                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     if *hovered && this.hovered != Some(slot) {
                         this.hovered = Some(slot);
@@ -147,7 +170,7 @@ impl Render for RingView {
                     .top(px(18.0))
                     .size(px(WINDOW_SIZE - 36.0))
                     .rounded_full()
-                    .bg(hsla(0.0, 0.0, 0.06, 0.82))
+                    .bg(PANEL)
                     .shadow_lg(),
             )
             .children(slots)
@@ -162,8 +185,8 @@ impl Render for RingView {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(hsla(0.0, 0.0, 0.20, 0.98))
-                    .text_color(hsla(0.0, 0.0, 0.82, 1.0))
+                    .bg(CANCEL_RESTING)
+                    .text_color(CANCEL_GLYPH)
                     .text_lg()
                     .cursor_pointer()
                     .child("×")
@@ -182,7 +205,7 @@ impl Render for RingView {
                         .w(px(160.0))
                         .text_center()
                         .text_sm()
-                        .text_color(hsla(0.0, 0.0, 0.94, 1.0))
+                        .text_color(LABEL)
                         .child(label),
                 )
             })
@@ -193,7 +216,7 @@ impl Render for RingView {
     }
 }
 
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
 )]
@@ -274,11 +297,6 @@ pub(crate) fn clamp_window_origin(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "panic helpers are idiomatic in tests"
-)]
 mod tests {
     use super::*;
 

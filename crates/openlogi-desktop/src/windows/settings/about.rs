@@ -58,12 +58,7 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
                     h_flex()
                         .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::BOLD)
-                                .child("OpenLogi"),
-                        )
+                        .child(div().text_heading().child("OpenLogi"))
                         .child(
                             div()
                                 .text_body()

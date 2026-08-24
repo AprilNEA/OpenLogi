@@ -12,17 +12,22 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, FontWeight, Hsla, Pixels, Rgba, Styled, Window, hsla, px, relative, rgb};
+#[cfg(test)]
+use gpui::rgb;
+use gpui::{App, FontWeight, Hsla, Pixels, Rgba, Styled, Window, hsla, px, relative};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::Appearance;
 
 use crate::state::AppState;
 
-/// Primary action / selection blue. Brand colour, identical in both modes —
-/// it reads on the light card surfaces and the dark window alike.
-pub const ACCENT_BLUE: u32 = 0x003b_82f6;
+// The brand accent lives in `openlogi-ui` so the overlay paints the same blue
+// this app does — it cannot depend on this crate, and a local copy is how the
+// ring ended up with a blue of its own. Re-exported so screens keep reading it
+// off `theme::`, beside the status hues and the appearance-derived [`Palette`].
+pub use openlogi_ui::color::{ACCENT_BLUE, accent};
 
-/// Status colours for the carousel connectivity dot.
+/// Status colours for the connectivity readouts. Fixed like the accent, but the
+/// overlay draws no status, so they stay with the app that does.
 pub const STATUS_CONNECTED: u32 = 0x0022_c55e;
 pub const STATUS_CONNECTING: u32 = 0x00ea_b308;
 pub const STATUS_OFFLINE: u32 = 0x006b_7280;
@@ -283,13 +288,6 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
         theme.radius = px(f32::from(radius));
     }
     cx.refresh_windows();
-}
-
-/// [`ACCENT_BLUE`] as an [`Hsla`] — the selection accent for borders and fills
-/// on selectable controls, so callers stop re-`rgb()`-ing the brand constant.
-#[must_use]
-pub fn accent() -> Hsla {
-    rgb(ACCENT_BLUE).into()
 }
 
 /// Faint accent fill marking a *selected* row / chip — tinted, not painted, so

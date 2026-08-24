@@ -37,6 +37,7 @@ use openlogi_core::binding::{
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::state::AppState;
+use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
@@ -570,7 +571,7 @@ pub(crate) fn action_rows(
     let mut children: Vec<AnyElement> = Vec::new();
     for (category, actions) in grouped_catalog() {
         let category_label = rust_i18n::t!(category.label());
-        children.push(section_header(&category_label, pal));
+        children.push(popover_section(category_label.into_owned(), pal));
         for action in actions {
             let selected = current == Some(&action);
             let label = tr!(action.label());
@@ -644,16 +645,15 @@ pub(crate) fn menu_row(
         })
 }
 
-/// Small uppercase muted group header.
-pub(crate) fn section_header(label: &str, pal: Palette) -> AnyElement {
-    div()
+/// A group heading in a popover list, inset to line up with the rows under it.
+/// Shared with the Actions Ring editor and the function-row list, which draw the
+/// same list.
+pub(crate) fn popover_section(label: impl Into<gpui::SharedString>, pal: Palette) -> AnyElement {
+    section_label(label, pal)
         .w_full()
         .px_2()
         .pt_2()
         .pb_0p5()
-        .text_caption()
-        .text_color(pal.text_muted)
-        .child(label.to_uppercase())
         .into_any_element()
 }
 

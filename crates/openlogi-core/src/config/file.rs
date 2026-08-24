@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock, PoisonError},
+    sync::{LazyLock, Mutex, PoisonError},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -17,7 +17,8 @@ use super::{Config, SCHEMA_VERSION};
 use crate::paths::{self, PathsError};
 
 const CONFIG_BACKUP_GENERATIONS: usize = 5;
-static BACKED_UP_CONFIGS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static BACKED_UP_CONFIGS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Failure loading or persisting `config.toml`.
 #[derive(Debug, Error)]
@@ -316,8 +317,9 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
 }
 
 fn backup_config_once(path: &Path) -> io::Result<()> {
-    let backed_up = BACKED_UP_CONFIGS.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut backed_up = backed_up.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut backed_up = BACKED_UP_CONFIGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if backed_up.contains(path) {
         return Ok(());
     }

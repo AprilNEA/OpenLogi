@@ -50,6 +50,8 @@ impl ObservableState {
                     inventory: InventoryHealth::Scanning,
                     protocol_version: PROTOCOL_VERSION,
                     agent_version,
+                    input_monitoring_granted: openlogi_hid::permissions::has_access(),
+                    hid_open_failures: false,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -110,7 +112,8 @@ impl ObservableState {
     }
 
     /// Publish where enumeration stands together with the device set it
-    /// produced, so the two can never be read from different generations.
+    /// produced — and whether that tick failed to open HID++ nodes — so none
+    /// of the three can be read from different generations.
     ///
     /// The inventory watcher re-enumerates on a timer, so most calls carry the
     /// same devices as the last one; those notify nobody.
@@ -119,17 +122,20 @@ impl ObservableState {
         health: InventoryHealth,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
     ) {
         self.update(|snapshot| {
             if snapshot.status.inventory == health
                 && snapshot.inventory == inventories
                 && snapshot.standalone == standalone
+                && snapshot.status.hid_open_failures == hid_open_failures
             {
                 return false;
             }
             snapshot.status.inventory = health;
             snapshot.inventory = inventories.to_vec();
             snapshot.standalone = standalone.to_vec();
+            snapshot.status.hid_open_failures = hid_open_failures;
             true
         });
     }
@@ -164,6 +170,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.accessibility_granted = granted;
+            true
+        });
+    }
+
+    /// Publish an Input Monitoring trust change, as observed by
+    /// [`watchers::input_monitoring`](crate::watchers::input_monitoring).
+    pub fn set_input_monitoring_granted(&self, granted: bool) {
+        self.update(|snapshot| {
+            if snapshot.status.input_monitoring_granted == granted {
+                return false;
+            }
+            snapshot.status.input_monitoring_granted = granted;
             true
         });
     }
@@ -214,10 +232,6 @@ impl ObservableState {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "unwrap is idiomatic in tests; `has_changed` can only fail once the sender is dropped, and these tests hold it"
-)]
 mod tests {
     use super::ObservableState;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
@@ -257,12 +271,12 @@ mod tests {
         let state = state();
         let mut rx = state.subscribe();
 
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap(), "the first enumeration is news");
         rx.mark_unchanged();
 
         // What the inventory watcher does every couple of seconds on a steady desk.
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(
             !rx.has_changed().unwrap(),
             "an identical enumeration must not wake a reader"
@@ -273,10 +287,10 @@ mod tests {
     fn a_device_waking_inside_an_otherwise_identical_set_is_news() {
         let state = state();
         let mut rx = state.subscribe();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[], false);
         rx.mark_unchanged();
 
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap());
     }
 
@@ -287,7 +301,7 @@ mod tests {
 
         // "Checked, no devices" differs from "not checked yet" only in health —
         // the distinction the GUI's empty state reads.
-        state.set_inventory(InventoryHealth::Ready, &[], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[], &[], false);
         assert!(rx.has_changed().unwrap());
         let snapshot = state.snapshot();
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
@@ -297,7 +311,7 @@ mod tests {
     #[test]
     fn a_hook_write_leaves_the_device_facts_alone() {
         let state = state();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
         state.set_hook_installed(true);
         state.set_accessibility_granted(true);
@@ -323,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_generation_gets_the_current_state_at_once() {
         let state = state();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
         let observed = state.observe(1).await;
         assert_eq!(observed.generation, 2);

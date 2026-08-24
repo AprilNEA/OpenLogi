@@ -29,7 +29,8 @@ pub enum GestureDirection {
 impl GestureDirection {
     /// All five direction slots, swipes first and [`Click`](Self::Click) last.
     /// Iterated to seed or complete a full gesture map — see
-    /// [`Binding::fill_gesture_defaults`] and [`default_binding_for`].
+    /// [`Binding::fill_gesture_defaults`](crate::binding::Binding::fill_gesture_defaults)
+    /// and [`default_binding_for`](crate::binding::default_binding_for).
     pub const ALL: [GestureDirection; 5] = [
         GestureDirection::Up,
         GestureDirection::Down,

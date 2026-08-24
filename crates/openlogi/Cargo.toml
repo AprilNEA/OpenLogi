@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "hardware-support"]
 readme = "../../README.md"
 
 [dependencies]
-openlogi-cli = { path = "../openlogi-cli", version = "0.7.1" }
+openlogi-cli = { path = "../openlogi-cli", version = "0.7.10" }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 

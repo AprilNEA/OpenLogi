@@ -87,7 +87,7 @@ async fn connect() -> Option<AgentClient> {
     // superseded install, and the agent will start the overlay that matches it
     // as soon as this one releases the role.
     if connection.version != PROTOCOL_VERSION {
-        yield_to_replacement(&format!(
+        stand_down(&format!(
             "agent speaks protocol {} and this overlay speaks {PROTOCOL_VERSION}",
             connection.version
         ));
@@ -95,23 +95,50 @@ async fn connect() -> Option<AgentClient> {
     let client = connection.client;
     let identity = client.identity(context::current()).await.ok()?;
     if let Standing::Superseded(because) = allegiance().observe(identity) {
-        yield_to_replacement(&because.to_string());
+        stand_down(&because.to_string());
     }
     Some(client)
 }
 
-/// Exit so the replacement overlay can take the role.
+/// Exit, releasing the overlay role.
 ///
-/// Staying alive would be worse than useless: this process cannot serve a ring
-/// it can no longer be asked about, and its claim on the role is exactly what
-/// stops the agent's supervisor from starting the overlay that can.
+/// Staying alive is worse than useless in every case that reaches here. A
+/// superseded helper cannot serve a ring it can no longer be asked about, and
+/// its claim on the role is exactly what stops the agent's supervisor from
+/// starting the one that can; an orphaned helper has no agent to serve at all.
 #[expect(
     clippy::exit,
     reason = "the IPC tasks run off the GPUI main thread and cannot return a status to `main`, which is parked in the application run loop; releasing the role by exiting is the point"
 )]
-pub(crate) fn yield_to_replacement(because: &str) -> ! {
-    info!("{because} — exiting so the agent's own overlay can start");
+pub(crate) fn stand_down(because: &str) -> ! {
+    info!("{because} — exiting and releasing the Actions Ring overlay role");
     std::process::exit(0)
+}
+
+/// How long to keep reaching for an agent before giving up and exiting.
+///
+/// Nothing else bounds this process's life. The agent starts it detached and
+/// never kills it — the menu-bar Quit is a `process::exit`, which runs no
+/// destructors — and every other exit path here needs a *replacement* agent to
+/// answer. So an agent that stops for good leaves its helper reconnecting
+/// forever; one was found still at it three days on. Giving up costs almost
+/// nothing: the helper only exists to keep process-start latency off the first
+/// ring press, which is worth exactly zero while no agent is running, and the
+/// supervisor starts a fresh one within its restart backoff once an agent is
+/// back.
+const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
+
+/// How long to wait between attempts to reach an agent.
+const RETRY_PERIOD: Duration = Duration::from_secs(1);
+
+/// Record a failed attempt to reach an agent, and say whether to give up.
+///
+/// `unreachable_since` is armed by the first failure of a run and cleared by
+/// the caller on every success, so a helper whose agent keeps flapping back
+/// within the deadline never accumulates its way to an exit.
+fn give_up(unreachable_since: &mut Option<Instant>, now: Instant) -> bool {
+    let armed = *unreachable_since.get_or_insert(now);
+    now.duration_since(armed) >= GIVE_UP_AFTER
 }
 
 async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
@@ -121,15 +148,21 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
     // instead of having missed its invocation. Reset on every disconnect: the
     // replacement agent numbers its own generations.
     let mut seen: Generation = 0;
+    // Armed while no agent is answering; see `give_up`.
+    let mut unreachable_since: Option<Instant> = None;
     loop {
         if client.is_none() {
             client = connect().await;
             seen = 0;
         }
         let Some(active) = client.as_ref() else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            if give_up(&mut unreachable_since, Instant::now()) {
+                stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
+            }
+            tokio::time::sleep(RETRY_PERIOD).await;
             continue;
         };
+        unreachable_since = None;
         let mut ctx = context::current();
         // Above the agent's hold, or tarpc would cancel the handler mid-wait.
         ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
@@ -345,13 +378,43 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "panic helpers are idiomatic in tests"
-)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_failed_attempt_only_arms_the_give_up_clock() {
+        let mut since = None;
+        let now = Instant::now();
+        assert!(!give_up(&mut since, now));
+        assert_eq!(since, Some(now));
+    }
+
+    #[test]
+    fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
+        let start = Instant::now();
+        let mut since = None;
+        assert!(!give_up(&mut since, start));
+        assert!(!give_up(&mut since, start + GIVE_UP_AFTER / 2));
+        assert!(give_up(&mut since, start + GIVE_UP_AFTER));
+    }
+
+    #[test]
+    fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
+        let start = Instant::now();
+        let mut since = None;
+        // Each round the agent is gone for half the deadline, then answers —
+        // which is what clears the clock at the call site. Five rounds is two
+        // and a half deadlines in total, so a version that kept the clock
+        // running across outages would have exited by the third.
+        for round in 1..=5 {
+            let gone = start + (GIVE_UP_AFTER / 2) * round;
+            assert!(
+                !give_up(&mut since, gone),
+                "a reachable agent must not inherit the previous outage's clock"
+            );
+            since = None;
+        }
+    }
 
     #[test]
     fn activation_takes_priority_over_queued_hover_updates() {

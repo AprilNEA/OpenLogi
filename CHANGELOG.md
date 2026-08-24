@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-08-23
+
+### Fixed
+
+- *(release)* publish the complete crates.io dependency closure
+- *(release)* ignore stale release pull requests during changelog post-processing
+
+## [0.7.9] - 2026-08-23
+
+### Added
+
+- *(cli)* read the running agent's inventory in openlogi list ([#823](https://github.com/AprilNEA/OpenLogi/pull/823))
+- *(ipc)* surface HID open failures in agent status ([#822](https://github.com/AprilNEA/OpenLogi/pull/822))
+
+### Fixed
+
+- *(overlay,agent)* stop the anonymous overlay tenant from wedging the Actions Ring ([#848](https://github.com/AprilNEA/OpenLogi/pull/848))
+- *(gui)* stop discarding correctly rebuilt device records ([#868](https://github.com/AprilNEA/OpenLogi/pull/868))
+- *(thumbwheel)* stop the tap firing App Exposé, and scroll by the wheel's native amount ([#857](https://github.com/AprilNEA/OpenLogi/pull/857))
+- *(agent)* follow the picked app icon in the menu bar ([#846](https://github.com/AprilNEA/OpenLogi/pull/846))
+- *(nix)* provide git to the sandboxed test phase ([#833](https://github.com/AprilNEA/OpenLogi/pull/833))
+- *(gui)* check the open helper's exit status when launching the agent ([#820](https://github.com/AprilNEA/OpenLogi/pull/820))
+
+## [0.7.8] - 2026-08-23
+
+### Added
+
+- *(cli)* read the running agent's inventory in openlogi list ([#823](https://github.com/AprilNEA/OpenLogi/pull/823))
+- *(ipc)* surface HID open failures in agent status ([#822](https://github.com/AprilNEA/OpenLogi/pull/822))
+
+### Fixed
+
+- *(thumbwheel)* stop the tap firing App Exposé, and scroll by the wheel's native amount ([#857](https://github.com/AprilNEA/OpenLogi/pull/857))
+- *(agent)* follow the picked app icon in the menu bar ([#846](https://github.com/AprilNEA/OpenLogi/pull/846))
+- *(nix)* provide git to the sandboxed test phase ([#833](https://github.com/AprilNEA/OpenLogi/pull/833))
+- *(gui)* check the open helper's exit status when launching the agent ([#820](https://github.com/AprilNEA/OpenLogi/pull/820))
+
+## [0.7.7] - 2026-08-23
+
+0.7.5 and 0.7.6 were tagged but never published — their macOS packaging
+failed before any artifact was uploaded — so everything they contained
+ships here.
+
+### Added
+
+- *(hid)* recognise Lightspeed receiver 046d:c54d (PRO X SUPERLIGHT 2 DEX) ([#811](https://github.com/AprilNEA/OpenLogi/pull/811))
+- *(gui)* wear and pick the app icon
+- *(core)* persist which app icon the user picked
+- *(camera)* add anti-flicker and low-light controls ([#793](https://github.com/AprilNEA/OpenLogi/pull/793))
+- *(cli)* report feature flags and firmware entities in diag features ([#690](https://github.com/AprilNEA/OpenLogi/pull/690))
+- *(i18n)* add Ukrainian (uk) locale ([#715](https://github.com/AprilNEA/OpenLogi/pull/715))
+
+### Fixed
+
+- *(ci)* build both macOS legs with an Icon Composer-capable Xcode ([#815](https://github.com/AprilNEA/OpenLogi/pull/815))
+- *(agent)* make macOS permission failures diagnosable ([#817](https://github.com/AprilNEA/OpenLogi/pull/817))
+- *(release)* trust release-plz no-op results
+- *(release)* use changelog as release PR body
+- *(hid)* park the Windows HID read on a permanently dead handle ([#779](https://github.com/AprilNEA/OpenLogi/pull/779))
+- *(hid)* take async-hid 0.5.3 so a denied HID open stops leaking ([#804](https://github.com/AprilNEA/OpenLogi/pull/804))
+- *(ipc)* surface Input Monitoring via agent status and fix registry_model_id bincode ([#760](https://github.com/AprilNEA/OpenLogi/pull/760))
+- *(agent)* an unreadable stat breaks the absence run
+- *(agent)* only confirmed absence may condemn the agent
+- *(agent)* shut down when the app is uninstalled
+- *(gui)* only wear an app icon the config kept
+- *(hook)* keep macOS tap lifecycle instance-owned
+- *(hook)* keep the idempotent re-enable, budget only the OS-driven one
+- *(agent)* release the input hook on SIGTERM and SIGINT
+- *(hook)* detect Accessibility revocation with a live tap probe
+- *(ci)* make the wasm job's drift check independent of the host
+- *(xtask)* skip the ci.yml drift tests where CI metadata is absent
+
+## [0.7.4] - 2026-08-21
+
+### Added
+
+- *(hid)* support G602 nano receiver ([#684](https://github.com/AprilNEA/OpenLogi/pull/684))
+
+### Fixed
+
+- *(hid)* surface the 0xc539 dongle as a Lightspeed receiver, not Unifying ([#665](https://github.com/AprilNEA/OpenLogi/pull/665))
+- *(ci)* make the MSRV job actually pin the toolchain it installs
+- *(camera)* finish the 1.98 chunks_exact sweep in the platform backends
+- satisfy the lints Rust 1.98 added
+
+## [0.7.3] - 2026-08-20
+
+### Fixed
+
+- *(xtask)* build the overlay the Linux package installs
+
+## [0.7.2] - 2026-08-20
+
+### Added
+
+- *(ipc)* identify each agent run behind a frozen handshake
+
+### Changed
+
+- *(gui)* stop scanning for cameras with no window open
+
+### Fixed
+
+- *(overlay)* prevent GPUI from exiting on window close ([#700](https://github.com/AprilNEA/OpenLogi/pull/700))
+- *(gui)* give the auxiliary windows the app's real Wayland identity
+- *(gui)* use the GPUI executor timer, not tokio::time::interval, for camera scans ([#686](https://github.com/AprilNEA/OpenLogi/pull/686))
+- *(overlay)* use the workspace's Duration idioms for the give-up clock
+- *(agent)* ask the overlay to leave before quitting
+- *(overlay)* give up when no agent answers for a minute
+- *(core)* resolve the binding module's intra-doc links
+- *(core)* keep dev builds on the dev profile after the suffix rename
+- *(agent)* supervise the overlay role instead of launching into it
+- *(gui)* bind the Actions Ring overlay to one agent run
+- *(agent)* reapply volatile settings after Windows resume ([#639](https://github.com/AprilNEA/OpenLogi/pull/639))
+
 ## [0.7.1] - 2026-08-15
 
 ### Added

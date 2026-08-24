@@ -47,6 +47,9 @@ in
       cmake
       sccache
       prek
+      # The `shell` CI job and the prek hooks of the same name.
+      shellcheck
+      shfmt
     ]
     # create-dmg is macOS-only (meta.platforms = darwin); an unconditional entry
     # breaks evaluation of the shell on Linux.
@@ -82,7 +85,15 @@ in
     # plus prebuilt import libs (no `cc`-compiled C), so it lints cleanly. It is
     # a fast proxy for CI's authoritative `clippy (windows)` (msvc); building a
     # runnable .exe would additionally need pkgsCross.mingwW64 and is out of scope.
-    targets = [ "x86_64-pc-windows-gnu" ];
+    # `wasm32-unknown-unknown` is not a shipping target: nothing here is built
+    # for the browser. It exists so `cargo check` can *prove* the portable
+    # layer stays portable — a crate that has no business touching the host
+    # (protocol codec, device model) fails to compile here the moment it picks
+    # up a dependency that does. Discipline drifts; a compiler does not.
+    targets = [
+      "x86_64-pc-windows-gnu"
+      "wasm32-unknown-unknown"
+    ];
   };
 
   enterShell = ''
@@ -111,10 +122,22 @@ in
         cargo fmt --all -- --check
         cargo clippy --workspace --all-targets -- -D warnings
         cargo test --workspace
-        # Mirrors CI's `rustdoc (hid crates)` job: a broken intra-doc link is
-        # neither a compile error nor a clippy lint, so nothing above catches it.
-        RUSTDOCFLAGS="-D warnings" cargo doc -p openlogi-hid -p openlogi-hidpp \
-          -p openlogi-hidpp-derive --no-deps --document-private-items
+        # Mirrors CI's `rustdoc (non-GUI crates)` job: a broken intra-doc link
+        # is neither a compile error nor a clippy lint, so nothing above catches
+        # it. The GPUI crates are excluded — documenting them would pull in the
+        # whole graphics toolchain.
+        RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+          --document-private-items --exclude openlogi-ui \
+          --exclude openlogi-desktop --exclude openlogi-overlay \
+          --exclude openlogi-agent
+      '';
+    };
+    "openlogi:ci" = {
+      description = "Run every GitHub Actions CI job this host can reproduce.";
+      exec = ''
+        set -e
+        ${requireXcodeMetal}
+        cargo run -p xtask -- ci
       '';
     };
     "openlogi:i18n-upload" = {
@@ -144,19 +167,10 @@ in
     };
     "openlogi:check-windows" = {
       description = "Lint the Windows code paths locally (check-only cross lint).";
-      # `clippy --target` is check-only (no linker needed), but a C-compiling
-      # build dep DOES need a cross C toolchain: openlogi-{assets,cli} and the
-      # root `openlogi` pull ureq -> ring, whose curve25519.c can't cross-compile
-      # from macOS without mingw. They have no Windows-specific code, so lint the
-      # ring-free agent/leaf subset here; CI's clippy (windows) covers the rest
-      # natively on windows-latest. The GUI is excluded (GPUI has no Windows
-      # backend).
-      exec = ''
-        cargo clippy --target x86_64-pc-windows-gnu \
-          -p openlogi-core -p openlogi-hidpp -p openlogi-hid -p openlogi-hook \
-          -p openlogi-agent -p openlogi-agent-core \
-          --all-targets -- -D warnings
-      '';
+      # The crate list, the `cargo-clippy` vs `cargo clippy` trap, and why this
+      # is not CI's `clippy (windows)` job all live in one place now:
+      # `WINDOWS_LINT_CRATES` in xtask/src/commands/ci/jobs.rs.
+      exec = "cargo run -p xtask -- ci clippy-windows";
     };
     "openlogi:assets" = {
       description = "Sync device assets.";

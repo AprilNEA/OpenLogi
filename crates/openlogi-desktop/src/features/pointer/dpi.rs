@@ -16,7 +16,7 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use openlogi_core::hid::{DeviceRoute, DpiCapabilities};
+use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities};
 use tracing::debug;
 
 use crate::state::{AppState, DeviceKey, DpiStatus};
@@ -34,15 +34,15 @@ pub struct DpiPanel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SliderShape {
-    min: u16,
-    max: u16,
-    step: u16,
+    min: Dpi,
+    max: Dpi,
+    step: Dpi,
 }
 
 struct DpiPanelSnapshot {
     device_key: DeviceKey,
-    dpi: u32,
-    presets: Vec<u32>,
+    dpi: Dpi,
+    presets: Vec<Dpi>,
     status: DpiStatus,
     /// Whether the active device currently has a usable route. An offline
     /// device sits in `Unknown` forever (discovery can't start without a
@@ -101,7 +101,7 @@ impl DpiPanel {
         &mut self,
         key: &str,
         capabilities: &DpiCapabilities,
-        dpi: u32,
+        dpi: Dpi,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -121,9 +121,9 @@ impl DpiPanel {
                     // possible because the slider step is uniform but the
                     // supported set may not be — from yanking the thumb back
                     // every frame.
-                    let thumb = capabilities.nearest(slider_raw_to_dpi(state.value().start()));
+                    let thumb = capabilities.nearest(Dpi::from_rounded(state.value().start()));
                     if thumb != target {
-                        state.set_value(dpi_to_f32(u32::from(target)), window, cx);
+                        state.set_value(f32::from(target), window, cx);
                     }
                 });
             }
@@ -136,10 +136,10 @@ impl DpiPanel {
         // the intermediate state coherent for high-DPI devices.
         let slider_state = cx.new(|_| {
             SliderState::new()
-                .max(dpi_to_f32(u32::from(shape.max)))
-                .min(dpi_to_f32(u32::from(shape.min)))
-                .step(dpi_to_f32(u32::from(shape.step)))
-                .default_value(dpi_to_f32(u32::from(snapped)))
+                .max(shape.max.into())
+                .min(shape.min.into())
+                .step(shape.step.into())
+                .default_value(f32::from(snapped))
         });
 
         let slider_sub =
@@ -150,13 +150,19 @@ impl DpiPanel {
                     // label tracks the drag. The HID write happens once on Release
                     // to keep us from spamming the device with intermediate values.
                     SliderEvent::Change(value) => {
-                        let dpi = normalized_slider_dpi(value.start(), cx);
-                        debug!(dpi, "slider change → AppState.dpi");
+                        let dpi = Dpi::from_rounded(value.start());
+                        let dpi = cx
+                            .try_global::<AppState>()
+                            .map_or(dpi, |state| state.normalize_active_dpi(dpi));
+                        debug!(%dpi, "slider change → AppState.dpi");
                         cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
                         cx.notify();
                     }
                     SliderEvent::Release(value) => {
-                        let dpi = normalized_slider_dpi(value.start(), cx);
+                        let dpi = Dpi::from_rounded(value.start());
+                        let dpi = cx
+                            .try_global::<AppState>()
+                            .map_or(dpi, |state| state.normalize_active_dpi(dpi));
                         // `commit_dpi` resolves the target at fire-time, so
                         // carousel-driven device switches route the write to the
                         // now-current device, not whichever was active when this
@@ -255,7 +261,7 @@ impl Render for DpiPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(tr!("PRESETS")),
+                            .child(tr!("Presets")),
                     )
                     .child(
                         h_flex()
@@ -358,8 +364,8 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palette) -> AnyElement {
-    let presets_for_remove: Vec<u32> = presets.to_vec();
+fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palette) -> AnyElement {
+    let presets_for_remove: Vec<Dpi> = presets.to_vec();
     h_flex()
         .id(("dpi-preset-chip", idx))
         .h(px(CHIP_H))
@@ -386,7 +392,7 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                     // clobbered by a discovery result that lands afterwards.
                     let Some(dpi) = cx
                         .try_global::<AppState>()
-                        .and_then(|s| Some(s.active_dpi_capabilities()?.snap(value)))
+                        .and_then(|s| Some(s.active_dpi_capabilities()?.nearest(value)))
                     else {
                         return;
                     };
@@ -442,31 +448,4 @@ fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(DeviceKey, DeviceRoute
         }
         Some((key, record.route.clone()?))
     })
-}
-
-/// Round a raw slider position to a non-negative DPI count.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "value is rounded to a non-negative DPI before use"
-)]
-fn slider_raw_to_dpi(raw: f32) -> u32 {
-    raw.max(0.).round() as u32
-}
-
-/// Snap a raw slider read to the selected device's supported DPI list.
-fn normalized_slider_dpi(raw: f32, cx: &mut gpui::App) -> u32 {
-    let rounded = slider_raw_to_dpi(raw);
-    cx.try_global::<AppState>()
-        .map_or(rounded, |state| state.normalize_active_dpi(rounded))
-}
-
-/// Widen a DPI count into f32 for slider math. DPI uses HID++'s u16 wire field,
-/// so it fits comfortably in f32's mantissa with no precision loss.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "DPI is limited by HID++'s u16 field — well below f32 mantissa precision"
-)]
-fn dpi_to_f32(dpi: u32) -> f32 {
-    dpi as f32
 }

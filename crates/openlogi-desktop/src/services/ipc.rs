@@ -27,8 +27,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
-    WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
@@ -94,11 +93,11 @@ pub enum GuiUpdate {
 /// a `oneshot` for the reply; standalone-light writes return a result event so
 /// the GUI can surface device failures after an optimistic update.
 pub enum Command {
-    SetDpi(DeviceRoute, u32),
+    SetDpi(DeviceRoute, Dpi),
     SetLighting(DeviceRoute, Lighting),
     SetLight(DeviceRoute, LightCommand, String, u64),
     SetLightManualPower(DeviceRoute, bool, String, u64),
-    SetSmartShift(DeviceRoute, SmartShiftMode, u8, u8),
+    SetSmartShift(DeviceRoute, SmartShiftStatus),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
     ReadSmartShift(
         DeviceRoute,
@@ -319,8 +318,12 @@ fn spawn_agent() {
     // The packaged helper goes through LaunchServices so it is its own TCC
     // responsible process; everything else is a `disclaim` exec (a no-op
     // pass-through to `std::process::Command` off macOS).
+    // "started", not "launched": on the packaged path success here only means
+    // `open` was handed the bundle — the waiter inside `launch_agent` reports
+    // the definitive outcome, so a LaunchServices rejection is not preceded by
+    // a success claim it then contradicts.
     match launch_agent(&path) {
-        Ok(()) => info!(path = %path.display(), "agent not running — launched it"),
+        Ok(()) => info!(path = %path.display(), "agent not running — launch started"),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
     }
 }
@@ -332,12 +335,23 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     // check to the parent GUI and the grant flips with the launch path (#192).
     #[cfg(target_os = "macos")]
     if let Some(bundle) = helper_bundle(path) {
-        return std::process::Command::new("/usr/bin/open")
+        let mut child = std::process::Command::new("/usr/bin/open")
             .arg("-g")
             .arg("-n")
             .arg(bundle)
-            .spawn()
-            .map(|_| ());
+            .spawn()?;
+        // `open` exits as soon as it hands the bundle to LaunchServices, and
+        // its exit status is the only signal that the handoff failed (damaged
+        // bundle, LaunchServices refusal) — a successful spawn alone proves
+        // nothing. Reap it off-thread and log the failure the spawn hides.
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) if !status.success() => {
+                warn!(%status, "`open` could not launch the agent bundle");
+            }
+            Err(e) => warn!(error = %e, "could not reap the `open` helper"),
+            Ok(_) => {}
+        });
+        return Ok(());
     }
     // Any other layout (bare dev binary, Windows, Linux): exec the binary
     // directly while disclaiming the GUI's TCC responsibility (#214).
@@ -353,7 +367,7 @@ fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
 
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
-/// embedded `OpenLogiAgent.app` login-item helper (packaged macOS build).
+/// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
 fn agent_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -366,13 +380,16 @@ fn agent_binary_path() -> Option<PathBuf> {
         return Some(sibling);
     }
     // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-desktop → the helper at
-    // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
-    // Dev uses a spaced bundle path so macOS privacy panes never fall back to
-    // displaying the old path-derived `OpenLogiAgent` name when metadata is stale.
+    // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent
+    // Every family names its directory after the display name, so the privacy
+    // panes' filename fallback (used when bundle metadata is stale) shows the
+    // real name. The last entry keeps finding helpers in bundles built before
+    // the rename.
     #[cfg(target_os = "macos")]
     {
         let contents = dir.parent()?;
         for relative in [
+            "Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
             "Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
             "Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
         ] {
@@ -473,8 +490,8 @@ async fn handle(
                 client.set_light_manual_power(ctx, route, enabled).await,
             )?;
         }
-        Command::SetSmartShift(route, mode, auto, torque) => {
-            log_apply(client.set_smartshift(ctx, route, mode, auto, torque).await)?;
+        Command::SetSmartShift(route, status) => {
+            log_apply(client.set_smartshift(ctx, route, status).await)?;
         }
         Command::ReadDpi(route, reply) => {
             let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
@@ -586,7 +603,7 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
 
 /// Reply to a read command that the agent is unreachable; writes are
 /// fire-and-forget so they have nothing to reply to.
-#[allow(
+#[expect(
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
@@ -662,21 +679,21 @@ mod tests {
     #[test]
     fn helper_bundle_resolves_only_the_packaged_layout() {
         let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
         );
         assert_eq!(
             helper_bundle(packaged),
             Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
             ))
         );
         let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
         );
         assert_eq!(
             helper_bundle(dev),
             Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
+                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
             ))
         );
         assert_eq!(

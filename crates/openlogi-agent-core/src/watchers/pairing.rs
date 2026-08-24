@@ -80,7 +80,8 @@ async fn run(
         // One session: a fresh command channel feeds run_pairing while we relay
         // the user's Pair/Cancel into it, racing against the session finishing.
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<PairingCommand>();
-        let mut session = Box::pin(run_pairing(target, cmd_rx, evt_tx.clone()));
+        let backend = openlogi_hid::host::backend();
+        let mut session = Box::pin(run_pairing(&*backend, target, cmd_rx, evt_tx.clone()));
 
         loop {
             tokio::select! {

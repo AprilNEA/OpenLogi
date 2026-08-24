@@ -23,16 +23,9 @@
     unsafe_code,
     reason = "AVFoundation / CoreMedia / CoreVideo capture FFI"
 )]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    reason = "pixel dimensions and FourCC constants are bounded and copied verbatim"
-)]
-
 use std::ffi::{CString, c_void};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -51,10 +44,7 @@ const LOCK_READ_ONLY: u64 = 1;
 // poll hands out a cheap refcount bump instead of copying the whole buffer. A
 // process previews one camera at a time, so a single global sink is enough and
 // keeps the delegate stateless.
-static LATEST: OnceLock<Mutex<Option<Arc<Frame>>>> = OnceLock::new();
-fn latest() -> &'static Mutex<Option<Arc<Frame>>> {
-    LATEST.get_or_init(|| Mutex::new(None))
-}
+static LATEST: LazyLock<Mutex<Option<Arc<Frame>>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Increments on every delivered frame, so a poller can tell a new frame from a
 /// repeat without comparing pixel buffers.
@@ -161,12 +151,17 @@ define_class!(
                             }
                         }
                     }
-                    if let Ok(mut slot) = latest().lock() {
-                        *slot = Some(Arc::new(Frame {
+                    if let Ok(mut slot) = LATEST.lock() {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "CoreVideo reports sensor-sized dimensions, divided down again by `step`"
+                        )]
+                        let frame = Frame {
                             width: out_w as u32,
                             height: out_h as u32,
                             bgra,
-                        }));
+                        };
+                        *slot = Some(Arc::new(frame));
                         FRAME_GEN.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -305,7 +300,7 @@ fn device_with_unique_id(unique_id: &str) -> Option<Retained<AnyObject>> {
 }
 
 /// A running capture session. Frames flow to the delegate on a background
-/// dispatch queue and land in [`latest`]; dropping the session stops it. The
+/// dispatch queue and land in [`LATEST`]; dropping the session stops it. The
 /// `Retained` fields keep the output + delegate alive for the session's life
 /// (the session references them, but we hold owning handles for clarity).
 struct Session {
@@ -324,11 +319,11 @@ impl Drop for Session {
 }
 
 /// Authorize, wire up, and start a capture session on `unique_id`. Frames begin
-/// arriving in [`latest`] shortly after this returns.
+/// arriving in [`LATEST`] shortly after this returns.
 fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError> {
     ensure_access()?;
     let device = device_with_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
-    if let Ok(mut slot) = latest().lock() {
+    if let Ok(mut slot) = LATEST.lock() {
         *slot = None;
     }
     // Previews cap at 720p-wide frames (the preview preset below already
@@ -430,7 +425,7 @@ pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, Captur
     let _session = open_session(unique_id, false)?;
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(mut slot) = latest().lock()
+        if let Ok(mut slot) = LATEST.lock()
             && let Some(frame) = slot.take()
         {
             return Ok(Arc::unwrap_or_clone(frame));
@@ -455,7 +450,7 @@ impl CameraStream {
     /// pixel buffer.
     #[must_use]
     pub fn latest_frame(&self) -> Option<Arc<Frame>> {
-        latest().lock().ok().and_then(|slot| slot.clone())
+        LATEST.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Take the most recent frame out of the slot (the next delivered frame
@@ -463,7 +458,7 @@ impl CameraStream {
     /// buffer without copying it.
     #[must_use]
     pub fn take_frame(&self) -> Option<Arc<Frame>> {
-        latest().lock().ok().and_then(|mut slot| slot.take())
+        LATEST.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// A counter that increments on every delivered frame, so the preview can

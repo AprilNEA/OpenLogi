@@ -15,7 +15,7 @@ pub mod pairing;
 pub mod route;
 pub mod smartshift;
 
-pub use dpi::{DpiCapabilities, DpiInfo};
+pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
@@ -23,4 +23,6 @@ pub use route::{
     BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, LOGITECH_VENDOR_ID,
     UNIFYING_PIDS, is_receiver_pid, receiver_display_name, speaks_unifying_protocol,
 };
-pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
+pub use smartshift::{
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+};

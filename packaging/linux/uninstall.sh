@@ -11,11 +11,17 @@ set -eu
 PREFIX=/usr/local
 
 for arg in "$@"; do
-    case "$arg" in
-        --prefix=*) PREFIX="${arg#--prefix=}" ;;
-        --prefix)   echo "--prefix requires a value" >&2; exit 1 ;;
-        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
-    esac
+  case "$arg" in
+    --prefix=*) PREFIX="${arg#--prefix=}" ;;
+    --prefix)
+      echo "--prefix requires a value" >&2
+      exit 1
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      exit 1
+      ;;
+  esac
 done
 
 BINDIR="${PREFIX}/bin"
@@ -28,12 +34,12 @@ BINDIR="${PREFIX}/bin"
 REAL_USER="${SUDO_USER:-$USER}"
 REAL_UID="$(id -u "$REAL_USER")"
 
-if command -v systemctl > /dev/null 2>&1; then
-    echo "Disabling and stopping the agent …"
-    # Set XDG_RUNTIME_DIR explicitly: sudo -u strips the environment so
-    # systemctl --user cannot locate the user's D-Bus socket without it.
-    sudo -u "$REAL_USER" XDG_RUNTIME_DIR="/run/user/${REAL_UID}" \
-        systemctl --user disable --now openlogi-agent.service 2>/dev/null || true
+if command -v systemctl >/dev/null 2>&1; then
+  echo "Disabling and stopping the agent …"
+  # Set XDG_RUNTIME_DIR explicitly: sudo -u strips the environment so
+  # systemctl --user cannot locate the user's D-Bus socket without it.
+  sudo -u "$REAL_USER" XDG_RUNTIME_DIR="/run/user/${REAL_UID}" \
+    systemctl --user disable --now openlogi-agent.service 2>/dev/null || true
 fi
 
 # ── remove binaries ───────────────────────────────────────────────────────────
@@ -46,10 +52,10 @@ sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-desktop" \
 
 echo "Removing udev rules …"
 sudo rm -f /etc/udev/rules.d/70-openlogi.rules
-if command -v udevadm > /dev/null 2>&1; then
-    sudo udevadm control --reload-rules
-    sudo udevadm trigger --subsystem-match=hidraw
-    sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
+if command -v udevadm >/dev/null 2>&1; then
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --subsystem-match=hidraw
+  sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
 fi
 
 # ── systemd user unit ─────────────────────────────────────────────────────────
@@ -63,11 +69,11 @@ echo "Removing desktop entry and icon …"
 sudo rm -f /usr/share/applications/openlogi.desktop
 sudo rm -f /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
 
-if command -v gtk-update-icon-cache > /dev/null 2>&1; then
-    sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
 fi
-if command -v update-desktop-database > /dev/null 2>&1; then
-    sudo update-desktop-database -q /usr/share/applications || true
+if command -v update-desktop-database >/dev/null 2>&1; then
+  sudo update-desktop-database -q /usr/share/applications || true
 fi
 
 echo "OpenLogi uninstalled."

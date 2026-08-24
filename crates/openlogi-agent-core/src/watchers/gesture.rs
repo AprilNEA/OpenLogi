@@ -25,8 +25,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, default_binding};
-use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
+use openlogi_core::config::ThumbwheelSensitivity;
+use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
 use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
@@ -47,22 +47,6 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// Minimum gap between two fires of the same custom wheel action, so one
 /// deliberate flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
-
-/// Speed multiplier for the wheel's continuous horizontal scroll. The default
-/// sensitivity is 1×; the scale is linear around it.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "sensitivity is a small 1..=100 integer — exact in f32"
-)]
-fn scroll_multiplier(sensitivity: i32) -> f32 {
-    sensitivity as f32 / DEFAULT_THUMBWHEEL_SENSITIVITY as f32
-}
-
-/// Rotation increments required to fire a custom (non-scroll) wheel action.
-/// Higher sensitivity → fewer increments; always at least one.
-fn action_threshold(sensitivity: i32) -> i32 {
-    (2 * DEFAULT_THUMBWHEEL_SENSITIVITY - sensitivity).max(1)
-}
 
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
 /// keeps one capture session pointed at the active device and dispatches each
@@ -98,7 +82,7 @@ pub fn spawn(
 /// tap: its sensitivity leaves the default (so we scale scroll ourselves) or a
 /// thumbwheel binding does.
 fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
-    plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
+    plan.thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
         || plan.thumbwheel_bindings_nondefault
 }
 
@@ -298,7 +282,7 @@ async fn manage(
 
 /// Start one device's capture session plus its input-forwarding task, and
 /// return the manager's tracking entry for it.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "plumbing between the manager loop's channels; grouping them into \
               a struct would only relabel the same eight values"
@@ -331,8 +315,16 @@ fn spawn_session(
     let slot = Arc::clone(capture_channel);
     tokio::spawn(async move {
         let _lease = lease;
-        if let Err(e) =
-            run_capture_session(session_route, session_spec, session_tx, stop_rx, slot).await
+        let backend = openlogi_hid::host::backend();
+        if let Err(e) = run_capture_session(
+            &*backend,
+            session_route,
+            session_spec,
+            session_tx,
+            stop_rx,
+            slot,
+        )
+        .await
         {
             debug!(error = %e, "capture session ended");
         }
@@ -419,9 +411,12 @@ fn dispatch(
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
         }
-        CapturedInput::Scroll(rotation) => {
+        CapturedInput::Scroll {
+            increments,
+            resolution,
+        } => {
             // Positive rotation is "up"; each direction has its own binding.
-            let up = rotation >= 0;
+            let up = increments >= 0;
             let button = if up {
                 ButtonId::ThumbwheelScrollUp
             } else {
@@ -435,8 +430,17 @@ fn dispatch(
             let sensitivity = plan.thumbwheel_sensitivity;
             let wheels = accumulators.entry(key.to_owned()).or_default();
             let dir = if up { &mut wheels.up } else { &mut wheels.down };
-            let magnitude = i32::from(rotation).abs();
-            match advance(dir, &action, magnitude, sensitivity, Instant::now()) {
+            let magnitude = i32::from(increments).abs();
+            match advance(
+                dir,
+                &action,
+                magnitude,
+                ScrollScale {
+                    native_per_increment: resolution.native_per_increment(),
+                    sensitivity,
+                },
+                Instant::now(),
+            ) {
                 WheelOutput::Idle => {}
                 WheelOutput::Scroll(lines) => {
                     openlogi_inject::post_horizontal_scroll(lines);
@@ -450,10 +454,31 @@ fn dispatch(
     }
 }
 
+/// How far one rotation increment should scroll.
+#[derive(Debug, Clone, Copy)]
+struct ScrollScale {
+    /// Native scroll units one diverted increment is worth, from the wheel's
+    /// own `getThumbwheelInfo`. Diverting the wheel changes the unit it
+    /// reports in — an MX Master 4 goes from 20 ratchets per revolution to 120
+    /// increments — so without this the same physical motion scrolls six times
+    /// as far as it did natively, and the sensitivity slider's 1× is 1× of
+    /// nothing recognisable.
+    native_per_increment: f32,
+    /// The user's own multiplier, relative to that native amount.
+    sensitivity: ThumbwheelSensitivity,
+}
+
+impl ScrollScale {
+    /// Scroll units one increment contributes.
+    fn per_increment(self) -> f32 {
+        self.native_per_increment * self.sensitivity.scroll_multiplier()
+    }
+}
+
 /// Advance one direction's accumulator by `magnitude` rotation increments and
 /// decide what to emit. Pure given `now`, so the decay/cooldown/threshold logic
 /// is unit-testable without touching the OS.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     reason = "magnitude/sensitivity are small integers and `lines` is a trunc'd \
@@ -463,16 +488,18 @@ fn advance(
     dir: &mut WheelDirection,
     action: &Action,
     magnitude: i32,
-    sensitivity: i32,
+    scale: ScrollScale,
     now: Instant,
 ) -> WheelOutput {
+    let sensitivity = scale.sensitivity;
     match action {
         // Suppressed: captured but produces nothing.
         Action::None => WheelOutput::Idle,
-        // Continuous, sensitivity-scaled horizontal scroll. Direction comes
-        // from the action; magnitude from the accumulated rotation.
+        // Continuous horizontal scroll, scaled from the wheel's diverted
+        // increments back to its native amount and then by the user's
+        // sensitivity. Direction comes from the action.
         Action::HorizontalScrollRight | Action::HorizontalScrollLeft => {
-            dir.scroll += magnitude as f32 * scroll_multiplier(sensitivity);
+            dir.scroll += magnitude as f32 * scale.per_increment();
             let lines = dir.scroll.trunc();
             if lines >= 1.0 {
                 dir.scroll -= lines;
@@ -506,7 +533,7 @@ fn advance(
             }
 
             dir.action += magnitude;
-            if dir.action >= action_threshold(sensitivity) {
+            if dir.action >= sensitivity.action_threshold() {
                 dir.action = 0;
                 dir.last_fired = Some(now);
                 WheelOutput::FireAction
@@ -520,25 +547,95 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlogi_hid::thumbwheel::WheelResolution;
+
+    /// The resolutions traced off an MX Master 4 over Bolt: 20 ratchets per
+    /// revolution natively, 120 increments per revolution diverted.
+    const TRACED: WheelResolution = WheelResolution {
+        native_res: 20,
+        diverted_res: 120,
+    };
+
+    /// A wheel whose increments are already native scroll units — what the
+    /// scaling tests below vary, and what every other test here assumes.
+    fn unscaled(sensitivity: ThumbwheelSensitivity) -> ScrollScale {
+        ScrollScale {
+            native_per_increment: 1.0,
+            sensitivity,
+        }
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {
-        assert!((scroll_multiplier(DEFAULT_THUMBWHEEL_SENSITIVITY) - 1.0).abs() < f32::EPSILON);
-        assert!(scroll_multiplier(DEFAULT_THUMBWHEEL_SENSITIVITY * 2) > 1.9);
-        assert!(scroll_multiplier(1) < 0.1);
+        assert!((ThumbwheelSensitivity::DEFAULT.scroll_multiplier() - 1.0).abs() < f32::EPSILON);
+        assert!(ThumbwheelSensitivity::from_rounded(28.0).scroll_multiplier() > 1.9);
+        assert!(ThumbwheelSensitivity::MIN.scroll_multiplier() < 0.1);
     }
 
     #[test]
     fn action_threshold_drops_with_sensitivity_and_floors_at_one() {
         assert_eq!(
-            action_threshold(DEFAULT_THUMBWHEEL_SENSITIVITY),
-            DEFAULT_THUMBWHEEL_SENSITIVITY
+            ThumbwheelSensitivity::DEFAULT.action_threshold(),
+            i32::from(ThumbwheelSensitivity::DEFAULT)
         );
         assert!(
-            action_threshold(1) > action_threshold(DEFAULT_THUMBWHEEL_SENSITIVITY),
+            ThumbwheelSensitivity::MIN.action_threshold()
+                > ThumbwheelSensitivity::DEFAULT.action_threshold(),
             "low sensitivity needs more increments"
         );
-        assert_eq!(action_threshold(100), 1, "high sensitivity floors at one");
+        assert_eq!(
+            ThumbwheelSensitivity::MAX.action_threshold(),
+            1,
+            "high sensitivity floors at one"
+        );
+    }
+
+    /// Diverting the wheel changes the unit it reports in. An MX Master 4
+    /// sends 120 increments per revolution where native scrolling produced 20
+    /// ratchets, so a revolution has to keep scrolling 20 units — not 120 —
+    /// with the sensitivity slider left alone.
+    #[test]
+    fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
+        let scale = ScrollScale {
+            native_per_increment: TRACED.native_per_increment(),
+            sensitivity: ThumbwheelSensitivity::DEFAULT,
+        };
+        let mut dir = WheelDirection::default();
+        let now = Instant::now();
+        let mut lines = 0;
+        for _ in 0..120 {
+            if let WheelOutput::Scroll(n) =
+                advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
+            {
+                lines += n;
+            }
+        }
+        assert_eq!(lines, 20, "one revolution is 20 native scroll units");
+    }
+
+    /// The sensitivity slider stays a multiplier *of that native amount*.
+    #[test]
+    fn sensitivity_multiplies_the_native_amount() {
+        let scale = ScrollScale {
+            native_per_increment: TRACED.native_per_increment(),
+            sensitivity: ThumbwheelSensitivity::from_rounded(28.0), // 2x
+        };
+        let mut dir = WheelDirection::default();
+        let now = Instant::now();
+        let mut lines = 0;
+        for _ in 0..120 {
+            if let WheelOutput::Scroll(n) =
+                advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
+            {
+                lines += n;
+            }
+        }
+        assert_eq!(lines, 40, "2x sensitivity doubles the native 20");
+    }
+
+    #[test]
+    fn an_unreported_resolution_leaves_increments_unscaled() {
+        assert!((WheelResolution::UNKNOWN.native_per_increment() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -546,13 +643,25 @@ mod tests {
         let mut dir = WheelDirection::default();
         let now = Instant::now();
         // multiplier 0.5: two increments make one whole line.
-        let half = DEFAULT_THUMBWHEEL_SENSITIVITY / 2;
+        let half = ThumbwheelSensitivity::from_rounded(7.0);
         assert_eq!(
-            advance(&mut dir, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut dir,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Idle
         );
         assert_eq!(
-            advance(&mut dir, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut dir,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Scroll(1)
         );
     }
@@ -566,7 +675,7 @@ mod tests {
                 &mut dir,
                 &Action::HorizontalScrollLeft,
                 1,
-                DEFAULT_THUMBWHEEL_SENSITIVITY,
+                unscaled(ThumbwheelSensitivity::DEFAULT),
                 now
             ),
             WheelOutput::Scroll(-1)
@@ -579,19 +688,37 @@ mod tests {
         let mut up = WheelDirection::default();
         let mut down = WheelDirection::default();
         let now = Instant::now();
-        let half = DEFAULT_THUMBWHEEL_SENSITIVITY / 2; // multiplier 0.5
+        let half = ThumbwheelSensitivity::from_rounded(7.0); // multiplier 0.5
         assert_eq!(
-            advance(&mut up, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut up,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Idle
         );
         // One tick the other way doesn't cancel `up`'s banked half-line…
         assert_eq!(
-            advance(&mut down, &Action::HorizontalScrollLeft, 1, half, now),
+            advance(
+                &mut down,
+                &Action::HorizontalScrollLeft,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Idle
         );
         // …so `up`'s next tick still completes its own line.
         assert_eq!(
-            advance(&mut up, &Action::HorizontalScrollRight, 1, half, now),
+            advance(
+                &mut up,
+                &Action::HorizontalScrollRight,
+                1,
+                unscaled(half),
+                now
+            ),
             WheelOutput::Scroll(1)
         );
     }
@@ -601,13 +728,13 @@ mod tests {
         let mut dir = WheelDirection::default();
         let now = Instant::now();
         // Threshold at default sensitivity is DEFAULT increments.
-        for _ in 0..DEFAULT_THUMBWHEEL_SENSITIVITY - 1 {
+        for _ in 0..i32::from(ThumbwheelSensitivity::DEFAULT) - 1 {
             assert_eq!(
                 advance(
                     &mut dir,
                     &Action::VolumeUp,
                     1,
-                    DEFAULT_THUMBWHEEL_SENSITIVITY,
+                    unscaled(ThumbwheelSensitivity::DEFAULT),
                     now
                 ),
                 WheelOutput::Idle
@@ -618,19 +745,19 @@ mod tests {
                 &mut dir,
                 &Action::VolumeUp,
                 1,
-                DEFAULT_THUMBWHEEL_SENSITIVITY,
+                unscaled(ThumbwheelSensitivity::DEFAULT),
                 now
             ),
             WheelOutput::FireAction
         );
         // Immediately after, the cooldown swallows further increments.
-        for _ in 0..DEFAULT_THUMBWHEEL_SENSITIVITY {
+        for _ in 0..i32::from(ThumbwheelSensitivity::DEFAULT) {
             assert_eq!(
                 advance(
                     &mut dir,
                     &Action::VolumeUp,
                     1,
-                    DEFAULT_THUMBWHEEL_SENSITIVITY,
+                    unscaled(ThumbwheelSensitivity::DEFAULT),
                     now
                 ),
                 WheelOutput::Idle
@@ -646,7 +773,7 @@ mod tests {
                 &mut dir,
                 &Action::None,
                 5,
-                DEFAULT_THUMBWHEEL_SENSITIVITY,
+                unscaled(ThumbwheelSensitivity::DEFAULT),
                 Instant::now()
             ),
             WheelOutput::Idle

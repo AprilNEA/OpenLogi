@@ -7,8 +7,10 @@ config. macOS and Linux are first-class; Windows is a young but shipping port.
 Dual-licensed MIT/Apache-2.0; the `design/` brand assets are proprietary.
 
 The developer handbook (toolchain, packaging, release pipeline) is
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). This file is the agent-facing contract;
-subsystem deep-rules are indexed at the bottom.
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). This file is the agent-facing contract:
+the architecture map plus the global workflow. Everything subsystem-specific lives in
+the path-scoped rule files indexed at the bottom — read the matching one before
+touching an area.
 
 ## Architecture
 
@@ -21,7 +23,8 @@ sits beneath both.
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog. No I/O, no async |
 | `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
-| `crates/openlogi-hid` | Device discovery + HID++ writes over `async-hid` |
+| `crates/openlogi-device` | The HID++ device layer: enumeration, probing, writes, sessions, pairing. Knows no host — expressed against `HidBackend` |
+| `crates/openlogi-hid` | That layer wired to this host: `async-hid` transport, macOS Input Monitoring, the on-disk probe cache |
 | `crates/openlogi-assets` | Device-render registry + cached fetch from OpenLogi asset mirrors |
 | `crates/openlogi-cli` | `clap` command tree: `list`, `assets`, `diag` |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
@@ -36,15 +39,17 @@ sits beneath both.
 | `xtask` | `cargo xtask` maintenance: bundling, packaging, release manifest |
 
 - GUI ↔ agent speak tarpc/bincode over an `interprocess` local socket. The wire format
-  is versioned and **append-only** — read `.claude/rules/ipc-protocol.md` before touching it.
+  is versioned and **append-only** — read `.claude/rules/ipc-protocol.md` before touching
+  it.
 - Three processes ship in the bundle — GUI, agent, overlay — and the overlay is a
-  *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never `openlogi-desktop`.
-  Anything both need goes in `openlogi-ui`; adding a dependency there puts it in the
-  overlay too, so keep the widget kit (`gpui-component`) on the app's side.
+  *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never
+  `openlogi-desktop`. Anything both need goes in `openlogi-ui`, and every dependency
+  added there lands in the overlay too (`.claude/rules/gui.md` has the rule).
 - Platform code is cfg-gated per crate (`[target.'cfg(target_os = …)'.dependencies]`).
-  `crates/openlogi-desktop/src/platform/AGENTS.md` is the contract for the workspace's ObjC
-  FFI and indexes every file that carries any — read it before editing one, including
-  `crates/openlogi-overlay/src/platform.rs`, which lives outside that directory.
+  `.claude/rules/objc-ffi.md` is the contract for the workspace's macOS native FFI and
+  indexes every file that carries any — read it before editing one. That surface spans
+  seven crates: the agent's tray, the camera backends, the hook, the injector, the
+  overlay, `openlogi-permissions`, and one file in the GUI.
 
 ## Build, run, verify
 
@@ -55,174 +60,135 @@ inside the shell — run from the repo root (or `direnv exec . …`), including
 git (the hooks need cargo):
 
 ```sh
-cargo clippy --workspace --all-targets -- -D warnings
+cargo check -p openlogi-core
 # when cargo is only inside devenv:
-direnv exec . cargo clippy --workspace --all-targets -- -D warnings
+direnv exec . cargo check -p openlogi-core
 direnv exec . git commit …
 ```
+
+### Verification while iterating (fast path)
+
+Use the narrowest command that can disprove the change while code is still moving.
+Do **not** run full-workspace Clippy, tests, or rustdoc after every edit; broad checks
+are a final gate, not an inner development loop.
+
+1. **Define one proof first.** Pick the focused test, compile target, or runtime
+   behavior that demonstrates the requested outcome.
+2. **Inner loop:** run that proof only. For Rust, prefer
+   `cargo test -p <crate> <test-filter>` for behavior and `cargo check -p <crate>`
+   for API/type feedback. A one-line or docs-only edit does not justify Clippy.
+3. **Once the code is stable:** run formatter check, the relevant tests, and Clippy
+   once for each crate actually changed (`cargo clippy -p <crate> --all-targets --
+   -D warnings`). For a shared public API, `cargo check` its affected consumers;
+   do not Clippy every consumer unless their source changed or `cargo check` exposes
+   a problem there.
+4. **Before push only:** run the full local gate below once on the final tree. If a
+   gate command fails, fix the cause, use a focused command while iterating, then
+   rerun the whole gate once after the tree is final again.
+
+Do not rerun an identical broad command merely because a later edit touched an
+unrelated file. Do rerun the focused check whose inputs changed. If no commit or push
+was requested, the task does not need the push gate solely because this file documents
+one; report the targeted verification that was actually relevant.
 
 ### Local gate (hard stop — do this before every push)
 
 **Never `git push` until the final tree has passed the full local gate.**
+This section applies to the final pre-push tree, not normal edit iterations.
 `cargo check` alone is not enough. Conflict resolution + "it compiles on my
 Mac" is not enough. Run **all four** on the commit you are about to push:
 
 ```sh
+export RUSTFLAGS="-D warnings"   # CI sets this globally; clippy `-D warnings` is not the same
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-RUSTDOCFLAGS="-D warnings" cargo doc -p openlogi-hid -p openlogi-hidpp \
-  -p openlogi-hidpp-derive --no-deps --document-private-items
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+  --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
+  --exclude openlogi-overlay --exclude openlogi-agent
 # or: devenv tasks run openlogi:check
+# every CI job this host can reproduce: cargo xtask ci
 ```
 
 Exit non-zero on any of those → fix, re-run the **whole** set, then push.
 Do not push "to see if CI likes it." CI is confirmation, not the first compile.
 
-The rustdoc step mirrors CI's `rustdoc (hid crates)` job and catches what the
-other three cannot: a broken intra-doc link is neither a compile error nor a
-clippy lint. How it bites is non-obvious — rustdoc resolves a
-`Type::trait_method` link only while that trait is **in scope**, so handing a
-hand-written trait impl over to a derive macro deletes the now-unused `use` and
-silently breaks every such link. Re-adding the import does not fix it either: a
-doc link does not count as a use, so that just trades the broken link for an
-`unused_imports` failure — write the trait method's full path instead. After any
-refactor that moves impls between hand-written and generated, grep for doc links
-naming that trait's methods.
+The rustdoc step mirrors CI's `rustdoc (non-GUI crates)` job and catches what the
+other three cannot: a broken intra-doc link is neither a compile error nor a clippy
+lint. The GPUI crates are excluded because documenting them drags in the whole
+graphics toolchain; everything else is covered by exclusion rather than by a list, so
+a new crate is documented by default. The classic silent breakage — handing a trait
+impl to a derive macro kills every `Type::trait_method` doc link — is explained in
+`.claude/rules/rust.md`.
 
-prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy at push
-(rust-scoped, so non-Rust pushes skip it). Hooks are a backstop, not a substitute
-for running the gate yourself after a rebase.
+### Reproduce every CI job locally
 
-### Platform / cfg-gated code (macOS-green is a trap)
+The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
+(Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
+`--all-targets` tests, cargo-deny, Windows clippy, wasm portability, shell lint). macOS-green is
+not that matrix. To run every job this machine can reproduce:
 
-macOS-green proves **nothing** about `#[cfg(target_os = "linux")]` /
-`windows` code. Recent agent failures that only showed up on CI Linux:
+```sh
+cargo xtask ci
+cargo xtask ci --list           # job → command table
+cargo xtask ci rustfmt clippy   # one job, names match CI
+# or: devenv tasks run openlogi:ci
+```
 
-- Shadowing a crate-level constant with a local `const` of a different type
-  (e.g. `LOGITECH_VENDOR_ID: u16` next to `use crate::LOGITECH_VENDOR_ID`
-  which is `u32`) — E0255 / E0308, **only compiles on Linux**.
-- Importing a name that only exists on another OS, or redefining one that
-  master already exports from `lib.rs`.
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. A skipped job (wrong
+OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as not
+run in the PR Testing section. Full map, including "if you changed X, run Y":
+[`.claude/rules/ci.md`](.claude/rules/ci.md).
 
-When the diff touches any of:
+prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy **and
+rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a backstop,
+not a substitute for running the gate yourself after a rebase.
 
-- `crates/openlogi-hook/src/linux.rs` / `windows.rs`
-- `crates/openlogi-inject/src/inject/linux.rs` / `windows.rs`
-- `crates/openlogi-hid/src/transport.rs` (has `#[cfg]` branches)
-- any `#[cfg(target_os = …)]` block
+**Push checklist (agents):**
 
-you MUST either:
+1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
+2. Full local gate green on the **final** tree (fmt + Clippy + tests + rustdoc).
+3. Pipeline jobs this host can reproduce for the diff: `cargo xtask ci`
+   (or named jobs from `--list`). Skipped jobs stay named as not run — never
+   claimed green. Mapping: `.claude/rules/ci.md`.
+4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
+   cross-lint or hand-audit against master — macOS-green proves nothing there; see
+   `.claude/rules/cross-platform.md`.
+5. If wire types changed: `PROTOCOL_VERSION` bumped and
+   `cargo test -p openlogi-ipc --test wire_format` green — see
+   `.claude/rules/ipc-protocol.md`.
+6. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
+   as `en.yml` (new keys at the same position); run
+   `cargo test -p openlogi-desktop i18n` — see `.claude/rules/i18n.md`.
+7. Only then `git push` / force-push to the PR branch.
 
-1. Cross-check with devenv when available:
-   `devenv tasks run openlogi:check-windows` (and any linux check the repo has), or
-2. Manually re-read every changed cfg-gated file against **current master** for:
-   - name collisions with existing `pub use` / `pub const` items
-   - type mismatches (`u16` vs `u32`, `Option` arity, new enum fields)
-   - call sites that gained args on master (e.g. `with_runtime`, `build_device_list`,
-     `dispatch_action`) but the PR still uses the old signature
+### Running the app
 
-Do not claim "cross-platform green" without CI (or a local cross-lint) having
-actually run those targets. `RUSTFLAGS=-D warnings` is global in CI — plain
-warnings fail there too.
-
-### Wire format / IPC (another silent CI red)
-
-If the change touches anything that crosses the agent↔GUI boundary
-(`crates/openlogi-ipc/src/ipc.rs`, serde enums in hid write errors, `DeviceKind`, …):
-
-- Enums are **append-only** (serde index = wire). New variants go at the end.
-- Bump `PROTOCOL_VERSION` and regenerate
-  `crates/openlogi-ipc/tests/wire_format.rs` goldens from the failure
-  message (`left` is the new encoding).
-- Run `cargo test -p openlogi-ipc --test wire_format` before push.
-
-### i18n
-
-New GUI strings: insert the same key in the **same position** in every
-`crates/openlogi-ui/locales/*.yml` (parity is required). Run
-`cargo test -p openlogi-desktop i18n`.
-
-### App / agent runtime notes
-
-- The macOS GUI build needs full Xcode for GPUI's Metal shaders. devenv sets
-  `DEVELOPER_DIR`/`SDKROOT` when present; without it, use system Xcode. If the
-  shader compile fails under devenv, `direnv reload` first.
-- Dev-run the app with `cargo run -p openlogi-desktop` — a cargo runner wraps it
-  into `target/dev/OpenLogi.app`. `cargo build` does NOT refresh that bundle,
-  and a second instance exits on the singleton lock: quit the old instance and
-  re-`run` before judging a UI change "not applied".
-- No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock`
-  serves a scripted inventory (both route kinds, every capability-gated panel, a
-  pairing flow) over the IPC socket, so the GUI runs unmodified. It defaults to
-  the `openlogi-dev` profile — same socket the dev bundle uses, production app
-  untouched. Details in `docs/DEVELOPMENT.md`.
+- Dev-run with `cargo run -p openlogi-desktop` — a cargo runner wraps the build into
+  `target/dev/OpenLogi.app` with the same identity, helper and plist tables packaging
+  uses. The macOS GUI build needs full Xcode for GPUI's Metal shaders; devenv sets the
+  env when present (`direnv reload` if the shader compile fails there).
+- `cargo build` does NOT refresh that bundle, and a second instance exits on the
+  singleton lock: quit the old instance and re-`run` before judging a UI change
+  "not applied".
+- Each dev run first stops the agent and overlay the previous one left behind — they
+  are LaunchServices-launched (for their own TCC identity), not children of the GUI,
+  and a surviving agent relaunches itself ~20 s later. `OPENLOGI_DEV_AGENT=0` opts
+  out of all of it.
+- No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock` serves
+  a scripted inventory over the dev IPC socket, so the GUI runs unmodified and the
+  production app stays untouched.
+- Mechanics, dev profiles, and the mock's scope: `docs/DEVELOPMENT.md`.
 
 ## Rust standards
 
-Edition 2024, MSRV 1.96. There is exactly **one** lint table, in the root `Cargo.toml`,
-and every crate inherits it with `[lints] workspace = true` — never a private copy, or
-the next lint added to the workspace silently skips that crate. A crate needing a
-different level opts out **in source** (the `openlogi-hook` platform modules carry
-`#![allow(unsafe_code, reason = "…")]`), because Cargo rejects mixing `workspace = true`
-with local overrides. `openlogi-hidpp` currently stays out of the table — it is a **hard
-fork**, so the "third-party code" rationale for that opt-out no longer holds; whether it
-should now inherit is an open question, costed in `crates/openlogi-hidpp/AGENTS.md`.
-
-The table: `unsafe_code = "deny"` (opt out per item with `#[expect(unsafe_code,
-reason = "…")]` plus a `// SAFETY:` comment), `clippy::pedantic` at warn,
-`unwrap_used`/`expect_used` at warn, plus the shared lint set —
-`assertions_on_result_states`, `cast_possible_truncation`, `cast_possible_wrap`,
-`cast_sign_loss`, `error_impl_error`, `exit`, `or_fun_call`, `ptr_as_ptr`,
-`tests_outside_test_module`, `undocumented_unsafe_blocks`. Any lint suppression carries
-a `reason`. What that changes day to day:
-
-- Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
-- `assert!(r.is_ok())` / `assert!(r.is_err())` are rejected — unwrap the `Result` (in a
-  test module that already allows it) or give the assertion a message.
-- A test module that wants `expect`/`unwrap` says so:
-  `#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]` on the
-  module (or on its `mod tests;` declaration). Never route around the lint with
-  `unwrap_or_else(|e| panic!("…: {e}"))` — that is the same panic with the check switched
-  off. The one honest use of that form is a *dynamic* panic message, where `expect` would
-  need a `format!` that allocates on the happy path (`expect_fun_call`).
-- A test module gated on more than `test` needs stacked attributes (`#[cfg(test)]` then
-  `#[cfg(unix)]`), not `#[cfg(all(test, unix))]`, which clippy reads as a test outside a
-  test module. Integration tests under `tests/` carry a file-level
-  `#![expect(clippy::tests_outside_test_module, reason = "…")]`.
-- `std::process::exit` needs `#[expect(clippy::exit, reason = "…")]` naming why that call
-  site cannot hand an `ExitCode` back to `main` instead.
-
-Encode invariants in the type system instead of checking them at runtime:
-
-- Wire/firmware values get typed wrappers: `num_enum` for discriminants, `bitflags`
-  (`from_bits_retain` when unknown bits are legal) for flag sets. Unknown wire values
-  surface as **errors** (`UnsupportedResponse`-style), never as silent fallbacks.
-- Replace long parameter lists with Change/Params structs; make illegal combinations
-  unrepresentable rather than validated.
-- Ownership models resources (`Retained<T>` in the ObjC FFI) and thread affinity is
-  proven by types (`MainThreadMarker`, `!Send` handles), not by runtime checks.
-- Libraries return `thiserror` types; binaries may use `anyhow`.
-
-House style:
-
-- **Root-cause fixes only.** Never layer compatibility shims over a broken abstraction —
-  refactor it. Never change product code to work around a dev-environment quirk; debug
-  the environment (or a release build) instead.
-- **Prefer mature crates over hand-rolled logic** (retry/backoff, hashing, paths, …).
-  Check `cargo tree | grep <candidate>` before adding a dependency and use `cargo add`
-  so versions come from the registry. After ANY dependency change, verify the
-  `gpui`/`gpui-component` git pins in `Cargo.lock` didn't move (they are held only by
-  the lock; restore with `cargo update -p gpui --precise <rev>`).
-- Module layout: a module with its own semantics is `foo.rs` (children in a sibling
-  `foo/`); `foo/mod.rs` is only for pure namespace shells. Never both for one module.
-- Keep files reasonably sized (split around ~500 lines) into real modules — never
-  simulate structure with `// ---- section ----` banner comments. But don't
-  over-extract either: inline single-use helpers.
-- rustdoc every public item. Comments state non-obvious constraints only.
-- Tests cover failure and edge paths, not just the happy path (state machines
-  especially). No tautological tests that mirror the implementation; never weaken an
-  assertion or special-case an input to make a test pass.
+Edition 2024, MSRV = current stable (1.98), one shared workspace lint table. The
+floor tracks stable instead of trailing it — raise it the day a release ships
+something worth using, and run `devenv update rust-overlay` with it so the local
+toolchain stops being older than CI's. The full standards — the
+lint table and what it changes day to day, typed-invariant style, house rules on
+refactoring, dependencies, and module layout — live in `.claude/rules/rust.md`,
+loaded for any Rust or `Cargo.toml` edit.
 
 ## Git & GitHub
 
@@ -243,7 +209,9 @@ House style:
   fixed, replied to, and resolved, not ignored.
 - PR bodies: `## Summary`, `## Changes` (per-crate bullets), `## Testing` listing the
   exact commands run plus hardware-verification status (say "not runtime-tested on
-  hardware" when true), and a closing `Fixes #N` line. Screenshots for UI changes.
+  hardware" when true — real-hardware verification is the maintainer's job, so every
+  fix PR states how to test it), and a closing `Fixes #N` line. Screenshots for UI
+  changes.
 - **All GitHub artifacts — PR titles/bodies, commits, issues, reviews, comments — are
   written in English.**
 - **Never add AI attribution** ("Generated with …", AI co-author trailers) to commits,
@@ -278,35 +246,6 @@ creates — **never hand-create the tag**. Published GitHub releases are immutab
 never re-run a failed release job or re-dispatch on an existing tag.
 `release-plz.toml` is the versioning contract — don't trim it.
 
-## Verification
-
-Define the concrete check that proves a change works before writing it — a failing test
-that should pass, a command whose output should change, a behavior in the running app —
-and loop on that check. Real-hardware verification (physical mice, receivers) is the
-maintainer's job: every fix PR states how to test it. Report outcomes honestly,
-including what was NOT verified.
-
-**Push checklist (agents):**
-
-1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
-2. Full local gate green on the **final** tree (fmt + clippy `-D warnings` + test).
-3. If cfg-gated files changed: cross-lint or hand-audit against master (see above).
-4. If wire types changed: `wire_format` tests green + `PROTOCOL_VERSION` bumped.
-5. If locales changed: every `locales/*.yml` must have the same keys as
-   `en.yml`; run `cargo test -p openlogi-desktop i18n`.
-6. Only then `git push` / force-push to the PR branch.
-
-## i18n (all locale files, then Crowdin)
-
-- Add or change UI strings in **every** `crates/openlogi-ui/locales/*.yml` in
-  the same PR. `en.yml` is the English source of truth (the English text IS the
-  key); other files must not lag — the parity test fails the build.
-- Crowdin improves non-English **values** over time. The sync job **merges**
-  downloads into complete catalogs (`.github/scripts/i18n/merge_crowdin_download.py`):
-  only real translations apply; English fill-in and sparse exports never wipe
-  keys or open noise PRs.
-- Details: [`.claude/rules/i18n.md`](.claude/rules/i18n.md).
-
 ## Subsystem rules — read before touching
 
 Claude Code loads these automatically per path; other agents: read the listed file
@@ -314,11 +253,28 @@ before editing that area.
 
 | Area | Rule file |
 |---|---|
+| reproducing CI jobs locally (every `ci.yml` job → command) | `.claude/rules/ci.md` |
+| any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
 | `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |
-| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**` (IPC wire) | `.claude/rules/ipc-protocol.md` |
+| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**`, plus `openlogi-core`/`openlogi-device` (their serde types ride the wire) | `.claude/rules/ipc-protocol.md` |
+| `crates/openlogi-hook/**`, `crates/openlogi-inject/**`, `crates/openlogi-hid/**` (cfg-gated platform code) | `.claude/rules/cross-platform.md` |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
-| `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
+| `crates/openlogi-device/**`, `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
-| `crates/openlogi-desktop/src/platform/**`, `crates/openlogi-overlay/src/platform.rs`, `crates/openlogi-permissions/**` (ObjC FFI) | `crates/openlogi-desktop/src/platform/AGENTS.md` |
+| macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |
+
+## Task skills — invoke when the task matches, not when a path matches
+
+The rules above load from the file you are editing. Some work has no file to key
+on: triaging a user report, or deciding what a symptom means. That lives in
+`.claude/skills/`, which Claude Code offers by task description; other agents
+should read the `SKILL.md` when the task matches.
+
+| Task | Skill |
+|---|---|
+| a macOS report of no devices / "Failed to open device" / which permission to grant, and any change to the permission, helper-launch, or bundle-signing code | `.claude/skills/openlogi-macos-permissions/SKILL.md` |
+
+Everything else under `.claude/skills/` is a per-developer symlink into
+`.agents/skills/` and is not part of the project — see `.gitignore`.

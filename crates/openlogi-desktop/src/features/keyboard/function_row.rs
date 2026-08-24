@@ -10,12 +10,16 @@
 //! [`AppState::commit_keyboard_binding`]. The panel lists the same action
 //! catalog the mouse picker uses, plus a Power User section.
 
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::float_cmp,
+#![expect(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
-    reason = "GPUI builders take owned Copy palette/slots; layout math uses small f32 counts"
+    reason = "GPUI builders take owned Copy palette values and slot tables"
+)]
+// Not `expect`: these fire inside `assert_eq!`, and rustc does not credit an
+// expectation with a lint raised in a macro expansion.
+#![allow(
+    clippy::float_cmp,
+    reason = "test and product compute the callout px through the same path"
 )]
 
 use std::rc::Rc;
@@ -37,12 +41,12 @@ use super::editors::{
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::mouse::picker::{
-    PickFn, action_icon_path, action_rows, divider, menu_card, menu_row, scroll_list,
-    section_header,
+    PickFn, action_icon_path, action_rows, divider, menu_card, menu_row, popover_section,
+    scroll_list,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::AppState;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
@@ -159,7 +163,7 @@ impl FunctionRowView {
         self.select_key(next_selection_after_click(self.selected_key, idx), cx);
     }
 
-    #[allow(dead_code, reason = "public accessor for the selection state")]
+    #[expect(dead_code, reason = "public accessor for the selection state")]
     pub(crate) fn selected_key(&self) -> Option<usize> {
         self.selected_key
     }
@@ -540,7 +544,7 @@ fn key_callout(
         })
         .child(
             div()
-                .text_xs()
+                .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(if highlighted {
                     rgb(ACCENT_BLUE).into()
@@ -570,7 +574,7 @@ fn key_callout(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .text_xs()
+                        .text_caption()
                         .text_color(if highlighted {
                             rgb(ACCENT_BLUE).into()
                         } else {
@@ -724,6 +728,10 @@ fn key_is_highlighted(idx: usize, selected: Option<usize>, hovered: Option<usize
 /// keys: a dense F-row (a G513 packs Esc-F12 into half the render width)
 /// would otherwise stack the bubbles into an overlapping wall. The leader
 /// lines fan from each bubble down to its true key position.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "idx/count index the function row — at most a couple of dozen keys"
+)]
 fn callout_center_x(idx: usize, count: usize, image_w: f32) -> f32 {
     let margin = KEY_CALLOUT_W / 2.0 + 4.0;
     if count <= 1 {
@@ -820,7 +828,7 @@ fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
         .pb_1()
         .child(
             div()
-                .text_xs()
+                .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
                 .child(tr!("Bind %{name}", name => key_name)),
@@ -836,7 +844,7 @@ fn panel_action_rows(
     pal: &Palette,
 ) -> Vec<AnyElement> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
-    children.push(section_header(&tr!("Power User"), *pal));
+    children.push(popover_section(tr!("Power User").to_string(), *pal));
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (
@@ -991,6 +999,10 @@ fn legacy_pixel_key_points(asset: &ResolvedAsset) -> Option<Vec<KeyPoint>> {
     if img.origin.width != asset.png_width || img.origin.height != asset.png_height {
         return None;
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "depot image dimensions are a few thousand pixels at most"
+    )]
     let (w, h) = (img.origin.width as f32, img.origin.height as f32);
 
     let mut markers: Vec<KeyPoint> = img
@@ -1083,6 +1095,10 @@ fn synthesized_esc_x(first_function_key_x: f32) -> f32 {
     (first_function_key_x - 0.045).max(0.02)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "FUNCTION_KEYS is a fixed table of a dozen entries"
+)]
 fn fallback_key_x_fractions() -> Vec<f32> {
     let step = (EVEN_SPACING_END - EVEN_SPACING_START) / (FUNCTION_KEYS.len() - 1) as f32;
     (0..FUNCTION_KEYS.len())
@@ -1313,6 +1329,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "lane counts are bounded by FUNCTION_KEYS"
+    )]
     fn staggered_function_key_callout_rows_fit_the_keyboard_width() {
         let lower_count = FUNCTION_KEYS
             .iter()

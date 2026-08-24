@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::config::SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -47,8 +48,9 @@ use openlogi_core::device::{
 use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
+    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, TunableTorque, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -70,6 +72,10 @@ const RECEIVER_UID: &str = "MOCK-BOLT-01";
 const MOUSE_SLOT: u8 = 1;
 const OFFLINE_SLOT: u8 = 2;
 const KEYBOARD_SLOT: u8 = 3;
+const MOCK_TORQUE: TunableTorque = match TunableTorque::try_new(50) {
+    Ok(value) => value,
+    Err(_) => panic!("valid mock SmartShift torque"),
+};
 /// Product ID of the scripted directly-attached mouse; `DeviceRoute::Direct`
 /// is matched against it.
 const DIRECT_PID: u16 = 0xb020;
@@ -205,7 +211,7 @@ async fn serve(server: MockAgent) -> std::io::Result<()> {
 
 /// Mutable DPI state for one scripted device.
 struct DpiState {
-    current: u16,
+    current: Dpi,
     capabilities: DpiCapabilities,
 }
 
@@ -269,13 +275,15 @@ impl State {
             MOUSE_SLOT,
             DeviceSettings {
                 dpi: Some(DpiState {
-                    current: 1600,
+                    current: Dpi::new(1600),
                     capabilities: DpiCapabilities::new((200u16..=8000).step_by(50).collect())?,
                 }),
                 smartshift: Some(SmartShiftStatus {
                     mode: SmartShiftMode::Ratchet,
-                    auto_disengage: 16,
-                    tunable_torque: 50,
+                    auto_disengage: SmartShiftAutoDisengage::Threshold(
+                        SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
+                    ),
+                    tunable_torque: Some(MOCK_TORQUE),
                 }),
                 lighting: false,
             },
@@ -293,7 +301,7 @@ impl State {
             DIRECT_DEVICE_INDEX,
             DeviceSettings {
                 dpi: Some(DpiState {
-                    current: 1000,
+                    current: Dpi::new(1000),
                     capabilities: DpiCapabilities::new((400u16..=4000).step_by(100).collect())?,
                 }),
                 smartshift: None,
@@ -421,10 +429,7 @@ fn standalone_light() -> StandaloneDevice {
             zones: false,
         }),
         driver_id: "litra".to_string(),
-        // Must stay `Some` until #571 is fixed: `registry_model_id` is
-        // `skip_serializing_if`, which truncates the bincode stream when it is
-        // `None` and makes the whole snapshot undecodable. `8c900` is also the
-        // real registry id for a Litra Glow, so the asset lookup resolves.
+        // `8c900` is the real registry id for a Litra Glow, so the asset lookup resolves.
         registry_model_id: Some("8c900".to_string()),
     }
 }
@@ -540,7 +545,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                         btle: true,
                         bluetooth: false,
                     },
-                    model_ids: [0x408a, 0xb35b, 0],
+                    model_ids: [0xb35b, 0x408a, 0],
                     extended_model_id: 0,
                 }),
                 capabilities: Some(Capabilities {
@@ -621,6 +626,8 @@ fn agent_status() -> AgentStatus {
         // The "-mock" marker shows up anywhere the GUI displays the agent
         // version, so a mock session can't be mistaken for a live one.
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
+        input_monitoring_granted: true,
+        hid_open_failures: false,
     }
 }
 
@@ -676,6 +683,11 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
 // Pairing updates are sent with `let _ =`: a send only fails when the GUI's
 // long-poll receiver is gone (Add Device window closed / GUI died), and
 // dropping the event is exactly right then.
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "scripted answers rarely await; keeping every method `async fn` mirrors \
+              the real server impl, which is the point of the mock"
+)]
 impl Agent for MockAgent {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
@@ -736,7 +748,7 @@ impl Agent for MockAgent {
 
     async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
 
-    async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: u32) -> Result<(), WriteError> {
+    async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
         let settings = state.settings_for_mut(&route)?;
         let dpi_state = settings
@@ -746,7 +758,7 @@ impl Agent for MockAgent {
                 feature_hex: 0x2201,
             })?;
         dpi_state.current = dpi_state.capabilities.nearest(dpi);
-        info!(%route, dpi = dpi_state.current, "set_dpi");
+        info!(%route, dpi = %dpi_state.current, "set_dpi");
         Ok(())
     }
 
@@ -770,9 +782,7 @@ impl Agent for MockAgent {
         self,
         _: Context,
         route: DeviceRoute,
-        mode: SmartShiftMode,
-        auto_disengage: u8,
-        tunable_torque: u8,
+        status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
         let settings = state.settings_for_mut(&route)?;
@@ -782,12 +792,8 @@ impl Agent for MockAgent {
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })?;
-        *smartshift = SmartShiftStatus {
-            mode,
-            auto_disengage,
-            tunable_torque,
-        };
-        info!(%route, ?mode, auto_disengage, tunable_torque, "set_smartshift");
+        *smartshift = status;
+        info!(%route, ?status, "set_smartshift");
         Ok(())
     }
 

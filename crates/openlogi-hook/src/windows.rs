@@ -1,15 +1,8 @@
 //! Windows `WH_MOUSE_LL` + `WH_KEYBOARD_LL` implementation of the OS-level
 //! input hook.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "the low-level input hook is built on the Win32 C API"
-)]
-#![allow(
-    clippy::borrow_as_ptr,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::needless_pass_by_value,
-    reason = "Win32 FFI uses raw pointer parameters and fixed-width message values"
 )]
 
 use std::cell::Cell;
@@ -35,8 +28,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, HookError, HookEvent, KeyEvent, KeyModifiers,
-    MouseEvent,
+    ButtonId, CursorPosition, EventDisposition, HookBackend, HookError, HookEvent, KeyEvent,
+    KeyModifiers, MouseEvent,
 };
 
 const WHEEL_DELTA: f32 = 120.0;
@@ -62,49 +55,120 @@ pub(crate) struct HookInner {
     join: Option<thread::JoinHandle<()>>,
 }
 
-pub(crate) fn start(
-    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
-) -> Result<HookInner, HookError> {
-    let callback: HookCallback = Arc::new(cb);
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let join = thread::Builder::new()
-        .name("openlogi-windows-hook".into())
-        .spawn(move || hook_thread(callback, ready_tx))
-        .map_err(|e| HookError::WindowsHook(format!("could not spawn hook thread: {e}")))?;
+/// The Windows backend: `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks on a thread
+/// with its own message pump.
+pub(crate) struct Backend;
 
-    match ready_rx
-        .recv()
-        .map_err(|e| HookError::WindowsHook(format!("hook thread exited before setup: {e}")))?
-    {
-        Ok(thread_id) => Ok(HookInner {
-            thread_id,
-            join: Some(join),
-        }),
-        Err(e) => {
-            let _ = join.join();
-            Err(e)
+impl HookBackend for Backend {
+    type Running = HookInner;
+
+    fn start(
+        cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
+    ) -> Result<HookInner, HookError> {
+        let callback: HookCallback = Arc::new(cb);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let join = thread::Builder::new()
+            .name("openlogi-windows-hook".into())
+            .spawn(move || hook_thread(callback, ready_tx))
+            .map_err(|e| HookError::WindowsHook(format!("could not spawn hook thread: {e}")))?;
+
+        match ready_rx
+            .recv()
+            .map_err(|e| HookError::WindowsHook(format!("hook thread exited before setup: {e}")))?
+        {
+            Ok(thread_id) => Ok(HookInner {
+                thread_id,
+                join: Some(join),
+            }),
+            Err(e) => {
+                let _ = join.join();
+                Err(e)
+            }
         }
     }
+
+    fn stop(mut inner: HookInner) {
+        // SAFETY: PostThreadMessageW takes the target thread id and the message by
+        // value (no pointers); `thread_id` was returned by the hook thread's own
+        // GetCurrentThreadId, so it names a real thread with a message queue.
+        let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
+        if posted == 0 {
+            // SAFETY: GetLastError reads the calling thread's last-error code and
+            // has no preconditions.
+            let err = unsafe { GetLastError() };
+            tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
+        }
+        if let Some(join) = inner.join.take()
+            && let Err(e) = join.join()
+        {
+            tracing::warn!(?e, "Windows hook thread panicked while stopping");
+        }
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the path buffer is a fixed 32768 u16s"
+    )]
+    fn frontmost_app() -> Option<String> {
+        // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
+        // or null; no preconditions.
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return None;
+        }
+
+        let mut pid = 0;
+        // SAFETY: `hwnd` is the non-null handle just returned; `&raw mut pid` is a
+        // valid out-pointer the call writes the owning process id into.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
+        }
+        if pid == 0 {
+            return None;
+        }
+
+        // SAFETY: OpenProcess takes the access mask and pid by value and returns a
+        // handle or null (checked); on success we own the handle and close it below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return None;
+        }
+
+        let mut buf = vec![0u16; 32_768];
+        let mut len = buf.len() as u32;
+        // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
+        // 32768-u16 buffer and `len` holds its length, so the call writes at most
+        // `len` code units and updates `len` with the count written.
+        let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
+        // SAFETY: `process` is the handle from OpenProcess, owned here and closed
+        // exactly once now that the query has returned.
+        unsafe {
+            CloseHandle(process);
+        }
+        if ok == 0 || len == 0 {
+            return None;
+        }
+
+        Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
+    }
+
+    fn cursor_position() -> Option<CursorPosition> {
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: `point` is a valid writable POINT for the duration of the call.
+        if unsafe { GetCursorPos(&raw mut point) } == 0 {
+            return None;
+        }
+        Some(CursorPosition {
+            x: f64::from(point.x),
+            y: f64::from(point.y),
+        })
+    }
 }
 
-pub(crate) fn stop(mut inner: HookInner) {
-    // SAFETY: PostThreadMessageW takes the target thread id and the message by
-    // value (no pointers); `thread_id` was returned by the hook thread's own
-    // GetCurrentThreadId, so it names a real thread with a message queue.
-    let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
-    if posted == 0 {
-        // SAFETY: GetLastError reads the calling thread's last-error code and
-        // has no preconditions.
-        let err = unsafe { GetLastError() };
-        tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
-    }
-    if let Some(join) = inner.join.take()
-        && let Err(e) = join.join()
-    {
-        tracing::warn!(?e, "Windows hook thread panicked while stopping");
-    }
-}
-
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "callback and ready are moved into the thread's hook state and channel"
+)]
 fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError>>) {
     match CALLBACK.lock() {
         Ok(mut slot) if slot.is_none() => {
@@ -133,7 +197,7 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
     // PostThreadMessageW from `stop` can't race queue creation and be lost.
     unsafe {
         PeekMessageW(
-            &mut bootstrap_msg,
+            &raw mut bootstrap_msg,
             std::ptr::null_mut(),
             WM_USER,
             WM_USER,
@@ -199,14 +263,14 @@ fn message_loop() {
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
         // messages for the calling thread. Returns <= 0 on WM_QUIT or error.
-        let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
+        let result = unsafe { GetMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0) };
         if result <= 0 {
             break;
         }
         // SAFETY: `msg` was just populated by GetMessageW and outlives the call.
-        unsafe { TranslateMessage(&msg) };
+        unsafe { TranslateMessage(&raw const msg) };
         // SAFETY: as above — `msg` is a live, initialized MSG.
-        unsafe { DispatchMessageW(&msg) };
+        unsafe { DispatchMessageW(&raw const msg) };
     }
 }
 
@@ -232,7 +296,7 @@ fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 /// `code == HC_ACTION`, Windows guarantees `lparam` points to a live
 /// `MSLLHOOKSTRUCT`; [`hook_data`] relies on that contract to dereference it.
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
+    if code != HC_ACTION.cast_signed() {
         return call_next(code, wparam, lparam);
     }
 
@@ -275,6 +339,10 @@ unsafe fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
     Some(unsafe { *(lparam as *const MSLLHOOKSTRUCT) })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "WPARAM/LPARAM are pointer-sized by ABI but carry 32-bit message payloads"
+)]
 fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
     // Every mouse message carries the cursor point, so the baseline advances on
     // all of them: injected motion is dropped below but still moves the cursor,
@@ -365,7 +433,7 @@ fn motion_delta(previous: POINT, pt: POINT) -> Option<(i32, i32)> {
 /// `KBDLLHOOKSTRUCT`; [`key_hook_data`] relies on that contract to
 /// dereference it.
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
+    if code != HC_ACTION.cast_signed() {
         return call_next(code, wparam, lparam);
     }
 
@@ -413,6 +481,10 @@ unsafe fn key_hook_data(lparam: LPARAM) -> Option<KBDLLHOOKSTRUCT> {
 /// for injected input (our own `SendInput` synthesis must not re-enter the
 /// remapper) and for keys outside the remapper's Esc/F1–F19 vocabulary, which
 /// pass through without ever reaching the callback.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "WPARAM is pointer-sized by ABI but carries a 32-bit message id"
+)]
 fn translate_key(
     wparam: WPARAM,
     data: KBDLLHOOKSTRUCT,
@@ -476,62 +548,7 @@ fn high_word(value: u32) -> u16 {
 }
 
 fn signed_high_word(value: u32) -> i16 {
-    high_word(value) as i16
-}
-
-pub(crate) fn cursor_position() -> Option<CursorPosition> {
-    let mut point = POINT { x: 0, y: 0 };
-    // SAFETY: `point` is a valid writable POINT for the duration of the call.
-    if unsafe { GetCursorPos(&raw mut point) } == 0 {
-        return None;
-    }
-    Some(CursorPosition {
-        x: f64::from(point.x),
-        y: f64::from(point.y),
-    })
-}
-
-pub(crate) fn frontmost_process_path() -> Option<String> {
-    // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
-    // or null; no preconditions.
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_null() {
-        return None;
-    }
-
-    let mut pid = 0;
-    // SAFETY: `hwnd` is the non-null handle just returned; `&mut pid` is a valid
-    // out-pointer the call writes the owning process id into.
-    unsafe {
-        GetWindowThreadProcessId(hwnd, &mut pid);
-    }
-    if pid == 0 {
-        return None;
-    }
-
-    // SAFETY: OpenProcess takes the access mask and pid by value and returns a
-    // handle or null (checked); on success we own the handle and close it below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process.is_null() {
-        return None;
-    }
-
-    let mut buf = vec![0u16; 32_768];
-    let mut len = buf.len() as u32;
-    // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
-    // 32768-u16 buffer and `len` holds its length, so the call writes at most
-    // `len` code units and updates `len` with the count written.
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) };
-    // SAFETY: `process` is the handle from OpenProcess, owned here and closed
-    // exactly once now that the query has returned.
-    unsafe {
-        CloseHandle(process);
-    }
-    if ok == 0 || len == 0 {
-        return None;
-    }
-
-    Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
+    high_word(value).cast_signed()
 }
 
 fn last_error(context: &str) -> HookError {
@@ -541,7 +558,6 @@ fn last_error(context: &str) -> HookError {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

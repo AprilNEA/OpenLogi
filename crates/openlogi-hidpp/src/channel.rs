@@ -5,29 +5,23 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Mutex, MutexGuard, Weak,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
 use futures::{FutureExt, channel::oneshot, select};
-use rand::Rng;
 use tracing::trace;
 
-use crate::nibble::U4;
+use crate::{nibble::U4, sync::lock};
 
 mod error;
 mod message;
 mod raw;
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 pub(crate) mod tests;
 
 pub use error::ChannelError;
@@ -52,17 +46,6 @@ const MAX_RAW_REPORT_LENGTH: usize = 64;
 pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
-
-/// Locks `mutex`, treating poisoning as unrecoverable: a panicking holder
-/// leaves the channel's shared queues in an inconsistent state, so
-/// continuing would operate on corrupt data.
-#[expect(
-    clippy::expect_used,
-    reason = "mutex poisoning is unrecoverable here — see doc comment"
-)]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().expect("mutex poisoned")
-}
 
 /// Removes a HID++ message listener when dropped.
 pub struct MessageListenerGuard {
@@ -111,6 +94,13 @@ pub struct HidppChannel {
     /// messages.
     message_listeners: Arc<Mutex<HashMap<u32, MessageListener>>>,
 
+    /// The handle assigned to the next registered message listener.
+    ///
+    /// A counter, not a random draw: a handle is only ever a key into
+    /// [`Self::message_listeners`], so counting up is collision-free by
+    /// construction where drawing needed a retry loop to be merely unlikely.
+    next_listener_hdl: AtomicU32,
+
     /// The sender signaling the read thread to stop.
     read_thread_close: Option<oneshot::Sender<()>>,
 
@@ -141,8 +131,9 @@ impl Drop for HidppChannel {
         }
 
         if let Some(read_thread_hdl) = self.read_thread_hdl.take() {
-            // A panic here means the read thread itself panicked; propagate
-            // it rather than silently ignore a crashed background worker.
+            // Joining is not politeness: it is what makes the OS handle closed
+            // by the time this returns, so a caller that drops a channel and
+            // reopens the same node never has two opens of it alive at once.
             #[expect(
                 clippy::unwrap_used,
                 reason = "propagate a read-thread panic instead of ignoring a crashed background worker"
@@ -168,6 +159,10 @@ struct PendingMessage {
 
 impl HidppChannel {
     /// Tries to construct a HID++ channel from a raw HID channel.
+    ///
+    /// Reads run on a thread this owns, joined on drop — so the underlying OS
+    /// handle is closed by the time a dropped channel's `drop` returns. Callers
+    /// that reopen the same node right after closing one depend on that.
     ///
     /// If the given HID channel does not support HID++,
     /// [`ChannelError::HidppNotSupported`] will be returned.
@@ -209,6 +204,7 @@ impl HidppChannel {
             software_id: AtomicU8::new(0x01),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
+            next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
@@ -464,15 +460,8 @@ impl HidppChannel {
         &self,
         listener: impl Fn(HidppMessage, bool) + Send + Sync + 'static,
     ) -> u32 {
-        let mut listeners = lock(&self.message_listeners);
-
-        let mut rng = rand::rng();
-        let mut hdl = rng.random::<u32>();
-        while listeners.contains_key(&hdl) {
-            hdl = rng.random::<u32>();
-        }
-
-        listeners.insert(hdl, Arc::new(listener));
+        let hdl = self.next_listener_hdl.fetch_add(1, Ordering::Relaxed);
+        lock(&self.message_listeners).insert(hdl, Arc::new(listener));
         hdl
     }
 
@@ -549,7 +538,7 @@ async fn read_loop(
             len,
             matched,
             pending_count,
-            payload = format!("{:02x?}", &buf[..len.min(16)]),
+            payload = format_args!("{:02x?}", &buf[..len.min(16)]),
             "raw report received"
         );
 

@@ -174,15 +174,11 @@ impl DeviceFriendlyNameFeature {
         let max_len = self.get_friendly_name_length().await?.name_max_length;
         let mut bytes = name.into_bytes();
         bytes.truncate(max_len as usize);
-        let chunks = bytes.chunks_exact(15);
-        let remainder = chunks.remainder();
+        let (chunks, remainder) = bytes.as_chunks::<15>();
 
         let mut index = 0;
         for chunk in chunks {
-            // `chunks_exact(15)` guarantees every yielded chunk is exactly 15
-            // bytes long.
-            let chunk: [u8; 15] = std::array::from_fn(|i| chunk[i]);
-            index += self.set_friendly_name(index, chunk).await?;
+            index += self.set_friendly_name(index, *chunk).await?;
         }
 
         if !remainder.is_empty() {

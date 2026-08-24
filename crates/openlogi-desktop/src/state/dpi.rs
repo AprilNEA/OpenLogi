@@ -1,7 +1,7 @@
 //! DPI presets and live writes. Capability discovery itself lives in
 //! [`super::load::LazyDeviceData`], reached directly as `self.reads.dpi`.
 
-use openlogi_core::hid::{DeviceRoute, DpiCapabilities, DpiInfo, WriteError};
+use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities, DpiInfo, WriteError};
 use tracing::debug;
 
 use crate::state::devices::DeviceRecord;
@@ -19,7 +19,7 @@ impl AppState {
     ///
     /// No-op when no device is selected (binding panel won't expose the
     /// editor in that state).
-    pub fn commit_dpi_presets(&mut self, presets: Vec<u32>) {
+    pub fn commit_dpi_presets(&mut self, presets: Vec<Dpi>) {
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -34,7 +34,7 @@ impl AppState {
     /// Read the DPI preset list for the active device, or an empty `Vec`
     /// when no device is selected. UI helper.
     #[must_use]
-    pub fn dpi_presets(&self) -> Vec<u32> {
+    pub fn dpi_presets(&self) -> Vec<Dpi> {
         self.current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(|key| self.config.dpi_presets(key))
@@ -43,11 +43,11 @@ impl AppState {
     /// The active device's known DPI, falling back to [`DEFAULT_DPI`] until its
     /// capability read completes. Used to seed `self.dpi` on a device switch.
     #[must_use]
-    pub(crate) fn dpi_for_current(&self) -> u32 {
+    pub(crate) fn dpi_for_current(&self) -> Dpi {
         self.current_record()
             .and_then(|record| self.reads.dpi.get(&record.device_key()))
             .and_then(|status| match status {
-                DpiStatus::Ready(info) => Some(u32::from(info.current)),
+                DpiStatus::Ready(info) => Some(info.current),
                 _ => None,
             })
             .unwrap_or(DEFAULT_DPI)
@@ -82,7 +82,7 @@ impl AppState {
             "DPI",
         ) && is_active
         {
-            self.dpi = u32::from(info.current);
+            self.dpi = info.current;
         }
     }
     /// DPI capabilities for the active device, if discovery succeeded.
@@ -100,15 +100,15 @@ impl AppState {
     }
     /// Snap `dpi` to the active device's supported list when known.
     #[must_use]
-    pub fn normalize_active_dpi(&self, dpi: u32) -> u32 {
+    pub fn normalize_active_dpi(&self, dpi: Dpi) -> Dpi {
         self.active_dpi_capabilities()
-            .map_or(dpi, |caps| caps.snap(dpi))
+            .map_or(dpi, |caps| caps.nearest(dpi))
     }
     /// Apply `dpi` to the active device (best-effort, via the agent) and
     /// persist it per device — the sensor value lives in device RAM and resets
     /// on a power cycle (#189), so the agent re-applies it on reconnect.
     /// Updates the displayed value even with no device selected.
-    pub fn commit_dpi(&mut self, dpi: u32) {
+    pub fn commit_dpi(&mut self, dpi: Dpi) {
         self.dpi = dpi;
         let Some(record) = self.current_record() else {
             debug!("no active device — DPI change kept in memory only");

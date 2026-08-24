@@ -19,8 +19,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
-    SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -80,6 +80,13 @@ impl AgentServer {
     }
 }
 
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "the handlers that only read cached state need no await, but the RPC \
+              surface reads as one thing when every method in the impl keeps the \
+              `async fn` the tarpc trait declares — worth more than shaving a \
+              future off a dozen of them with `std::future::ready`"
+)]
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
@@ -103,10 +110,16 @@ impl Agent for AgentServer {
         match Config::load_or_default() {
             Ok(config) => {
                 let launch_at_login = config.app_settings.launch_at_login;
+                #[cfg(target_os = "macos")]
+                let app_icon = config.app_settings.app_icon;
                 self.orchestrator.lock().await.reload_config(config);
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::launch_agent::reconcile(launch_at_login);
+                // So does the app icon, and the menu-bar item is ours to
+                // restyle — the GUI can only reach the Dock and the bundle.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_icon(app_icon);
                 Ok(())
             }
             Err(error) => {
@@ -118,8 +131,7 @@ impl Agent for AgentServer {
         }
     }
 
-    async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: u32) -> Result<(), WriteError> {
-        let dpi = hardware::dpi_wire_value(dpi)?;
+    async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         self.shared
             .device(&route)
             .run(HidppOperation::WriteDpi, |c| async move {
@@ -147,14 +159,12 @@ impl Agent for AgentServer {
         self,
         _: Context,
         route: DeviceRoute,
-        mode: SmartShiftMode,
-        auto_disengage: u8,
-        tunable_torque: u8,
+        status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
         self.shared
             .device(&route)
             .run(HidppOperation::WriteSmartShift, |c| async move {
-                openlogi_hid::set_smartshift_on(&c, mode, auto_disengage, tunable_torque).await
+                openlogi_hid::set_smartshift_on(&c, status).await
             })
             .await
     }
@@ -563,7 +573,6 @@ pub async fn run(server: AgentServer) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
     use std::time::{Duration, Instant};

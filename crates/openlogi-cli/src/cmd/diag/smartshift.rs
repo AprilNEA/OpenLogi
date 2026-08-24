@@ -4,6 +4,7 @@ use std::num::NonZeroU8;
 
 use anyhow::{Context, Result};
 use clap::Args;
+use openlogi_hid::{SmartShiftAutoDisengage, TunableTorque};
 
 use crate::cmd::diag::select_device;
 
@@ -35,6 +36,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
     println!("device: {name} ({route})");
 
     if let Some(n) = args.sensitivity {
+        let requested = SmartShiftAutoDisengage::from(n);
         let before = openlogi_hid::get_smartshift_status(&route)
             .await
             .context("read SmartShift status")?;
@@ -43,7 +45,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
             before.mode, before.auto_disengage
         );
 
-        let after = openlogi_hid::set_smartshift_sensitivity(&route, n)
+        let after = openlogi_hid::set_smartshift_sensitivity(&route, requested)
             .await
             .context("set SmartShift sensitivity")?;
         println!(
@@ -51,7 +53,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
             after.mode, after.auto_disengage
         );
 
-        if after.auto_disengage != n.get() {
+        if after.auto_disengage != requested {
             anyhow::bail!(
                 "SmartShift sensitivity write not applied: requested {n}, device reports {}",
                 after.auto_disengage
@@ -77,7 +79,9 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         .context("read SmartShift status")?;
     println!(
         "  current: mode={:?} auto_disengage={} torque={}",
-        before.mode, before.auto_disengage, before.tunable_torque
+        before.mode,
+        before.auto_disengage,
+        before.tunable_torque.map_or(0, TunableTorque::into_inner)
     );
 
     let new_mode = openlogi_hid::toggle_smartshift(&route)
@@ -90,7 +94,9 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         .context("read SmartShift after toggle")?;
     println!(
         "  read-back: mode={:?} auto_disengage={} torque={}",
-        after.mode, after.auto_disengage, after.tunable_torque
+        after.mode,
+        after.auto_disengage,
+        after.tunable_torque.map_or(0, TunableTorque::into_inner)
     );
 
     if after.mode == before.mode {

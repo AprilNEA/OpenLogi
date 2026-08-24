@@ -1,5 +1,5 @@
-> [!WARNING]
-> **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified when a new release lands.
+> [!NOTE]
+> 🚀 **OpenLogi is live on Product Hunt!** If you find it useful, we'd really appreciate your [support and feedback](https://www.producthunt.com/products/openlogi).
 
 <h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a></h4>
 
@@ -8,8 +8,10 @@
 </p>
 
 <h1 align="center">OpenLogi</h1>
-<p align="center"><strong>⚡️ A native, local-first alternative to Logitech Options+, written in Rust 🦀<br/>Remap buttons, DPI, and SmartShift over HID++. No account, no telemetry.</strong></p>
+<p align="center"><strong>⚡️ A native, local-first alternative to Logitech Options+, written in Rust 🦀<br/>Unlock the full capabilities of Logitech mice, keyboards, and webcams over HID++ and UVC</strong></p>
 
+> [!WARNING]
+> **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified when a new release lands.
 
 <div align="center">
     <a href="https://twitter.com/AprilNEA" target="_blank">
@@ -25,76 +27,54 @@
 
 <p align="center">
     <a href="https://trendshift.io/repositories/42303" target="_blank">
-    <img src="https://trendshift.io/api/badge/trendshift/repositories/42303/daily?language=Rust" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <img src="https://trendshift.io/api/badge/repositories/42303" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <a href="https://www.producthunt.com/products/openlogi?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-openlogi" target="_blank" rel="noopener noreferrer">
+    <img alt="OpenLogi - A local-first alternative to Logitech Options+ | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1229381&amp;theme=light&amp;t=1787483638149"></a>
 </p>
 
-> **Options+ ? Try OpenLogi.**
+> **Fed up with Options+? Try OpenLogi.**
 
-Remap buttons, drive DPI and SmartShift, and switch profiles per app, without a Logitech account, telemetry, or the official Options+ install. No cloud, plain TOML config. By default, device-image fetches are the only automatic network calls; update checks and downloads run only when you request or opt into them.
+Runs on macOS, Linux, and Windows.
 
 ---
-
-## What it is
-
-OpenLogi talks to Logitech HID++ peripherals over Logi Bolt and Unifying
-receivers, Bluetooth-direct connections, or USB cables, without running Logi
-Options+. It consists of three components:
-
-- **[OpenLogi GUI](crates/openlogi-desktop)**, a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, SmartShift, per-device scroll inversion, RGB keyboard lighting, per-application profiles, a live device carousel, and a Settings window localized into 20 languages.
-- **[OpenLogi agent](crates/openlogi-agent)**, the background service that owns the input hook and all device I/O. The GUI is a pure IPC client and starts the agent when needed.
-- **[OpenLogi CLI](crates/openlogi-cli)** for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
-
-Everything stays local: bindings live in a plain TOML file, the agent remaps
-button presses through the OS input hook, and writes DPI, SmartShift, scroll,
-and lighting changes straight to the device over HID++.
-
-OpenLogi runs on macOS, Linux, and Windows. Windows is the newest port: it has
-been validated end-to-end on Windows 11 hardware, but may still have more rough
-edges than the macOS and Linux builds; see [Roadmap](#roadmap).
 
 ## Beyond Options+
 
 Things OpenLogi does that Options+ won't:
 
-- **Run on Linux.** Options+ ships for macOS and Windows only. OpenLogi treats
-  Linux as a first-class platform: evdev/uinput hook, udev rules, a systemd
-  user unit, and `.deb` / `.rpm` / `.pkg.tar.zst` packages.
-- **Put gestures on any button.** The dedicated Gesture Button, middle, back,
-  and forward buttons can each have their own per-direction swipe bindings.
-  Options+ pins gestures to the dedicated Gesture Button.
-- **Keep config in plain text.** Everything is one TOML file you can read,
-  diff, version-control, and copy between machines.
-- **Script it.** A real CLI: device inventory, asset prefetch, and on-device
-  HID++ diagnostics (feature/control dumps, DPI / SmartShift round-trips, and
-  keyboard lighting checks).
-- **Stay light.** Native Rust + GPUI binaries: no Electron suite, no resident
-  updaters, no account, no telemetry.
+- **Stay light.** Native Rust + GPUI.
+- **Run on Linux.** Linux is a first-class platform in OpenLogi.
+- **Gestures on any button.** Give the gesture role to any physical button — or turn gestures off entirely.
+- **Plain-text config.** Everything is one TOML file you can sync between machines however you like.
+- **Script it.** A real CLI alongside the GUI.
 
-## Roadmap
+## Features
 
-| Capability | State |
-|---|---|
-| Discover Bolt receivers + list paired devices (CLI + GUI) | ✅ |
-| Unifying receivers (older protocol, replaced by Bolt) | ✅ |
-| Bluetooth-direct / wired devices (no receiver) | ✅ |
-| Battery percentage / charge state | ✅ (online devices) |
-| Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS + Linux + Windows |
-| Button remapping via the OS input hook | ✅ macOS + Linux + Windows |
-| Built-in action catalog + custom keyboard shortcuts (TOML-authored) | ✅ macOS + Linux + Windows¹ |
-| DPI control + presets + Cycle / Set-preset actions (HID++ `0x2201`) | ✅ |
-| SmartShift wheel: mode toggle + sensitivity + permanent-ratchet panel (HID++ `0x2111`) | ✅ |
-| Per-device native scroll inversion (HID++ `0x2121`) | ✅ (supported devices) |
-| Static RGB keyboard lighting (HID++ `0x8070` / `0x8080`) | ✅ (supported devices) |
-| Per-application profile overlays (auto-switch on app focus) | ✅ macOS + Windows, 🟡 Linux (X11 / XWayland only) |
-| Settings window: launch-at-login, updates, permissions, language, appearance | ✅ macOS + Linux + Windows |
-| Agent status icon | ✅ macOS menu bar + Windows tray; not applicable on Linux |
-| Interface localization (20 languages: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ |
-| Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` / `.pkg.tar.zst` | ✅ Linux |
-| Gesture-button per-direction bindings + live capture | ✅ (device capability dependent) |
-| Middle / mode-shift / thumbwheel button capture | ✅ middle on all platforms; mode-shift / thumbwheel device dependent |
-| Windows (agent, GUI, event hook, installer) | ✅ Windows 11 hardware validated; newer port with ongoing compatibility polish |
+- Devices connected over Logi Bolt receivers, Unifying receivers, Bluetooth, or a wired connection, with battery percentage and charge state
+- Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config¹
+- Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)
+- Litra lights: power, brightness, and color temperature, with optional auto power that follows camera activity
 
-Help improve the interface translations on [Crowdin](https://crowdin.com/project/openlogi).
+**Mouse**
+
+- Capture and remap the middle, mode-shift, and thumbwheel buttons (middle everywhere, the rest where the device exposes them)
+- Per-direction gesture bindings with live capture, on any capable button
+- Actions Ring: a cursor-centred, eight-slot overlay of actions (`ShowActionsRing`), with per-application layouts
+- DPI control with presets and Cycle / Set-preset actions (`0x2201`)
+- SmartShift wheel: mode toggle, sensitivity, and a permanent-ratchet panel (`0x2111`)
+- Per-device native scroll inversion (`0x2121`, supported devices)
+
+**Keyboard**
+
+- Global F-key remapping: the same action catalog as the mouse, plus power-user actions — typed text, key combos, multi-step workflows (macOS + Windows)
+- Static RGB lighting (`0x8070` / `0x8080`, supported devices)
+
+**Camera**
+
+- Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
+- Live preview that opens the camera only while you watch — leaving it releases the camera entirely and the LED goes off
+- Image controls written straight to the UVC hardware — zoom, focus, exposure, brightness, contrast, saturation, sharpness, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
+- One-click profiles: built-in Default / Streaming / Video call plus custom snapshots; settings persist per camera and are written back to the hardware on the next view
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.
 
@@ -215,14 +195,14 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
 
 ## Acknowledgments
 
-- **Windows, cameras, and i18n** by [@davidbudnick](https://github.com/davidbudnick) — the Windows input hook and MSI updates, Logitech webcam support, keyboard RGB, and the Crowdin translation pipeline
-- **Linux port** by [@cserby](https://github.com/cserby) — the evdev/uinput hook, D-Bus actions, .deb/.rpm packaging
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — the most complete open-source HID++ implementation, and our protocol reference
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — prior art for a local, account-free Options+ replacement
+- **Windows, cameras, and i18n** by [@davidbudnick](https://github.com/davidbudnick) — keyboard RGB, Windows support, Logitech webcam support
+- **Linux port** by [@cserby](https://github.com/cserby) — Linux support
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — a local, account-free Options+ replacement
 
 ## License
 
-Dual-licensed under either of
+The code in this repository is dual-licensed under either of
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))

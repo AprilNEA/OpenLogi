@@ -7,7 +7,7 @@
 //! exact version already in Cargo.lock as gpui's own build-dependency, so it
 //! adds an edge, not a crate, and cannot move the pinned gpui rev.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     reason = "a build script fails by panicking, so expect — whose message surfaces in the build log — is the idiomatic error path"
 )]

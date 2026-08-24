@@ -16,13 +16,6 @@
 //! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
 //! block in this backend and hands the descriptor up as a plain `&[u8]`.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    reason = "UVC payloads are bounded 16-bit values copied verbatim"
-)]
-
 mod iokit;
 
 use std::collections::HashMap;
@@ -51,6 +44,8 @@ pub use crate::controls::{
 /// them into the one combination each control actually uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Payload {
+    /// 1-byte unsigned (menu/enum controls).
+    U8,
     /// 2-byte unsigned (most controls).
     U16,
     /// 2-byte signed (brightness, hue).
@@ -63,6 +58,7 @@ impl Payload {
     /// Size in bytes on the wire.
     const fn len(self) -> usize {
         match self {
+            Self::U8 => 1,
             Self::U16 | Self::I16 => 2,
             Self::U32 => 4,
         }
@@ -81,12 +77,14 @@ impl CameraControl {
     /// UVC entity, control selector (Camera Terminal §A.9.4, Processing Unit
     /// §A.9.5), and wire payload type for this control.
     const fn spec(self) -> ControlSpec {
-        use Payload::{I16, U16, U32};
+        use Payload::{I16, U8, U16, U32};
         use Unit::{CameraTerminal, Processing};
         let (unit, selector, payload) = match self {
             Self::Zoom => (CameraTerminal, 0x0B, U16), // CT_ZOOM_ABSOLUTE_CONTROL
             Self::Focus => (CameraTerminal, 0x06, U16), // CT_FOCUS_ABSOLUTE_CONTROL
             Self::Exposure => (CameraTerminal, 0x04, U32), // CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
+            Self::PowerLineFrequency => (Processing, 0x05, U8), // PU_POWER_LINE_FREQUENCY_CONTROL
+            Self::LowLightCompensation => (CameraTerminal, 0x03, U8), // CT_AE_PRIORITY_CONTROL
             Self::Brightness => (Processing, 0x02, I16), // PU_BRIGHTNESS_CONTROL
             Self::Contrast => (Processing, 0x03, U16), // PU_CONTRAST_CONTROL
             Self::Saturation => (Processing, 0x07, U16), // PU_SATURATION_CONTROL
@@ -167,16 +165,7 @@ pub fn control_range(
 ) -> Result<ControlRange, ControlError> {
     let _quiesce = quiesce();
     let dev = UsbDevice::open_for(unique_id)?;
-    let min = dev.get(control, UVC_GET_MIN)?;
-    let max = dev.get(control, UVC_GET_MAX)?;
-    let default = dev.get(control, UVC_GET_DEF)?;
-    let current = dev.get(control, UVC_GET_CUR).unwrap_or(default);
-    Ok(ControlRange {
-        min,
-        max,
-        default,
-        current,
-    })
+    dev.range(control)
 }
 
 /// Read every supported control in a single device-open (controls the camera
@@ -199,21 +188,8 @@ pub fn read_camera_state(unique_id: &str) -> Result<CameraState, ControlError> {
     let dev = UsbDevice::open_for(unique_id)?;
     let mut state = CameraState::default();
     for control in CameraControl::ALL {
-        if let (Ok(min), Ok(max), Ok(default)) = (
-            dev.get(control, UVC_GET_MIN),
-            dev.get(control, UVC_GET_MAX),
-            dev.get(control, UVC_GET_DEF),
-        ) {
-            let current = dev.get(control, UVC_GET_CUR).unwrap_or(default);
-            state.controls.push((
-                control,
-                ControlRange {
-                    min,
-                    max,
-                    default,
-                    current,
-                },
-            ));
+        if let Ok(range) = dev.range(control) {
+            state.controls.push((control, range));
         }
     }
     for toggle in AutoToggle::ALL {
@@ -430,6 +406,33 @@ impl UsbDevice {
         }
     }
 
+    /// Read one control's complete range. Boolean AE priority controls need
+    /// synthetic bounds because UVC cameras commonly implement only GET_CUR;
+    /// without GET_DEF, the live value is the only safe reset target.
+    fn range(&self, control: CameraControl) -> Result<ControlRange, ControlError> {
+        if control == CameraControl::LowLightCompensation {
+            let current = self.get(control, UVC_GET_CUR)?;
+            return Ok(ControlRange {
+                min: 0,
+                max: 1,
+                default: self.get(control, UVC_GET_DEF).unwrap_or(current),
+                current,
+                value_mask: None,
+            });
+        }
+        let min = self.get(control, UVC_GET_MIN)?;
+        let max = self.get(control, UVC_GET_MAX)?;
+        let default = self.get(control, UVC_GET_DEF)?;
+        let current = self.get(control, UVC_GET_CUR).unwrap_or(default);
+        Ok(ControlRange {
+            min,
+            max,
+            default,
+            current,
+            value_mask: None,
+        })
+    }
+
     /// Issue a UVC GET request (`req` = GET_MIN/MAX/DEF/CUR), returning the
     /// control-sized little-endian value, sign-extended per the control.
     fn get(&self, control: CameraControl, req: u8) -> Result<i32, ControlError> {
@@ -442,6 +445,7 @@ impl UsbDevice {
         let mut buf = [0u8; 4];
         self.transfer(RT_GET, req, selector, entity, &mut buf[..payload.len()])?;
         Ok(match payload {
+            Payload::U8 => i32::from(buf[0]),
             Payload::U32 => i32::try_from(u32::from_le_bytes(buf)).unwrap_or(i32::MAX),
             Payload::I16 => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
             Payload::U16 => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
@@ -456,7 +460,7 @@ impl UsbDevice {
             payload,
         } = control.spec();
         let entity = self.entity(unit)?;
-        let mut buf = (value as u32).to_le_bytes();
+        let mut buf = value.cast_unsigned().to_le_bytes();
         self.transfer(
             RT_SET,
             UVC_SET_CUR,
@@ -513,6 +517,10 @@ impl UsbDevice {
             bRequest: request,
             wValue: selector << 8,
             wIndex: (u16::from(entity) << 8) | u16::from(self.vc_interface),
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "`data` is a UVC control payload — at most the 4 bytes a `ControlSpec` declares"
+            )]
             wLength: data.len() as u16,
             pData: data.as_mut_ptr().cast::<c_void>(),
             wLenDone: 0,
@@ -628,7 +636,22 @@ fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ITT_CAMERA, VcTopology, location_hint, scan_descriptors};
+    use super::{
+        CameraControl, ITT_CAMERA, Payload, Unit, VcTopology, location_hint, scan_descriptors,
+    };
+
+    #[test]
+    fn flicker_and_low_light_use_standard_uvc_controls() {
+        let flicker = CameraControl::PowerLineFrequency.spec();
+        assert_eq!(flicker.unit, Unit::Processing);
+        assert_eq!(flicker.selector, 0x05);
+        assert_eq!(flicker.payload, Payload::U8);
+
+        let low_light = CameraControl::LowLightCompensation.spec();
+        assert_eq!(low_light.unit, Unit::CameraTerminal);
+        assert_eq!(low_light.selector, 0x03);
+        assert_eq!(low_light.payload, Payload::U8);
+    }
 
     /// AVFoundation prints the location id unpadded: a StreamCam on bus
     /// 0x01123000 yields a 15-digit id whose leading run is only 7 digits.
@@ -659,16 +682,8 @@ mod tests {
 
     /// An 8-byte VC_INPUT_TERMINAL descriptor for `entity`.
     fn input_terminal(entity: u8, terminal_type: u16) -> Vec<u8> {
-        vec![
-            8,
-            0x24,
-            0x02,
-            entity,
-            terminal_type as u8,
-            (terminal_type >> 8) as u8,
-            0,
-            0,
-        ]
+        let [type_lo, type_hi] = terminal_type.to_le_bytes();
+        vec![8, 0x24, 0x02, entity, type_lo, type_hi, 0, 0]
     }
 
     /// A minimal VC_PROCESSING_UNIT descriptor for `entity`.

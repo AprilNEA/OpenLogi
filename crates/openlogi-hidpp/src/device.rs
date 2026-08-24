@@ -252,16 +252,11 @@ async fn read_feature_entry(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use std::sync::Arc;
 
     use crate::{
-        channel::{HidppChannel, tests::MockRawHidChannel},
+        channel::tests::{MockRawHidChannel, channel_with_reader},
         feature::{CreatableFeature as _, feature_set::FeatureSetFeature},
         protocol::v20::Hidpp20Error,
     };
@@ -275,7 +270,7 @@ mod tests {
     fn lost_feature_entry_is_retried_before_giving_up() {
         futures::executor::block_on(async {
             let (raw, handle) = MockRawHidChannel::new();
-            let channel = Arc::new(HidppChannel::from_raw_channel(raw).await.unwrap());
+            let channel = Arc::new(channel_with_reader(raw).await);
             // The mock answers nothing, so every attempt runs to its deadline.
             let feature_set = FeatureSetFeature::new(Arc::clone(&channel), 0xff, 0x01);
 

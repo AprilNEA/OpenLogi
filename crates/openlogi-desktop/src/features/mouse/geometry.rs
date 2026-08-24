@@ -22,7 +22,7 @@ const ASSET_HOTSPOT: f32 = 56.;
 /// is typically narrower than the full image (Logi pads transparent strips on
 /// both sides); sizing by origin causes `ObjectFit::Contain` to letterbox
 /// vertically and pulls every hotspot off the rendered button.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
@@ -68,7 +68,7 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
 /// Primary left/right clicks deliberately have no entry — Logi never
 /// exposes them as remappable (and Options+ doesn't either), so we don't
 /// invent markers for them.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
@@ -113,7 +113,7 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
 /// Lay labels out on the left side, evenly spaced down the mouse's vertical
 /// extent. Slots are assigned in order of the hotspots' y position (top
 /// hotspot → top label) so leader lines don't cross.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
 )]

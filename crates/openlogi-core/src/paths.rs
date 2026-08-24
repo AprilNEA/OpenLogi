@@ -7,6 +7,7 @@
 //! |--------|---------------------|-------------------------------|
 //! | config | `$XDG_CONFIG_HOME`  | `~/.config/openlogi`          |
 //! | data   | `$XDG_DATA_HOME`    | `~/.local/share/openlogi`     |
+//! | state  | `$XDG_STATE_HOME`   | `~/.local/state/openlogi`     |
 //!
 //! On Windows `$HOME` falls back to `%USERPROFILE%`, so paths resolve to
 //! `%USERPROFILE%\.config\openlogi` etc.
@@ -28,10 +29,15 @@ use etcetera::{BaseStrategy, base_strategy::Xdg};
 use thiserror::Error;
 
 /// Production subdirectory created under each XDG base directory.
-const APP_DIR: &str = "openlogi";
+///
+/// Public because the dev tooling has to name the same directories from
+/// outside a running app — `xtask macos dev-bundle` remembers the developer's
+/// codesigning certificate under [`DEV_APP_DIR`], where `cargo clean` cannot
+/// reach it.
+pub const APP_DIR: &str = "openlogi";
 /// Local macOS dev builds use a separate profile so development agents
 /// cannot take over the installed app's socket, lock, config, or asset cache.
-const DEV_APP_DIR: &str = "openlogi-dev";
+pub const DEV_APP_DIR: &str = "openlogi-dev";
 
 /// Failure resolving the per-user base directories.
 #[derive(Debug, Error)]
@@ -139,6 +145,18 @@ pub fn data_dir() -> Result<PathBuf, PathsError> {
     Ok(xdg()?.data_dir().join(app_dir()))
 }
 
+/// Directory for logs and other rebuildable process state — the agent's
+/// rotated log files live here.
+///
+/// `$XDG_STATE_HOME/openlogi`, default `~/.local/state/openlogi`.
+/// Local macOS dev builds use `openlogi-dev` instead.
+pub fn state_dir() -> Result<PathBuf, PathsError> {
+    let xdg = xdg()?;
+    Ok(xdg
+        .state_dir()
+        .map_or_else(|| xdg.data_dir().join(app_dir()), |dir| dir.join(app_dir())))
+}
+
 /// Directory for runtime sockets — the background agent's IPC endpoint.
 pub fn runtime_dir() -> Result<PathBuf, PathsError> {
     let xdg = xdg()?;
@@ -156,7 +174,6 @@ pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
 
 #[cfg(test)]
 #[cfg(unix)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

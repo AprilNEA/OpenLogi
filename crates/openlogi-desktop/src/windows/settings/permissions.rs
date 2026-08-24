@@ -16,7 +16,10 @@ use openlogi_permissions as permissions;
 
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux")),
-    allow(unused_variables)
+    expect(
+        unused_variables,
+        reason = "`has_camera` only gates a macOS/Linux row; elsewhere the page is empty"
+    )
 )]
 pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
     let page = SettingPage::new(tr!("Permissions"))
@@ -43,14 +46,7 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
                 },
                 pal,
             ))
-            .item(permission_item(
-                "perm-input-monitoring",
-                tr!("Input Monitoring"),
-                tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
-                Permission::InputMonitoring,
-                |_| permissions::input_monitoring(),
-                pal,
-            ))
+            .item(input_monitoring_item(pal))
             .item(permission_item(
                 "perm-bluetooth",
                 tr!("Bluetooth"),
@@ -114,6 +110,46 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
     }));
 
     page
+}
+
+#[cfg(target_os = "macos")]
+fn input_monitoring_item(pal: Palette) -> SettingItem {
+    SettingItem::new(
+                tr!("Input Monitoring"),
+                SettingField::render(move |_, _, cx| {
+                    let status = cx.try_global::<AppState>().and_then(AppState::agent_status);
+                    // Granted-but-still-failing is the one state the badge
+                    // alone cannot express: the grant exists, yet every
+                    // open is refused — an exclusive open elsewhere, or a
+                    // TCC session only a re-login refreshes (#704).
+                    let stalled = status
+                        .as_ref()
+                        .is_some_and(|s| s.input_monitoring_granted && s.hid_open_failures);
+                    let badge = match status {
+                        Some(s) if s.input_monitoring_granted => PermissionStatus::Granted,
+                        Some(_) => PermissionStatus::Denied,
+                        None => PermissionStatus::Unknown,
+                    };
+                    let field = gpui_component::v_flex().gap_1().child(permission_field(
+                        "perm-input-monitoring",
+                        badge,
+                        Permission::InputMonitoring,
+                        pal,
+                    ));
+                    if stalled {
+                        field.child(div().text_caption().text_color(pal.text_muted).child(
+                            tr!(
+                                "Granted, but devices still fail to open — another app may hold them exclusively, or macOS needs a log out and back in."
+                            ),
+                        ))
+                    } else {
+                        field
+                    }
+                }),
+            )
+            .description(tr!(
+                "Needed to read HID++ data, including Bluetooth-direct mice."
+            ))
 }
 
 #[cfg(target_os = "macos")]

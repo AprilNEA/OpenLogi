@@ -8,7 +8,7 @@
 </p>
 
 <h1 align="center">OpenLogi</h1>
-<p align="center"><strong>⚡️ 原生、本地优先的 Logitech Options+ 替代品，用 Rust 编写 🦀<br/>通过 HID++ 重映射按键、调节 DPI 与 SmartShift。无账号、无遥测。</strong></p>
+<p align="center"><strong>⚡️ 本地优先的 Logitech Options+ 平替 <br/>通过 HID++ 与 UVC 协议解锁 Logitech 鼠标、键盘与摄像头的完整能力</strong></p>
 
 
 <div align="center">
@@ -30,55 +30,47 @@
 
 > **被 Options+ 折腾够了？试试 OpenLogi。**
 
-无需 Logitech 账号、无遥测、无需安装官方 Options+，即可重映射按键、调节 DPI 与 SmartShift、按应用自动切换配置。没有云端，配置是纯 TOML 文件。默认情况下，唯一的自动联网行为是获取设备图片；只有在你主动请求或选择启用时，才会检查并下载更新。
+支持 macOS、Linux 和 Windows。
 
 ---
-
-## 这是什么
-
-OpenLogi 通过 Logi Bolt 和 Unifying 接收器、蓝牙直连或 USB 线缆与 Logitech HID++ 外设通信，完全不需要运行 Logi Options+。它由三个组件组成：
-
-- **[OpenLogi GUI](../crates/openlogi-desktop)** —— 基于 GPUI 的桌面应用：可点击热区的交互式鼠标示意图、逐按键动作选择器（内置动作 + 在 TOML 配置中编写的自定义快捷键）、DPI 预设、SmartShift、按设备原生滚动反转、RGB 键盘灯光、按应用的配置叠加层、实时设备轮播，以及界面已本地化为 20 种语言的设置窗口。
-- **[OpenLogi agent](../crates/openlogi-agent)** —— 拥有输入钩子和全部设备 I/O 的后台服务。GUI 是纯 IPC 客户端，并在需要时启动 agent。
-- **[OpenLogi CLI](../crates/openlogi-cli)** —— 命令行工具：无界面设备清单（`list`）、资产同步与设备诊断子命令。
-
-一切都在本地完成：绑定保存在纯 TOML 文件中，agent 通过操作系统输入钩子重映射按键，并经由 HID++ 将 DPI、SmartShift、滚动和灯光修改直接写入设备。
-
-支持 macOS、Linux 和 Windows。Windows 是最新移植的平台：已在 Windows 11 实机上完成端到端验证，但可能仍比 macOS 和 Linux 版本更显粗糙；详见[路线图](#路线图)。
 
 ## 超越 Options+
 
 OpenLogi 能做、而 Options+ 做不到的事：
 
-- **跑在 Linux 上。** Options+ 只有 macOS 和 Windows 版本。OpenLogi 把 Linux 当作一等公民：evdev/uinput 钩子、udev 规则、systemd 用户单元，以及 `.deb` / `.rpm` / `.pkg.tar.zst` 安装包。
-- **切换手势键。** 自由指定哪个物理按键承担手势角色 —— 专用手势键、中键、后退或前进键 —— 支持按方向绑定滑动动作，也可以彻底关闭手势。Options+ 则把手势固定在专用手势键上。
-- **纯文本配置。** 全部设置就是一个 TOML 文件，可读、可 diff、可纳入版本管理、可在多台机器间复制。
-- **可脚本化。** 真正的 CLI：设备清单、资产预取、设备端 HID++ 诊断（特性 / 控制转储、DPI / SmartShift 往返自检和键盘灯光检查）。
-- **保持轻量。** 原生 Rust + GPUI 二进制 —— 没有 Electron 全家桶、没有常驻更新器、无账号、无遥测。
+- **轻量化** 原生 Rust + GPUI。
+- **支持 Linux** Linux 是 OpenLogi 的一等公民。
+- **自定义手势键** 可自由指定任一物理按键承担手势角色，也可以彻底关闭手势。
+- **纯文本配置** 通过一个 TOML 文件完成，可通过多种方法在多台机器之间同步。
+- **可脚本化** 除了 GUI 以外还支持 CLI。
 
-## 路线图
+## 功能列表
 
-| 能力 | 状态 |
-|---|---|
-| 发现 Bolt 接收器 + 列出已配对设备（CLI + GUI） | ✅ |
-| Unifying 接收器（更早的协议，已被 Bolt 取代） | ✅ |
-| 蓝牙直连 / 有线设备（无接收器） | ✅ |
-| 电池电量 / 充电状态 | ✅（在线设备） |
-| 交互式 GUI：轮播、鼠标示意图、动作选择器 | ✅ macOS + Linux + Windows |
-| 经由 OS 输入钩子的按键重映射 | ✅ macOS + Linux + Windows |
-| 内置动作目录 + 自定义键盘快捷键（TOML 编写） | ✅ macOS + Linux + Windows¹ |
-| DPI 控制 + 预设 + 循环 / 按预设设置动作（HID++ `0x2201`） | ✅ |
-| SmartShift 滚轮：模式切换 + 灵敏度 + 永久棘轮面板（HID++ `0x2111`） | ✅ |
-| 按设备原生滚动反转（HID++ `0x2121`） | ✅（受支持设备） |
-| 静态 RGB 键盘灯光（HID++ `0x8070` / `0x8080`） | ✅（受支持设备） |
-| 按应用的配置叠加层（应用获得焦点时自动切换） | ✅ macOS + Windows，🟡 Linux（仅 X11 / XWayland） |
-| 设置窗口：登录时启动、更新、权限、语言、外观 | ✅ macOS + Linux + Windows |
-| Agent 状态图标 | ✅ macOS 菜单栏 + Windows 系统托盘；不适用于 Linux |
-| 界面本地化（20 种语言：da、de、el、en、es、fi、fr、it、ja、ko、nb、nl、pl、pt-BR、pt-PT、ru、sv、zh-CN、zh-HK、zh-TW） | ✅ |
-| Linux 打包：udev 规则、systemd 单元、`.deb` / `.rpm` / `.pkg.tar.zst` | ✅ Linux |
-| 手势键按方向绑定 + 实时捕获 | ✅（取决于设备能力） |
-| 中键 / 模式切换键 / 拇指滚轮按键捕获 | ✅ 所有平台均支持中键；模式切换键 / 拇指滚轮取决于设备能力 |
-| Windows（agent、GUI、事件钩子、安装程序） | ✅ 已在 Windows 11 实机验证；较新的移植版本，兼容性仍在持续打磨 |
+- 支持通过 Logi Bolt、Unifying 无线接收器、蓝牙或者有线连接的设备，并显示电池电量与充电状态
+- 经由 OS 输入钩子的按键重映射：内置动作目录 + 自定义键盘快捷键（TOML 编写）¹
+- 按应用的配置叠加层，应用获得焦点时自动切换（macOS + Windows；Linux 仅 X11 / XWayland）
+- Litra 补光灯：开关、亮度、色温，还可跟随摄像头活动自动开关
+
+**鼠标**
+
+- 中键、模式切换键、拇指滚轮等按键的捕获与重映射（中键全平台可用，其余取决于设备能力）
+- 按方向的手势绑定与实时捕获，可放在任意支持的按键上
+- Actions Ring：以光标为中心的八槽位动作环（`ShowActionsRing`），支持按应用的布局
+- DPI 控制：预设 + 循环 / 按预设设置动作（`0x2201`）
+- SmartShift 滚轮：模式切换、灵敏度和永久棘轮面板（`0x2111`）
+- 按设备原生滚动反转（`0x2121`，受支持设备）
+
+**键盘**
+
+- F 键全局重映射：与鼠标共用同一动作目录，并提供文本输入、组合键、多步工作流等进阶动作（macOS + Windows）
+- 静态 RGB 灯光（`0x8070` / `0x8080`，受支持设备）
+
+**摄像头**
+
+- 支持任何 Logitech UVC 摄像头（Brio、StreamCam、C920 系列等），即插即用
+- 实时预览：只在查看时开启摄像头，切走即完全释放，指示灯同步熄灭
+- 画面控制直写 UVC 硬件：变焦、对焦、曝光、亮度、对比度、饱和度、锐度、白平衡、色调，其中对焦 / 曝光 / 白平衡带自动模式开关；对 Meet / Zoom / OBS 等所有使用该摄像头的应用生效
+- 一键配置档：内置「默认 / 直播 / 视频通话」三档，另可保存自定义快照；设置按摄像头持久化，下次查看时自动写回硬件
 
 ¹ Linux 上媒体键动作走 D-Bus MPRIS；少数 macOS 专属动作在 Linux 上没有通用对应功能，因此为空操作。Windows 会在可用时将平台动作映射到原生对应功能。
 
@@ -156,14 +148,14 @@ Windows 支持可正常工作，并已在 Windows 11 实机上完成端到端验
 
 ## 致谢
 
-- **Windows、摄像头与 i18n**：[@davidbudnick](https://github.com/davidbudnick) —— Windows 输入钩子与 MSI 更新、Logitech 摄像头支持、键盘 RGB、Crowdin 翻译流水线
-- **Linux 移植**：[@cserby](https://github.com/cserby) —— evdev/uinput 钩子、D-Bus 动作、.deb/.rpm 打包
-- [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 目前最完整的开源 HID++ 实现，也是本项目的协议参考
-- [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 同一目标的先行项目：本地、无需账号的 Options+ 替代品
+- **Windows、摄像头与 i18n**：[@davidbudnick](https://github.com/davidbudnick) —— 键盘 RGB 支持、Windows 支持、Logitech 摄像头支持
+- **Linux 移植**：[@cserby](https://github.com/cserby) —— Linux 支持
+- [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 开源 HID++ 实现
+- [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 本地、无需账号的 Options+ 替代品
 
 ## 许可证
 
-以下两种许可证任选其一：
+本仓库代码可选择以下任一许可证：
 
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT 许可证（[LICENSE-MIT](../LICENSE-MIT)）
@@ -174,7 +166,8 @@ Windows 支持可正常工作，并已在 Windows 11 实机上完成端到端验
 
 ### Logo 与品牌资产
 
-OpenLogi 的 Logo 与应用图标 —— 即 [`design/`](../design/) 下的品牌资产 —— © 2026 AprilNEA 保留所有权利，不在上述 MIT/Apache 许可范围内；见 [`design/LICENSE`](../design/LICENSE)。Fork 代码并不授予 OpenLogi 名称、Logo 或图标的使用权；未经事先书面许可，请勿用它们代表你自己的项目、Fork 或分发版本。
+感谢 [@kubai087](https://github.com/kubai087) 为 OpenLogi 设计的 Logo，该 Logo —— 即 [`design/`](../design/) 下的品牌资产 —— © 2026 AprilNEA 保留所有权利，不在上述 MIT/Apache 许可范围内，许可证详见 [`design/LICENSE`](../design/LICENSE)。
+Fork 代码并不授予 OpenLogi 名称、Logo 或图标的使用权，未经事先书面许可，请勿用它们代表你自己的项目、Fork 或分发版本。
 
 ---
 

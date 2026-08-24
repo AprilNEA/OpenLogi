@@ -34,6 +34,8 @@
 
 use tracing::debug;
 
+#[cfg(target_os = "linux")]
+use std::fmt;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::io;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -298,7 +300,7 @@ fn escape_systemd_exec(s: &str) -> String {
 /// best-effort (e.g. the session D-Bus may be unavailable in some environments).
 #[cfg(target_os = "linux")]
 fn run_systemctl(args: &[&str]) {
-    let label = args.join(" ");
+    let label = SystemctlArgsDisplay(args);
     let mut cmd = std::process::Command::new("systemctl");
     cmd.arg("--user").args(args);
     match cmd.output() {
@@ -315,18 +317,32 @@ fn run_systemctl(args: &[&str]) {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct SystemctlArgsDisplay<'a, 'b>(&'a [&'b str]);
+
+#[cfg(target_os = "linux")]
+impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut separator = "";
+        for arg in self.0 {
+            write!(f, "{separator}{arg}")?;
+            separator = " ";
+        }
+        Ok(())
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[cfg(target_os = "macos")]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
     #[test]
     fn rendered_plist_targets_the_agent_and_keeps_alive() {
         let body = render_plist(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
         )
         .expect("render plist");
         assert!(body.contains(LABEL));
@@ -422,11 +438,18 @@ mod linux_tests {
     }
 
     #[test]
+    fn systemctl_arguments_render_as_a_command_suffix() {
+        assert_eq!(
+            SystemctlArgsDisplay(&["enable", UNIT_NAME]).to_string(),
+            "enable openlogi-agent.service"
+        );
+    }
+
+    #[test]
     fn unit_path_uses_home_fallback() {
         // When XDG_CONFIG_HOME is unset (or relative), falls back to $HOME/.config.
         // We can't mutate global env safely in a parallel test suite, so we test
         // the logic indirectly: unit_path() must end in the UNIT_NAME component.
-        #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
         let path = unit_path().expect("unit_path should resolve with a valid HOME");
         assert!(path.ends_with(UNIT_NAME));
         assert!(path.to_string_lossy().contains("systemd/user"));

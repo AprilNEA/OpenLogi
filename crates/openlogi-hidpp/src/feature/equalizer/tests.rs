@@ -1,12 +1,6 @@
 //! Unit tests for `Equalizer` payload parsing, using the spec's worked example
 //! (10 bands at ±12 dB).
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
-
 use super::{
     EqCapabilities, EqInfo, GainLocation, GainPersistence, parse_frequency_page, parse_gains,
 };

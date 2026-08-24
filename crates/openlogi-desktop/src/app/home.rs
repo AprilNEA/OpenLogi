@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, BoxShadow, Context, Div, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement as _, Styled,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, BorrowAppContext as _, Context, Div, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Role, SharedString, StatefulInteractiveElement as _, Styled, canvas, div, fill,
+    img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName,
@@ -385,29 +385,21 @@ fn device_image(
         .into_any_element()
 }
 
-/// Connectivity dot for a gallery card: a steady grey when offline, a green dot
-/// with a static glow when connected. The glow is a fixed `BoxShadow`, not a
-/// `.repeat()` animation: an infinite animation keeps GPUI re-rendering every
-/// frame for as long as a device is connected, pinning the render loop and
-/// burning CPU/battery while the app is idle.
+/// Connectivity dot for a gallery card: a steady grey when offline, green when
+/// connected. Flat and unhaloed, matching every other status dot in the app
+/// (the detail header's, the footer's, the permission rows'): connectivity is a
+/// binary readout, and a halo would say nothing the colour doesn't already say.
 fn status_dot(online: bool) -> AnyElement {
     let color = if online {
         theme::STATUS_CONNECTED
     } else {
         theme::STATUS_OFFLINE
     };
-    let base = div().size(px(10.)).rounded_full().bg(rgb(color));
-    if !online {
-        return base.into_any_element();
-    }
-    base.shadow(vec![BoxShadow {
-        color: gpui::hsla(0.35, 0.7, 0.55, 0.6),
-        offset: point(px(0.), px(0.)),
-        blur_radius: px(6.),
-        spread_radius: px(0.5),
-        inset: false,
-    }])
-    .into_any_element()
+    div()
+        .size(px(10.))
+        .rounded_full()
+        .bg(rgb(color))
+        .into_any_element()
 }
 
 /// Battery readout for a gallery card: a charge/level glyph plus the

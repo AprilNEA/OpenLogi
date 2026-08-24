@@ -14,7 +14,7 @@ use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
+    emitter::EventEmitter,
     protocol::v10,
     receiver::{RECEIVER_DEVICE_INDEX, ReceiverError},
 };
@@ -22,21 +22,26 @@ use crate::{
 /// All USB vendor & product ID pairs that are known to identify Unifying
 /// receivers.
 ///
+/// `046d:c537` is the Nano receiver bundled with the G602;
 /// `046d:c539` is the Lightspeed gaming receiver; `046d:c53f` is the Lightspeed
 /// nano receiver (bundled with G-series wireless mice such as the G305);
 /// `046d:c547` is the Lightspeed receiver bundled with newer G-series devices
-/// such as the G915 keyboard and the G502 X LIGHTSPEED. All answer the same
+/// such as the G915 keyboard and the G502 X LIGHTSPEED; `046d:c54d` ships with
+/// the PRO X SUPERLIGHT 2 DEX. All answer the same
 /// HID++ 1.0 registers (pairing count, connection state, pairing information)
 /// as Unifying receivers. Callers that surface a user-facing receiver name
 /// label Lightspeed PIDs separately (see `openlogi-hid`).
 /// `0xc53f` was verified against a G305 (paired device wpid `0x4074`);
-/// `0xc547` against a G915 (paired device wpid `0x407c`).
+/// `0xc547` against a G915 (paired device wpid `0x407c`); `0xc54d` against a
+/// PRO X SUPERLIGHT 2 DEX.
 pub const VPID_PAIRS: &[(u16, u16)] = &[
     (0x046d, 0xc52b),
     (0x046d, 0xc532),
+    (0x046d, 0xc537),
     (0x046d, 0xc539),
     (0x046d, 0xc53f),
     (0x046d, 0xc547),
+    (0x046d, 0xc54d),
 ];
 
 /// All known registers of the Unifying receiver.
@@ -370,11 +375,6 @@ pub enum Event {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "expect/unwrap are idiomatic in tests"
-)]
 mod tests {
     use super::{DeviceConnection, DeviceKind, Event, decode_notification};
     use crate::protocol::v10::{Message, MessageHeader};

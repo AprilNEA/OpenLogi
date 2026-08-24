@@ -8,7 +8,7 @@
 </p>
 
 <h1 align="center">OpenLogi</h1>
-<p align="center"><strong>⚡️ Rust로 작성된 네이티브 로컬 우선 Logitech Options+ 대안 🦀<br/>HID++로 버튼·DPI·SmartShift를 리매핑하세요. 계정도, 텔레메트리도 없습니다.</strong></p>
+<p align="center"><strong>⚡️ Rust로 작성된 네이티브 로컬 우선 Logitech Options+ 대안 🦀<br/>HID++와 UVC로 Logitech 마우스·키보드·웹캠의 모든 기능을 끌어냅니다</strong></p>
 
 
 <div align="center">
@@ -30,55 +30,47 @@
 
 > **Options+가 지긋지긋하다면? OpenLogi를 써 보세요.**
 
-Logitech 계정도, 텔레메트리도, 공식 Options+ 설치도 없이 버튼을 리매핑하고 DPI와 SmartShift를 제어하며 앱별 프로필을 전환할 수 있습니다. 클라우드 없이 순수 TOML 설정 파일만 사용합니다. 기본 설정에서는 기기 이미지를 가져올 때만 자동으로 연결하며, 업데이트 확인과 다운로드는 요청하거나 옵트인한 경우에만 실행됩니다.
+macOS, Linux, Windows를 지원합니다.
 
 ---
-
-## 소개
-
-OpenLogi는 Logi Bolt 및 Unifying 수신기, Bluetooth 직접 연결 또는 USB 케이블을 통해 Logitech HID++ 주변기기와 통신하며, Logi Options+를 실행할 필요가 없습니다. 세 가지 구성 요소로 이루어집니다:
-
-- **[OpenLogi GUI](../crates/openlogi-desktop)** — GPUI 데스크톱 앱: 클릭 가능한 핫스팟이 있는 인터랙티브 마우스 다이어그램, 버튼별 액션 선택기(내장 액션 + TOML 설정에서 작성하는 사용자 지정 단축키), DPI 프리셋, SmartShift, 기기별 스크롤 반전, RGB 키보드 조명, 앱별 프로필, 실시간 기기 캐러셀, 20개 언어로 현지화된 설정 창.
-- **[OpenLogi agent](../crates/openlogi-agent)** — 입력 훅과 모든 기기 I/O를 소유하는 백그라운드 서비스. GUI는 순수 IPC 클라이언트이며 필요할 때 agent를 시작합니다.
-- **[OpenLogi CLI](../crates/openlogi-cli)** — 헤드리스 기기 목록(`list`), 에셋 동기화, 기기 진단 하위 명령을 갖춘 CLI.
-
-모든 것이 로컬에서 이루어집니다: 바인딩은 순수 TOML 파일에 저장되고, agent가 OS 입력 훅으로 버튼 입력을 리매핑하며 DPI, SmartShift, 스크롤, 조명 변경을 HID++를 통해 기기에 직접 기록합니다.
-
-macOS, Linux, Windows를 지원합니다. Windows는 가장 최근에 포팅된 플랫폼으로 Windows 11 실제 하드웨어에서 엔드투엔드 검증을 마쳤지만, macOS와 Linux 빌드보다 다듬어지지 않은 부분이 더 있을 수 있습니다. [로드맵](#로드맵)을 참고하세요.
 
 ## Options+ 그 너머
 
 OpenLogi는 되고 Options+는 안 되는 것들:
 
-- **Linux에서 실행.** Options+는 macOS와 Windows 전용입니다. OpenLogi는 Linux를 일급 플랫폼으로 다룹니다: evdev/uinput 훅, udev 규칙, systemd 사용자 유닛, `.deb` / `.rpm` / `.pkg.tar.zst` 패키지.
-- **제스처 버튼 이동.** 어떤 물리 버튼이 제스처 역할을 맡을지 — 전용 제스처 버튼, 가운데, 뒤로, 앞으로 — 직접 고를 수 있고, 방향별 스와이프 바인딩을 설정하거나 제스처를 아예 끌 수도 있습니다. Options+는 제스처 역할을 전용 제스처 버튼에 고정합니다.
-- **순수 텍스트 설정.** 모든 설정이 TOML 파일 하나에 들어 있어 읽고, diff하고, 버전 관리하고, 다른 기기로 복사할 수 있습니다.
-- **스크립트 가능.** 진짜 CLI: 기기 목록, 에셋 프리페치, 기기 내 HID++ 진단(피처 / 컨트롤 덤프, DPI / SmartShift 왕복 검사, 키보드 조명 검사).
-- **가볍게 유지.** 네이티브 Rust + GPUI 바이너리 — Electron 스위트도, 상주 업데이터도, 계정도, 텔레메트리도 없습니다.
+- **가볍게 유지.** 네이티브 Rust + GPUI.
+- **Linux 지원.** Linux는 OpenLogi의 일급 플랫폼입니다.
+- **제스처 버튼 자유 지정.** 아무 물리 버튼에나 제스처 역할을 맡기거나, 제스처를 아예 끌 수 있습니다.
+- **순수 텍스트 설정.** 모든 설정이 TOML 파일 하나에 담겨 원하는 방법으로 기기 간 동기화할 수 있습니다.
+- **스크립트 가능.** GUI 외에 진짜 CLI도 제공합니다.
 
-## 로드맵
+## 기능 목록
 
-| 기능 | 상태 |
-|---|---|
-| Bolt 수신기 탐색 + 페어링된 기기 목록(CLI + GUI) | ✅ |
-| Unifying 수신기(Bolt로 대체된 구형 프로토콜) | ✅ |
-| Bluetooth 직접 연결 / 유선 기기(수신기 없음) | ✅ |
-| 배터리 잔량 / 충전 상태 | ✅ (온라인 기기) |
-| 인터랙티브 GUI: 캐러셀, 마우스 다이어그램, 액션 선택기 | ✅ macOS + Linux + Windows |
-| OS 입력 훅을 통한 버튼 리매핑 | ✅ macOS + Linux + Windows |
-| 내장 액션 카탈로그 + 사용자 지정 키보드 단축키(TOML 작성) | ✅ macOS + Linux + Windows¹ |
-| DPI 제어 + 프리셋 + 사이클 / 프리셋 지정 액션(HID++ `0x2201`) | ✅ |
-| SmartShift 휠: 모드 전환 + 감도 + 영구 래칫 패널(HID++ `0x2111`) | ✅ |
-| 기기별 네이티브 스크롤 반전(HID++ `0x2121`) | ✅ (지원 기기) |
-| 정적 RGB 키보드 조명(HID++ `0x8070` / `0x8080`) | ✅ (지원 기기) |
-| 앱별 프로필 오버레이(앱 포커스 시 자동 전환) | ✅ macOS + Windows, 🟡 Linux (X11 / XWayland 전용) |
-| 설정 창: 로그인 시 실행, 업데이트, 권한, 언어, 외관 | ✅ macOS + Linux + Windows |
-| Agent 상태 아이콘 | ✅ macOS 메뉴 막대 + Windows 트레이; Linux에는 해당 없음 |
-| 인터페이스 현지화(20개 언어: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ |
-| Linux 패키징: udev 규칙, systemd 유닛, `.deb` / `.rpm` / `.pkg.tar.zst` | ✅ Linux |
-| 제스처 버튼 방향별 바인딩 + 실시간 캡처 | ✅ (기기 기능에 따라 다름) |
-| 가운데 / 모드 시프트 / 썸휠 버튼 캡처 | ✅ 가운데 버튼은 모든 플랫폼; 모드 시프트 / 썸휠은 기기 기능에 따라 다름 |
-| Windows(agent, GUI, 이벤트 훅, 설치 프로그램) | ✅ Windows 11 실제 하드웨어 검증 완료; 최신 포트로 호환성을 계속 개선 중 |
+- Logi Bolt 수신기, Unifying 수신기, Bluetooth, 유선으로 연결된 기기를 지원하며 배터리 잔량과 충전 상태 표시
+- OS 입력 훅을 통한 버튼 리매핑: 내장 액션 카탈로그 + 사용자 지정 키보드 단축키(TOML 작성)¹
+- 앱 포커스 시 자동 전환되는 앱별 프로필 오버레이(macOS + Windows; Linux는 X11 / XWayland 전용)
+- Litra 조명: 전원, 밝기, 색온도 제어와 카메라 사용에 연동한 자동 켜기 / 끄기
+
+**마우스**
+
+- 가운데 버튼, 모드 시프트, 썸휠 버튼의 캡처와 리매핑(가운데 버튼은 모든 플랫폼, 나머지는 기기 기능에 따라 다름)
+- 방향별 제스처 바인딩과 실시간 캡처, 지원되는 아무 버튼에나 설정 가능
+- Actions Ring: 커서 중심의 8슬롯 액션 오버레이(`ShowActionsRing`), 앱별 레이아웃 지원
+- DPI 제어: 프리셋 + 사이클 / 프리셋 지정 액션(`0x2201`)
+- SmartShift 휠: 모드 전환, 감도, 영구 래칫 패널(`0x2111`)
+- 기기별 네이티브 스크롤 반전(`0x2121`, 지원 기기)
+
+**키보드**
+
+- F 키 전역 리매핑: 마우스와 같은 액션 카탈로그에 더해 텍스트 입력, 키 조합, 다단계 워크플로 등 파워 유저 액션 제공(macOS + Windows)
+- 정적 RGB 조명(`0x8070` / `0x8080`, 지원 기기)
+
+**카메라**
+
+- 모든 Logitech UVC 웹캠(Brio, StreamCam, C920 시리즈 등) 플러그 앤 플레이 지원
+- 실시간 미리보기: 보고 있는 동안에만 카메라를 켜고, 벗어나면 완전히 해제되어 LED도 꺼집니다
+- 화면 조절 값을 UVC 하드웨어에 직접 기록: 줌, 초점, 노출, 밝기, 대비, 채도, 선명도, 화이트 밸런스, 색조 — 초점 / 노출 / 화이트 밸런스는 자동 모드 전환 지원, Meet / Zoom / OBS 등 카메라를 쓰는 모든 앱에 적용
+- 원클릭 프로필: 기본값 / 스트리밍 / 영상 통화 3종 내장 + 사용자 스냅숏 저장; 설정은 카메라별로 저장되며 다음에 볼 때 하드웨어에 다시 기록됩니다
 
 ¹ Linux의 미디어 키 액션은 D-Bus MPRIS를 사용합니다. 일부 macOS 전용 액션은 Linux에 범용 대응 기능이 없어 아무 동작도 하지 않습니다. Windows는 가능한 경우 플랫폼 액션을 네이티브 기능에 매핑합니다.
 
@@ -156,14 +148,14 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 ## 감사의 말
 
-- **Windows·카메라·i18n** — [@davidbudnick](https://github.com/davidbudnick): Windows 입력 훅과 MSI 업데이트, Logitech 웹캠 지원, 키보드 RGB, Crowdin 번역 파이프라인
-- **Linux 포팅** — [@cserby](https://github.com/cserby): evdev/uinput 훅, D-Bus 액션, .deb/.rpm 패키징
-- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr)가 만든, 가장 완성도 높은 오픈소스 HID++ 구현이자 이 프로젝트의 프로토콜 참고 자료
-- [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash)가 만든, 같은 목표의 선행 프로젝트: 로컬에서 동작하는 계정 없는 Options+ 대체제
+- **Windows·카메라·i18n** — [@davidbudnick](https://github.com/davidbudnick): 키보드 RGB 지원, Windows 지원, Logitech 웹캠 지원
+- **Linux 포팅** — [@cserby](https://github.com/cserby): Linux 지원
+- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr): 오픈소스 HID++ 구현
+- [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash): 로컬에서 동작하는 계정 없는 Options+ 대체제
 
 ## 라이선스
 
-다음 중 하나를 선택해 사용할 수 있습니다:
+이 저장소의 코드는 다음 중 하나를 선택해 사용할 수 있습니다:
 
 - Apache License 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT 라이선스 ([LICENSE-MIT](../LICENSE-MIT))
@@ -174,7 +166,7 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 ### 로고 및 브랜드 자산
 
-OpenLogi 로고와 앱 아이콘 — [`design/`](../design/) 아래의 브랜드 자산 — 은 © 2026 AprilNEA가 모든 권리를 보유하며, 위 MIT/Apache 라이선스의 적용을 받지 않습니다. [`design/LICENSE`](../design/LICENSE)를 참고하세요. 코드를 포크해도 OpenLogi 이름·로고·아이콘에 대한 권리는 부여되지 않습니다. 사전 서면 허가 없이 자신의 프로젝트, 포크, 배포판을 나타내는 데 사용하지 마세요.
+OpenLogi 로고를 디자인해 준 [@kubai087](https://github.com/kubai087)에게 감사드립니다. OpenLogi 로고와 앱 아이콘 — [`design/`](../design/) 아래의 브랜드 자산 — 은 © 2026 AprilNEA가 모든 권리를 보유하며, 위 MIT/Apache 라이선스의 적용을 받지 않습니다. [`design/LICENSE`](../design/LICENSE)를 참고하세요. 코드를 포크해도 OpenLogi 이름·로고·아이콘에 대한 권리는 부여되지 않습니다. 사전 서면 허가 없이 자신의 프로젝트, 포크, 배포판을 나타내는 데 사용하지 마세요.
 
 ---
 

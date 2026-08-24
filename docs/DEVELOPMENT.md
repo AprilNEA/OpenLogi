@@ -5,9 +5,12 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.96)
-- macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
-  GPUI's `gpui_macos` build script to compile shaders)
+- Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
+- macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
+  Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
+  version floor is `actool`, which packaging uses to compile the app icon from
+  its Icon Composer document. `OPENLOGI_DEVELOPER_DIR` overrides which Xcode is
+  used when several are installed.
 - Linux: system libraries — on Debian/Ubuntu:
   `sudo apt-get install libudev-dev gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev pkg-config`
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
@@ -22,7 +25,7 @@ Nix/devenv is optional. A normal Rust toolchain is enough.
 ```sh
 # rustup installs the stable toolchain pinned in rust-toolchain.toml
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# macOS: full Xcode 16+ with the Metal Toolchain (not only Command Line Tools)
+# macOS: full Xcode 26+ with the Metal Toolchain (not only Command Line Tools)
 # Linux: see system libraries under Toolchain above
 # optional helpers: brew install cmake create-dmg sccache
 git clone https://github.com/AprilNEA/OpenLogi
@@ -43,7 +46,8 @@ nfpm on Linux, and the macOS packaging/env helpers GPUI needs
 
 ```sh
 devenv tasks run openlogi:gui      # run the desktop app
-devenv tasks run openlogi:check    # fmt + clippy + tests (run before committing)
+devenv tasks run openlogi:check    # host-OS gate: fmt + clippy + tests + rustdoc
+devenv tasks run openlogi:ci       # every GitHub Actions CI job this host can reproduce
 devenv tasks run openlogi:dmg      # build the macOS DMG
 devenv tasks run openlogi:i18n-upload    # upload English source strings to Crowdin
 devenv tasks run openlogi:i18n-download  # download translations and run i18n tests
@@ -79,14 +83,22 @@ Flake's pinned formatter.
 
 On macOS the desktop binary is launched from inside a throwaway
 `target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
-(`.cargo/run-macos.sh`). This makes the dev build show as
-**OpenLogi Dev** in the menu bar and Dock, with the real app icon; a bare
-`cargo run` binary has no bundle, so macOS would otherwise fall back to the
-`openlogi-desktop` executable name and a generic icon. The binary is hardlinked in
-(no copy) and the icon is generated on demand by
-`cargo run -p xtask -- macos icns`. The runner is a transparent passthrough for
-everything else (the CLI, tests); set
-`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-desktop` binary instead.
+(`.cargo/run-macos.sh`) that hands the build to `xtask macos dev-bundle`. This
+makes the dev build show as **OpenLogi Dev** in the menu bar and Dock, with the
+real app icon; a bare `cargo run` binary has no bundle, so macOS would otherwise
+fall back to the `openlogi-desktop` executable name and a generic icon. The
+binary is hardlinked in (no copy) unless the bundle is being signed, and the
+icon is generated on demand. The runner is a transparent passthrough for
+everything else (the CLI, tests); set `OPENLOGI_DEV_BUNDLE=0` to launch the raw
+`openlogi-desktop` binary instead.
+
+Each run also stops the dev agent and overlay left behind by the previous one.
+They are launched through LaunchServices so they get their own TCC identity,
+which also means they are not children of the GUI: closing its window or
+pressing Ctrl-C ends only the GUI, and a surviving dev agent relaunches itself
+~20 s later once its watcher notices the rewritten binary. Set
+`OPENLOGI_DEV_AGENT=0` to run against an
+agent you started yourself — nothing is stopped, built, or embedded then.
 
 Packaged local dev bundles (`cargo run` and
 `cargo run -p xtask -- macos bundle`) use `-dev` bundle identifiers and the
@@ -161,17 +173,40 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
-## Pre-commit checklist
+## Local CI
 
-Before committing, the following must pass:
+The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
+machine can reproduce — including MSRV, cargo-deny, and the Windows cross-lint
+the host-OS gate does not run:
 
 ```sh
+cargo xtask ci
+cargo xtask ci --list                        # job → command table
+devenv tasks run openlogi:ci                 # same, from devenv
+```
+
+The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
+OS are reported as skipped; a skip is not a pass. The full job map (and which
+diff requires which job) is [`.claude/rules/ci.md`](../.claude/rules/ci.md).
+
+### Pre-push gate
+
+Before pushing, the host-OS subset must pass:
+
+```sh
+export RUSTFLAGS="-D warnings"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
+  --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
+  --exclude openlogi-overlay --exclude openlogi-agent
 ```
 
-Equivalent to `devenv tasks run openlogi:check`.
+Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
+pipeline: Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell lint
+(shellcheck + shfmt) are separate CI jobs. Reproduce those with `cargo xtask ci` or the commands in
+`.claude/rules/ci.md`.
 
 ## Packaging the macOS DMG
 

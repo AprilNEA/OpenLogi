@@ -49,6 +49,13 @@ git_release_enable = false
 name = "openlogi-core"
 version_group = "openlogi"
 
+# The published CLI uses this contract to read the running agent's inventory,
+# so IPC is part of the crates.io dependency closure even though its other
+# consumers are application crates.
+[[package]]
+name = "openlogi-ipc"
+version_group = "openlogi"
+
 # OS input-event synthesis split out of openlogi-core (depends on it). Published
 # with the workspace under unified versioning.
 [[package]]
@@ -116,15 +123,5 @@ publish = false
 
 [[package]]
 name = "openlogi-agent"
-release = false
-publish = false
-
-# Leaf IPC contract crate for the agent<->GUI boundary. Only the two app
-# crates above depend on it, so it stays unpublished like they do; if a
-# published crate (openlogi-cli, openlogi-hid, …) ever depends on it, it must
-# move into the "openlogi" version_group instead — a published crate cannot
-# depend on an unpublished path dependency.
-[[package]]
-name = "openlogi-ipc"
 release = false
 publish = false

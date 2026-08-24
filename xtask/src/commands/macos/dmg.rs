@@ -4,7 +4,9 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use xshell::{Shell, cmd};
 
-use super::bundle::identity::{self, Channel};
+use strum::VariantArray as _;
+
+use super::bundle::identity::{self, Channel, Component};
 use crate::support::fs::{absolutize, ensure_command, ensure_dir, repo_root};
 
 #[derive(Parser)]
@@ -39,7 +41,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     // bundle that reached users would void their permission grants and move
     // them to a different config directory.
     if args.sign_identity.is_some() {
-        identity::verify(&app, Channel::Production)
+        identity::verify(&app, Channel::Production, Component::VARIANTS)
             .context("a signed DMG must contain a production-identity app bundle")?;
     }
     ensure_command("create-dmg")?;

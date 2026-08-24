@@ -28,6 +28,7 @@
   rustPlatform,
   fetchgit,
   src,
+  git,
   pkg-config,
   patchelf,
   versionCheckHook,
@@ -56,6 +57,9 @@ let
       (src + "/packaging/linux/desktop")
       (src + "/packaging/linux/systemd")
       (src + "/packaging/linux/udev")
+      # xtask's packaged-bins test include_str!s this; omitting it fails
+      # `cargo test --workspace` inside the Nix sandbox.
+      (src + "/packaging/linux/nfpm.yaml")
       (src + "/xtask")
     ];
   };
@@ -104,6 +108,7 @@ rustPlatform.buildRustPackage {
     # Obtain new values from the error message of a failing build, or with
     # `nix-prefetch-git <url> --rev <rev>`.
     outputHashes = {
+      "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
       "gpui-0.2.2" = "sha256-Av+unZNI39dEb+zwSIU+SkEjqagHWrc7W8KehEgQ4H8=";
       "gpui-component-0.5.2" = gpuiComponentHash;
       "gpui-updater-0.0.7" = "sha256-hxdATcCif7csqKLNoi41ETe09Ym6zM4rVzYvBDEvVg4=";
@@ -136,6 +141,11 @@ rustPlatform.buildRustPackage {
     patchelf
     rustPlatform.bindgenHook # `media` (a gpui dep) runs bindgen — needs libclang
   ];
+
+  # The xtask release tests exercise version-bump checkout against throwaway
+  # repositories they `git init` themselves, so the sandboxed `cargo test`
+  # needs a git binary even though the build does not.
+  nativeCheckInputs = [ git ];
 
   # Only libraries whose *-sys crates appear in Cargo.lock. TLS is rustls and
   # evdev/hidraw are opened directly. Runtime-selected graphics libraries also

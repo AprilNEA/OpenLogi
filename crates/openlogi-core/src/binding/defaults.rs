@@ -7,17 +7,24 @@ use super::value::Binding;
 
 /// Sensible defaults for a fresh device so the panel isn't empty on first run.
 ///
-/// Thumbwheel / GestureButton defaults match what Logi Options+ ships for
-/// MX-line devices: thumb wheel click → App Exposé, gesture button →
-/// Mission Control. The thumb wheel isn't captured yet; the dedicated gesture button is
-/// (per-direction, see [`default_gesture_binding`]). The bindings persist
-/// regardless so the user only configures once.
+/// `GestureButton` matches what Logi Options+ ships for MX-line devices:
+/// gesture button → Mission Control, captured per-direction (see
+/// [`default_gesture_binding`]).
 ///
 /// `GestureButton`'s entry here is vestigial: in the merged [`Binding`] model
 /// the gesture button defaults to [`Binding::Gesture`] (see
 /// [`default_binding_for`]), so this single-action value is never the source of
 /// truth for it. It is retained only so the per-button-`Action` callers (the
 /// hook map, scroll defaults, labels) stay total.
+///
+/// [`ButtonId::Thumbwheel`] — the wheel's capacitive tap — is deliberately
+/// inert. The mouse model surfaces the wheel as one paired rotation control,
+/// so the tap has no GUI hotspot to discover or clear it, while the firmware
+/// reports a tap from incidental thumb contact (including mid-roll, from the
+/// ridges alone). Seeding it with a real action therefore fired that action
+/// for users who only changed the rotation bindings or the sensitivity — the
+/// two settings that divert the wheel over `0x2150` in the first place. A tap
+/// bound explicitly in the config still dispatches; only the seed is inert.
 #[must_use]
 pub fn default_binding(button: ButtonId) -> Action {
     match button {
@@ -27,7 +34,12 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::Back => Action::BrowserBack,
         ButtonId::Forward => Action::BrowserForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
-        ButtonId::Thumbwheel => Action::AppExpose,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the tap is inert because its captured events are noise (see above), \
+                      not because the control stays native like the keyboard arm below"
+        )]
+        ButtonId::Thumbwheel => Action::None,
         // The thumb wheel scrolls horizontally by default: rotating it produces
         // continuous horizontal scroll, with "up" → right and "down" → left.
         // The wheel watcher renders these two actions as smooth, sensitivity-

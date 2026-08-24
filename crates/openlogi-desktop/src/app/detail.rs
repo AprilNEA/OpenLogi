@@ -632,8 +632,8 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .items_center()
                 .child(
                     v_flex()
-                        .child(div().text_sm().child(tr!("Manage this device")))
-                        .child(div().text_xs().text_color(pal.text_muted).child(tr!(
+                        .child(div().text_body().child(tr!("Manage this device")))
+                        .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                             "Off leaves every control native and stops re-applying settings."
                         ))),
                 )

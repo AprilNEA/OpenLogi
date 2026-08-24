@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(rust_i18n::t!("Quit OpenLogi"), "退出 OpenLogi"); // menu-bar status item
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
         assert_eq!(rust_i18n::t!("Lighting"), "灯光"); // keyboard lighting tab
-        assert_eq!(rust_i18n::t!("BRIGHTNESS"), "亮度"); // lighting panel label
+        assert_eq!(rust_i18n::t!("Brightness"), "亮度"); // lighting panel label
         assert_eq!(
             rust_i18n::t!("Automatically start OpenLogi when you log in to macOS."),
             "登录 macOS 时自动启动 OpenLogi。"
@@ -108,6 +108,10 @@ mod tests {
         rust_i18n::set_locale("ru");
         assert_eq!(rust_i18n::t!("Settings"), "Настройки");
         assert_eq!(rust_i18n::t!("Left Click"), "Левый щелчок");
+
+        rust_i18n::set_locale("uk");
+        assert_eq!(rust_i18n::t!("Settings"), "Налаштування");
+        assert_eq!(rust_i18n::t!("Left Click"), "Клацання лівою");
 
         rust_i18n::set_locale("zh-TW");
         assert_eq!(rust_i18n::t!("Settings"), "設定");

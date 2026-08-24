@@ -4,7 +4,24 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
 
-use crate::{bcd, feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
+use crate::{feature::FeatureEndpoint, nibble::U4, protocol::v20::Hidpp20Error};
+
+/// Decodes a packed binary-coded decimal byte — two decimal digits, high
+/// nibble first. `None` when either nibble is outside `0..=9`, which means the
+/// device sent something that is not BCD at all.
+fn packed_bcd_u8(bcd: u8) -> Option<u8> {
+    let digit_0 = U4::from_hi(bcd).to_lo();
+    let digit_1 = U4::from_lo(bcd).to_lo();
+    (digit_0 <= 9 && digit_1 <= 9).then_some(digit_0 * 10 + digit_1)
+}
+
+/// Decodes a packed binary-coded decimal `u16` as four decimal digits, most
+/// significant byte first.
+fn packed_bcd_u16(bcd: u16) -> Option<u16> {
+    let high = u16::from(packed_bcd_u8((bcd >> 8) as u8)?);
+    let low = u16::from(packed_bcd_u8((bcd & 0xff) as u8)?);
+    Some(high * 100 + low)
+}
 
 /// Implements the `DeviceInformation` / `0x0003` feature.
 #[derive(Clone, Feature)]
@@ -51,12 +68,10 @@ impl DeviceInformationFeature {
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
             firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            firmware_number: bcd::convert_packed_u8(payload[4])
-                .map_err(|()| Hidpp20Error::UnsupportedResponse)?,
-            revision: bcd::convert_packed_u8(payload[5])
-                .map_err(|()| Hidpp20Error::UnsupportedResponse)?,
-            build: bcd::convert_packed_u16(u16::from_be_bytes([payload[6], payload[7]]))
-                .map_err(|()| Hidpp20Error::UnsupportedResponse)?,
+            firmware_number: packed_bcd_u8(payload[4]).ok_or(Hidpp20Error::UnsupportedResponse)?,
+            revision: packed_bcd_u8(payload[5]).ok_or(Hidpp20Error::UnsupportedResponse)?,
+            build: packed_bcd_u16(u16::from_be_bytes([payload[6], payload[7]]))
+                .ok_or(Hidpp20Error::UnsupportedResponse)?,
             active: payload[8] & 1 != 0,
             transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
             extra_version: [

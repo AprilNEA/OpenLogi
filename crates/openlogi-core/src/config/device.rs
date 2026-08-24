@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    deserialize_gesture_owner, deserialize_optional_thumbwheel_sensitivity,
+    ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
+use crate::hid::Dpi;
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -94,6 +95,14 @@ pub struct DeviceConfig {
     /// (gesture mode is per-button; see
     /// [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
     #[serde(skip_serializing)]
+    // Consumed only by the `fs` half's load migration. The field stays in
+    // every build: it is part of the shape serde *deserializes*, and dropping
+    // it would turn an old config's key into an unknown field.
+    #[cfg_attr(
+        not(feature = "fs"),
+        expect(clippy::allow_attributes, reason = "see above"),
+        allow(dead_code, reason = "only the `fs` half's load migration reads it")
+    )]
     pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
@@ -133,7 +142,7 @@ pub struct DeviceConfig {
         deserialize_with = "deserialize_dpi_presets",
         skip_serializing_if = "Vec::is_empty"
     )]
-    pub dpi_presets: Vec<u32>,
+    pub dpi_presets: Vec<Dpi>,
     /// The sensor DPI the user committed for this device. Persisted because
     /// the value lives in device RAM and resets on a power cycle (#189); the
     /// agent re-applies it when the device reconnects. `None` until the user
@@ -143,7 +152,7 @@ pub struct DeviceConfig {
         deserialize_with = "deserialize_optional_dpi",
         skip_serializing_if = "Option::is_none"
     )]
-    pub dpi: Option<u32>,
+    pub dpi: Option<Dpi>,
     /// Per-device RGB lighting (static color + brightness + on/off). `None`
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,12 +179,8 @@ pub struct DeviceConfig {
     /// Per-device thumb-wheel sensitivity override. `None` falls back to the
     /// app-wide
     /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_thumbwheel_sensitivity",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub thumbwheel_sensitivity: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -237,7 +242,7 @@ fn default_true() -> bool {
 }
 
 /// `skip_serializing_if` helper for `bool` fields whose default is `true`.
-#[allow(
+#[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
 )]
@@ -247,7 +252,7 @@ fn is_true(b: &bool) -> bool {
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
 /// `false`: keeps an unset toggle out of `config.toml` entirely.
-#[allow(
+#[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
 )]
@@ -255,32 +260,36 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Vec<Dpi>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let values = Vec::<u32>::deserialize(deserializer)?;
-    if let Some(value) = values.iter().find(|value| u16::try_from(**value).is_err()) {
-        return Err(serde::de::Error::custom(format_args!(
-            "DPI must fit the HID++ 16-bit range, got {value}"
-        )));
-    }
-    Ok(values)
+    Vec::<u32>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| {
+            Dpi::try_from(value).map_err(|_| {
+                serde::de::Error::custom(format_args!(
+                    "DPI must fit the HID++ 16-bit range, got {value}"
+                ))
+            })
+        })
+        .collect()
 }
 
-fn deserialize_optional_dpi<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+fn deserialize_optional_dpi<'de, D>(deserializer: D) -> Result<Option<Dpi>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = Option::<u32>::deserialize(deserializer)?;
-    if let Some(value) = value
-        && u16::try_from(value).is_err()
-    {
-        return Err(serde::de::Error::custom(format_args!(
-            "DPI must fit the HID++ 16-bit range, got {value}"
-        )));
-    }
-    Ok(value)
+    value
+        .map(|value| {
+            Dpi::try_from(value).map_err(|_| {
+                serde::de::Error::custom(format_args!(
+                    "DPI must fit the HID++ 16-bit range, got {value}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
@@ -315,9 +324,9 @@ struct RawDeviceConfig {
     #[serde(default)]
     action_ring: ActionRingConfig,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
-    dpi_presets: Vec<u32>,
+    dpi_presets: Vec<Dpi>,
     #[serde(default, deserialize_with = "deserialize_optional_dpi")]
-    dpi: Option<u32>,
+    dpi: Option<Dpi>,
     #[serde(default)]
     lighting: Option<Lighting>,
     #[serde(default)]
@@ -330,11 +339,8 @@ struct RawDeviceConfig {
     camera_profiles: BTreeMap<String, CameraControls>,
     #[serde(default)]
     camera_profile: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_thumbwheel_sensitivity"
-    )]
-    thumbwheel_sensitivity: Option<i32>,
+    #[serde(default)]
+    thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
     #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]

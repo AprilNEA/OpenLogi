@@ -11,13 +11,6 @@
 //! Streaming / Video call) plus user-saved customs, applied to the hardware in
 //! a single batched device-open.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "UVC control values are small integers; slider math goes through f32"
-)]
-
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, ClickEvent, Context, Entity,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
@@ -34,7 +27,8 @@ use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::AppState;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette};
+use crate::ui::section::section_label;
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 /// Built-in profiles: `values` are fractions of each control's own range, so
 /// they scale to whatever the camera reports. Auto modes all engage — the
@@ -78,7 +72,7 @@ pub struct CameraControlsPanel {
     uid: Option<String>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
-    #[allow(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
 }
 
@@ -87,7 +81,7 @@ struct ControlSlider {
     label: SharedString,
     range: ControlRange,
     state: Entity<SliderState>,
-    #[allow(dead_code, reason = "held to keep the slider subscription alive")]
+    #[expect(dead_code, reason = "held to keep the slider subscription alive")]
     sub: Subscription,
 }
 
@@ -286,7 +280,7 @@ impl CameraControlsPanel {
         cx: &mut Context<Self>,
     ) {
         let state = cx.new(|_| {
-            let (lo, hi) = (range.min as f32, range.max as f32);
+            let (lo, hi) = (to_slider(range.min), to_slider(range.max));
             // `SliderState` defaults to [0, 100] and re-clamps its value on every
             // builder call, panicking if min > max even transiently. A fully
             // negative range (UVC exposure reports e.g. -11..-2) would make
@@ -297,7 +291,7 @@ impl CameraControlsPanel {
             } else {
                 SliderState::new().max(hi).min(lo)
             };
-            bounded.step(1.0).default_value(shown as f32)
+            bounded.step(1.0).default_value(to_slider(shown))
         });
         let uid_for_event = uid.to_string();
         let key_for_event = key.to_string();
@@ -307,7 +301,7 @@ impl CameraControlsPanel {
                 // so we don't flood the camera with intermediate values.
                 SliderEvent::Change(_) => cx.notify(),
                 SliderEvent::Release(value) => {
-                    let v = value.start().round() as i32;
+                    let v = from_slider(value.start());
                     panel.commit_release(control, &uid_for_event, &key_for_event, v, cx);
                 }
             }
@@ -391,7 +385,7 @@ impl CameraControlsPanel {
         {
             values.push((
                 slider.control,
-                slider.state.read(cx).value().start().round() as i32,
+                from_slider(slider.state.read(cx).value().start()),
             ));
         }
         if let Err(e) = openlogi_camera::apply_settings(&uid, &[(toggle, on)], &values) {
@@ -457,7 +451,7 @@ impl CameraControlsPanel {
         for (control, value) in values {
             if let Some(slider) = self.sliders.iter().find(|s| s.control == *control) {
                 slider.state.clone().update(cx, |s, cx| {
-                    s.set_value(*value as f32, window, cx);
+                    s.set_value(to_slider(*value), window, cx);
                 });
             }
         }
@@ -505,7 +499,7 @@ impl CameraControlsPanel {
             });
         }
         state.update(cx, |slider, cx| {
-            slider.set_value(default as f32, window, cx);
+            slider.set_value(to_slider(default), window, cx);
         });
         cx.update_global::<AppState, _>(|state, _| {
             state.commit_camera_control(&key, control, default);
@@ -543,13 +537,22 @@ impl CameraControlsPanel {
                 ));
             }
             for slider in &self.sliders {
+                let fallback = if builtin.id != "default"
+                    && matches!(
+                        slider.control,
+                        CameraControl::PowerLineFrequency | CameraControl::LowLightCompensation
+                    ) {
+                    from_slider(slider.state.read(cx).value().start())
+                } else {
+                    slider.range.default
+                };
                 let target = builtin
                     .values
                     .iter()
                     .find(|(c, _)| *c == slider.control)
-                    .map_or(slider.range.default, |(_, pct)| {
-                        let span = (slider.range.max - slider.range.min) as f32;
-                        slider.range.min + (span * pct).round() as i32
+                    .map_or(fallback, |(_, pct)| {
+                        let span = to_slider(slider.range.max - slider.range.min);
+                        slider.range.min + from_slider(span * pct)
                     });
                 values.push((
                     slider.control,
@@ -593,7 +596,7 @@ impl CameraControlsPanel {
         for slider in &self.sliders {
             snap.0.insert(
                 slider.control.name().to_string(),
-                slider.state.read(cx).value().start().round() as i32,
+                from_slider(slider.state.read(cx).value().start()),
             );
         }
         for row in &self.autos {
@@ -686,7 +689,7 @@ impl Render for CameraControlsPanel {
 
         if self.sliders.is_empty() {
             return div()
-                .text_sm()
+                .text_body()
                 .text_color(pal.text_muted)
                 .child(tr!("This camera exposes no adjustable image controls."))
                 .into_any_element();
@@ -697,13 +700,13 @@ impl Render for CameraControlsPanel {
 
         let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, pal, cx));
         if !lens.is_empty() && !image.is_empty() {
-            panel = panel.child(section_label(tr!("Lens"), pal));
+            panel = panel.child(section_label(tr!("Lens"), pal).mt_1());
         }
         for ix in lens {
             panel = panel.child(control_row(self, ix, cx, pal));
         }
         if !image.is_empty() && self.sliders.len() != image.len() {
-            panel = panel.child(section_label(tr!("Image"), pal));
+            panel = panel.child(section_label(tr!("Image"), pal).mt_1());
         }
         for ix in image {
             panel = panel.child(control_row(self, ix, cx, pal));
@@ -761,7 +764,7 @@ fn profiles_row(key: &str, pal: Palette, cx: &mut Context<CameraControlsPanel>) 
             .rounded_full()
             .border_1()
             .border_color(pal.border)
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .hover(|s| s.bg(pal.surface_hover))
             .child(format!("+ {}", tr!("New")))
@@ -787,7 +790,7 @@ fn profile_chip(
         .rounded_full()
         .border_1()
         .border_color(if active { accent.into() } else { pal.border })
-        .text_xs()
+        .text_caption()
         .text_color(if active {
             accent.into()
         } else {
@@ -822,7 +825,7 @@ fn custom_profile_chip(
         .rounded_full()
         .border_1()
         .border_color(if active { accent.into() } else { pal.border })
-        .text_xs()
+        .text_caption()
         .text_color(if active {
             accent.into()
         } else {
@@ -850,15 +853,6 @@ fn custom_profile_chip(
         .into_any_element()
 }
 
-fn section_label(text: SharedString, pal: Palette) -> AnyElement {
-    div()
-        .mt_1()
-        .text_xs()
-        .text_color(pal.text_muted)
-        .child(text)
-        .into_any_element()
-}
-
 /// One compact control line: label · slider · live value (· Auto chip when the
 /// device pairs one). Double-click anywhere on the line resets that control.
 fn control_row(
@@ -868,7 +862,20 @@ fn control_row(
     pal: Palette,
 ) -> AnyElement {
     let slider = &panel.sliders[ix];
-    let value = slider.state.read(cx).value().start().round() as i32;
+    if slider.control == CameraControl::PowerLineFrequency
+        && [1, 2, 3]
+            .into_iter()
+            .any(|value| slider.range.supports(value))
+    {
+        return frequency_row(panel, ix, cx, pal);
+    }
+    if slider.control == CameraControl::LowLightCompensation
+        && slider.range.min == 0
+        && slider.range.max == 1
+    {
+        return binary_control_row(panel, ix, cx, pal);
+    }
+    let value = from_slider(slider.state.read(cx).value().start());
     let auto_on = panel.auto_state_for(slider.control);
     let dimmed = auto_on == Some(true);
 
@@ -894,7 +901,7 @@ fn control_row(
                 .w(px(96.))
                 .flex_shrink_0()
                 .truncate()
-                .text_sm()
+                .text_body()
                 .text_color(pal.text_muted)
                 .child(slider.label.clone()),
         )
@@ -911,7 +918,7 @@ fn control_row(
                 .w(px(36.))
                 .flex_shrink_0()
                 .text_right()
-                .text_sm()
+                .text_body()
                 .text_color(if dimmed {
                     pal.text_muted
                 } else {
@@ -936,7 +943,7 @@ fn control_row(
                 .rounded_full()
                 .border_1()
                 .border_color(if on { accent.into() } else { pal.border })
-                .text_xs()
+                .text_caption()
                 .text_color(if on { accent.into() } else { pal.text_muted })
                 .hover(|s| s.bg(pal.surface_hover))
                 .child(tr!("Auto"))
@@ -948,6 +955,128 @@ fn control_row(
     row = row.child(auto_cell);
 
     row.into_any_element()
+}
+
+fn frequency_row(
+    panel: &CameraControlsPanel,
+    ix: usize,
+    cx: &Context<CameraControlsPanel>,
+    pal: Palette,
+) -> AnyElement {
+    let slider = &panel.sliders[ix];
+    let current = from_slider(slider.state.read(cx).value().start());
+    let mut choices = h_flex().flex_1().justify_end().gap_1();
+    for (choice_ix, (value, label)) in [
+        (1, SharedString::from("50 Hz")),
+        (2, SharedString::from("60 Hz")),
+        (3, tr!("Auto")),
+    ]
+    .into_iter()
+    .filter(|(value, _)| slider.range.supports(*value))
+    .enumerate()
+    {
+        let active = value == current;
+        let accent = rgb(ACCENT_BLUE);
+        choices = choices.child(
+            div()
+                .id(("camera-frequency", choice_ix))
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(if active { accent.into() } else { pal.border })
+                .text_caption()
+                .text_color(if active {
+                    accent.into()
+                } else {
+                    pal.text_muted
+                })
+                .hover(|s| s.bg(pal.surface_hover))
+                .child(label)
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
+                        return;
+                    };
+                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
+                        state.set_value(to_slider(value), window, cx);
+                    });
+                    panel.commit_release(CameraControl::PowerLineFrequency, &uid, &key, value, cx);
+                })),
+        );
+    }
+
+    h_flex()
+        .id(("camera-control-row", ix))
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .w(px(96.))
+                .flex_shrink_0()
+                .truncate()
+                .text_body()
+                .text_color(pal.text_muted)
+                .child(slider.label.clone()),
+        )
+        .child(choices)
+        .into_any_element()
+}
+
+fn binary_control_row(
+    panel: &CameraControlsPanel,
+    ix: usize,
+    cx: &Context<CameraControlsPanel>,
+    pal: Palette,
+) -> AnyElement {
+    let slider = &panel.sliders[ix];
+    let on = from_slider(slider.state.read(cx).value().start()) != 0;
+    let accent = rgb(ACCENT_BLUE);
+    h_flex()
+        .id(("camera-control-row", ix))
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .w(px(96.))
+                .flex_shrink_0()
+                .truncate()
+                .text_body()
+                .text_color(pal.text_muted)
+                .child(slider.label.clone()),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .id("camera-low-light")
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(if on { accent.into() } else { pal.border })
+                .text_caption()
+                .text_color(if on { accent.into() } else { pal.text_muted })
+                .hover(|s| s.bg(pal.surface_hover))
+                .child(if on { tr!("On") } else { tr!("Off") })
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
+                        return;
+                    };
+                    let value = i32::from(!on);
+                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
+                        state.set_value(to_slider(value), window, cx);
+                    });
+                    panel.commit_release(
+                        CameraControl::LowLightCompensation,
+                        &uid,
+                        &key,
+                        value,
+                        cx,
+                    );
+                })),
+        )
+        .into_any_element()
 }
 
 fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
@@ -964,7 +1093,7 @@ fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyEleme
                 .border_color(pal.border)
                 .bg(pal.surface)
                 .hover(|s| s.bg(pal.surface_hover))
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!("Reset to defaults"))
                 .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
@@ -987,6 +1116,8 @@ fn control_label(control: CameraControl) -> SharedString {
         CameraControl::Zoom => tr!("Zoom"),
         CameraControl::Focus => tr!("Focus"),
         CameraControl::Exposure => tr!("Exposure"),
+        CameraControl::PowerLineFrequency => tr!("Anti-flicker"),
+        CameraControl::LowLightCompensation => tr!("Low light compensation"),
         CameraControl::Brightness => tr!("Brightness"),
         CameraControl::Contrast => tr!("Contrast"),
         CameraControl::Saturation => tr!("Saturation"),
@@ -994,4 +1125,22 @@ fn control_label(control: CameraControl) -> SharedString {
         CameraControl::WhiteBalance => tr!("White balance"),
         CameraControl::Tint => tr!("Tint"),
     }
+}
+
+/// A UVC control value as the GPUI slider wants it.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a UVC control range is far below f32's exact integer range"
+)]
+fn to_slider(value: i32) -> f32 {
+    value as f32
+}
+
+/// Inverse of [`to_slider`].
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the slider steps by 1 over the control's own i32 range"
+)]
+fn from_slider(value: f32) -> i32 {
+    value.round() as i32
 }

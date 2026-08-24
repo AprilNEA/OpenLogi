@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, HidppFeatureErrorKind, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftMode, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ScrollResolution,
+    SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -264,17 +264,6 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
     );
 }
 
-/// Desired SmartShift values for a reconnect re-apply.
-#[derive(Debug, Clone, Copy)]
-pub struct SmartShiftApply {
-    /// Wheel mode to write.
-    pub mode: SmartShiftMode,
-    /// Auto-disengage threshold (`0` = preserve).
-    pub auto_disengage: u8,
-    /// Tunable torque (`0` = preserve).
-    pub tunable_torque: u8,
-}
-
 /// Re-apply every volatile mouse setting for `op`'s device on a **single**
 /// background thread, sequentially, on the current inventory-owned channel.
 ///
@@ -293,8 +282,8 @@ pub fn reapply_mouse_volatile_in_background(
     op: &DeviceOp<'_>,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
-    dpi: Option<u32>,
-    smartshift: Option<SmartShiftApply>,
+    dpi: Option<Dpi>,
+    smartshift: Option<SmartShiftStatus>,
 ) {
     let Ok(shared) = op.resolve() else {
         debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
@@ -316,45 +305,30 @@ pub fn reapply_mouse_volatile_in_background(
                 log_wheel_result(index, resolution, inverted, result);
             }
             if let Some(dpi) = dpi {
-                match u16::try_from(dpi) {
-                    Ok(dpi_u16) => {
-                        let result = tokio::time::timeout(WRITE_BUDGET, async {
-                            openlogi_hid::set_dpi_on(&shared, dpi_u16).await
-                        })
-                        .await;
-                        match result {
-                            Ok(Ok(())) => {
-                                debug!(index, dpi = dpi_u16, "DPI written to device");
-                            }
-                            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
-                            Err(_) => warn!(
-                                dpi = dpi_u16,
-                                "DPI write timed out (device asleep/unresponsive)"
-                            ),
-                        }
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    openlogi_hid::set_dpi_on(&shared, dpi).await
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        debug!(index, %dpi, "DPI written to device");
                     }
-                    Err(_) => {
-                        warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
-                    }
+                    Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
+                    Err(_) => warn!(
+                        %dpi,
+                        "DPI write timed out (device asleep/unresponsive)"
+                    ),
                 }
             }
             if let Some(ss) = smartshift {
                 let result = tokio::time::timeout(WRITE_BUDGET, async {
-                    openlogi_hid::set_smartshift_on(
-                        &shared,
-                        ss.mode,
-                        ss.auto_disengage,
-                        ss.tunable_torque,
-                    )
-                    .await
+                    openlogi_hid::set_smartshift_on(&shared, ss).await
                 })
                 .await;
                 match result {
                     Ok(Ok(())) => debug!(
                         index,
-                        mode = ?ss.mode,
-                        auto_disengage = ss.auto_disengage,
-                        tunable_torque = ss.tunable_torque,
+                        status = ?ss,
                         "SmartShift config written"
                     ),
                     Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
@@ -421,27 +395,21 @@ pub fn write_dpi_in_background(
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
-    dpi: u32,
+    dpi: Dpi,
 ) {
     let Some(target) = target else {
-        debug!(dpi, "no target device — DPI write skipped");
-        return;
-    };
-    // All device-supported DPI values fit in HID++'s u16 wire field; a
-    // larger value is a caller bug and must not be clamped onto the device.
-    let Ok(dpi_u16) = u16::try_from(dpi) else {
-        warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
+        debug!(%dpi, "no target device — DPI write skipped");
         return;
     };
     let index = target.device_index();
     DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
         "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi_u16).await },
+        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
         move |result| match result {
-            Ok(Ok(())) => debug!(index, dpi = dpi_u16, "DPI written to device"),
+            Ok(Ok(())) => debug!(index, %dpi, "DPI written to device"),
             Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
             Err(_) => warn!(
-                dpi = dpi_u16,
+                %dpi,
                 "DPI write timed out (device asleep/unresponsive)"
             ),
         },
@@ -540,16 +508,6 @@ pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     let scale =
         |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
     (scale(r), scale(g), scale(b))
-}
-
-/// Reject a DPI beyond the HID++ `u16` wire field the same way the device
-/// itself would reject an out-of-range argument, rather than clamping it.
-pub fn dpi_wire_value(dpi: u32) -> Result<u16, WriteError> {
-    u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
-        operation: HidppOperation::WriteDpi,
-        feature_hex: 0x2201,
-        kind: HidppFeatureErrorKind::OutOfRange,
-    })
 }
 
 /// Bound any single HID++ call by [`WRITE_BUDGET`] so an asleep / unresponsive
@@ -669,7 +627,6 @@ mod tests {
     /// forever. Uses a paused clock so the test doesn't spend `WRITE_BUDGET`
     /// (5s) of real wall-clock time.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::expect_used, reason = "expect is idiomatic in tests")]
     async fn timed_maps_an_elapsed_deadline_to_request_timed_out() {
         let handle = tokio::spawn(timed(
             HidppOperation::WriteDpi,

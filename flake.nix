@@ -1,12 +1,24 @@
 {
   description = "OpenLogi — local-first companion for Logitech HID++ peripherals";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # Workspace rust-version tracks current stable; nixpkgs' rustc lags it and
+    # cargo then refuses to build. Same overlay devenv uses for the local toolchain.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   # The dev shell lives in devenv.nix (devenv.yaml). This flake owns the Linux
   # package, its NixOS integration, checks, and formatter.
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -14,7 +26,19 @@
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
       packageFor =
-        system: nixpkgs.legacyPackages.${system}.callPackage ./packaging/linux/package.nix { src = ./.; };
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system}.extend rust-overlay.overlays.default;
+          toolchain = pkgs.rust-bin.stable.latest.minimal;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+        in
+        pkgs.callPackage ./packaging/linux/package.nix {
+          src = ./.;
+          inherit rustPlatform;
+        };
       moduleCheckFor =
         system:
         let

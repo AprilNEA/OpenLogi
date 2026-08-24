@@ -33,10 +33,7 @@ pub(super) use gpui_component::{
 };
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
-pub(super) use openlogi_core::config::{
-    Appearance, AssetSourcePreference, DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY,
-    MIN_THUMBWHEEL_SENSITIVITY,
-};
+pub(super) use openlogi_core::config::{Appearance, AssetSourcePreference, ThumbwheelSensitivity};
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
@@ -106,7 +103,6 @@ pub(super) enum ThemeFilter {
 /// Standalone Settings window root view.
 pub struct SettingsView {
     focus_handle: FocusHandle,
-    #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
@@ -122,7 +118,7 @@ pub struct SettingsView {
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "held to re-render the Updates page on status change"
     )]
@@ -144,10 +140,6 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "sensitivity bounds are tiny 1..=100 integers — exact in f32"
-    )]
     fn new(initial_page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -189,14 +181,14 @@ impl SettingsView {
 
         let sensitivity = cx
             .try_global::<AppState>()
-            .map_or(DEFAULT_THUMBWHEEL_SENSITIVITY, |s| {
+            .map_or(ThumbwheelSensitivity::DEFAULT, |s| {
                 s.app_settings().thumbwheel_sensitivity
             });
         let sensitivity_slider = cx.new(|_| {
             SliderState::new()
-                .min(MIN_THUMBWHEEL_SENSITIVITY as f32)
-                .max(MAX_THUMBWHEEL_SENSITIVITY as f32)
-                .default_value(sensitivity as f32)
+                .min(f32::from(ThumbwheelSensitivity::MIN))
+                .max(f32::from(ThumbwheelSensitivity::MAX))
+                .default_value(f32::from(sensitivity))
         });
         cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
             .detach();
@@ -256,12 +248,7 @@ impl SettingsView {
     /// Commit the thumb-wheel sensitivity slider. The label tracks the live
     /// slider value on every `Change`; persistence (and the one shared-atomic
     /// write the watcher reads) happens once on `Release`.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "slider value is a stepped 1..=100 figure"
-    )]
-    #[allow(
+    #[expect(
         clippy::unused_self,
         reason = "gpui subscription handlers must take &mut self"
     )]
@@ -273,7 +260,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         if let SliderEvent::Release(value) = event {
-            let sensitivity = value.start().round() as i32;
+            let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
             cx.update_global::<AppState, _>(|s, _| s.set_thumbwheel_sensitivity(sensitivity));
         }
         cx.notify();

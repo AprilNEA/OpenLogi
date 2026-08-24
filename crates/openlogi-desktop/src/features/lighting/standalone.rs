@@ -212,7 +212,7 @@ impl Render for LightPanel {
                 .native_for_percent(settings.brightness_percent)
                 .unwrap_or_else(|| range.min());
             panel = panel.child(control_well(
-                tr!("BRIGHTNESS"),
+                tr!("Brightness"),
                 format_light_value(value, range.unit()),
                 format_range_endpoints(range),
                 Slider::new(slider).horizontal(),
@@ -224,7 +224,7 @@ impl Render for LightPanel {
                 .temperature_kelvin
                 .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin));
             panel = panel.child(control_well(
-                tr!("COLOUR TEMPERATURE"),
+                tr!("Colour temperature"),
                 format_light_value(value, range.unit()),
                 format_range_endpoints(range),
                 Slider::new(slider).horizontal(),
@@ -479,7 +479,7 @@ fn midpoint(range: LightValueRange) -> u16 {
     range.quantize(range.min() + (range.max() - range.min()) / 2)
 }
 
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "the slider value is clamped to the u16 range before conversion"
@@ -511,11 +511,6 @@ fn light_command_status(status: LightCommandStatus, pal: Palette) -> impl IntoEl
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::expect_used,
-        reason = "range fixture construction is intentionally asserted in tests"
-    )]
-
     use super::{format_light_value, midpoint};
     use openlogi_core::device::{LightValueRange, LightValueUnit};
 

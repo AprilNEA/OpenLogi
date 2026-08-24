@@ -48,7 +48,8 @@ fn main() -> Result<()> {
         commands,
     } = spawn_ipc();
 
-    let app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
+    let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
+    app = app.with_quit_mode(gpui::QuitMode::Explicit);
     app.run(move |cx| {
         platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
@@ -105,11 +106,6 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    reason = "panic helpers are idiomatic in tests"
-)]
 mod tests {
 
     /// The catalog this binary translates against lives in `openlogi-ui` and is

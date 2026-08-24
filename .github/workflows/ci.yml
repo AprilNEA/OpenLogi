@@ -1,5 +1,9 @@
 name: CI
 
+# Reproduce every job locally: `cargo xtask ci`
+# Job → command map: `.claude/rules/ci.md`
+# Changing a `run:` here without updating those two is a bug.
+
 on:
   push:
     branches: [main, master]
@@ -32,6 +36,39 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  publish-closure:
+    name: publish closure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-debug
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      - run: cargo xtask release check-publish
+
+  # The shell equivalent of `rustfmt` + `clippy`. The file set is every tracked
+  # file shfmt recognises as a shell script, so a new script is covered the day
+  # it lands — including the extensionless `.agents/*` ones, which it detects by
+  # shebang. shfmt's formatting options come from `.editorconfig`; passing it a
+  # printer flag here would silently discard that file.
+  shell:
+    name: shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: shellcheck,shfmt
+      - name: List tracked shell scripts
+        run: git ls-files -z | xargs -0 shfmt -f | tee "${RUNNER_TEMP}/shell-scripts"
+      - name: shellcheck
+        run: xargs shellcheck < "${RUNNER_TEMP}/shell-scripts"
+      - name: shfmt
+        run: xargs shfmt -d < "${RUNNER_TEMP}/shell-scripts"
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -54,23 +91,34 @@ jobs:
             libssl-dev libzstd-dev pkg-config
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # Both first-class platforms: macOS and Linux compile disjoint cfg-gated
-  # code (evdev/zbus vs the ObjC surface), so a single-runner MSRV check would
-  # miss a too-new stabilization on the other side.
+  # The floor tracks current stable (see `rust-version` in the root Cargo.toml),
+  # so what this job buys is keeping that number honest: it fails the moment
+  # someone reaches for an API newer than what `cargo install` users are
+  # promised, which the floating-stable jobs above cannot notice. Both
+  # first-class platforms, because macOS and Linux compile disjoint cfg-gated
+  # code (evdev/zbus vs the ObjC surface) and a single runner would miss a
+  # too-new stabilization on the other side.
   msrv:
     name: MSRV (cargo check, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # `rust-toolchain.toml` pins the channel to `stable`, and rustup honours
+      # that file over whatever toolchain this job installs — so for its whole
+      # life this check silently ran stable and never once verified the floor.
+      # RUSTUP_TOOLCHAIN outranks the file; keep it in step with the version
+      # installed above and with `rust-version`.
+      RUSTUP_TOOLCHAIN: "1.98"
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.96
+      - uses: dtolnay/rust-toolchain@1.98
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
-          # Host OS splits Linux vs macOS; rustc 1.96 is already in the key.
+          # Host OS splits Linux vs macOS; the rustc version is already in the key.
           shared-key: msrv-debug
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - if: runner.os == 'Linux'
@@ -85,10 +133,10 @@ jobs:
 
   # Stable Linux typecheck is covered by `clippy` above (clippy subsumes
   # `cargo check` for the same --workspace --all-targets set — same rationale
-  # as clippy-windows). MSRV stays on the `msrv` matrix (1.96).
+  # as clippy-windows). The declared floor stays on the `msrv` matrix.
 
-  docs-hid:
-    name: rustdoc (hid crates)
+  docs:
+    name: rustdoc (non-GUI crates)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -105,18 +153,19 @@ jobs:
           sudo apt-get install -y \
             libudev-dev \
             pkg-config
-      - name: cargo doc (openlogi-hid)
+      # Everything except the GPUI crates, which would drag the whole graphics
+      # toolchain into this job. Excluding by name rather than listing the
+      # covered crates keeps a new crate documented by default — the hid-only
+      # version of this step let five broken links rot in `openlogi-core`.
+      - name: cargo doc
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc -p openlogi-hid --no-deps --document-private-items
-      - name: cargo doc (openlogi-hidpp)
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc -p openlogi-hidpp --no-deps --document-private-items
-      - name: cargo doc (openlogi-hidpp-derive)
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc -p openlogi-hidpp-derive --no-deps --document-private-items
+        run: |
+          cargo doc --workspace --no-deps --document-private-items \
+            --exclude openlogi-ui \
+            --exclude openlogi-desktop \
+            --exclude openlogi-overlay \
+            --exclude openlogi-agent
 
   # openlogi-core / openlogi-hid / openlogi-assets / openlogi / openlogi-hook
   # all compile on Linux today (the hook crate has stubs for non-macOS targets).
@@ -206,3 +255,26 @@ jobs:
       # and the agent's HKCU-Run autostart) that the Linux/macOS clippy jobs
       # never compile.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  wasm:
+    name: wasm (portable crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: wasm-stable-debug
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      # A portability gate, not a deliverable: nothing here is built for the
+      # browser. `wasm32-unknown-unknown` has no OS under it, so a crate that
+      # picks up a filesystem, a randomness source or a thread stops compiling
+      # here and nowhere else. The crate list lives in xtask
+      # (`WASM_PORTABLE_CRATES`) and the drift test keeps the two in step.
+      - run: cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown
+      # `openlogi-core` earns its place only with `fs` off: that feature is
+      # the config file, and a config file needs a filesystem.
+      - run: cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown

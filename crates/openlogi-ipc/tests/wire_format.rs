@@ -17,10 +17,13 @@
 //! `PROTOCOL_VERSION`, update [`protocol_version_is_pinned`], and replace the
 //! golden with the actual hex from the assertion message.
 
-#![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 #![expect(
     clippy::tests_outside_test_module,
     reason = "an integration test file is already its own test-only crate"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "the fixture helpers sit outside any `#[test]` fn, where `allow-expect-in-tests` cannot see them"
 )]
 
 use std::collections::BTreeMap;
@@ -35,8 +38,9 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Click, DeviceRoute, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
+    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -59,19 +63,44 @@ fn wire_bytes<T: serde::Serialize>(value: &T) -> String {
 }
 
 #[track_caller]
-fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
+fn assert_wire<T>(value: &T, golden: &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let hex = wire_bytes(value);
     assert_eq!(
-        wire_bytes(value),
-        golden,
+        hex, golden,
         "wire encoding changed — if intentional, bump PROTOCOL_VERSION and regenerate this golden"
     );
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+        .collect::<Vec<u8>>();
+    let decoded: T = bincode::DefaultOptions::new()
+        .deserialize(&bytes)
+        .expect("wire types deserialize");
+    let re_hex = wire_bytes(&decoded);
+    assert_eq!(
+        hex, re_hex,
+        "wire round-trip failed — re-encoded bytes differ"
+    );
+}
+
+fn representative_smartshift_status() -> SmartShiftStatus {
+    SmartShiftStatus {
+        mode: SmartShiftMode::Ratchet,
+        auto_disengage: SmartShiftAutoDisengage::Threshold(
+            SmartShiftThreshold::try_new(16).expect("valid SmartShift threshold"),
+        ),
+        tunable_torque: Some(TunableTorque::try_new(60).expect("valid SmartShift torque")),
+    }
 }
 
 /// Any golden regeneration must come with a version bump — this is the test
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 21);
+    assert_eq!(PROTOCOL_VERSION, 26);
 }
 
 #[test]
@@ -96,9 +125,19 @@ fn request_variant_order() {
                 receiver_uid: "F00DCAFE".into(),
                 slot: 1,
             },
-            dpi: 1600,
+            dpi: Dpi::new(1600),
         },
         "040008463030444341464501fb4006",
+    );
+    assert_wire(
+        &AgentRequest::SetSmartshift {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            status: representative_smartshift_status(),
+        },
+        "06000846303044434146450101103c",
     );
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
@@ -231,8 +270,10 @@ fn agent_status() {
         // the version must not churn this golden.
         protocol_version: 7,
         agent_version: "0.6.6".into(),
+        input_monitoring_granted: true,
+        hid_open_failures: false,
     };
-    assert_wire(&status, "010001010705302e362e36");
+    assert_wire(&status, "010001010705302e362e360100");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
@@ -249,20 +290,22 @@ fn agent_snapshot() {
             inventory: InventoryHealth::Ready,
             protocol_version: 7,
             agent_version: "0.6.6".into(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
         camera_active: false,
         pairing: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e3600000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e3600000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000");
 }
 
 /// The pairing session is state, so its phases are wire format like any enum.
@@ -376,7 +419,7 @@ fn pairing_updates() {
 #[test]
 fn device_settings_payloads() {
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
-        current: 1600,
+        current: Dpi::new(1600),
         capabilities: DpiCapabilities::new(vec![800, 1600, 3200]).expect("non-empty list"),
     });
     assert_wire(&dpi, "00fb400603fb2003fb4006fb800c");
@@ -426,11 +469,7 @@ fn device_settings_payloads() {
     // serde encodes SmartShiftMode's variant *index* (Free=0, Ratchet=1), not
     // the `#[repr(u8)]` firmware discriminants (1/2) — pinned here because it
     // is exactly the kind of thing a refactor would "fix".
-    let smartshift: Result<SmartShiftStatus, WriteError> = Ok(SmartShiftStatus {
-        mode: SmartShiftMode::Ratchet,
-        auto_disengage: 16,
-        tunable_torque: 60,
-    });
+    let smartshift: Result<SmartShiftStatus, WriteError> = Ok(representative_smartshift_status());
     assert_wire(&smartshift, "0001103c");
 
     // `Rgb` serializes as the same hex string the field used to hold raw, so
@@ -491,7 +530,7 @@ fn standalone_light_dtos_commands_and_errors() {
     legacy.registry_model_id = None;
     assert_wire(
         &legacy,
-        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000d010001010114fa010101fb8c0afb641964020000056c69747261",
+        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000d010001010114fa010101fb8c0afb641964020000056c6974726100",
     );
     assert_wire(&capabilities, "010114fa010101fb8c0afb641964020000");
     assert_wire(&brightness, "14fa0101");

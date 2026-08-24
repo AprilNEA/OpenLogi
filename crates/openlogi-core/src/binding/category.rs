@@ -2,8 +2,8 @@
 
 /// Grouping for popover section headers.
 ///
-/// Used by [`Action::category`] and rendered as a small muted label above
-/// each group in the action picker.
+/// Used by [`Action::category`](crate::binding::Action::category) and rendered
+/// as a small muted label above each group in the action picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Category {
     /// Cut, copy, paste, undo, redo, select-all, find, save.
@@ -25,19 +25,22 @@ pub enum Category {
 }
 
 impl Category {
-    /// Short label for popover section headers (already uppercase so callers
-    /// don't have to transform it).
+    /// Short label for popover section headers, and the i18n key it is looked
+    /// up by. Sentence case: a UI layer cannot uppercase a *translated* label
+    /// safely — casing rules are per-language, and GPUI has no `text-transform`
+    /// to defer the decision to — so the catalog carries the cased text it
+    /// wants. `DPI` is an acronym, not a shout.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Category::Editing => "EDITING",
-            Category::Browser => "BROWSER",
-            Category::Media => "MEDIA",
-            Category::Mouse => "MOUSE",
+            Category::Editing => "Editing",
+            Category::Browser => "Browser",
+            Category::Media => "Media",
+            Category::Mouse => "Mouse",
             Category::Dpi => "DPI",
-            Category::Scroll => "SCROLL",
-            Category::Navigation => "NAVIGATION",
-            Category::System => "SYSTEM",
+            Category::Scroll => "Scroll",
+            Category::Navigation => "Navigation",
+            Category::System => "System",
         }
     }
 }

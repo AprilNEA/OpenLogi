@@ -1,17 +1,23 @@
 pub(crate) mod bundle;
+pub(crate) mod dev_bundle;
 pub(crate) mod dmg;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::icon::IconPipeline as _;
+use crate::icon::macos::AppBundle;
 use bundle::identity::Channel;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Generate the macOS app icon from the master PNG.
-    Icns,
+    /// Compile the macOS app icon from its Icon Composer document.
+    Icon,
     /// Build the OpenLogi.app bundle.
     Bundle(BundleArgs),
+    /// Wrap a freshly built desktop binary in `target/dev/OpenLogi.app`.
+    /// Driven by the cargo runner; not normally run by hand.
+    DevBundle(dev_bundle::Args),
     /// Create the branded macOS DMG from an existing app bundle.
     Dmg(dmg::Args),
     /// Build the app bundle for distribution, optionally sign it, and package
@@ -30,8 +36,9 @@ pub(crate) struct BundleArgs {
 
 pub(crate) fn run(command: Command) -> Result<()> {
     match command {
-        Command::Icns => bundle::generate_icns(),
+        Command::Icon => AppBundle.compile(),
         Command::Bundle(args) => bundle::run(args.channel),
+        Command::DevBundle(args) => dev_bundle::run(&args),
         Command::Dmg(args) => dmg::run(&args),
         Command::Package(args) => {
             bundle::run_for_distribution(args.sign_identity.as_deref())?;

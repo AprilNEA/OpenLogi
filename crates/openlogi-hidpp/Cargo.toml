@@ -28,7 +28,6 @@ hidreport = "0.5.0"
 futures = "0.3.31"
 futures-timer = "3.0.4"
 async-trait = "0.1.88"
-rand = "0.9.0"
 num_enum = "0.7.3"
 async-channel = "2.3.1"
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -41,7 +40,7 @@ tracing = { workspace = true }
 # OpenLogi-specific: generates the mechanical CreatableFeature/Feature impls
 # for feature structs shaped `{ endpoint: FeatureEndpoint }` or `{ endpoint,
 # events: EventSource<Event> }`. Not in upstream hidpp; used only here.
-openlogi-hidpp-derive = { version = "0.7.1", path = "../openlogi-hidpp-derive" }
+openlogi-hidpp-derive = { version = "0.7.10", path = "../openlogi-hidpp-derive" }
 derive_more = { version = "2.1.1", default-features = false, features = ["from", "into"] }
 
 [lints]

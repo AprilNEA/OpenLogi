@@ -135,6 +135,24 @@ jobs:
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
 
+      # The two macOS legs run on different images, and their default Xcode is
+      # whatever `/Applications/Xcode.app` happens to point at — 26.x on the
+      # arm64 image, 16.4 on the Intel one. Compiling the app icon needs an
+      # Icon Composer-capable actool (Xcode 26+), and a bundle should not be
+      # built by two different toolchains depending on which leg produced it.
+      - name: Select the Xcode both legs build with
+        run: |
+          # An unmatched glob stays literal, which `-d` then rejects — where
+          # `ls` would have failed the step under the shell's `-e -o pipefail`
+          # before this check could say what is actually wrong.
+          xcode=$(printf '%s\n' /Applications/Xcode_26*.app | sort -V | tail -1)
+          if [ ! -d "$xcode" ]; then
+            echo "No Xcode 26 on this runner; the app icon cannot be compiled." >&2
+            exit 1
+          fi
+          echo "OPENLOGI_DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Building with $xcode"
+
       - name: Load release secrets from 1Password
         id: load_secrets
         if: ${{ inputs.sign }}
@@ -231,16 +249,16 @@ jobs:
             [ -f "$1/Contents/Resources/AppIcon.icns" ]
           }
           check "$app" "org.openlogi.openlogi" "OpenLogi"
-          check "$app/Contents/Library/LoginItems/OpenLogiAgent.app" "org.openlogi.agent" "OpenLogi Agent"
-          check "$app/Contents/Library/LoginItems/OpenLogiOverlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
+          check "$app/Contents/Library/LoginItems/OpenLogi Agent.app" "org.openlogi.agent" "OpenLogi Agent"
+          check "$app/Contents/Library/LoginItems/OpenLogi Overlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
 
       - name: Verify signed app bundle
         if: ${{ inputs.sign }}
         run: |
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
-          helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
-          overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
+          helper="$app/Contents/Library/LoginItems/OpenLogi Agent.app"
+          overlay="$app/Contents/Library/LoginItems/OpenLogi Overlay.app"
           cli="$app/Contents/MacOS/openlogi"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"

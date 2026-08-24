@@ -369,7 +369,7 @@ pub(super) fn device_node() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Convert a [`KeyCombo`](openlogi_core::binding::KeyCombo) modifier bitmask
+/// Convert a [`KeyCombo`] modifier bitmask
 /// to the evdev keys to hold.
 ///
 /// macOS Cmd (`MOD_CMD`) and Ctrl (`MOD_CTRL`) both map to `KEY_LEFTCTRL`;
@@ -607,7 +607,6 @@ fn try_mpris_command(command: &str) -> Option<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::{KeyCombo, Shortcut};

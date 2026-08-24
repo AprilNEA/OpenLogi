@@ -22,7 +22,6 @@ mod swipe;
 mod value;
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests;
 
 pub use action::{Action, WorkflowStep};

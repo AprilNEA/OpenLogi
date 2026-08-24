@@ -1,9 +1,9 @@
 //! General settings page.
 
 use super::{
-    AnyElement, App, AppState, BorrowAppContext, DEFAULT_THUMBWHEEL_SENSITIVITY, Entity,
-    FluentBuilder, IconName, IntoElement, ParentElement, SettingField, SettingGroup, SettingItem,
-    SettingPage, Slider, SliderState, Styled, div, h_flex, px, theme, v_flex,
+    AnyElement, App, AppState, BorrowAppContext, Entity, FluentBuilder, IconName, IntoElement,
+    ParentElement, SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState,
+    Styled, ThumbwheelSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
@@ -83,14 +83,9 @@ pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPa
         .group(group)
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "slider value is a stepped 1..=100 figure"
-)]
 fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
-    let value = slider.read(cx).value().start().round() as i32;
-    let is_default = value == DEFAULT_THUMBWHEEL_SENSITIVITY;
+    let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
+    let is_default = value == ThumbwheelSensitivity::DEFAULT;
     let pal = theme::palette(cx);
     v_flex()
         .flex_shrink_0()
