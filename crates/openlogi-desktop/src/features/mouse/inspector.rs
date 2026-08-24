@@ -64,7 +64,7 @@ pub(super) fn binding_inspector(
         .flex_shrink_0()
         .border_l_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.bg)
         .child(
             div()
                 .id("button-inspector-scroll")

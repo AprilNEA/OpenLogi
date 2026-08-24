@@ -14,8 +14,8 @@ use gpui_component::{
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
-    asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png, default_labels,
-    labels_from_hotspots,
+    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
+    default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
@@ -28,12 +28,13 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
-const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
 const LABEL_H: f32 = 56.;
+const LABEL_GUTTER: f32 = LABEL_W + SIDE_GAP;
+const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
 
-const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
+const CARD_EDGE_INSET: f32 = SIDE_GAP;
 
 const HOTSPOT_DOT: f32 = 12.;
 /// Vertical space occupied by the device bar, profile context, and canvas
@@ -187,29 +188,17 @@ impl Render for MouseModelView {
             .filter(|button| editing_app.is_none() || !overridden.contains(button))
             .collect();
 
-        // Scale the model to fit the content area in *both* axes. A tall mouse
-        // is bound by the viewport height (capped at the design height, floored
-        // so the side labels stay readable — the window's min height keeps the
-        // viewport above the floor, see `main`). A wide keyboard is bound by the
-        // available width so it can't overflow the panel (#272), and — having no
-        // side labels — drops the label gutter to centre at full width.
         let viewport_h = f32::from(window.viewport_size().height);
         let viewport_w = f32::from(window.viewport_size().width);
-        let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-        let has_labels = asset.as_ref().is_none_or(asset_has_button_labels) && viewport_w >= 960.;
-        let gutter = if has_labels { SIDE_W + SIDE_GAP } else { 0. };
-        let content_w =
-            (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
-        let max_image_w = (content_w - gutter).max(MODEL_MIN_CONTENT_W / 2.);
-        let (mouse_w, mouse_h, hotspots, mut labels) =
-            scaled_model(asset.as_ref(), target_h, max_image_w, thumbwheel);
-        if !has_labels {
-            labels.clear();
-        }
-
-        let canvas_w = gutter + mouse_w;
+        let ModelLayout {
+            canvas_w,
+            mouse_left,
+            mouse_w,
+            mouse_h,
+            hotspots,
+            labels,
+        } = model_layout(asset.as_ref(), viewport_w, viewport_h, thumbwheel);
         let canvas_h = mouse_h;
-        let mouse_left = gutter;
 
         let highlight = self.hovered.or(active);
         let view = cx.entity();
@@ -297,6 +286,56 @@ fn workspace_layout(canvas: AnyElement, inspector: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
+struct ModelLayout {
+    canvas_w: f32,
+    mouse_left: f32,
+    mouse_w: f32,
+    mouse_h: f32,
+    hotspots: Vec<Hotspot>,
+    labels: Vec<Label>,
+}
+
+/// Scale the model to fit the content area in both axes. A tall mouse is bound
+/// by the viewport height; a wide keyboard is bound by the available width and
+/// drops the label gutter so it remains centred.
+fn model_layout(
+    asset: Option<&ResolvedAsset>,
+    viewport_w: f32,
+    viewport_h: f32,
+    thumbwheel: bool,
+) -> ModelLayout {
+    let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+    let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
+    let content_w =
+        (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
+    let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {
+        LabelDistribution::BothSides
+    } else {
+        LabelDistribution::LeftOnly
+    };
+    let left_gutter = if has_labels { LABEL_GUTTER } else { 0. };
+    let right_gutter = if label_distribution == LabelDistribution::BothSides {
+        LABEL_GUTTER
+    } else {
+        0.
+    };
+    let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
+    let (mouse_w, mouse_h, hotspots, mut labels) =
+        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    if !has_labels {
+        labels.clear();
+    }
+
+    ModelLayout {
+        canvas_w: left_gutter + mouse_w + right_gutter,
+        mouse_left: left_gutter,
+        mouse_w,
+        mouse_h,
+        hotspots,
+        labels,
+    }
+}
+
 /// Model geometry fit inside a `max_w` × `target_h` box. With a real asset the
 /// hotspots and labels are recomputed from the scaled dimensions; the synthetic
 /// silhouette's authored coordinates are scaled by the same factor. Returns
@@ -306,11 +345,12 @@ fn scaled_model(
     target_h: f32,
     max_w: f32,
     thumbwheel: bool,
+    label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
         let hotspots = asset_hotspots_for_png(a, w, h);
-        let labels = labels_from_hotspots(&hotspots, h);
+        let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
@@ -324,7 +364,7 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel)
+        let labels = default_labels(thumbwheel, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,
@@ -452,7 +492,7 @@ fn label_control(
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
     let x = match label.side {
-        Side::Left => mouse_left - SIDE_GAP - SIDE_W,
+        Side::Left => mouse_left - SIDE_GAP - LABEL_W,
         Side::Right => mouse_left + mouse_w + SIDE_GAP,
     };
     let view = view.clone();
@@ -882,8 +922,8 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true);
+        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
+        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
         assert_eq!(
             without
                 .iter()

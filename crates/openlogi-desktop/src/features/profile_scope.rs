@@ -177,7 +177,7 @@ fn profile_scope_content(
                 .child(
                     div()
                         .flex_none()
-                        .text_caption()
+                        .text_body()
                         .text_color(pal.text_muted)
                         .child(tr!("Profile")),
                 )

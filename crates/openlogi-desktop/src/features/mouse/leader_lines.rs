@@ -14,14 +14,8 @@ use crate::ui::theme::ACCENT_BLUE;
 /// the diagonal doesn't start inside the card.
 const STUB: f32 = 10.;
 
-/// Which side of the mouse a label sits on. `Right` is unused in the current
-/// view (the right half of the window is reserved for the DPI / gesture
-/// column) but the routing logic is kept so labels can move later.
+/// Which side of the mouse a label sits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(
-    dead_code,
-    reason = "Right variant kept for future right-side labelling"
-)]
 pub enum Side {
     Left,
     Right,
