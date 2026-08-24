@@ -43,6 +43,11 @@ impl AppState {
     pub fn restart_after_input_monitoring_change(&self) {
         self.send_ipc(crate::services::ipc::Command::RestartAfterInputMonitoringChange);
     }
+    /// Ask the agent to raise the macOS Input Monitoring request. The agent
+    /// owns HID access, so TCC must attribute the request to that helper.
+    pub fn request_input_monitoring_access(&self) {
+        self.send_ipc(crate::services::ipc::Command::RequestInputMonitoringAccess);
+    }
     /// The agent connection state the render path branches on.
     #[must_use]
     pub fn agent_link(&self) -> &AgentLink {

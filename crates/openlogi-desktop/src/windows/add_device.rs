@@ -344,7 +344,7 @@ fn input_monitoring_body(pal: Palette) -> impl IntoElement {
                 tr!("Open System Settings to grant access"),
                 true,
             )
-            .on_click(|_, _, _| crate::app::open_input_monitoring_settings()),
+            .on_click(|_, _, cx| crate::app::request_input_monitoring(cx)),
         )
         .child(
             action_button(

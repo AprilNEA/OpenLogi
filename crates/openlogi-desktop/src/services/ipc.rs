@@ -111,6 +111,10 @@ pub enum Command {
     /// Restart the macOS agent after the user changes Input Monitoring so the
     /// new TCC decision applies to HID device opens.
     RestartAfterInputMonitoringChange,
+    /// Ask the agent to raise the macOS Input Monitoring request. The agent
+    /// owns HID access, so prompting in the GUI would authorize the wrong
+    /// process.
+    RequestInputMonitoringAccess,
     /// Pairing (agent-owned, since it opens the receiver): begin a session,
     /// pair a discovered device by address, or cancel. Events stream back via
     /// the separate [`IpcClient::pairing`] long-poll, not these commands.
@@ -528,6 +532,10 @@ async fn handle(
             .map_err(|_| ())?,
         Command::RestartAfterInputMonitoringChange => client
             .restart_after_input_monitoring_change(ctx)
+            .await
+            .map_err(|_| ())?,
+        Command::RequestInputMonitoringAccess => client
+            .request_input_monitoring_access(ctx)
             .await
             .map_err(|_| ())?,
         Command::StartPairing(selector) => {

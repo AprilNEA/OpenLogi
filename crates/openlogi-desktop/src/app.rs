@@ -413,7 +413,7 @@ impl AppView {
                     .primary()
                     .icon(IconName::Settings)
                     .label(tr!("Open System Settings to grant access"))
-                    .on_click(|_, _, _| open_input_monitoring_settings()),
+                    .on_click(|_, _, cx| request_input_monitoring(cx)),
             )
             .child(
                 Button::new("restart-after-input-monitoring")
@@ -439,8 +439,13 @@ fn request_accessibility(cx: &mut App) {
     permissions::open_pane(Permission::Accessibility);
 }
 
-pub(crate) fn open_input_monitoring_settings() {
+pub(crate) fn request_input_monitoring(cx: &mut App) {
     use openlogi_permissions::{self as permissions, Permission};
+    // Only the agent may request this permission: it owns HID access, and TCC
+    // attributes the resulting prompt and Settings row to the caller.
+    if let Some(state) = cx.try_global::<AppState>() {
+        state.request_input_monitoring_access();
+    }
     permissions::open_pane(Permission::InputMonitoring);
 }
 

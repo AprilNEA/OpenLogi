@@ -56,7 +56,8 @@ pub use succession::Identity;
 /// v25: `AgentStatus::input_monitoring_granted` appended.
 /// v26: `AgentStatus::hid_open_failures` appended.
 /// v27: [`Agent::restart_after_input_monitoring_change`] appended.
-pub const PROTOCOL_VERSION: u32 = 27;
+/// v28: [`Agent::request_input_monitoring_access`] appended.
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -500,4 +501,11 @@ pub trait Agent {
     /// The GUI calls this only on macOS. Other platforms accept it as a no-op
     /// so the IPC contract stays portable.
     async fn restart_after_input_monitoring_change();
+    /// Ask the agent to request Input Monitoring from macOS, so TCC attributes
+    /// the prompt and Settings row to the helper that actually opens HID
+    /// devices rather than to the GUI.
+    ///
+    /// The GUI calls this only on macOS. Other platforms accept it as a no-op
+    /// so the IPC contract stays portable.
+    async fn request_input_monitoring_access();
 }
