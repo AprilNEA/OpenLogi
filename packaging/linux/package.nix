@@ -86,8 +86,8 @@ let
   # at a separate checkout. The rev must match Cargo.lock (a mismatch fails
   # the build with a hash error, so it cannot drift silently); the hash is
   # shared with outputHashes below.
-  gpuiComponentRev = "031555662e99a1b5a549990b47f246d475b8288a";
-  gpuiComponentHash = "sha256-yOXdgxQgfvGN2/+OdDnl1pYti0DoGFvS3Tyqvj3Bkng=";
+  gpuiComponentRev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8";
+  gpuiComponentHash = "sha256-A5NitDokr5+8tQaSO6gSyQpH3X/8FWQHC140CHnpVsY=";
   gpuiComponentSrc = fetchgit {
     url = "https://github.com/longbridge/gpui-component";
     rev = gpuiComponentRev;
@@ -109,10 +109,11 @@ rustPlatform.buildRustPackage {
     # `nix-prefetch-git <url> --rev <rev>`.
     outputHashes = {
       "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
-      "gpui-0.2.2" = "sha256-Av+unZNI39dEb+zwSIU+SkEjqagHWrc7W8KehEgQ4H8=";
+      "gpui-0.2.2" = "sha256-d2GVmZgvJzLk1pbNtPedw0V09+ANZFORZjTSLVxw7jc=";
       "gpui-component-0.5.2" = gpuiComponentHash;
       "gpui-updater-0.0.7" = "sha256-hxdATcCif7csqKLNoi41ETe09Ym6zM4rVzYvBDEvVg4=";
       "proptest-1.10.0" = "sha256-p5NTcHhruI8QQvANACg8AMRVNmuvGxs2NLit+/8PaWo=";
+      "wasm_thread-0.3.3" = "sha256-+lRLCIk0S6Y5ORYjDKsYYHia2FtoSoh+rWkQh7mnPBE=";
       "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
       "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
       "zed-scap-0.0.8-zed" = "sha256-BihiQHlal/eRsktyf0GI3aSWsUCW7WcICMsC2Xvb7kw=";
