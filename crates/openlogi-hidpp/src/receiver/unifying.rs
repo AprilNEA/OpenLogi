@@ -226,7 +226,7 @@ impl Receiver {
             // Kind is identity-only: an unrecognised nibble folds to
             // `Unknown` instead of failing the whole pairing-info read.
             kind: DeviceKind::from(response[1] & 0x0f),
-            encrypted: response[1] & (1 << 4) != 0,
+            encrypted: response[1] & (1 << 5) != 0,
             online: response[1] & (1 << 6) == 0,
             unit_id: [response[4], response[5], response[6], response[7]],
         })
@@ -278,7 +278,10 @@ pub fn decode_notification(msg: &v10::Message) -> Option<Event> {
         // dropping the event would hide the device entirely, since arrival
         // notifications are the only device source on this path.
         kind: DeviceKind::from(payload[1] & 0x0f),
-        encrypted: payload[1] & (1 << 4) != 0,
+        // Device-info high nibble: bit 6 = link not established, bit 5 = link
+        // encrypted, bit 4 = software present (same layout as Bolt; Solaar
+        // decodes both receivers with one mask table).
+        encrypted: payload[1] & (1 << 5) != 0,
         online: payload[1] & (1 << 6) == 0,
         wpid: u16::from_le_bytes([payload[2], payload[3]]),
     }))
@@ -428,9 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn encryption_sits_on_bit_4_unlike_bolt() {
-        // Unifying reports link encryption on bit 4; Bolt uses bit 5. Reading
-        // Bolt's bit here would report every encrypted link as plaintext.
+    fn encryption_sits_on_bit_5_and_bit_4_is_software_present() {
+        // Both receivers report link encryption on bit 5 of the device-info
+        // byte; bit 4 is the software-present flag. This decoder used to read
+        // bit 4, reporting "Options+ seen" as link encryption.
         let connection = |status: u8| {
             let mut payload = [0u8; 17];
             payload[1] = status;
@@ -440,8 +444,8 @@ mod tests {
             }
         };
 
-        assert!(connection(1 << 4).encrypted);
-        assert!(!connection(1 << 5).encrypted);
+        assert!(connection(1 << 5).encrypted);
+        assert!(!connection(1 << 4).encrypted);
     }
 
     #[test]
