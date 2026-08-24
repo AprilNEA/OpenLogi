@@ -1055,6 +1055,7 @@ mod tests {
                         .enumerate()
                         .map(|(i, name)| openlogi_assets::metadata::Assignment {
                             slot_name: (*name).to_string(),
+                            slot_id: format!("mx-master-6b012_c{i}"),
                             #[expect(
                                 clippy::cast_precision_loss,
                                 reason = "fixture indices are single digits"
