@@ -7,7 +7,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Monitor discovery and DDC/CI input switching for OpenLogi."
-publish = false
+keywords = ["monitor", "ddc", "mccs", "display", "windows"]
+categories = ["hardware-support", "os::windows-apis"]
 
 [dependencies]
 serde = { workspace = true }

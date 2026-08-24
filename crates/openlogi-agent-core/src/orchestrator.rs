@@ -1008,12 +1008,9 @@ fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitch
                     .host_switch_monitor_inputs
                     .iter()
                     .filter_map(|(host, assignments)| {
-                        let host = match host.parse::<u8>() {
-                            Ok(host @ 0..=2) => host,
-                            _ => {
-                                warn!(host, "ignoring invalid host switch monitor input key");
-                                return None;
-                            }
+                        let Ok(host @ 0..=2) = host.parse::<u8>() else {
+                            warn!(host, "ignoring invalid host switch monitor input key");
+                            return None;
                         };
                         Some((
                             host,
