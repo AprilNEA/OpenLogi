@@ -207,7 +207,7 @@ impl Render for CameraPreview {
             .rounded_md()
             .border_1()
             .border_color(pal.border)
-            .bg(pal.surface)
+            .bg(pal.panel)
             .child(surface)
     }
 }

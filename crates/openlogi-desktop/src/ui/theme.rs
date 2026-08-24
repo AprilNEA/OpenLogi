@@ -69,15 +69,19 @@ pub const GALLERY_PHOTO_H: f32 = 230.;
 /// tokens* (see [`palette`]), so the hand-painted surfaces re-skin with whatever
 /// theme the user selects in Settings → Appearance — the same `cx.theme()` the
 /// framework widgets read. The bundled "OpenLogi" theme (`themes/openlogi.json`)
-/// encodes the original tuned values, so the default look is unchanged.
+/// provides the default values for those roles.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    /// Window background.
-    pub bg: Hsla,
+    /// Window and page background.
+    pub page: Hsla,
     /// Raised card / panel fill.
-    pub surface: Hsla,
-    /// Card hover / armed fill.
-    pub surface_hover: Hsla,
+    pub panel: Hsla,
+    /// Resting fill for bespoke interactive controls.
+    pub control: Hsla,
+    /// Hover fill for bespoke interactive controls.
+    pub control_hover: Hsla,
+    /// Muted, non-interactive fill for tracks and disabled illustrations.
+    pub muted: Hsla,
     /// Hairline border between cards and surface.
     pub border: Hsla,
     /// Foreground text.
@@ -164,17 +168,20 @@ fn normalize_theme_text_contrast(theme: &mut Theme) {
 /// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
 /// with the selected theme exactly as the framework widgets do.
 ///
-/// - `bg` ← `background` (window)
-/// - `surface` ← `group_box` (content cards), while `surface_hover` keeps the
-///   theme's interactive `secondary_hover` state.
+/// - `page` ← `background` (window and page canvas)
+/// - `panel` ← `group_box` (content cards)
+/// - `control` / `control_hover` ← `secondary` / `secondary_hover`
+/// - `muted` ← `muted` (non-interactive tracks and disabled illustrations)
 /// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
 #[must_use]
 pub fn palette(cx: &App) -> Palette {
     let t = cx.theme();
     Palette {
-        bg: t.background,
-        surface: t.group_box,
-        surface_hover: t.secondary_hover,
+        page: t.background,
+        panel: t.group_box,
+        control: t.secondary,
+        control_hover: t.secondary_hover,
+        muted: t.muted,
         border: t.border,
         text_primary: t.foreground,
         text_muted: t.muted_foreground,

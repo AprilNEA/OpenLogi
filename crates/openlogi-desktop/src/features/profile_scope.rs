@@ -166,7 +166,7 @@ fn profile_scope_content(
         .gap_1p5()
         .border_b_1()
         .border_color(pal.border)
-        .bg(pal.bg)
+        .bg(pal.panel)
         .px_4()
         .py_2()
         .child(
@@ -255,7 +255,7 @@ fn profile_tab(
             tab.bg(if selected {
                 theme::accent_tint_hover()
             } else {
-                pal.surface_hover
+                pal.control_hover
             })
         })
         .children(leading)
@@ -277,7 +277,7 @@ fn application_mark(icon: Option<Arc<Image>>, name: &str, pal: Palette) -> AnyEl
         .items_center()
         .justify_center()
         .rounded(px(4.))
-        .bg(pal.surface_hover)
+        .bg(pal.muted)
         .text_caption()
         .text_color(pal.text_muted)
         .child(initial)

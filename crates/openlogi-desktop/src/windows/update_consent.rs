@@ -74,7 +74,7 @@ impl Render for UpdateConsentView {
 
         v_flex()
             .size_full()
-            .bg(pal.bg)
+            .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())

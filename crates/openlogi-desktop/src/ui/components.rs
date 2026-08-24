@@ -163,7 +163,7 @@ impl RenderOnce for PanelCard {
             .rounded(pal.card_radius)
             .border_1()
             .border_color(pal.border)
-            .bg(pal.surface)
+            .bg(pal.panel)
             .p(px(theme::CARD_PAD))
             .child(
                 v_flex()
@@ -245,7 +245,7 @@ impl RenderOnce for MenuRow {
                 style.bg(if selected {
                     theme::accent_tint_hover()
                 } else {
-                    pal.surface_hover
+                    pal.control_hover
                 })
             })
             .children(self.children)
@@ -331,12 +331,22 @@ impl RenderOnce for ProfileTab {
             })
             .text_caption()
             .text_color(if self.selected {
-                accent.into()
+                pal.text_primary
             } else {
                 pal.text_muted
             })
-            .when(self.selected, |style| style.bg(pal.surface))
-            .hover(move |style| style.bg(pal.surface_hover))
+            .bg(if self.selected {
+                theme::accent_tint()
+            } else {
+                pal.control
+            })
+            .hover(move |style| {
+                style.bg(if self.selected {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+            })
             .child(self.label)
             .children(self.children)
             .when_some(self.delete, |tab, (id, handler)| {
@@ -346,7 +356,7 @@ impl RenderOnce for ProfileTab {
                         .px_0p5()
                         .rounded_full()
                         .text_color(pal.text_muted)
-                        .hover(|style| style.text_color(gpui::white()))
+                        .hover(|style| style.text_color(pal.text_primary))
                         .child("×")
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
@@ -395,16 +405,23 @@ impl ParentElement for PresetChip {
 impl RenderOnce for PresetChip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
+        let selected = self.selected;
         self.base
             .h(px(28.))
             .px_2()
             .gap_2()
             .items_center()
             .rounded(pal.control_radius)
-            .selected_border(self.selected, pal)
-            .bg(pal.surface)
-            .selected_fill(self.selected)
-            .hover(|style| style.bg(pal.surface_hover))
+            .selected_border(selected, pal)
+            .bg(pal.control)
+            .selected_fill(selected)
+            .hover(move |style| {
+                style.bg(if selected {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+            })
             .children(self.children)
     }
 }

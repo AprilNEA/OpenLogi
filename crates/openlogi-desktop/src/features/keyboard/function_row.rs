@@ -556,14 +556,14 @@ fn key_callout(
         .bg(if highlighted {
             theme::accent_tint()
         } else {
-            pal.surface_hover
+            pal.control
         })
         .cursor_pointer()
         .hover(move |s| {
             s.bg(if highlighted {
                 theme::accent_tint_hover()
             } else {
-                pal.surface
+                pal.control_hover
             })
         })
         .child(
@@ -1159,7 +1159,7 @@ fn image_or_fallback(
             .rounded_md()
             .border_1()
             .border_color(pal.border)
-            .bg(pal.surface)
+            .bg(pal.panel)
             .flex()
             .items_center()
             .justify_center()

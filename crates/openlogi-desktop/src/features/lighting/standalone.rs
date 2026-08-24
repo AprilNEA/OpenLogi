@@ -295,7 +295,7 @@ fn light_emblem(enabled: bool, pal: Palette) -> impl IntoElement {
     let halo = if enabled {
         hsla(0.105, 0.9, 0.66, 0.22)
     } else {
-        pal.surface_hover
+        pal.muted
     };
     let icon_color: Hsla = if enabled {
         hsla(0.105, 0.9, 0.66, 1.)
@@ -344,16 +344,8 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
         .gap_3()
         .rounded(pal.control_radius)
         .border_1()
-        .border_color(if current.auto_camera {
-            hsla(0.105, 0.9, 0.66, 0.4)
-        } else {
-            pal.border
-        })
-        .bg(if current.auto_camera {
-            hsla(0.105, 0.9, 0.66, 0.08)
-        } else {
-            pal.surface_hover
-        })
+        .border_color(pal.border)
+        .bg(pal.muted)
         .p_3()
         .child(
             v_flex()
@@ -413,7 +405,7 @@ fn control_well(
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface_hover)
+        .bg(pal.muted)
         .p_3()
         .child(
             h_flex()

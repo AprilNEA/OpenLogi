@@ -891,8 +891,19 @@ fn control_row(
                 .border_1()
                 .border_color(if on { accent.into() } else { pal.border })
                 .text_caption()
-                .text_color(if on { accent.into() } else { pal.text_muted })
-                .hover(|s| s.bg(pal.surface_hover))
+                .text_color(if on { pal.text_primary } else { pal.text_muted })
+                .bg(if on {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                .hover(move |s| {
+                    s.bg(if on {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
                 .child(tr!("Auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
@@ -934,11 +945,22 @@ fn frequency_row(
                 .border_color(if active { accent.into() } else { pal.border })
                 .text_caption()
                 .text_color(if active {
-                    accent.into()
+                    pal.text_primary
                 } else {
                     pal.text_muted
                 })
-                .hover(|s| s.bg(pal.surface_hover))
+                .bg(if active {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                .hover(move |s| {
+                    s.bg(if active {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
                 .child(label)
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -1003,8 +1025,19 @@ fn binary_control_row(
                 .border_1()
                 .border_color(if on { accent.into() } else { pal.border })
                 .text_caption()
-                .text_color(if on { accent.into() } else { pal.text_muted })
-                .hover(|s| s.bg(pal.surface_hover))
+                .text_color(if on { pal.text_primary } else { pal.text_muted })
+                .bg(if on {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                .hover(move |s| {
+                    s.bg(if on {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
                 .child(if on { tr!("On") } else { tr!("Off") })
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -1038,8 +1071,8 @@ fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyEleme
                 .rounded_md()
                 .border_1()
                 .border_color(pal.border)
-                .bg(pal.surface)
-                .hover(|s| s.bg(pal.surface_hover))
+                .bg(pal.control)
+                .hover(|s| s.bg(pal.control_hover))
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!("Reset to defaults"))

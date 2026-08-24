@@ -79,7 +79,7 @@ pub(super) fn binding_inspector(
         .flex_shrink_0()
         .border_l_1()
         .border_color(pal.border)
-        .bg(pal.bg)
+        .bg(pal.panel)
         .child(
             div()
                 .id("button-inspector-scroll")
@@ -573,10 +573,10 @@ fn selection_card(
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface_hover)
+        .bg(pal.control)
         .p_3()
         .cursor_pointer()
-        .hover(move |card| card.bg(pal.surface))
+        .hover(move |card| card.bg(pal.control_hover))
         .child(
             div()
                 .text_caption()

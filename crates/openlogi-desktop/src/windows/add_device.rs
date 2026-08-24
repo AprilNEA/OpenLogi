@@ -186,7 +186,7 @@ impl Render for AddDeviceView {
 
         v_flex()
             .size_full()
-            .bg(pal.bg)
+            .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -320,7 +320,8 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
         .border_1()
         .border_color(pal.border)
         .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover))
+        .bg(pal.control)
+        .hover(|s| s.bg(pal.control_hover))
         .child(
             div()
                 .text_body()

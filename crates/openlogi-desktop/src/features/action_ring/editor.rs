@@ -45,7 +45,7 @@ pub(super) fn action_library(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.panel)
         .child(
             v_flex()
                 .flex_none()
@@ -264,7 +264,13 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                                 .text_color(rgb(theme::ACCENT_BLUE)),
                         )
                     })
-                    .hover(move |row| row.bg(pal.surface_hover))
+                    .hover(move |row| {
+                        row.bg(if selected {
+                            theme::accent_tint_hover()
+                        } else {
+                            pal.control_hover
+                        })
+                    })
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);
                     })

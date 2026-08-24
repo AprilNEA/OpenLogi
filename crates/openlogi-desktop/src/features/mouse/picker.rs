@@ -176,7 +176,7 @@ pub(crate) fn action_rows_matching(
 /// The shared floating-card surface for compact binding menus.
 pub(crate) fn menu_card(pal: Palette) -> gpui::Div {
     v_flex()
-        .bg(pal.surface)
+        .bg(pal.panel)
         .border_1()
         .border_color(pal.border)
         .rounded(pal.card_radius)

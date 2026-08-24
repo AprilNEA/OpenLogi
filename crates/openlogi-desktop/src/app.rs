@@ -360,7 +360,7 @@ impl AppView {
     fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
-            .bg(pal.bg)
+            .bg(pal.page)
             .text_color(pal.text_primary)
             .items_center()
             .justify_center()
@@ -471,7 +471,7 @@ impl Render for AppView {
         // first frame on, not only once the full UI is up.
         let root = v_flex()
             .size_full()
-            .bg(pal.bg)
+            .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())

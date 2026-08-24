@@ -155,7 +155,7 @@ pub(super) fn detail_content(
                     .gap_2()
                     .border_b_1()
                     .border_color(pal.border)
-                    .bg(pal.bg)
+                    .bg(pal.panel)
                     .px_5()
                     .py_2()
                     .text_caption()
@@ -172,7 +172,7 @@ pub(super) fn detail_content(
                 .min_h_0()
                 .w_full()
                 .items_stretch()
-                .bg(pal.surface)
+                .bg(pal.page)
                 .child(navigation)
                 .child(content),
         )
@@ -194,7 +194,7 @@ fn detail_navigation(
         .gap_1()
         .border_r_1()
         .border_color(pal.border)
-        .bg(pal.bg)
+        .bg(pal.panel)
         .p_3()
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
@@ -220,7 +220,7 @@ fn detail_navigation(
                     row.bg(if selected {
                         crate::ui::theme::accent_tint_hover()
                     } else {
-                        pal.surface_hover
+                        pal.control_hover
                     })
                 })
                 .child(

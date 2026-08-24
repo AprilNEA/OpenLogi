@@ -582,12 +582,18 @@ impl RenderOnce for LabelTrigger {
                 pal.border
             })
             .bg(if highlighted {
-                pal.surface
+                theme::accent_tint()
             } else {
-                pal.surface_hover
+                pal.control
             })
             .cursor_pointer()
-            .hover(move |s| s.bg(pal.surface))
+            .hover(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+            })
             // Button name — the caption (xs / muted), the same size as the
             // popover title and category headers it shares the binding flow with.
             .child(
@@ -728,7 +734,7 @@ fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
         .rounded_3xl()
         .border_1()
         .border_color(pal.text_muted)
-        .bg(pal.surface_hover)
+        .bg(pal.muted)
         .child(
             div()
                 .absolute()

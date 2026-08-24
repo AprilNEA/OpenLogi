@@ -543,7 +543,7 @@ fn theme_card(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(if selected { swatch.primary } else { pal.border })
-        .bg(pal.surface)
+        .bg(pal.panel)
         .shadow_xs()
         .cursor_pointer()
         .hover(move |style| {

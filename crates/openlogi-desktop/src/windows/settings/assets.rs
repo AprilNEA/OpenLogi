@@ -215,7 +215,8 @@ fn action_button(
         .border_color(pal.border)
         .text_caption()
         .cursor_pointer()
-        .hover(move |s| s.bg(pal.surface_hover))
+        .bg(pal.control)
+        .hover(move |s| s.bg(pal.control_hover))
         .child(label)
         .on_click(move |_, _, cx| on_click(cx))
 }

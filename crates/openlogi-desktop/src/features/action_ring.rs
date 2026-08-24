@@ -224,7 +224,7 @@ fn ring_preview(
                 .rounded_full()
                 .border_1()
                 .border_color(pal.border)
-                .bg(pal.surface),
+                .bg(pal.panel),
         )
         .child(
             div()
@@ -236,7 +236,7 @@ fn ring_preview(
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(pal.surface_hover)
+                .bg(pal.muted)
                 .text_color(pal.text_muted)
                 .child("×"),
         )
@@ -293,7 +293,7 @@ fn slot_button(
         .bg(if selected {
             theme::accent_tint()
         } else {
-            pal.surface_hover
+            pal.control
         })
         .text_color(if selected {
             pal.text_primary
@@ -318,7 +318,7 @@ fn slot_button(
             button.bg(if selected {
                 theme::accent_tint_hover()
             } else {
-                pal.surface_hover
+                pal.control_hover
             })
         })
         .on_click(move |_, _, cx| {
