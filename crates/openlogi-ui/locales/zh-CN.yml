@@ -296,6 +296,8 @@ _version: 1
 "Thumb Wheel Up": "拇指滚轮向上"
 "Thumb Wheel Down": "拇指滚轮向下"
 "Do Nothing": "不执行任何操作"
+"Vertical Scroll Sensitivity": "垂直滚动灵敏度"
+"Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "调整传统鼠标滚轮的垂直滚动距离，不影响触控板滚动。"
 "Thumb Wheel Sensitivity": "拇指滚轮灵敏度"
 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger.": "调整拇指滚轮的横向滚动速度，以及自定义滚轮操作的触发难易程度。"
 "Device offline — reconnect to read DPI range": "设备离线 —— 重新连接以读取 DPI 范围"

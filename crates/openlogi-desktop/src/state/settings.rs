@@ -4,7 +4,7 @@ use super::AppState;
 use gpui::App;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
-    UiScale,
+    UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -243,6 +243,16 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.thumbwheel_sensitivity = sensitivity);
         self.persist_and_reload("thumbwheel sensitivity");
+    }
+    /// Set traditional vertical mouse-wheel sensitivity and persist it. The
+    /// agent publishes the value to its scroll worker on config reload. No-op
+    /// when unchanged; disk failures restore the persisted value.
+    pub fn set_vertical_scroll_sensitivity(&mut self, sensitivity: VerticalScrollSensitivity) {
+        if self.config.app_settings.vertical_scroll_sensitivity == sensitivity {
+            return;
+        }
+        self.config.app_settings.vertical_scroll_sensitivity = sensitivity;
+        self.persist_and_reload("vertical scroll sensitivity");
     }
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
         if self.config.app_settings.auto_download_assets == enabled {

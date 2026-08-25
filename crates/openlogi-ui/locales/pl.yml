@@ -296,6 +296,8 @@ _version: 1
 "Thumb Wheel Up": "Rolka kciukowa w górę"
 "Thumb Wheel Down": "Rolka kciukowa w dół"
 "Do Nothing": "Nic nie rób"
+"Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"
+"Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
 "Thumb Wheel Sensitivity": "Czułość rolki kciukowej"
 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger.": "Skaluje prędkość poziomego przewijania rolki kciukowej oraz łatwość wyzwalania niestandardowych działań rolki."
 "Device offline — reconnect to read DPI range": "Urządzenie offline — połącz ponownie, aby odczytać zakres DPI"

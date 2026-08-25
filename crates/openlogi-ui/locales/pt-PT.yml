@@ -296,6 +296,8 @@ _version: 1
 "Thumb Wheel Up": "Roda de polegar para cima"
 "Thumb Wheel Down": "Roda de polegar para baixo"
 "Do Nothing": "Não fazer nada"
+"Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"
+"Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
 "Thumb Wheel Sensitivity": "Sensibilidade da roda de polegar"
 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger.": "Ajusta a velocidade de deslocamento horizontal da roda de polegar e a facilidade com que as ações personalizadas da roda são acionadas."
 "Device offline — reconnect to read DPI range": "Device offline — reconnect to read DPI range"

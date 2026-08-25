@@ -296,6 +296,8 @@ _version: 1
 "Thumb Wheel Up": "Πλαϊνός τροχός πάνω"
 "Thumb Wheel Down": "Πλαϊνός τροχός κάτω"
 "Do Nothing": "Καμία ενέργεια"
+"Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"
+"Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
 "Thumb Wheel Sensitivity": "Ευαισθησία πλαϊνού τροχού"
 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger.": "Ρυθμίζει την ταχύτητα οριζόντιας κύλισης του πλαϊνού τροχού και την ευκολία ενεργοποίησης προσαρμοσμένων ενεργειών τροχού."
 "Device offline — reconnect to read DPI range": "Device offline — reconnect to read DPI range"

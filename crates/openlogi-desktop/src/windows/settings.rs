@@ -34,7 +34,7 @@ pub(super) use gpui_component::{
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 pub(super) use openlogi_core::config::{
-    Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale,
+    Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
@@ -117,7 +117,8 @@ pub struct SettingsView {
     initial_page: SettingsPage,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
-    sensitivity_slider: Entity<SliderState>,
+    thumbwheel_sensitivity_slider: Entity<SliderState>,
+    vertical_scroll_sensitivity_slider: Entity<SliderState>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -190,17 +191,9 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let sensitivity = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |s| {
-            s.app_settings().thumbwheel_sensitivity
-        });
-        let sensitivity_slider = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(ThumbwheelSensitivity::MIN))
-                .max(f32::from(ThumbwheelSensitivity::MAX))
-                .default_value(f32::from(sensitivity))
-        });
-        cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
-            .detach();
+        let thumbwheel_sensitivity_slider = Self::thumbwheel_sensitivity_slider(window, cx);
+        let vertical_scroll_sensitivity_slider =
+            Self::vertical_scroll_sensitivity_slider(window, cx);
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -246,7 +239,8 @@ impl SettingsView {
             initial_page,
             language_select,
             asset_source_select,
-            sensitivity_slider,
+            thumbwheel_sensitivity_slider,
+            vertical_scroll_sensitivity_slider,
             updater,
             updater_obs,
             copied: false,
@@ -257,14 +251,49 @@ impl SettingsView {
         }
     }
 
+    fn thumbwheel_sensitivity_slider(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let current = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |state| {
+            state.app_settings().thumbwheel_sensitivity
+        });
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(f32::from(ThumbwheelSensitivity::MIN))
+                .max(f32::from(ThumbwheelSensitivity::MAX))
+                .default_value(f32::from(current))
+        });
+        cx.subscribe_in(&slider, window, Self::on_thumbwheel_sensitivity_slider)
+            .detach();
+        slider
+    }
+
+    fn vertical_scroll_sensitivity_slider(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let current = AppState::try_read(cx).map_or(VerticalScrollSensitivity::DEFAULT, |state| {
+            state.app_settings().vertical_scroll_sensitivity
+        });
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(f32::from(VerticalScrollSensitivity::MIN))
+                .max(f32::from(VerticalScrollSensitivity::MAX))
+                .default_value(f32::from(current))
+        });
+        cx.subscribe_in(&slider, window, Self::on_vertical_scroll_sensitivity_slider)
+            .detach();
+        slider
+    }
+
     /// Commit the thumb-wheel sensitivity slider. The label tracks the live
-    /// slider value on every `Change`; persistence (and the one shared-atomic
-    /// write the watcher reads) happens once on `Release`.
+    /// slider value on every `Change`; persistence happens once on `Release`.
     #[expect(
         clippy::unused_self,
         reason = "gpui subscription handlers must take &mut self"
     )]
-    fn on_sensitivity_slider(
+    fn on_thumbwheel_sensitivity_slider(
         &mut self,
         _: &Entity<SliderState>,
         event: &SliderEvent,
@@ -275,6 +304,28 @@ impl SettingsView {
             let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
             AppState::update(cx, |state, cx| {
                 state.set_thumbwheel_sensitivity(sensitivity);
+                cx.emit(StateEvent::SettingsChanged);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Commit the vertical scroll sensitivity once the slider is released.
+    #[expect(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_vertical_scroll_sensitivity_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SliderEvent::Release(value) = event {
+            let sensitivity = VerticalScrollSensitivity::from_rounded(value.start());
+            AppState::update(cx, |state, cx| {
+                state.set_vertical_scroll_sensitivity(sensitivity);
                 cx.emit(StateEvent::SettingsChanged);
             });
         }
@@ -381,7 +432,10 @@ impl Render for SettingsView {
                 page_ix: self.initial_page.index(),
                 group_ix: None,
             })
-            .page(general::general_page(self.sensitivity_slider.clone()))
+            .page(general::general_page(
+                self.vertical_scroll_sensitivity_slider.clone(),
+                self.thumbwheel_sensitivity_slider.clone(),
+            ))
             .page(updates::updates_page(self.updater.clone(), pal));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
