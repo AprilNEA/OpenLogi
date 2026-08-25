@@ -15,6 +15,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod onboard_profiles;
 pub mod smartshift;
 pub mod wheel;
 
@@ -34,6 +35,9 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Dump the raw HID++ 0x8100 OnboardProfiles info payload (G-series
+    /// gaming mice/keyboards).
+    OnboardProfiles(onboard_profiles::OnboardProfilesArgs),
 }
 
 impl DiagCmd {
@@ -46,6 +50,7 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::OnboardProfiles(args) => onboard_profiles::run(args).await,
         }
     }
 }

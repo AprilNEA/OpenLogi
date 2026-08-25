@@ -14,6 +14,9 @@ devenv.local.yaml
 # never copied or vendored. Cloned at the project root for convenience.
 /local-reference/
 
+# graphify knowledge-graph output (local docs/exploration aid, not shipped)
+graphify-out/
+
 # Claude Code skill plumbing — local per-developer, not part of the project.
 # `/*` instead of the bare directory so the committed Amp orb lifecycle
 # scripts can be re-included below: git cannot un-ignore a file whose parent

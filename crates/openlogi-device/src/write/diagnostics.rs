@@ -10,6 +10,7 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::onboard_profiles::OnboardProfilesFeature,
     feature::unified_battery::UnifiedBatteryFeature,
     protocol::v20::Hidpp20Error,
 };
@@ -138,6 +139,44 @@ pub async fn dump_reprog_controls(
             entries.push(control.into());
         }
         Ok(entries)
+    })
+    .await
+}
+
+/// Diagnostic, read-only probe of the HID++ `0x8100 OnboardProfiles` feature.
+///
+/// G-series gaming mice (e.g. the G502 X / G502 X LIGHTSPEED families) expose
+/// no `ReprogControls` (`0x1b00`–`0x1b04`) at all, which is why
+/// `Capabilities::buttons` never becomes true for them and the desktop app's
+/// Buttons panel never appears — see `openlogi-core/src/device.rs`. Both
+/// devices do expose `0x8100`, the feature Logitech's gaming line actually
+/// uses for on-device profile and button-assignment storage. This probe just
+/// captures the raw `getInfo`-equivalent payload (function `0`) with no
+/// official spec available yet — see `hidpp::feature::onboard_profiles` for
+/// why the layout isn't parsed here.
+pub async fn dump_onboard_profiles_info(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<[u8; 16], WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let info = device
+            .root()
+            .get_feature(OnboardProfilesFeature::ID)
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+            })?
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: OnboardProfilesFeature::ID,
+            })?;
+        let onboard_profiles = device.add_feature::<OnboardProfilesFeature>(info.index);
+        onboard_profiles.get_info_raw().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+        })
     })
     .await
 }

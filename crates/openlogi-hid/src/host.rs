@@ -178,6 +178,12 @@ pub async fn dump_reprog_controls(
     device::dump_reprog_controls(&*native_backend(), route).await
 }
 
+/// Read the raw HID++ `0x8100 OnboardProfiles` info payload of the device
+/// `route` reaches.
+pub async fn dump_onboard_profiles_info(route: &DeviceRoute) -> Result<[u8; 16], WriteError> {
+    device::dump_onboard_profiles_info(&*native_backend(), route).await
+}
+
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await
