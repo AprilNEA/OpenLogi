@@ -14,8 +14,6 @@ use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
 const INPUT_QUEUE_CAPACITY: usize = 128;
-/// Lets settings, invalidation, and shutdown interrupt an idle worker quickly.
-const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Bounds graceful process shutdown if platform injection stops returning.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -81,12 +79,16 @@ impl ScrollInputHandle {
     /// Invalidate every accepted OS-hook animation without blocking.
     pub fn cancel_hooks(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake();
+    }
+
+    fn wake(&self) {
         let _ = self.commands.try_send(ScrollCommand::Wake);
     }
 
     fn stop_accepting(&self) {
         self.accepting.store(false, Ordering::Release);
-        self.cancel_hooks();
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -136,22 +138,31 @@ impl ScrollRuntime {
 
     /// Reject new input, cancel active output, and join the worker.
     pub fn shutdown(&mut self) {
+        let _ = self.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
+    }
+
+    fn shutdown_with_timeout(&mut self, timeout: Duration) -> bool {
         let Some(worker) = self.worker.take() else {
-            return;
+            return true;
         };
         self.input.stop_accepting();
         let (done, wait) = mpsc::sync_channel(0);
         if self.shutdown.send(ShutdownRequest { done }).is_err() {
             let _ = worker.join();
-            return;
+            return false;
         }
-        if wait.recv_timeout(SHUTDOWN_TIMEOUT).is_err() {
+        // Send the wake only after the shutdown request is visible. Otherwise
+        // an idle worker could consume it first and block again on `commands`.
+        self.input.wake();
+        if wait.recv_timeout(timeout).is_err() {
             warn!("smooth-scroll worker did not shut down before the deadline");
-            return;
+            return false;
         }
         if worker.join().is_err() {
             warn!("smooth-scroll worker panicked during shutdown");
+            return false;
         }
+        true
     }
 }
 
@@ -183,14 +194,15 @@ fn run_worker(
             generation = current_generation;
         }
 
-        let now = Instant::now();
-        let until_frame = engine
-            .next_deadline()
-            .map_or(WORKER_POLL_INTERVAL, |deadline| {
-                deadline.saturating_duration_since(now)
-            })
-            .min(WORKER_POLL_INTERVAL);
-        match commands.recv_timeout(until_frame) {
+        let command = engine.next_deadline().map_or_else(
+            || {
+                commands
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            },
+            |deadline| commands.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        );
+        match command {
             Ok(ScrollCommand::Input(input))
                 if input.generation == generation && enabled.load(Ordering::Relaxed) =>
             {
@@ -235,6 +247,13 @@ mod tests {
         assert!(!input.try_hook_scroll(ScrollDelta::pixels(0.0, 1.0)));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         assert!(!input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+    }
+
+    #[test]
+    fn idle_worker_shutdown_wakes_after_publishing_its_request() {
+        let mut runtime = ScrollRuntime::spawn_with(Arc::new(AtomicBool::new(false)), |_| {})
+            .expect("spawn scroll worker");
+        assert!(runtime.shutdown_with_timeout(Duration::from_millis(100)));
     }
 
     #[test]
