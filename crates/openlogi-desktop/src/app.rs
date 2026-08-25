@@ -1,11 +1,11 @@
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::FluentBuilder as _, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName, Root, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -467,12 +467,18 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
     )
 }
 
-impl Render for AppView {
+impl AppView {
+    /// Every screen branch, without the overlay layers.
+    ///
+    /// Split from [`Render::render`] so the dialog / sheet / notification
+    /// layers are appended exactly once, after whichever branch returned —
+    /// the early-return branches (config issue, connecting, unreachable,
+    /// outdated GUI, accessibility gate) would otherwise render no overlays.
     #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
@@ -637,6 +643,21 @@ impl Render for AppView {
             .child(content_el)
             .when(!granted, |this| this.child(status::attention_footer(cx)))
             .into_any_element()
+    }
+}
+
+impl Render for AppView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // `Root::render` draws only the view, tooltip and native-menu layers,
+        // so an app that never renders these three has dialogs, sheets and
+        // notifications registered but never drawn — they open silently and
+        // nothing appears. They go last so they stack above the content.
+        div()
+            .size_full()
+            .child(self.render_content(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 
