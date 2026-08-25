@@ -17,13 +17,13 @@ use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
 
 use super::{
-    AppView, connection_summary, connection_view, device_card, device_identity_subtitle,
-    device_image, device_ring, keyboard_glow, rename_device_button,
+    AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
+    device_ring, keyboard_glow, kind_badge, rename_device_button,
 };
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
@@ -221,27 +221,19 @@ fn device_card_element(
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
 
-    device_card(
-        record,
-        enabled,
-        active,
-        glow,
-        light_enabled,
-        light_settings,
-        pal,
-    )
-    .active(gpui::Styled::shadow_2xs)
-    .accessibility_label(record.display_name.clone())
-    .aria_description(device_accessibility_description(record))
-    .aria_selected(active)
-    .cursor_pointer()
-    .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .on_click(move |_, _, cx| {
-        view.update(cx, |this, cx| {
-            this.open_device(record_key.clone(), cx);
-        });
-    })
+    device_card(record, enabled, glow, light_enabled, light_settings, pal)
+        .active(gpui::Styled::shadow_2xs)
+        .accessibility_label(record.display_name.clone())
+        .aria_description(device_accessibility_description(record))
+        .aria_selected(active)
+        .cursor_pointer()
+        .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.open_device(record_key.clone(), cx);
+            });
+        })
 }
 
 fn device_list_row(
@@ -270,10 +262,9 @@ fn device_list_row(
         .py_2()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(device_ring(enabled, active))
+        .border_color(device_ring(enabled))
         .bg(pal.panel)
         .shadow_xs()
-        .selected_fill(active)
         .child(
             div()
                 .relative()
@@ -296,18 +287,27 @@ fn device_list_row(
                 .min_w_0()
                 .gap_1p5()
                 .child(
-                    div()
-                        .truncate()
-                        .text_subheading()
-                        .child(record.display_name.clone()),
+                    h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_subheading()
+                                .child(record.display_name.clone()),
+                        )
+                        .child(kind_badge(record.kind, pal)),
                 )
-                .child(
-                    div()
-                        .truncate()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(device_identity_subtitle(record)),
-                )
+                .when_some(custom_model_subtitle(record), |column, model| {
+                    column.child(
+                        div()
+                            .truncate()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(model),
+                    )
+                })
                 .child(connection_view(record, pal)),
         )
         .child(
@@ -316,14 +316,6 @@ fn device_list_row(
                 .flex_none()
                 .items_end()
                 .gap_2()
-                .when(active, |this| {
-                    this.child(
-                        div()
-                            .text_caption()
-                            .text_color(theme::accent())
-                            .child(tr!("Active device")),
-                    )
-                })
                 .when_some(record.battery.as_ref(), |this, battery| {
                     this.child(BatteryIndicator::status(battery, record.online))
                 })
