@@ -1,12 +1,13 @@
 //! General settings page.
 
 use super::{
-    App, AppState, Button, Entity, FluentBuilder, IconName, ParentElement, SettingField, SettingGroup,
-    SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled, ThumbwheelSensitivity,
-    VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    App, AppState, Button, Disableable, Entity, FluentBuilder, IconName, IntoElement,
+    ParentElement, SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState,
+    StateEvent, Styled, ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme,
+    v_flex,
 };
 use gpui::{
-    BorderStyle, Bounds, PathBuilder, canvas, point, quad, rgb, size,
+    BorderStyle, Bounds, Hsla, PathBuilder, canvas, point, quad, rgb, size,
 };
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -20,13 +21,9 @@ pub(super) fn general_page(
 ) -> SettingPage {
     let v_strength_slider_1 = vertical_accel_strength_slider.clone();
     let v_max_gain_slider_1 = vertical_accel_max_gain_slider.clone();
-    let v_strength_slider_2 = vertical_accel_strength_slider.clone();
-    let v_max_gain_slider_2 = vertical_accel_max_gain_slider.clone();
 
     let h_strength_slider_1 = horizontal_accel_strength_slider.clone();
     let h_max_gain_slider_1 = horizontal_accel_max_gain_slider.clone();
-    let h_strength_slider_2 = horizontal_accel_strength_slider.clone();
-    let h_max_gain_slider_2 = horizontal_accel_max_gain_slider.clone();
 
     let group = SettingGroup::new()
         .item(
@@ -396,29 +393,31 @@ fn curve_graph_view(
     acceleration_factor: f64,
     max_gain: f64,
     pal: Palette,
-) -> gpui::Div {
-    let width = 240.0;
-    let height = 110.0;
-    let padding_left = 28.0;
-    let padding_bottom = 18.0;
-    let padding_top = 8.0;
-    let padding_right = 8.0;
+) -> impl IntoElement {
+    let width = 240.0f32;
+    let height = 110.0f32;
+    let padding_left = 28.0f32;
+    let padding_bottom = 18.0f32;
+    let padding_top = 8.0f32;
+    let padding_right = 8.0f32;
 
     let graph_w = width - padding_left - padding_right;
     let graph_h = height - padding_top - padding_bottom;
 
-    let min_y = 1.0;
-    let max_y = 3.5;
-    let max_x_speed = 30.0;
+    let min_y = 1.0f64;
+    let max_y = 3.5f64;
+    let max_x_speed = 30.0f64;
 
     let map_x = move |speed: f64| -> f32 {
-        padding_left + (speed / max_x_speed * graph_w) as f32
+        padding_left + (speed / max_x_speed) as f32 * graph_w
     };
 
     let map_y = move |gain: f64| -> f32 {
         let normalized = ((gain - min_y) / (max_y - min_y)).clamp(0.0, 1.0);
-        (padding_top + graph_h * (1.0 - normalized)) as f32
+        padding_top + (1.0 - normalized) as f32 * graph_h
     };
+
+    let transparent = pal.page.opacity(0.0);
 
     canvas(
         move |_, _, _| (),
@@ -450,7 +449,7 @@ fn curve_graph_view(
                 px(0.0),
                 if enabled { pal.text_muted.opacity(0.4) } else { pal.text_muted.opacity(0.2) },
                 px(0.0),
-                pal.transparent,
+                transparent,
                 BorderStyle::default(),
             ));
 
@@ -465,7 +464,7 @@ fn curve_graph_view(
                     px(0.0),
                     pal.text_muted.opacity(0.3),
                     px(0.0),
-                    pal.transparent,
+                    transparent,
                     BorderStyle::default(),
                 ));
             }
@@ -490,8 +489,8 @@ fn curve_graph_view(
             let mut path = PathBuilder::fill();
             path.add_polygon(&polygon_pts, true);
             if let Ok(path) = path.build() {
-                let fill_color = if enabled {
-                    rgb(theme::STATUS_CONNECTED).opacity(0.25)
+                let fill_color: Hsla = if enabled {
+                    Hsla::from(rgb(theme::STATUS_CONNECTED)).opacity(0.25)
                 } else {
                     pal.text_muted.opacity(0.05)
                 };

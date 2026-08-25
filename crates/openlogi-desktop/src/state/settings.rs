@@ -255,6 +255,24 @@ impl AppState {
             .edit(|config| config.app_settings.smooth_scroll = enabled);
         self.persist_and_reload("smooth scroll");
     }
+    /// Toggle vertical mouse-wheel acceleration and persist it.
+    pub fn set_vertical_acceleration_enabled(&mut self, enabled: bool) {
+        if self.config.app_settings.vertical_acceleration_enabled == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.vertical_acceleration_enabled = enabled);
+        self.persist_and_reload("vertical acceleration enabled");
+    }
+    /// Toggle horizontal mouse-wheel acceleration and persist it.
+    pub fn set_horizontal_acceleration_enabled(&mut self, enabled: bool) {
+        if self.config.app_settings.horizontal_acceleration_enabled == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.horizontal_acceleration_enabled = enabled);
+        self.persist_and_reload("horizontal acceleration enabled");
+    }
     /// Set vertical acceleration strength factor (0.2 to 2.0).
     pub fn set_vertical_acceleration(&mut self, factor: f64) {
         let factor = factor.clamp(0.2, 2.0);
