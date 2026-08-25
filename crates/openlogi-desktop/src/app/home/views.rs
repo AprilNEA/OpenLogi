@@ -1,7 +1,7 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
@@ -279,7 +279,7 @@ fn device_list_row(
     let glow = keyboard_glow(state, record);
     let record_key = record.record_key();
 
-    BaseButton::new(format!("device-list-row-{record_key}"))
+    BaseButton::new((ElementId::from("device-list-row"), record_key.clone()))
         .w_full()
         .min_h(px(96.))
         .flex()

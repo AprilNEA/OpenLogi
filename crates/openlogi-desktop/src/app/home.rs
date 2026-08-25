@@ -11,8 +11,9 @@ pub(super) use views::ordered_device_indices;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Hsla, IntoElement, ParentElement, SharedString,
-    Styled, Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, AppContext as _, Context, ElementId, Hsla, IntoElement, ParentElement,
+    SharedString, Styled, Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px,
+    rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -36,7 +37,7 @@ use super::widgets::{
 };
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
@@ -159,7 +160,7 @@ fn device_card(
     light_settings: LightSettings,
     pal: Palette,
 ) -> BaseButton {
-    BaseButton::new(format!("device-card-{}", record.record_key()))
+    BaseButton::new((ElementId::from("device-card"), record.record_key()))
         .w_full()
         .flex()
         .flex_col()
@@ -277,7 +278,7 @@ fn rename_device_button(record: &DeviceRecord, pal: Palette) -> Button {
         record.display_name.clone()
     };
     let model_name = record.model_name.clone();
-    Button::new(SharedString::from(format!("rename-device-{record_key}")))
+    Button::new((ElementId::from("rename-device"), record_key.clone()))
         .ghost()
         .xsmall()
         .text_color(pal.text_muted)
@@ -333,9 +334,8 @@ fn open_rename_dialog(
                     let custom_name = input.read(cx).value().to_string();
                     AppState::update(cx, |state, cx| {
                         state.set_device_custom_name(&record_key, &custom_name);
-                        cx.notify();
+                        cx.emit(StateEvent::InventoryChanged);
                     });
-                    cx.refresh_windows();
                     true
                 }
             })

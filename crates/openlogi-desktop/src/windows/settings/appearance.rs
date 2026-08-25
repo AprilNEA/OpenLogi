@@ -1,7 +1,7 @@
 //! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
-use gpui::img;
+use gpui::{ElementId, img};
 use openlogi_core::config::AppIcon;
 
 use super::{
@@ -412,7 +412,7 @@ fn scale_segment(cx: &App) -> ButtonGroup {
     ButtonGroup::new("interface-scale")
         .outline()
         .children(UiScale::ALL.map(|scale| {
-            Button::new(format!("interface-scale-{}", scale.percent()))
+            Button::new(("interface-scale", u32::from(scale.percent())))
                 .label(format!("{}%", scale.percent()))
                 .selected(current == scale)
         }))
@@ -475,15 +475,10 @@ fn theme_picker(
             grid.flex()
                 .flex_wrap()
                 .gap_2()
-                .children(
-                    themes
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (name, mode, swatch))| {
-                            let selected = name == active;
-                            theme_card(i, name, mode, swatch, selected, pal)
-                        }),
-                )
+                .children(themes.into_iter().map(|(name, mode, swatch)| {
+                    let selected = name == active;
+                    theme_card(name, mode, swatch, selected, pal)
+                }))
         });
 
     v_flex()
@@ -567,7 +562,6 @@ struct Swatch {
 }
 
 fn theme_card(
-    index: usize,
     name: SharedString,
     mode: ThemeMode,
     swatch: Swatch,
@@ -576,7 +570,7 @@ fn theme_card(
 ) -> impl IntoElement {
     let dark = mode.is_dark();
     let stored = name.clone();
-    ChoiceCard::new(("theme", index), name.clone())
+    ChoiceCard::new((ElementId::from("theme"), name.clone()), name.clone())
         .selected(selected)
         .w(px(132.))
         .p(px(8.))

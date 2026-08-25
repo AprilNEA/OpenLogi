@@ -131,8 +131,9 @@ impl Carousel {
         let selected = selected.min(len - 1);
         let multi = len > 1;
 
-        let scroll_state =
-            window.use_keyed_state((id, "scroll"), cx, |_, _| (usize::MAX, ScrollHandle::new()));
+        let scroll_state = window.use_keyed_state((id.clone(), "scroll"), cx, |_, _| {
+            (usize::MAX, ScrollHandle::new())
+        });
         let previous = scroll_state.read(cx).0;
         let scroll_handle = scroll_state.read(cx).1.clone();
         if previous != selected {
@@ -156,7 +157,7 @@ impl Carousel {
         // so the scroll handle targets cards at `selected + 1`.
         let edge_spacer = px((ROW_PAD - f32::from(gap)).max(0.));
         let row = h_flex()
-            .id("carousel-row")
+            .id((id.clone(), "row"))
             .flex_1()
             .min_w_0()
             .h_full()
@@ -178,7 +179,7 @@ impl Carousel {
             .px_4()
             .when(multi, |this| {
                 this.child(arrow(
-                    "carousel-prev",
+                    (id.clone(), "previous").into(),
                     IconName::ChevronLeft,
                     selected.saturating_sub(1),
                     selected == 0,
@@ -189,7 +190,7 @@ impl Carousel {
             .child(row)
             .when(multi, |this| {
                 this.child(arrow(
-                    "carousel-next",
+                    (id.clone(), "next").into(),
                     IconName::ChevronRight,
                     (selected + 1).min(len - 1),
                     selected + 1 >= len,
@@ -203,7 +204,7 @@ impl Carousel {
 }
 
 fn arrow(
-    id: &'static str,
+    id: ElementId,
     icon: IconName,
     target: usize,
     disabled: bool,
@@ -218,4 +219,92 @@ fn arrow(
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
             this.on_click(move |_, window, cx| handler(&target, window, cx))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext, div, px};
+
+    use super::*;
+
+    struct CarouselHarness {
+        selected: usize,
+        instances: usize,
+        selections: Rc<RefCell<Vec<(usize, usize)>>>,
+    }
+
+    impl Render for CarouselHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mut row = h_flex().tab_group().size(px(600.));
+            for instance in 0..self.instances {
+                let selections = self.selections.clone();
+                row = row.child(
+                    Carousel::new(("test-carousel", instance), px(120.))
+                        .len(3)
+                        .selected(self.selected)
+                        .render_item(|index, _, _, _| {
+                            div().child(format!("Item {index}")).into_any_element()
+                        })
+                        .on_select(move |index, _, _| {
+                            selections.borrow_mut().push((instance, *index));
+                        }),
+                );
+            }
+            row
+        }
+    }
+
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+    }
+
+    #[gpui::test]
+    fn carousel_arrows_are_controlled_and_instance_local(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let selections = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let selections = selections.clone();
+            move |_, _| CarouselHarness {
+                selected: 1,
+                instances: 2,
+                selections,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        for _ in 0..3 {
+            cx.update(Window::focus_next);
+            activate_key(cx, "enter");
+        }
+
+        assert_eq!(&*selections.borrow(), &[(0, 0), (0, 2), (1, 0)]);
+    }
+
+    #[gpui::test]
+    fn carousel_clamps_selection_before_navigating(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let selections = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let selections = selections.clone();
+            move |_, _| CarouselHarness {
+                selected: usize::MAX,
+                instances: 1,
+                selections,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(Window::focus_next);
+        activate_key(cx, "space");
+
+        assert_eq!(&*selections.borrow(), &[(0, 1)]);
+    }
 }

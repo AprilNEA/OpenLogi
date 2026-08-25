@@ -12,8 +12,8 @@
 //! a single batched device-open.
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
+    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
@@ -884,7 +884,7 @@ fn control_row(
     {
         let accent = rgb(ACCENT_BLUE);
         auto_cell = auto_cell.child(
-            BaseButton::new(("camera-control-auto", ix))
+            BaseButton::new((ElementId::from("camera-control-auto"), toggle.name()))
                 .role(Role::CheckBox)
                 .selected(on)
                 .accessibility_label(tr!("Auto"))
@@ -923,20 +923,19 @@ fn frequency_row(
     let slider = &panel.sliders[ix];
     let current = from_slider(slider.state.read(cx).value().start());
     let mut choices = h_flex().flex_1().justify_end().gap_1();
-    for (choice_ix, (value, label)) in [
-        (1, SharedString::from("50 Hz")),
-        (2, SharedString::from("60 Hz")),
-        (3, tr!("Auto")),
+    for (value, id, label) in [
+        (1, 1_u32, SharedString::from("50 Hz")),
+        (2, 2_u32, SharedString::from("60 Hz")),
+        (3, 3_u32, tr!("Auto")),
     ]
     .into_iter()
-    .filter(|(value, _)| slider.range.supports(*value))
-    .enumerate()
+    .filter(|(value, _, _)| slider.range.supports(*value))
     {
         let active = value == current;
         let accent = rgb(ACCENT_BLUE);
         let accessibility_label = label.clone();
         choices = choices.child(
-            BaseButton::new(("camera-frequency", choice_ix))
+            BaseButton::new(("camera-frequency", id))
                 .role(Role::RadioButton)
                 .selected(active)
                 .accessibility_label(accessibility_label)

@@ -45,6 +45,9 @@ paths:
   a genuinely heterogeneous branch, collection, callback, or stored field requires
   `AnyElement`. Prefer one typed `.when()` / `.when_some()` / `.children()` pipeline to
   branching early and erasing each result.
+- Key dynamic `ElementId`s by a stable domain identity, not a filtered position or a
+  formatted display label. Derive reusable-component child IDs from the component's
+  caller-provided root ID so multiple instances cannot share focus or scroll state.
 - A view, entity, or app service owns every `Task` and `Subscription` whose work belongs
   to its lifetime. Use `.detach()` only for true process-lifetime work or bounded
   one-shots whose completion is safe after the initiating view disappears.

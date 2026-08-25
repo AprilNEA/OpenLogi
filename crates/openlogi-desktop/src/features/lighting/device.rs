@@ -119,8 +119,7 @@ impl Render for LightingPanel {
 
         let swatches: Vec<AnyElement> = PALETTE
             .iter()
-            .enumerate()
-            .map(|(idx, &color)| swatch(idx, color, &lighting, pal))
+            .map(|&color| swatch(color, &lighting, pal))
             .collect();
 
         v_flex()
@@ -175,9 +174,9 @@ impl Render for LightingPanel {
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
-fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
+fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
     let selected = current.enabled && current.color == color;
-    BaseButton::new(("light-swatch", idx))
+    BaseButton::new(("light-swatch", color.packed()))
         .role(Role::RadioButton)
         .selected(selected)
         .accessibility_label(format!("{} #{:06X}", tr!("Lighting"), color.packed()))

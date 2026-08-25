@@ -246,8 +246,8 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 col = col.child(hint(tr!("No devices found yet…"), pal));
             } else {
                 col = col.child(hint(tr!("Select a device to pair:"), pal));
-                for (idx, device) in devices.iter().enumerate() {
-                    col = col.child(device_row(idx, device, pal));
+                for device in devices {
+                    col = col.child(device_row(device, pal));
                 }
             }
             col = col.child(cancel_button());
@@ -311,10 +311,13 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
 }
 
 /// A discovered-device row; clicking it pairs with that device.
-fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElement {
+fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
     let address = device.address;
+    let address_id = u64::from_be_bytes([
+        0, 0, address[0], address[1], address[2], address[3], address[4], address[5],
+    ]);
     let name = SharedString::from(device.name.clone());
-    BaseButton::new(("found-device", idx))
+    BaseButton::new(("found-device", address_id))
         .accessibility_label(name.clone())
         .w_full()
         .px_4()
