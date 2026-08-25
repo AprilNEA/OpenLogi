@@ -30,7 +30,9 @@
     reason = "win32 message plumbing round-trips ids through WPARAM/LPARAM by design"
 )]
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -68,21 +70,22 @@ const ID_BATTERY_ROW: usize = 3;
 /// 0xC000).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
-/// Posted by the agent core thread when it wants a balloon shown. `WPARAM` is
-/// an owned `*mut Balloon` the receiver takes responsibility for.
+/// Posted by the agent core thread when it wants a balloon shown. A bare
+/// wakeup: the payload travels through [`mailbox`], not through `WPARAM`.
 const WM_TRAY_BALLOON: u32 = WM_APP + 2;
 
 /// Posted by the agent core thread when the battery glyph should change.
-/// `WPARAM` carries the glyph index (see `BatteryGlyph::index`) — a plain
-/// scalar, so unlike [`WM_TRAY_BALLOON`] nothing is owned across the boundary.
+/// `WPARAM` carries the glyph index (see `BatteryGlyph::index`). A plain
+/// scalar, and one the receiver validates through `BatteryGlyph::from_index`,
+/// so the worst a forged post can do is draw the wrong icon.
 const WM_TRAY_GLYPH: u32 = WM_APP + 3;
 
 /// `WPARAM` sentinel on [`WM_TRAY_GLYPH`] meaning "restore the brand mark".
 /// Glyph indices are small, so this can never collide with one.
 const GLYPH_BRAND: WPARAM = WPARAM::MAX;
 
-/// Posted by the agent core thread when the hover text should change.
-/// `WPARAM` is an owned `*mut String` the receiver takes responsibility for.
+/// Posted by the agent core thread when the hover text should change. A bare
+/// wakeup, like [`WM_TRAY_BALLOON`]; the text travels through [`mailbox`].
 const WM_TRAY_TOOLTIP: u32 = WM_APP + 4;
 
 /// The tray window, published once it exists so the agent core thread can post
@@ -94,6 +97,43 @@ static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// restore it instead of silently reverting to the brand mark. `-1` means the
 /// brand mark is what belongs on screen.
 static LAST_GLYPH: AtomicIsize = AtomicIsize::new(-1);
+
+/// What the agent core thread has handed the tray thread but which the tray
+/// thread has not drawn yet.
+///
+/// This exists so that no window message carries a pointer. `PostMessageW`
+/// targets a window any same-integrity process on the desktop can find, and
+/// UIPI does not filter same-integrity senders, so a `WPARAM` arriving at
+/// [`wnd_proc`] is attacker-supplied data rather than something this crate
+/// sent. Boxing a payload and posting `Box::into_raw` as the `WPARAM` made a
+/// forged `WM_APP+2` into a `Box::from_raw` on an arbitrary integer — an
+/// unsound `unsafe` block whose safety argument ("we posted it exactly once")
+/// nothing enforced.
+///
+/// The messages are now bare wakeups and the payloads live here, where only
+/// this process can write them. A forged wakeup finds an empty mailbox and
+/// does nothing.
+#[derive(Default)]
+struct Mailbox {
+    /// Each balloon is a distinct alert, so they queue rather than replace:
+    /// dropping one loses a notification the user was meant to see.
+    balloons: VecDeque<Balloon>,
+    /// The tooltip is a level rather than an event — only the newest text is
+    /// worth drawing, and `tray_battery::publish` already filters repeats.
+    tooltip: Option<String>,
+}
+
+/// The mailbox, locked. Poisoning is recovered from rather than propagated:
+/// the contents are plain owned strings with no invariant a panic could have
+/// broken, and killing the tray thread over one would cost the user their
+/// icon.
+fn mailbox() -> MutexGuard<'static, Mailbox> {
+    static MAILBOX: OnceLock<Mutex<Mailbox>> = OnceLock::new();
+    MAILBOX
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Host the tray icon on its own thread. No-op when the user disabled the
 /// menu-bar/tray preference (same `show_in_menu_bar` setting macOS honors;
@@ -200,22 +240,24 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TRAY_BALLOON => {
-            // SAFETY: `notify` boxed this payload and posted it exactly once;
-            // this arm is its only receiver, so reconstituting the box here
-            // takes sole ownership and drops it at the end of the arm.
-            let balloon = unsafe { Box::from_raw(wparam as *mut Balloon) };
-            // SAFETY: `hwnd` is our own window, live for the duration of the
-            // callback, and this is the thread that added the icon.
-            unsafe { show_balloon(hwnd, &balloon.title, &balloon.body) };
+            // Drains rather than taking one: two alerts can be queued before
+            // this thread gets a slice, and a forged wakeup would otherwise
+            // leave the second sitting there until a third arrived. The guard
+            // is dropped before each `show_balloon` — that call pumps the
+            // shell, and holding a lock across it invites a deadlock.
+            while let Some(balloon) = mailbox().balloons.pop_front() {
+                // SAFETY: `hwnd` is our own window, live for the duration of
+                // the callback, and this is the thread that added the icon.
+                unsafe { show_balloon(hwnd, &balloon.title, &balloon.body) };
+            }
             0
         }
         WM_TRAY_TOOLTIP => {
-            // SAFETY: `request_tooltip` boxed this payload and posted it
-            // exactly once; this arm is its only receiver, so reconstituting
-            // the box takes sole ownership and drops it at the end of the arm.
-            let text = unsafe { Box::from_raw(wparam as *mut String) };
-            // SAFETY: our own live window, on the thread that owns the icon.
-            unsafe { set_tooltip(hwnd, &text) };
+            let text = mailbox().tooltip.take();
+            if let Some(text) = text {
+                // SAFETY: our own live window, on the thread that owns the icon.
+                unsafe { set_tooltip(hwnd, &text) };
+            }
             0
         }
         WM_TRAY_GLYPH => {
@@ -550,6 +592,11 @@ unsafe fn set_tray_icon(hwnd: HWND, icon: HICON) {
         nid.hIcon = icon;
         if Shell_NotifyIconW(NIM_MODIFY, &raw const nid) == 0 {
             warn!("Shell_NotifyIconW(NIM_MODIFY) failed — tray glyph not updated");
+            // The post reached this thread but the shell refused the icon, so
+            // the screen still shows the old glyph. Clear the publisher's
+            // cache or the next identical snapshot is filtered as a repeat and
+            // the stale icon survives until the glyph changes again.
+            crate::tray_glyph::invalidate();
         }
     }
 }
@@ -789,8 +836,9 @@ fn quit(hwnd: HWND) {
 /// require. The trade is that the notification cannot outlive the icon: with
 /// `show_in_menu_bar = false` there is no icon and no alert.
 ///
-/// Called from the agent core thread, so the payload is boxed and handed to
-/// the tray thread, which owns every `Shell_NotifyIconW` call.
+/// Called from the agent core thread, so the payload is left in [`mailbox`]
+/// and the tray thread — which owns every `Shell_NotifyIconW` call — is woken
+/// to draw it.
 pub fn notify(title: &str, body: &str) {
     let hwnd = TRAY_HWND.load(Ordering::Relaxed);
     if hwnd == 0 {
@@ -799,20 +847,18 @@ pub fn notify(title: &str, body: &str) {
         info!(title, body, "low-battery alert suppressed: no tray icon");
         return;
     }
-    let payload = Box::into_raw(Box::new(Balloon {
+    mailbox().balloons.push_back(Balloon {
         title: title.to_string(),
         body: body.to_string(),
-    }));
+    });
     // SAFETY: `hwnd` was published by the tray thread after a successful
-    // CreateWindowExW. The boxed payload is claimed by exactly one receiver —
-    // the WM_TRAY_BALLOON arm in `wnd_proc` — which reconstitutes and drops
-    // it. If the post fails the box is reclaimed here instead, so the pointer
-    // is never leaked and never freed twice.
+    // CreateWindowExW. Both parameters are zero — the message is a wakeup and
+    // carries nothing the receiver dereferences.
     let posted = unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
             hwnd as HWND,
             WM_TRAY_BALLOON,
-            payload as WPARAM,
+            0,
             0,
         )
     };
@@ -820,9 +866,9 @@ pub fn notify(title: &str, body: &str) {
         info!(title, body, "tray notification posted");
     } else {
         warn!("could not post the low-battery alert to the tray thread");
-        // SAFETY: the post failed, so no receiver will ever claim this
-        // pointer; reclaiming it here is the only way it is freed.
-        drop(unsafe { Box::from_raw(payload) });
+        // Nothing will drain it, and a queue that only grows is a leak. This
+        // is the balloon queued above: only the agent core thread calls here.
+        mailbox().balloons.pop_back();
     }
 }
 
@@ -845,23 +891,21 @@ pub fn request_tooltip(text: String) {
         crate::tray_battery::invalidate();
         return;
     }
-    let payload = Box::into_raw(Box::new(text));
+    mailbox().tooltip = Some(text);
     // SAFETY: `hwnd` was published by the tray thread after a successful
-    // CreateWindowExW. The boxed payload is claimed by exactly one receiver —
-    // the WM_TRAY_TOOLTIP arm in `wnd_proc` — which reconstitutes and drops
-    // it. A failed post reclaims it here, so it is never leaked or double-freed.
+    // CreateWindowExW. Both parameters are zero — the message is a wakeup and
+    // carries nothing the receiver dereferences.
     let posted = unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
             hwnd as HWND,
             WM_TRAY_TOOLTIP,
-            payload as WPARAM,
+            0,
             0,
         )
     };
     if posted == 0 {
         warn!("could not post the tray tooltip to the tray thread");
-        // SAFETY: the post failed, so no receiver will claim this pointer.
-        drop(unsafe { Box::from_raw(payload) });
+        mailbox().tooltip = None;
         crate::tray_battery::invalidate();
     }
 }
@@ -879,6 +923,9 @@ unsafe fn set_tooltip(hwnd: HWND, text: &str) {
         copy_truncated(&mut nid.szTip, text);
         if Shell_NotifyIconW(NIM_MODIFY, &raw const nid) == 0 {
             warn!("Shell_NotifyIconW(NIM_MODIFY) failed — tray tooltip not updated");
+            // Same reasoning as the glyph above: the text never reached the
+            // shell, so the dedup cache must not claim it did.
+            crate::tray_battery::invalidate();
         } else {
             // The Windows 11 taskbar renders tooltips in its own XAML surface,
             // which no screen capture or window enumeration can inspect. This
@@ -949,7 +996,46 @@ mod tests {
         reason = "a vendored SVG that fails to render is a broken build, and the panic names which glyph"
     )]
 
-    use super::{battery_pixels, copy_truncated, is_gui_process_name};
+    use super::{Balloon, battery_pixels, copy_truncated, is_gui_process_name, mailbox};
+
+    /// The two payload kinds have deliberately different disciplines: every
+    /// balloon is an alert the user is meant to see, so they queue in order,
+    /// while the tooltip is a level whose older values are worth nothing.
+    ///
+    /// This also pins the property the window messages depend on — that a
+    /// wakeup finds its payload here rather than in a `WPARAM` — so a future
+    /// change that puts a pointer back on the wire has to delete a test to do
+    /// it.
+    #[test]
+    fn balloons_queue_in_order_while_the_tooltip_keeps_only_the_newest() {
+        {
+            let mut box_ = mailbox();
+            box_.balloons.clear();
+            box_.tooltip = None;
+            box_.balloons.push_back(Balloon {
+                title: "OpenLogi".to_string(),
+                body: "first".to_string(),
+            });
+            box_.balloons.push_back(Balloon {
+                title: "OpenLogi".to_string(),
+                body: "second".to_string(),
+            });
+            box_.tooltip = Some("stale".to_string());
+            box_.tooltip = Some("current".to_string());
+        }
+
+        let mut drained = Vec::new();
+        while let Some(balloon) = mailbox().balloons.pop_front() {
+            drained.push(balloon.body);
+        }
+        assert_eq!(drained, vec!["first".to_string(), "second".to_string()]);
+
+        assert_eq!(mailbox().tooltip.take().as_deref(), Some("current"));
+        assert!(
+            mailbox().tooltip.is_none(),
+            "the receiver takes the tooltip, so a second wakeup redraws nothing"
+        );
+    }
 
     /// Fixed render size for the pixel tests, so they do not depend on the
     /// machine's DPI the way `icon_size()` deliberately does.
