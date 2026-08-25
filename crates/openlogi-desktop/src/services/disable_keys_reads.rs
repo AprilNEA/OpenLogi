@@ -163,6 +163,7 @@ impl DisableKeysReads {
     }
 
     /// Last device-confirmed snapshot, independent of active subscription.
+    #[cfg(test)]
     pub(crate) fn confirmed(&self, key: &DeviceKey) -> Option<Arc<DisableKeysState>> {
         self.confirmed.get(key).cloned()
     }
@@ -181,16 +182,17 @@ impl DisableKeysReads {
 
     /// Generation of the active subscription, or `None` when detached/offline.
     pub(crate) fn generation(&self, key: &DeviceKey) -> Option<u64> {
-        self.reads.get(key).map(|read| read.generation).or_else(|| {
-            #[cfg(test)]
-            {
-                self.test_generations.get(key).copied()
-            }
-            #[cfg(not(test))]
-            {
-                None
-            }
-        })
+        if let Some(read) = self.reads.get(key) {
+            return Some(read.generation);
+        }
+        #[cfg(test)]
+        {
+            self.test_generations.get(key).copied()
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
     }
 
     #[cfg(test)]
