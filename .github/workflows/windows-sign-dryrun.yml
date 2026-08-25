@@ -39,7 +39,7 @@ jobs:
     # federated credential (repo:AprilNEA/OpenLogi:environment:release).
     environment: release
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,7 +59,7 @@ jobs:
 
       - name: Load Azure signing config from 1Password
         id: azure_config
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: false
         env:
