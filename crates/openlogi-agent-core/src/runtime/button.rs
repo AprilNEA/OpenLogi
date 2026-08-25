@@ -4,7 +4,7 @@
 //! edges, while HID++ diverted-control reports carry complete held-control
 //! snapshots. Producers normalise both into typed inputs for one worker. The
 //! worker is the sole owner of active presses and emits balanced lifecycle
-//! events carrying a unique [`PressId`].
+//! events carrying a unique [`PressToken`].
 
 use std::collections::HashMap;
 use std::io;

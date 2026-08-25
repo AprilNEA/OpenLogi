@@ -13,7 +13,7 @@
 //!   continuous, sensitivity-scaled horizontal scroll or accumulated into a
 //!   custom action,
 //!
-//! all via the common action path ([`crate::hook_runtime::dispatch_action`]).
+//! all via the common [`crate::runtime::ActionDispatcher`].
 //!
 //! Unlike the CGEventTap hook, this needs no macOS Accessibility permission —
 //! the events arrive over HID++, and the bound action is synthesised the same
@@ -31,10 +31,9 @@ use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_sessi
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::button_runtime::{HidppSessionId, PressToken};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
-use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
+use crate::runtime::{ActionDispatcher, HidppSessionId, PressToken};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.

@@ -1,3 +1,5 @@
+//! Regression tests for OS-hook state and dispatch policy.
+
 use super::*;
 use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
 

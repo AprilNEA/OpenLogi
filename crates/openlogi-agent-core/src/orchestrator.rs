@@ -32,9 +32,9 @@ use tracing::{debug, info, warn};
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::hardware::DeviceOp;
-use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
+use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
@@ -73,7 +73,7 @@ pub struct SharedRuntime {
     pub hook_maps: SharedHookMaps,
     /// Function-key remapper bindings (keycode+modifiers → action). Not
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
-    pub keyboard_bindings: crate::hook_runtime::SharedKeyboardBindings,
+    pub keyboard_bindings: crate::runtime::hook::SharedKeyboardBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
     /// One capture plan per online device — what to divert and how to
     /// dispatch, keyed by the device the events arrive on. Carries each

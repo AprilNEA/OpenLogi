@@ -4,7 +4,7 @@
 //! dedicated thread for the keyboard the orchestrator publishes in
 //! [`SharedKeyboardSpec`], restarts it when the keyboard (or the set of bound
 //! keys) changes, and dispatches each captured key press through the common
-//! action path ([`crate::hook_runtime::ActionDispatcher`]).
+//! action path ([`crate::runtime::ActionDispatcher`]).
 //!
 //! The mouse capture watcher ([`super::gesture`]) and this one hold *shared*
 //! receiver leases, so both run concurrently; pairing still waits for (and
@@ -24,9 +24,8 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::button_runtime::HidppSessionId;
-use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::ReceiverAccess;
+use crate::runtime::{ActionDispatcher, HidppSessionId};
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
 /// `0x1b04` controls to divert (only keys carrying a real binding), and the

@@ -1,3 +1,5 @@
+//! Regression tests for the source-independent button lifecycle.
+
 use std::time::Instant;
 
 use super::*;

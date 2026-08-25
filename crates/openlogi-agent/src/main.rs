@@ -40,10 +40,10 @@ use std::time::Duration;
 
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
-use openlogi_agent_core::hook_runtime::{ActionDispatcher, ActionRuntime};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
-use openlogi_agent_core::{hook_runtime, watchers};
+use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
+use openlogi_agent_core::watchers;
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -215,7 +215,7 @@ fn start_hook(
         return None;
     }
     info!("accessibility granted — installing OS mouse hook");
-    hook_runtime::start(
+    hook::start(
         shared.hook_maps.clone(),
         shared.keyboard_bindings.clone(),
         dispatcher.clone(),
