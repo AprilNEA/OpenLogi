@@ -24,5 +24,6 @@ pub mod diagnostics;
 pub mod hid;
 #[cfg(feature = "fs")]
 pub mod paths;
+pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;

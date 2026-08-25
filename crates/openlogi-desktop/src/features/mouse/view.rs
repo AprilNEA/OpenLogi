@@ -78,9 +78,11 @@ impl<'a> MouseWorkspaceData<'a> {
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
-            active: state.active_button.map(MouseControlId::from_active_button),
-            bindings: &state.button_bindings,
-            gesture_maps: &state.gesture_bindings,
+            active: state
+                .active_button()
+                .map(MouseControlId::from_active_button),
+            bindings: state.button_bindings(),
+            gesture_maps: state.gesture_bindings(),
             glow: state
                 .current_record()
                 .and_then(|record| keyboard_glow(state, record)),

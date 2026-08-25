@@ -40,7 +40,8 @@ impl AppState {
             debug!("no persistent device key — invert-scroll change ignored");
             return;
         };
-        self.config.set_invert_scroll(&key, invert);
+        self.config
+            .edit(|config| config.set_invert_scroll(&key, invert));
         self.persist_and_reload("invert scroll");
     }
     /// The active device's persisted wheel resolution, or `None` when OpenLogi
@@ -77,7 +78,10 @@ impl AppState {
             debug!("no persistent device key — wheel-resolution change ignored");
             return;
         };
-        if !set_scroll_resolution_if_supported(&mut self.config, &key, supported, resolution) {
+        if !self
+            .config
+            .edit(|config| set_scroll_resolution_if_supported(config, &key, supported, resolution))
+        {
             debug!("active device does not support HiResWheel");
             return;
         }

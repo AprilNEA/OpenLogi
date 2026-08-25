@@ -17,10 +17,11 @@ use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
 
 use super::{
-    AppView, battery_view, connection_summary, connection_view, device_card,
-    device_identity_subtitle, device_image, device_ring, keyboard_glow, rename_device_button,
+    AppView, connection_summary, connection_view, device_card, device_identity_subtitle,
+    device_image, device_ring, keyboard_glow, rename_device_button,
 };
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
 use crate::ui::carousel::Carousel;
 use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
 
@@ -103,10 +104,8 @@ fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        ordered_device_indices(&state.device_list)
+        let active_idx = state.selected_device_index().unwrap_or(0);
+        ordered_device_indices(state.devices())
             .into_iter()
             .map(|idx| {
                 device_card_element(state, idx, active_idx, view.clone(), pal)
@@ -139,10 +138,8 @@ fn device_list(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let rows = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        ordered_device_indices(&state.device_list)
+        let active_idx = state.selected_device_index().unwrap_or(0);
+        ordered_device_indices(state.devices())
             .into_iter()
             .map(|idx| device_list_row(state, idx, active_idx, view.clone(), pal))
             .collect()
@@ -169,10 +166,8 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
     let (order, selected) = AppState::try_read(cx).map_or_else(
         || (Vec::new(), 0),
         |state| {
-            let active_idx = state
-                .current_device
-                .min(state.device_list.len().saturating_sub(1));
-            let order = ordered_device_indices(&state.device_list);
+            let active_idx = state.selected_device_index().unwrap_or(0);
+            let order = ordered_device_indices(state.devices());
             let selected = order.iter().position(|idx| *idx == active_idx).unwrap_or(0);
             (order, selected)
         },
@@ -193,9 +188,7 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                 let Some(&idx) = render_order.get(position) else {
                     return div().into_any_element();
                 };
-                let active_idx = state
-                    .current_device
-                    .min(state.device_list.len().saturating_sub(1));
+                let active_idx = state.selected_device_index().unwrap_or(0);
                 device_card_element(state, idx, active_idx, view.clone(), pal).into_any_element()
             })
             .on_select(cx.listener(move |_, position: &usize, _, cx| {
@@ -203,13 +196,9 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                     return;
                 };
                 AppState::global(cx).update(cx, |state, cx| {
-                    if state.current_device == idx || idx >= state.device_list.len() {
-                        return;
+                    if let Some(key) = state.set_current_device(idx) {
+                        cx.emit(StateEvent::DeviceSelected(key));
                     }
-                    state.set_current_device(idx);
-                    cx.emit(StateEvent::DeviceSelected(
-                        state.device_list[idx].device_key(),
-                    ));
                 });
                 AppState::load_current_device_reads(cx);
             })),
@@ -223,7 +212,7 @@ fn device_card_element(
     view: gpui::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
-    let record = &state.device_list[idx];
+    let record = &state.devices()[idx];
     let active = idx == active_idx;
     let record_key = record.record_key();
     let enabled = state.device_enabled(&record.config_key);
@@ -262,7 +251,7 @@ fn device_list_row(
     view: gpui::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
-    let record = &state.device_list[idx];
+    let record = &state.devices()[idx];
     let active = idx == active_idx;
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
@@ -336,7 +325,7 @@ fn device_list_row(
                     )
                 })
                 .when_some(record.battery.as_ref(), |this, battery| {
-                    this.child(battery_view(battery, record.online, pal))
+                    this.child(BatteryIndicator::status(battery, record.online))
                 })
                 .when(record.persistent, |this| {
                     this.child(rename_device_button(record, pal))
@@ -369,7 +358,14 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     };
     let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
     if let Some(battery) = record.battery.as_ref() {
-        format!("{metadata} {} {}%.", tr!("Battery"), battery.percentage).into()
+        let battery = if battery_charging_no_reading(battery) {
+            tr!("Charging").to_string()
+        } else if record.online {
+            format!("{} {}%", tr!("Battery"), battery.percentage)
+        } else {
+            format!("{} {}%", tr!("Last known battery"), battery.percentage)
+        };
+        format!("{metadata} {battery}.").into()
     } else {
         metadata.into()
     }

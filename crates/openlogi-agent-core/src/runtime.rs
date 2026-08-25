@@ -7,6 +7,7 @@
 
 mod button;
 pub mod hook;
+pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;

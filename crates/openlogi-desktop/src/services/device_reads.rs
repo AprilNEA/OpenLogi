@@ -91,7 +91,10 @@ impl DeviceReads {
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
             let load = project_load(query_state.read(cx), dpi_error_is_permanent);
-            if state.reads.update_dpi(&observed_key, generation, load) {
+            if state
+                .device_reads_mut()
+                .update_dpi(&observed_key, generation, load)
+            {
                 state.apply_dpi_read(&observed_key);
                 cx.emit(StateEvent::DpiChanged(observed_key.clone()));
             }
@@ -185,7 +188,7 @@ impl DeviceReads {
             let settled = smartshift_read_is_settled(query_state);
             let load = project_load(query_state, smartshift_error_is_permanent);
             if state
-                .reads
+                .device_reads_mut()
                 .update_smartshift(&observed_key, generation, load)
             {
                 if settled {

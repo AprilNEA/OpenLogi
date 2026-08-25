@@ -19,14 +19,15 @@ impl AppState {
         else {
             return;
         };
-        self.reads
+        self.pointer
+            .reads
             .ensure_dpi(key.clone(), route, self.ipc_sender(), cx);
         self.apply_dpi_read(&key);
     }
 
     pub(crate) fn retry_dpi_read(cx: &mut App, key: DeviceKey) {
         Self::update(cx, |state, cx| {
-            state.reads.retry_dpi(&key);
+            state.pointer.reads.retry_dpi(&key);
             cx.emit(StateEvent::DpiChanged(key));
         });
     }
@@ -48,7 +49,8 @@ impl AppState {
             debug!("no persistent device key — DPI presets kept in memory only");
             return;
         };
-        self.config.set_dpi_presets(&key, presets);
+        self.config
+            .edit(|config| config.set_dpi_presets(&key, presets));
         self.persist_and_reload("DPI presets");
     }
     /// Read the DPI preset list for the active device, or an empty `Vec`
@@ -61,11 +63,11 @@ impl AppState {
             .unwrap_or_default()
     }
     /// The active device's known DPI, falling back to [`DEFAULT_DPI`] until its
-    /// capability read completes. Used to seed `self.dpi` on a device switch.
+    /// capability read completes. Used to seed the pointer editor on a device switch.
     #[must_use]
     pub(crate) fn dpi_for_current(&self) -> Dpi {
         self.current_record()
-            .and_then(|record| self.reads.dpi_load(&record.device_key()))
+            .and_then(|record| self.pointer.reads.dpi_load(&record.device_key()))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(info.current),
                 _ => None,
@@ -82,15 +84,15 @@ impl AppState {
         {
             return;
         }
-        if let Some(DpiStatus::Ready(info)) = self.reads.dpi_load(key) {
-            self.dpi = info.current;
+        if let Some(DpiStatus::Ready(info)) = self.pointer.reads.dpi_load(key) {
+            self.pointer.dpi = info.current;
         }
     }
     /// DPI capabilities for the active device, if discovery succeeded.
     #[must_use]
     pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
         self.current_record()
-            .and_then(|record| self.reads.dpi_load(&record.device_key()))
+            .and_then(|record| self.pointer.reads.dpi_load(&record.device_key()))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(&info.capabilities),
                 DpiStatus::Unknown
@@ -110,7 +112,7 @@ impl AppState {
     /// on a power cycle (#189), so the agent re-applies it on reconnect.
     /// Updates the displayed value even with no device selected.
     pub fn commit_dpi(&mut self, dpi: Dpi) {
-        self.dpi = dpi;
+        self.pointer.dpi = dpi;
         let Some(record) = self.current_record() else {
             debug!("no active device — DPI change kept in memory only");
             return;
@@ -118,7 +120,8 @@ impl AppState {
         let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
         if let Some(persistent_key) = persistent_key {
-            self.config.set_dpi(&persistent_key, dpi);
+            self.config
+                .edit(|config| config.set_dpi(&persistent_key, dpi));
             if !self.persist_and_reload("DPI") {
                 return;
             }
@@ -131,5 +134,24 @@ impl AppState {
         if let Some(route) = route {
             self.send_ipc(crate::services::ipc::Command::SetDpi(route, dpi));
         }
+    }
+
+    /// The DPI value currently shown by the active pointer editor.
+    #[must_use]
+    pub fn dpi(&self) -> Dpi {
+        self.pointer.dpi
+    }
+
+    /// Update the pointer editor's in-progress DPI value without committing it.
+    pub fn set_dpi_preview(&mut self, dpi: Dpi) {
+        self.pointer.dpi = dpi;
+    }
+
+    pub(crate) fn dpi_load_for(&self, key: &DeviceKey) -> Option<&DpiStatus> {
+        self.pointer.reads.dpi_load(key)
+    }
+
+    pub(crate) fn dpi_status_for(&self, key: &DeviceKey) -> DpiStatus {
+        self.pointer.reads.dpi_status(key)
     }
 }

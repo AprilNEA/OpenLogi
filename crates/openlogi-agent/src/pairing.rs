@@ -301,6 +301,7 @@ mod tests {
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            smooth_scroll_enabled: Arc::new(false.into()),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),

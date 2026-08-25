@@ -2,6 +2,7 @@
 #![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
 use std::mem::size_of;
+use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -13,10 +14,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase};
+use super::{HeldKey, KeyPhase, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
+const WHEEL_DELTA_F64: f64 = 120.0;
+
+static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -238,14 +244,28 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-pub(super) fn post_horizontal_scroll(delta: i32) {
-    if delta == 0 {
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Windows");
         return;
+    };
+    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
+        tracing::warn!("Windows scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, WHEEL_DELTA_F64);
+    drop(quantizer);
+
+    let mut inputs = Vec::with_capacity(2);
+    if delta.y != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
     }
-    send_inputs(&[mouse_input(
-        MOUSEEVENTF_HWHEEL,
-        delta.saturating_mul(WHEEL_DELTA),
-    )]);
+    if delta.x != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, delta.x));
+    }
+    if !inputs.is_empty() {
+        send_inputs(&inputs);
+    }
 }
 
 fn post_custom_shortcut(combo: &KeyCombo) {

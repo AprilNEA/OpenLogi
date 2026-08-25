@@ -30,10 +30,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    KeyEvent, KeyModifiers, MouseEvent,
+    KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
-const WHEEL_DELTA: f32 = 120.0;
+const WHEEL_DELTA: f64 = 120.0;
 
 thread_local! {
     /// Cursor position carried by the previous mouse message of any kind,
@@ -455,14 +455,18 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         // WM_MOUSEWHEEL and precision-touchpad scrolling as separate input, so
         // a wheel event is unambiguously a mouse wheel (unlike macOS).
         WM_MOUSEWHEEL => Some(MouseEvent::Scroll {
-            delta_x: 0.0,
-            delta_y: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+            delta: ScrollDelta::wheel_ticks(
+                0.0,
+                f64::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+            ),
             from_trackpad: false,
             device: None,
         }),
         WM_MOUSEHWHEEL => Some(MouseEvent::Scroll {
-            delta_x: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
-            delta_y: 0.0,
+            delta: ScrollDelta::wheel_ticks(
+                f64::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+                0.0,
+            ),
             from_trackpad: false,
             device: None,
         }),
@@ -762,16 +766,16 @@ mod tests {
             mouseData: 120u32 << 16,
             ..MSLLHOOKSTRUCT::default()
         };
-        let Some(MouseEvent::Scroll {
-            delta_x, delta_y, ..
-        }) = translate_event(WM_MOUSEWHEEL as WPARAM, forward)
+        let Some(MouseEvent::Scroll { delta, .. }) =
+            translate_event(WM_MOUSEWHEEL as WPARAM, forward)
         else {
             panic!("expected a scroll event");
         };
-        assert!(delta_x.abs() < f32::EPSILON);
+        assert!(delta.x().abs() < f64::EPSILON);
         assert!(
-            delta_y > 0.0,
-            "wheel-forward should scroll up, got {delta_y}"
+            delta.y() > 0.0,
+            "wheel-forward should scroll up, got {}",
+            delta.y()
         );
     }
 

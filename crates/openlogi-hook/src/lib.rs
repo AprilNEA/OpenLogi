@@ -29,6 +29,7 @@ use std::cfg_select;
 
 pub use openlogi_core::app::ForegroundApp;
 pub use openlogi_core::binding::ButtonId;
+pub use openlogi_core::scroll::ScrollDelta;
 
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
@@ -148,12 +149,10 @@ pub enum MouseEvent {
         /// attribute the event (Windows today) or it was synthetic.
         device: Option<EventDevice>,
     },
-    /// A scroll-wheel tick (or continuous momentum scroll).
+    /// A scroll-wheel tick or pixel-precise continuous scroll.
     Scroll {
-        /// Positive = right, negative = left.
-        delta_x: f32,
-        /// Positive = down, negative = up.
-        delta_y: f32,
+        /// Signed two-axis distance with its native unit preserved.
+        delta: ScrollDelta,
         /// `true` when the OS attributes this scroll to a trackpad / Magic Mouse
         /// gesture rather than a mouse wheel, so a consumer can transform the
         /// wheel while leaving native trackpad scrolling alone (issue #126).

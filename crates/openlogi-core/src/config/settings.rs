@@ -190,6 +190,15 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
+    /// Whether ordinary mouse-wheel input is replaced with a finite smooth
+    /// scroll animation. **Off by default**: while enabled the OS hook
+    /// suppresses eligible physical wheel events only after its non-blocking
+    /// scroll worker accepts them. Trackpad and other continuous pixel input
+    /// remains native. Windows' low-level hook cannot attribute wheel messages
+    /// to a device, so the preference applies to every traditional mouse-wheel
+    /// message there.
+    #[serde(default)]
+    pub smooth_scroll: bool,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -223,10 +232,10 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Thumb-wheel responsiveness. It scales both the speed of the wheel's
-    /// continuous horizontal scroll and how few rotation increments a custom
-    /// wheel action needs to fire. [`ThumbwheelSensitivity::DEFAULT`] means 1×
-    /// scroll speed; the wheel is only diverted from native scrolling once
-    /// this leaves the default.
+    /// continuous horizontal or remapped vertical scroll and how few rotation
+    /// increments a custom wheel action needs to fire.
+    /// [`ThumbwheelSensitivity::DEFAULT`] means 1× scroll speed; the wheel is
+    /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
     /// Light/dark appearance preference. Defaults to following the OS.
@@ -285,8 +294,8 @@ impl ThumbwheelSensitivity {
         Ok(value) => value,
         Err(_) => panic!("valid maximum thumb-wheel sensitivity"),
     };
-    /// Out-of-the-box sensitivity. At this value horizontal scrolling runs at
-    /// 1× and remains native unless a thumb-wheel binding is customized.
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1× and
+    /// remains native unless a thumb-wheel binding is customized.
     pub const DEFAULT: Self = match Self::try_new(14) {
         Ok(value) => value,
         Err(_) => panic!("valid default thumb-wheel sensitivity"),
@@ -359,6 +368,7 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             capture_mouse_events: true,
+            smooth_scroll: false,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,

@@ -19,6 +19,7 @@ use openlogi_hook::{
 };
 use tracing::{info, warn};
 
+use super::scroll::ScrollInputHandle;
 use super::{ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
 
@@ -197,6 +198,16 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
             !cfg!(target_os = "macos")
         }
     }
+}
+
+/// Whether a wheel event may be replaced by host-side smooth output.
+///
+/// Native trackpad/pixel gestures always stay untouched. macOS additionally
+/// requires a known Logitech sender; Linux and Windows perform device
+/// selection before this callback and therefore admit their unattributed
+/// wheel events through the same policy as button remapping.
+fn scroll_source_may_smooth(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
+    !from_trackpad && button_source_may_remap(device)
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
@@ -411,6 +422,7 @@ pub fn start(
     hooks: SharedHookMaps,
     keyboard_bindings: SharedKeyboardBindings,
     dispatcher: ActionDispatcher,
+    scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
@@ -442,24 +454,26 @@ pub fn start(
                     HOLD.with_borrow_mut(HoldState::cancel);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
+                    scroll.cancel_hooks();
                     EventDisposition::PassThrough
                 }
                 MouseEvent::Scroll {
-                    delta_x, delta_y, ..
+                    delta,
+                    from_trackpad,
+                    device,
                 } => {
-                    #[cfg(not(target_os = "windows"))]
-                    let _ = (delta_x, delta_y);
                     #[cfg(target_os = "windows")]
-                    if delta_y == 0.0
+                    if delta.y() == 0.0
                         && let Some((button, action)) = hooks
                             .try_read()
                             .ok()
-                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta_x))
+                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        if try_queue_action(&action_tx, action) {
-                            return EventDisposition::Suppress;
-                        }
+                        return queued_event_disposition(try_queue_action(&action_tx, action));
+                    }
+                    if scroll_source_may_smooth(from_trackpad, device.as_ref()) {
+                        return queued_event_disposition(scroll.try_hook_scroll(delta));
                     }
                     EventDisposition::PassThrough
                 }
@@ -490,7 +504,7 @@ pub fn start(
 /// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
 /// backward/down direction, so it maps to `ThumbwheelScrollDown`.
 #[cfg(any(target_os = "windows", test))]
-fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f32) -> Option<(ButtonId, Action)> {
+fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId, Action)> {
     let button = if delta_x > 0.0 {
         ButtonId::ThumbwheelScrollDown
     } else if delta_x < 0.0 {

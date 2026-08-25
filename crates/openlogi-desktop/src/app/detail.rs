@@ -16,13 +16,10 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::config::ScrollResolution;
-use openlogi_core::device::{BatteryStatus, DeviceKind};
+use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
 
-use super::widgets::{
-    back_button, battery_charging_no_reading, battery_summary, kind_label, route_label,
-    sidebar_action, status_badge,
-};
+use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
 use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
@@ -35,8 +32,9 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::{ProfileIconCache, profile_scope_bar};
+use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
     ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
@@ -58,33 +56,9 @@ pub(super) fn detail_header(
 ) -> impl IntoElement {
     let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
     let online = record.map(|r| r.online);
-    let battery = record.and_then(|r| r.battery.as_ref()).map(|battery| {
-        let icon = if matches!(
-            battery.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow
-        ) {
-            IconName::BatteryCharging
-        } else if battery.percentage < 20 {
-            IconName::BatteryLow
-        } else if battery.percentage < 60 {
-            IconName::BatteryMedium
-        } else {
-            IconName::BatteryFull
-        };
-        let label = if battery_charging_no_reading(battery) {
-            tr!("Charging").to_string()
-        } else {
-            format!("{}%", battery.percentage)
-        };
-        h_flex()
-            .items_center()
-            .gap_1()
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(Icon::new(icon).size_4())
-            .child(label)
-            .into_any_element()
-    });
+    let battery = record
+        .and_then(|r| r.battery.as_ref())
+        .map(BatteryIndicator::inline);
     h_flex()
         .h(px(HEADER_H))
         .flex_shrink_0()
@@ -126,7 +100,8 @@ pub(super) struct DetailPanels<'a> {
 /// device's tab set.
 pub(super) fn detail_content(
     panels: &DetailPanels<'_>,
-    profile_icons: &mut ProfileIconCache,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
     tabs: &[DetailTab],
     active: DetailTab,
     pal: Palette,
@@ -137,7 +112,7 @@ pub(super) fn detail_content(
         .is_some_and(|record| record.online);
     let content = match active {
         DetailTab::Buttons => {
-            buttons_tab(panels.mouse_model, profile_icons, pal, cx).into_any_element()
+            buttons_tab(panels.mouse_model, profile_icons, app_catalog, pal, cx).into_any_element()
         }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
@@ -272,7 +247,8 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
 /// binding inspector.
 fn buttons_tab(
     mouse_model: &gpui::Entity<MouseModelView>,
-    profile_icons: &mut ProfileIconCache,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
@@ -280,7 +256,7 @@ fn buttons_tab(
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(pal, profile_icons, cx))
+        .children(profile_scope_bar(pal, profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
 }
 
@@ -687,7 +663,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                         pal,
                     ))
                     .when_some(record.battery.as_ref(), |this, battery| {
-                        this.child(battery_summary(battery, pal))
+                        this.child(BatteryIndicator::summary(battery))
                     })
                     .child(device_description_list(record))
                     .into_any_element()
@@ -710,7 +686,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
             || (0, 0, 0, tr!("Default profile").to_string()),
             |state| {
                 (
-                    state.button_bindings.len(),
+                    state.button_bindings().len(),
                     // Device-level, not scope-level: this card describes the
                     // device, and a per-app profile holds no gestures at all.
                     state.device_gesture_binding_count(),

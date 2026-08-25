@@ -49,7 +49,8 @@ impl AppState {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[must_use]
     pub fn has_camera(&self) -> bool {
-        self.device_list
+        self.devices
+            .records
             .iter()
             .any(|r| matches!(r.kind, openlogi_core::device::DeviceKind::Camera))
     }
@@ -92,7 +93,8 @@ impl AppState {
     fn commit_camera_entry(&mut self, config_key: &str, name: &str, value: i32) {
         let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
         controls.0.insert(name.to_string(), value);
-        self.config.set_camera_controls(config_key, controls);
+        self.config
+            .edit(|config| config.set_camera_controls(config_key, controls));
         self.persist_config("camera controls");
     }
     /// Lift settings from the legacy port-bound `camera-<unique_id>` key onto
@@ -108,17 +110,21 @@ impl AppState {
         if port_key == config_key || !self.camera_key_has_settings(&port_key) {
             return;
         }
-        if let Some(controls) = self.config.camera_controls(&port_key) {
-            self.config.set_camera_controls(config_key, controls);
-        }
-        for (name, snap) in self.config.camera_profiles(&port_key) {
-            self.config.save_camera_profile(config_key, &name, snap);
-        }
-        if let Some(active) = self.config.camera_active_profile(&port_key) {
-            self.config
-                .set_camera_active_profile(config_key, Some(active));
-        }
-        self.config.devices.remove(&port_key);
+        let controls = self.config.camera_controls(&port_key);
+        let profiles = self.config.camera_profiles(&port_key);
+        let active = self.config.camera_active_profile(&port_key);
+        self.config.edit(|config| {
+            if let Some(controls) = controls {
+                config.set_camera_controls(config_key, controls);
+            }
+            for (name, snap) in profiles {
+                config.save_camera_profile(config_key, &name, snap);
+            }
+            if let Some(active) = active {
+                config.set_camera_active_profile(config_key, Some(active));
+            }
+            config.devices.remove(&port_key);
+        });
         self.persist_config("camera key migration");
     }
     fn camera_key_has_settings(&self, key: &str) -> bool {
@@ -141,12 +147,14 @@ impl AppState {
         name: &str,
         snap: openlogi_core::config::CameraControls,
     ) {
-        self.config.save_camera_profile(config_key, name, snap);
+        self.config
+            .edit(|config| config.save_camera_profile(config_key, name, snap));
         self.persist_config("camera profile");
     }
     /// Delete a custom camera profile and persist the removal.
     pub fn delete_camera_profile(&mut self, config_key: &str, name: &str) {
-        self.config.delete_camera_profile(config_key, name);
+        self.config
+            .edit(|config| config.delete_camera_profile(config_key, name));
         self.persist_config("camera profile removal");
     }
     /// The camera profile last applied for `config_key`, if any.
@@ -156,7 +164,8 @@ impl AppState {
     }
     /// Record (and persist) which camera profile `config_key` last applied.
     pub fn set_camera_active_profile(&mut self, config_key: &str, name: Option<String>) {
-        self.config.set_camera_active_profile(config_key, name);
+        self.config
+            .edit(|config| config.set_camera_active_profile(config_key, name));
         self.persist_config("camera profile selection");
     }
 }

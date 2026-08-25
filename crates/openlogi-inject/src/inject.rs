@@ -14,6 +14,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, KeyCombo};
+use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -310,35 +311,122 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
-/// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
+/// Integer scroll units ready for a platform API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QuantizedScroll {
+    x: i32,
+    y: i32,
+}
+
+/// Carries fractional platform units across frames so rounding never changes
+/// the cumulative distance.
+#[derive(Default)]
+struct ScrollQuantizer {
+    residual_x: f64,
+    residual_y: f64,
+}
+
+impl ScrollQuantizer {
+    fn quantize(&mut self, delta: ScrollDelta, units_per_input: f64) -> QuantizedScroll {
+        QuantizedScroll {
+            x: quantize_axis(&mut self.residual_x, delta.x(), units_per_input),
+            y: quantize_axis(&mut self.residual_y, delta.y(), units_per_input),
+        }
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the rounded value is clamped to the i32 range before conversion"
+)]
+fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
+    let exact = input.mul_add(units_per_input, *residual);
+    let rounded = exact
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
+    let output = rounded as i32;
+    *residual = exact - f64::from(output);
+    output
+}
+
+/// Synthesise a typed scroll distance at the current focus.
 ///
-/// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
-/// wheel's scrolling after the wheel has been diverted over HID++ to capture its
-/// click. `delta` is the device's raw rotation; its sign follows the wheel's
-/// rotation convention and its magnitude (one line per rotation increment) may
-/// need tuning per device, since the diverted resolution differs from native.
-///
-/// No-op (logs nothing) on platforms without a supported injection mechanism.
-pub fn post_horizontal_scroll(delta: i32) {
+/// Fractional wheel ticks are retained until the platform can represent them,
+/// so a sequence of high-resolution frames preserves its cumulative distance.
+/// Non-finite input is rejected at this I/O boundary.
+pub fn post_scroll(delta: ScrollDelta) {
+    if !delta.is_finite() || (delta.x() == 0.0 && delta.y() == 0.0) {
+        return;
+    }
     cfg_select! {
         target_os = "macos" => {
-            macos::post_horizontal_scroll(delta);
+            macos::post_scroll(delta);
         }
         target_os = "linux" => {
-            // `delta` is already in "one line per rotation increment" units (see
-            // doc above), which matches REL_HWHEEL's convention of one unit per
-            // detent. This is intentionally different from
-            // Action::HorizontalScrollLeft/Right, which hardcode ±3 as a fixed
-            // "scroll tick" with no device delta involved.
-            linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta);
+            linux::post_scroll(delta);
         }
         target_os = "windows" => {
-            windows::post_horizontal_scroll(delta);
+            windows::post_scroll(delta);
         }
         _ => {
             let _ = delta;
         }
     }
+}
+
+/// Lifecycle phase of one synthetic smooth-scroll frame.
+///
+/// macOS forwards this state to the scroll-wheel event so applications see a
+/// balanced continuous gesture. Linux and Windows have no equivalent field;
+/// there the phase is retained by the runtime contract but only the frame's
+/// distance is injected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothScrollPhase {
+    /// First output frame of a new animation.
+    Began,
+    /// An intermediate output frame, including frames after retargeting.
+    Changed,
+    /// Final frame, carrying any correction needed to reach the exact target.
+    Ended,
+    /// The capture source ended before the animation reached its target.
+    Cancelled,
+}
+
+/// Synthesise one frame of a finite smooth-scroll animation.
+///
+/// On macOS wheel ticks become continuous pixel events at ten points per tick,
+/// matching the line/point relationship carried in native continuous events.
+/// Other platforms preserve fractional wheel ticks through their native
+/// high-resolution output. Non-finite distance is rejected at this I/O
+/// boundary; zero-distance terminal frames remain meaningful on macOS.
+pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
+    if !delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_smooth_scroll(delta, phase);
+        }
+        _ => {
+            let _ = phase;
+            post_scroll(delta);
+        }
+    }
+}
+
+/// Synthesise a scroll of `(delta_x, delta_y)` wheel lines at the current focus.
+///
+/// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
+/// wheel's scrolling after the wheel has been diverted over HID++. The caller
+/// maps physical rotation onto the configured horizontal or vertical axis and
+/// scales it from diverted increments back to native wheel lines.
+///
+/// No-op (logs nothing) on platforms without a supported injection mechanism.
+pub fn post_thumbwheel_scroll(delta_x: i32, delta_y: i32) {
+    post_scroll(ScrollDelta::wheel_ticks(
+        f64::from(delta_x),
+        f64::from(delta_y),
+    ));
 }
 
 /// Return the `/dev/input/eventN` node for the action-injector uinput device,
@@ -407,11 +495,39 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::scroll::ScrollDelta;
+
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use openlogi_core::binding::KeyCombo;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
+    use super::{QuantizedScroll, ScrollQuantizer};
+
+    /// Synthetic high-resolution input: eight eighth-ticks must total exactly
+    /// one Windows/Linux wheel detent (120 raw units). This is deterministic
+    /// model data, not a hardware capture.
+    #[test]
+    fn fractional_frames_preserve_cumulative_wheel_distance() {
+        let mut quantizer = ScrollQuantizer::default();
+        let total = (0..8)
+            .map(|_| {
+                quantizer
+                    .quantize(ScrollDelta::wheel_ticks(0.0, 0.125), 120.0)
+                    .y
+            })
+            .sum::<i32>();
+        assert_eq!(total, 120);
+    }
+
+    #[test]
+    fn opposing_fractional_input_cancels_without_rounding_drift() {
+        let mut quantizer = ScrollQuantizer::default();
+        let forward = quantizer.quantize(ScrollDelta::wheel_ticks(0.25, 0.0), 120.0);
+        let backward = quantizer.quantize(ScrollDelta::wheel_ticks(-0.25, 0.0), 120.0);
+        assert_eq!(forward, QuantizedScroll { x: 30, y: 0 });
+        assert_eq!(backward, QuantizedScroll { x: -30, y: 0 });
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     fn combo(label: &str) -> KeyCombo {

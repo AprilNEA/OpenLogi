@@ -23,7 +23,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::ProfileIconCache;
+use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
@@ -39,9 +39,6 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
-// Tray menu and other crate-level callers need the cold-start charging quirk.
-pub(crate) use widgets::battery_charging_no_reading;
-
 /// Which screen the root view is showing.
 ///
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
@@ -175,6 +172,9 @@ pub struct AppView {
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
     profile_icons: ProfileIconCache,
+    app_catalog: Entity<AppCatalogPicker>,
+    /// Redraw the profile picker after discovery, filtering, or expansion changes.
+    _app_catalog_obs: Subscription,
     appearance_obs: Option<Subscription>,
     /// Invalidates the root only for semantic state changes its current route
     /// reads; feature entities subscribe to their own events directly.
@@ -233,6 +233,8 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let app_catalog = cx.new(|cx| AppCatalogPicker::new(window, cx));
+        let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
             let active_key = AppState::try_read(cx)
                 .and_then(AppState::current_record)
@@ -288,6 +290,8 @@ impl AppView {
             camera_controls,
             light_panel,
             profile_icons: ProfileIconCache::default(),
+            app_catalog,
+            _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
             config_issue_visible: false,
@@ -308,17 +312,12 @@ impl AppView {
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
         AppState::global(cx).update(cx, |state, cx| {
             if let Some(idx) = state
-                .device_list
+                .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
+                && let Some(key) = state.set_current_device(idx)
             {
-                let changed = state.current_device != idx;
-                state.set_current_device(idx);
-                if changed {
-                    cx.emit(StateEvent::DeviceSelected(
-                        state.device_list[idx].device_key(),
-                    ));
-                }
+                cx.emit(StateEvent::DeviceSelected(key));
             }
         });
         AppState::load_current_device_reads(cx);
@@ -544,7 +543,7 @@ impl Render for AppView {
 
         let has_device = AppState::try_global(cx)
             .map(|state| state.read(cx))
-            .is_some_and(|s| !s.device_list.is_empty());
+            .is_some_and(|s| !s.devices().is_empty());
 
         // Resolve the route. A detail route lives only while its device is
         // still the live selection; if a hot-plug dropped or reordered it (or
@@ -607,7 +606,8 @@ impl Render for AppView {
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
                     },
-                    &mut self.profile_icons,
+                    &self.profile_icons,
+                    &self.app_catalog,
                     &tabs,
                     active,
                     pal,
@@ -641,8 +641,9 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::home::{battery_needs_attention, connection_icon_path, ordered_device_indices};
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
+    use super::home::{connection_icon_path, ordered_device_indices};
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+    use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
         LightValueRange, LightValueUnit,

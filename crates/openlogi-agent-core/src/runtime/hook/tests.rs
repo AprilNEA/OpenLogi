@@ -153,6 +153,28 @@ fn rejected_key_edges_fail_open() {
 }
 
 #[test]
+fn smooth_scroll_uses_the_button_source_safety_policy_and_skips_trackpads() {
+    let logitech = EventDevice {
+        vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+        product_name: Some("Logitech MX Master".to_string()),
+        ..EventDevice::default()
+    };
+    let trackpad = EventDevice {
+        product_name: Some("Magic Trackpad".to_string()),
+        ..EventDevice::default()
+    };
+
+    assert!(scroll_source_may_smooth(false, Some(&logitech)));
+    assert!(!scroll_source_may_smooth(true, Some(&logitech)));
+    assert!(!scroll_source_may_smooth(false, Some(&trackpad)));
+    assert_eq!(
+        scroll_source_may_smooth(false, None),
+        !cfg!(target_os = "macos"),
+        "only macOS requires callback-time device attribution"
+    );
+}
+
+#[test]
 fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
     let maps = HookMaps {
         bindings: BTreeMap::from([

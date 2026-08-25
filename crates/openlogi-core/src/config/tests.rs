@@ -811,6 +811,17 @@ fn app_settings_launch_at_login_roundtrips() {
 }
 
 #[test]
+fn app_settings_smooth_scroll_is_opt_in_and_roundtrips() {
+    let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
+    assert!(!default.app_settings.smooth_scroll);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.smooth_scroll = true;
+    let parsed = write_and_read(&cfg);
+    assert!(parsed.app_settings.smooth_scroll);
+}
+
+#[test]
 fn app_settings_ui_scale_roundtrips() {
     let mut cfg = Config::default();
     cfg.app_settings.ui_scale = UiScale::ExtraLarge;

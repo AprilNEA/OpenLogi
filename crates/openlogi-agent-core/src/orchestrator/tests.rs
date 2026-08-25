@@ -14,6 +14,7 @@ use openlogi_core::device::{
 };
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::observable::ObservableState;
 
@@ -703,6 +704,19 @@ fn config_reload_keeps_manual_override_for_parameter_edits() {
         Some((true, 80, Some(6500)))
     );
     assert_eq!(orch.manual_light_overrides.get(key), Some(&true));
+}
+
+#[test]
+fn config_reload_publishes_smooth_scroll_without_restarting_the_hook() {
+    let mut orch = orchestrator(Config::default());
+    let setting = Arc::clone(&orch.shared.smooth_scroll_enabled);
+    assert!(!setting.load(Ordering::Relaxed));
+
+    let mut config = Config::default();
+    config.app_settings.smooth_scroll = true;
+    orch.reload_config(config);
+
+    assert!(setting.load(Ordering::Relaxed));
 }
 
 #[test]
