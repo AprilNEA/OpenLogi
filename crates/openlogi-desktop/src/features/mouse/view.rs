@@ -65,6 +65,11 @@ struct MouseWorkspaceData<'a> {
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
+    /// No `ReprogControls` (`0x1b04`) at all — an `OnboardProfiles`-only
+    /// device (G-series gaming mice), so the synthetic fallback model must
+    /// drop hotspots that need HID++ diversion to ever fire. See
+    /// `hotspots::default_hotspots`.
+    standard_buttons_only: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -90,6 +95,10 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.thumbwheel),
+            standard_buttons_only: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| !capabilities.buttons && capabilities.onboard_profiles),
             editing_app: state.editing_app().map(|app| {
                 state
                     .recent_app_name(app)
@@ -111,6 +120,7 @@ impl<'a> MouseWorkspaceData<'a> {
             gesture_maps,
             glow: None,
             thumbwheel: false,
+            standard_buttons_only: false,
             editing_app: None,
             overridden: None,
         }
@@ -238,6 +248,7 @@ impl Render for MouseModelView {
             gesture_maps,
             glow,
             thumbwheel,
+            standard_buttons_only,
             editing_app,
             overridden,
         } = MouseWorkspaceData::read(cx)
@@ -263,7 +274,13 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(
+            asset,
+            viewport_w,
+            viewport_h,
+            thumbwheel,
+            standard_buttons_only,
+        );
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active);
@@ -379,6 +396,7 @@ fn model_layout(
     viewport_w: f32,
     viewport_h: f32,
     thumbwheel: bool,
+    standard_buttons_only: bool,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -396,8 +414,14 @@ fn model_layout(
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
+        asset,
+        target_h,
+        max_image_w,
+        thumbwheel,
+        standard_buttons_only,
+        label_distribution,
+    );
     if !has_labels {
         labels.clear();
     }
@@ -421,6 +445,7 @@ fn scaled_model(
     target_h: f32,
     max_w: f32,
     thumbwheel: bool,
+    standard_buttons_only: bool,
     label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
@@ -430,7 +455,7 @@ fn scaled_model(
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let hotspots = default_hotspots(thumbwheel, standard_buttons_only)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -440,7 +465,7 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
+        let labels = default_labels(thumbwheel, standard_buttons_only, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,
@@ -1014,8 +1039,10 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+        let (_, _, without, _) =
+            scaled_model(None, 560., 420., false, false, LabelDistribution::LeftOnly);
+        let (_, _, with, _) =
+            scaled_model(None, 560., 420., true, false, LabelDistribution::LeftOnly);
         assert_eq!(
             without
                 .iter()
@@ -1028,6 +1055,18 @@ mod tests {
                 .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn standard_buttons_only_reaches_scaled_model() {
+        let (_, _, hotspots, _) =
+            scaled_model(None, 560., 420., false, true, LabelDistribution::LeftOnly);
+        assert!(
+            !hotspots
+                .iter()
+                .any(|h| h.id == MouseControlId::Button(ButtonId::DpiToggle)),
+            "standard_buttons_only must reach default_hotspots through model_layout/scaled_model"
         );
     }
 }

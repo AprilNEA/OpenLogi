@@ -114,7 +114,13 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Camera) {
             tabs.push(Self::Camera);
         }
-        if caps.buttons && can_show_mouse_model {
+        // G-series gaming mice have no ReprogControls (0x1b04) but their
+        // Middle/Back/Forward clicks are native OS-hook buttons regardless —
+        // widened here so those become remappable through the same panel.
+        // Capability-gated in `default_hotspots`/`default_labels` to a
+        // reduced hotspot set: they have no DPI-toggle/gesture-button signal
+        // to divert.
+        if (caps.buttons || caps.onboard_profiles) && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
@@ -246,7 +252,9 @@ impl AppView {
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
                 StateEvent::ForegroundChanged => !on_home,
-                StateEvent::BindingsChanged(key) | StateEvent::DpiChanged(key) => {
+                StateEvent::BindingsChanged(key)
+                | StateEvent::DpiChanged(key)
+                | StateEvent::OnboardProfileBindingsChanged(key) => {
                     !on_home
                         && view.active_tab == DetailTab::Device
                         && active_key.as_ref() == Some(key)
@@ -828,12 +836,34 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            onboard_profiles: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
         assert!(tabs.contains(&DetailTab::Buttons));
         assert!(tabs.contains(&DetailTab::Pointer));
         assert!(!tabs.contains(&DetailTab::Lighting));
+    }
+
+    /// G-series gaming mice (G502, G502 X) have no ReprogControls at all —
+    /// only `OnboardProfiles` (`0x8100`) — but their Middle/Back/Forward
+    /// clicks are native OS-hook buttons regardless, so the Buttons tab must
+    /// still appear for them.
+    #[test]
+    fn onboard_profiles_only_mouse_still_gets_buttons_tab() {
+        let caps = Some(Capabilities {
+            buttons: false,
+            pointer: true,
+            lighting: false,
+            scroll_inversion: false,
+            hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+            onboard_profiles: true,
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
+        assert!(tabs.contains(&DetailTab::Buttons));
     }
 
     /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
@@ -850,6 +880,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            onboard_profiles: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
@@ -870,6 +901,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            onboard_profiles: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));

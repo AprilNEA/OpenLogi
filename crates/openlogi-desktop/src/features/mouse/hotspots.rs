@@ -71,8 +71,16 @@ impl Hotspot {
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
 /// as remappable and we follow the same rule everywhere.
+///
+/// `standard_buttons_only` drops `DpiToggle`/`GestureButton`: those need a
+/// diverted HID++ control (`0x1b04`) to ever reach the OS hook, which
+/// `OnboardProfiles`-only devices (G-series gaming mice — no `ReprogControls`
+/// at all) don't have. Offering those hotspots there would show a control
+/// that can never actually fire. `MiddleClick`/`Back`/`Forward` stay: on
+/// every mouse the OS hook captures those natively, with no HID++ diversion
+/// involved (see `crates/openlogi-hook`), so they work identically either way.
 #[must_use]
-pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
+pub fn default_hotspots(thumbwheel: bool, standard_buttons_only: bool) -> Vec<Hotspot> {
     let mut hotspots = vec![
         Hotspot {
             id: ButtonId::MiddleClick.into(),
@@ -95,21 +103,23 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
             w: 40.,
             h: 60.,
         },
-        Hotspot {
+    ];
+    if !standard_buttons_only {
+        hotspots.push(Hotspot {
             id: ButtonId::DpiToggle.into(),
             x: 175.,
             y: 230.,
             w: 70.,
             h: 40.,
-        },
-        Hotspot {
+        });
+        hotspots.push(Hotspot {
             id: ButtonId::GestureButton.into(),
             x: 8.,
             y: 380.,
             w: 44.,
             h: 80.,
-        },
-    ];
+        });
+    }
     if thumbwheel {
         hotspots.push(Hotspot {
             id: MouseControlId::ThumbwheelRotation,
@@ -141,12 +151,12 @@ mod tests {
     #[test]
     fn fallback_thumbwheel_is_capability_gated() {
         assert!(
-            !default_hotspots(false)
+            !default_hotspots(false, false)
                 .iter()
                 .any(|hotspot| { hotspot.id == MouseControlId::ThumbwheelRotation })
         );
         assert_eq!(
-            default_hotspots(true)
+            default_hotspots(true, false)
                 .iter()
                 .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
                 .count(),
@@ -156,7 +166,7 @@ mod tests {
 
     #[test]
     fn default_hotspots_expose_the_gesture_button() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(false, false);
         assert!(
             hotspots
                 .iter()
@@ -167,7 +177,7 @@ mod tests {
 
     #[test]
     fn default_hotspots_omit_primary_clicks() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(false, false);
         assert!(
             !hotspots.iter().any(|h| {
                 matches!(
@@ -177,5 +187,40 @@ mod tests {
             }),
             "primary clicks are not remappable and must stay out of the model"
         );
+    }
+
+    /// G-series gaming mice (`OnboardProfiles`, no `ReprogControls`) have no
+    /// diverted DPI-toggle/gesture-button signal, so those hotspots must be
+    /// absent — offering a hotspot that can never fire would be misleading.
+    #[test]
+    fn standard_buttons_only_drops_dpi_toggle_and_gesture_button() {
+        let hotspots = default_hotspots(false, true);
+        assert!(
+            !hotspots
+                .iter()
+                .any(|h| h.id == MouseControlId::Button(ButtonId::DpiToggle)),
+            "DPI toggle has no native signal on an OnboardProfiles-only mouse"
+        );
+        assert!(
+            !hotspots
+                .iter()
+                .any(|h| h.id == MouseControlId::Button(ButtonId::GestureButton)),
+            "the gesture button has no native signal on an OnboardProfiles-only mouse"
+        );
+    }
+
+    /// Middle/Back/Forward are native OS-hook buttons on any mouse — they
+    /// must stay available even in the reduced `standard_buttons_only` set.
+    #[test]
+    fn standard_buttons_only_keeps_middle_back_forward() {
+        let hotspots = default_hotspots(false, true);
+        for expected in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                hotspots
+                    .iter()
+                    .any(|h| h.id == MouseControlId::Button(expected)),
+                "{expected:?} must remain a hotspot in the reduced set"
+            );
+        }
     }
 }

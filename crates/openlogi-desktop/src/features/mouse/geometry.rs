@@ -170,10 +170,15 @@ pub fn labels_from_hotspots(
     labels
 }
 
-/// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+/// Label positions for the synthetic fallback silhouette. See
+/// [`super::hotspots::default_hotspots`] for what `standard_buttons_only` does.
+pub fn default_labels(
+    thumbwheel: bool,
+    standard_buttons_only: bool,
+    distribution: LabelDistribution,
+) -> Vec<Label> {
     labels_from_hotspots(
-        &super::hotspots::default_hotspots(thumbwheel),
+        &super::hotspots::default_hotspots(thumbwheel, standard_buttons_only),
         MOUSE_MODEL_SIZE.1,
         distribution,
     )
@@ -217,12 +222,12 @@ mod tests {
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
         assert!(
-            !default_labels(false, LabelDistribution::LeftOnly)
+            !default_labels(false, false, LabelDistribution::LeftOnly)
                 .iter()
                 .any(|label| label.id == MouseControlId::ThumbwheelRotation)
         );
         assert_eq!(
-            default_labels(true, LabelDistribution::LeftOnly)
+            default_labels(true, false, LabelDistribution::LeftOnly)
                 .iter()
                 .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
                 .count(),
@@ -257,7 +262,7 @@ mod tests {
 
     #[test]
     fn labels_track_hotspots_and_avoid_crossing() {
-        let hotspots = default_hotspots(true);
+        let hotspots = default_hotspots(true, false);
         let labels =
             labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
         assert_eq!(labels.len(), hotspots.len());
@@ -270,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_two_sided_layout_uses_both_sides() {
-        let hotspots = default_hotspots(true);
+        let hotspots = default_hotspots(true, false);
         let labels =
             labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::BothSides);
 
