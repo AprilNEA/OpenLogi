@@ -5,8 +5,8 @@ use super::{App, AppState, InteractiveElement, Permission};
 use super::{IconName, Palette, SettingPage};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
-    IntoElement, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem,
-    SharedString, Styled, div, h_flex, px, rgb, theme,
+    ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, SharedString, Styled,
+    div, h_flex, px, rgb, theme,
 };
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
@@ -173,7 +173,7 @@ fn permission_item(
 
 /// A readable status word with colour retained as a supplemental marker.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn status_badge(status: PermissionStatus, pal: Palette) -> impl IntoElement {
+fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
     let (label, color) = match status {
         PermissionStatus::Granted => (tr!("Granted"), theme::STATUS_CONNECTED),
         PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
@@ -183,7 +183,7 @@ fn status_badge(status: PermissionStatus, pal: Palette) -> impl IntoElement {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn badge(label: SharedString, color: u32, pal: Palette) -> impl IntoElement {
+fn badge(label: SharedString, color: u32, pal: Palette) -> gpui::Div {
     h_flex()
         .items_center()
         .gap_1()
@@ -209,12 +209,7 @@ fn permission_field(
     let status_el = if never_requested {
         badge(tr!("Not requested"), theme::STATUS_OFFLINE, pal)
     } else {
-        let (label, color) = match status {
-            PermissionStatus::Granted => (tr!("Granted"), theme::STATUS_CONNECTED),
-            PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
-            PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
-        };
-        badge(label, color, pal)
+        status_badge(status, pal)
     };
     let prompts_here = never_requested && matches!(permission, Permission::Camera);
     let action_label = if prompts_here {
