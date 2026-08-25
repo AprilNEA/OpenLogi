@@ -11,17 +11,18 @@ pub(super) use views::ordered_device_indices;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div,
-    fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    Anchor, AnyElement, App, AppContext as _, Context, ElementId, Hsla, InteractiveElement,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, Sizable as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
     input::InputState,
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
     v_flex,
 };
@@ -37,7 +38,7 @@ use super::widgets::{
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::battery::{BatteryIndicator, battery_context};
+use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::control_input;
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
 
@@ -198,7 +199,22 @@ fn device_card(
                 )
                 // Outside the dimmed render, so an offline card's status
                 // stays legible.
-                .child(card_status_overlay(record, pal)),
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .child(transport_glance(record, pal)),
+                )
+                .when_some(record.battery.as_ref(), |image, battery| {
+                    image.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .child(battery_glance(battery, record)),
+                    )
+                }),
         )
         .child(
             v_flex().w_full().gap_2().child(
@@ -236,35 +252,30 @@ fn device_card(
                             }),
                     )
                     .when(record.persistent, |row| {
-                        row.child(rename_device_button(record, pal))
+                        row.child(device_menu_button(record, pal))
                     }),
             ),
         )
 }
 
-/// The connectivity-and-battery glance in a card's corner: status on the
-/// first line, battery on the second. Battery detail (low, charging, last
-/// known) rides a hover tip instead of a label.
-fn card_status_overlay(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
-    v_flex()
-        .absolute()
-        .top_0()
-        .right_0()
-        .items_end()
-        .gap_1()
-        .child(transport_glance(record, pal))
-        .when_some(record.battery.as_ref(), |this, battery| {
-            this.child(battery_glance(battery, record))
-        })
-}
-
-/// Colored transport glyph in the card corner — green while connected, muted
-/// while offline; the words ride its hover tip.
+/// Transport glyph in the card corner, colored by the transport itself —
+/// Bluetooth blue, receiver green, cable muted; the connectivity words ride
+/// its hover tip and the dimmed render already marks an offline card.
 fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
-    let color: Hsla = if record.online {
-        rgb(theme::STATUS_CONNECTED).into()
+    let path = if matches!(record.kind, DeviceKind::Camera) {
+        "action-icons/usb.svg"
     } else {
-        pal.text_muted
+        connection_icon_path(
+            record.route.as_ref(),
+            record.model_info.as_ref().map(|model| &model.transports),
+        )
+    };
+    let color: Hsla = match path {
+        "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
+        "action-icons/bolt.svg" | "action-icons/unifying.svg" => {
+            rgb(theme::STATUS_CONNECTED).into()
+        }
+        _ => pal.text_muted,
     };
     let hint: SharedString = format!(
         "{} · {}",
@@ -279,37 +290,22 @@ fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
     div()
         .id((ElementId::from("transport-glance"), record.record_key()))
         .flex_none()
-        .child(
-            svg()
-                .path(if matches!(record.kind, DeviceKind::Camera) {
-                    "action-icons/usb.svg"
-                } else {
-                    connection_icon_path(
-                        record.route.as_ref(),
-                        record.model_info.as_ref().map(|model| &model.transports),
-                    )
-                })
-                .size_4()
-                .flex_none()
-                .text_color(color),
-        )
+        .child(svg().path(path).size_4().flex_none().text_color(color))
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
 }
 
-/// [`BatteryIndicator::glance`] under a hover tip carrying the words the
-/// corner has no room for.
+/// [`BatteryIndicator::glance`] under a hover tip carrying the value and
+/// words the corner has no room for.
 fn battery_glance(
     battery: &openlogi_core::device::BatteryInfo,
     record: &DeviceRecord,
 ) -> impl IntoElement {
-    let hint = battery_context(battery, record.online).map(SharedString::from);
+    let hint: SharedString = glance_hint(battery, record.online).into();
     div()
         .id((ElementId::from("battery-glance"), record.record_key()))
         .flex_none()
         .child(BatteryIndicator::glance(battery))
-        .when_some(hint, |glance, hint| {
-            glance.tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
-        })
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
 }
 
 fn device_ring(enabled: bool) -> Hsla {
@@ -342,7 +338,11 @@ pub(super) fn custom_model_subtitle(record: &DeviceRecord) -> Option<SharedStrin
     (record.display_name != record.model_name).then(|| record.model_name.clone().into())
 }
 
-fn rename_device_button(record: &DeviceRecord, pal: Palette) -> Button {
+/// The card's action menu — rename, and for an offline device, delete. One
+/// builder serves both the corner menu button and the card's context menu.
+pub(super) fn device_menu(
+    record: &DeviceRecord,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     let record_key = record.record_key();
     let custom_name = if record.display_name == record.model_name {
         String::new()
@@ -350,22 +350,90 @@ fn rename_device_button(record: &DeviceRecord, pal: Palette) -> Button {
         record.display_name.clone()
     };
     let model_name = record.model_name.clone();
-    Button::new((ElementId::from("rename-device"), record_key.clone()))
+    let display_name = record.display_name.clone();
+    // A live device would simply re-register on the next inventory snapshot,
+    // so deletion is only offered once it is offline.
+    let deletable = record.persistent && !record.online;
+    move |menu, _window, _cx| {
+        let menu = menu.item(
+            PopupMenuItem::new(tr!("Rename…"))
+                .icon(Icon::empty().path("action-icons/pencil.svg"))
+                .on_click({
+                    let record_key = record_key.clone();
+                    let custom_name = custom_name.clone();
+                    let model_name = model_name.clone();
+                    move |_, window, cx| {
+                        open_rename_dialog(
+                            window,
+                            cx,
+                            record_key.clone(),
+                            custom_name.clone(),
+                            model_name.clone(),
+                        );
+                    }
+                }),
+        );
+        if !deletable {
+            return menu;
+        }
+        menu.item(PopupMenuItem::separator()).item(
+            PopupMenuItem::new(tr!("Delete device…"))
+                .icon(IconName::Delete)
+                .on_click({
+                    let record_key = record_key.clone();
+                    let display_name = display_name.clone();
+                    move |_, window, cx| {
+                        open_delete_confirmation(
+                            window,
+                            cx,
+                            record_key.clone(),
+                            display_name.clone(),
+                        );
+                    }
+                }),
+        )
+    }
+}
+
+/// The card corner's ellipsis button, opening the same menu the card offers
+/// on right-click.
+pub(super) fn device_menu_button(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+    Button::new((ElementId::from("device-menu"), record.record_key()))
         .ghost()
         .xsmall()
         .text_color(pal.text_muted)
-        .icon(Icon::empty().path("action-icons/pencil.svg"))
-        .tooltip(tr!("Rename device"))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            open_rename_dialog(
-                window,
-                cx,
-                record_key.clone(),
-                custom_name.clone(),
-                model_name.clone(),
-            );
-        })
+        .icon(IconName::Ellipsis)
+        .dropdown_menu_with_anchor(Anchor::TopRight, device_menu(record))
+}
+
+/// Confirm before forgetting a device: the record, its custom name, and its
+/// per-device settings all go.
+fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: String, name: String) {
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title(tr!("Delete %{name}?", name => name.clone()))
+            .description(tr!(
+                "This forgets the device and its settings. Reconnect or pair it again to set it up from scratch."
+            ))
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("Delete device"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(tr!("Cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok({
+                let record_key = record_key.clone();
+                move |_event, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        if state.forget_device(&record_key) {
+                            cx.emit(StateEvent::InventoryChanged);
+                        }
+                    });
+                    true
+                }
+            })
+    });
 }
 
 fn open_rename_dialog(

@@ -115,12 +115,15 @@ fn glance_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         .gap_2()
         .text_caption()
         .child(battery_glyph(battery, pal, GlyphSize::Compact, pal.panel))
-        .child(
-            gpui::div()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(pal.text_primary)
-                .child(value_label(battery)),
-        )
+    // The number is hidden for now — the glyph's fill carries it, and
+    // [`glance_hint`] repeats it on hover. Re-enable if the glyph alone
+    // proves too coarse.
+    // .child(
+    //     gpui::div()
+    //         .font_weight(FontWeight::MEDIUM)
+    //         .text_color(pal.text_primary)
+    //         .child(value_label(battery)),
+    // )
 }
 
 fn status_readout(battery: &BatteryInfo, online: bool, pal: Palette) -> impl IntoElement {
@@ -184,10 +187,13 @@ fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
     }
 }
 
-/// The status-and-last-known words a [`BatteryIndicator::glance`] leaves to
-/// its caller's hover tip.
-pub(crate) fn battery_context(battery: &BatteryInfo, online: bool) -> Option<String> {
-    context_label(battery, online)
+/// Everything a [`BatteryIndicator::glance`] does not show — the value plus
+/// the status and last-known words — for its caller's hover tip.
+pub(crate) fn glance_hint(battery: &BatteryInfo, online: bool) -> String {
+    match context_label(battery, online) {
+        Some(context) => format!("{} · {context}", value_label(battery)),
+        None => value_label(battery),
+    }
 }
 
 fn context_label(battery: &BatteryInfo, online: bool) -> Option<String> {

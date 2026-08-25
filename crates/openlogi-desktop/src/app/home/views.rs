@@ -10,6 +10,7 @@ use gpui_component::{
     IconName, Sizable as _,
     button::{Toggle, ToggleVariants as _},
     h_flex,
+    menu::ContextMenuExt as _,
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -18,7 +19,7 @@ use openlogi_core::device::DeviceKind;
 
 use super::{
     AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
-    device_ring, keyboard_glow, kind_badge, rename_device_button,
+    device_menu, device_menu_button, device_ring, keyboard_glow, kind_badge,
 };
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
@@ -112,6 +113,7 @@ fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
                     .min_w(theme::GALLERY_CARD_MIN_W)
                     .max_w(theme::GALLERY_CARD_MAX_W)
                     .flex_1()
+                    .context_menu(device_menu(&state.devices()[idx]))
             })
             .collect()
     });
@@ -141,7 +143,10 @@ fn device_list(cx: &mut Context<AppView>) -> impl IntoElement {
         let active_idx = state.selected_device_index().unwrap_or(0);
         ordered_device_indices(state.devices())
             .into_iter()
-            .map(|idx| device_list_row(state, idx, active_idx, view.clone(), pal))
+            .map(|idx| {
+                device_list_row(state, idx, active_idx, view.clone(), pal)
+                    .context_menu(device_menu(&state.devices()[idx]))
+            })
             .collect()
     });
 
@@ -189,7 +194,9 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let active_idx = state.selected_device_index().unwrap_or(0);
-                device_card_element(state, idx, active_idx, view.clone(), pal).into_any_element()
+                device_card_element(state, idx, active_idx, view.clone(), pal)
+                    .context_menu(device_menu(&state.devices()[idx]))
+                    .into_any_element()
             })
             .on_select(cx.listener(move |_, position: &usize, _, cx| {
                 let Some(&idx) = select_order.get(*position) else {
@@ -320,7 +327,7 @@ fn device_list_row(
                     this.child(BatteryIndicator::status(battery, record.online))
                 })
                 .when(record.persistent, |this| {
-                    this.child(rename_device_button(record, pal))
+                    this.child(device_menu_button(record, pal))
                 }),
         )
         .active(gpui::Styled::shadow_2xs)
