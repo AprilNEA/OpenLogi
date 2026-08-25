@@ -347,6 +347,18 @@ impl super::AppState {
         let device_key = record.device_key();
         let config_key = record.persistent_config_key().map(str::to_string);
 
+        // Dropping the config entry *is* the deletion, so the card only
+        // follows once the write lands. A failed save restores the persisted
+        // revision, so returning early keeps memory, disk, and the gallery in
+        // agreement: the device honestly stays instead of vanishing until the
+        // next inventory refresh resurrects it.
+        if let Some(config_key) = config_key {
+            self.config.edit(|config| config.remove_device(&config_key));
+            if !self.persist_and_reload("device removed") {
+                return false;
+            }
+        }
+
         let mut records = self.devices.records.clone();
         records.remove(index);
         let selected = match self.devices.selected_index() {
@@ -358,11 +370,6 @@ impl super::AppState {
         self.devices.replace(records, selected);
         self.devices.runtime.remove(&device_key);
         self.pointer.reads.remove(&device_key);
-
-        if let Some(config_key) = config_key {
-            self.config.edit(|config| config.remove_device(&config_key));
-            self.persist_and_reload("device removed");
-        }
         true
     }
 }
