@@ -581,12 +581,11 @@ fn application_mark(icon: AppIconState, name: &str, edge: f32, pal: Palette) -> 
         .justify_center();
     match icon {
         AppIconState::Ready(icon) => slot.child(img(icon).size(px(edge)).flex_none()),
-        AppIconState::Loading => slot
-            .child(
-                Spinner::new()
-                    .with_size(px(edge * 0.6))
-                    .color(pal.text_muted),
-            ),
+        AppIconState::Loading => slot.child(
+            Spinner::new()
+                .with_size(px(edge * 0.6))
+                .color(pal.text_muted),
+        ),
         AppIconState::Missing => {
             let initial = name
                 .chars()

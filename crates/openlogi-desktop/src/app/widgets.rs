@@ -3,8 +3,7 @@
 //! screens.
 
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::FluentBuilder as _,
+    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     IconName, Sizable as _,
