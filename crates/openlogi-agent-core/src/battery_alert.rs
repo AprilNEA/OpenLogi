@@ -71,12 +71,16 @@ pub struct BatteryAlerts {
 impl BatteryAlerts {
     /// Fold one inventory snapshot in and return the alerts to raise now.
     ///
-    /// Fires on `→ Low` and on `Low → Critical`, with the severity taken from
-    /// the reading rather than the reported level. Never fires twice for the
+    /// Fires on `→ Low` and on `Low → Critical`. Never fires twice for the
     /// same severity, never fires on a level the firmware calls
-    /// [`BatteryLevel::Unknown`], never fires while the reading is above the
-    /// crate's `LOW_PERCENTAGE` threshold, and never fires for a device on
-    /// power.
+    /// [`BatteryLevel::Unknown`], and never fires for a device on power.
+    ///
+    /// A `Low` alert additionally needs the reading to agree — it will not
+    /// fire above the crate's `LOW_PERCENTAGE`. A firmware `Critical` has no
+    /// such floor and fires at whatever the reading says, which is the whole
+    /// point of treating it as authoritative (see the module docs); a device
+    /// claiming `Critical` beside a healthy percentage is reporting a fault
+    /// worth surfacing, not a reading worth second-guessing.
     pub fn evaluate(&mut self, inventories: &[DeviceInventory]) -> Vec<BatteryAlert> {
         let mut alerts = Vec::new();
         let mut present: HashSet<DeviceKey> = HashSet::new();

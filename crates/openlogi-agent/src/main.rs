@@ -182,10 +182,18 @@ fn update_tray_battery(
         let _ = icon;
     }
 
+    // Folded in on every tick, even while the setting is off, for the same
+    // reason the glyph above is published unconditionally: the bookkeeping has
+    // to describe the world as it is now, not as it was when the user last had
+    // alerts on. Skipping the fold instead would leave `fired` frozen — a
+    // device that drained while muted would alert the moment the setting came
+    // back, and one that recovered while muted would stay marked as alerted
+    // and go quiet on its next real crossing.
+    let alerts = battery_alerts.evaluate(inventories);
     if !orchestrator.battery_alerts() {
         return;
     }
-    for alert in battery_alerts.evaluate(inventories) {
+    for alert in alerts {
         let severity = match alert.level {
             BatteryLevel::Critical => "critical",
             _ => "low",
