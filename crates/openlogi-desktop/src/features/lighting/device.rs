@@ -7,8 +7,10 @@
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px, rgb,
+    Render, Role, StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px,
+    rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
@@ -175,8 +177,16 @@ impl Render for LightingPanel {
 /// One color swatch. Clicking it turns lighting on and sets that color.
 fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
     let selected = current.enabled && current.color == color;
-    div()
-        .id(("light-swatch", idx))
+    BaseButton::new(("light-swatch", idx))
+        .role(Role::RadioButton)
+        .selected(selected)
+        .accessibility_label(format!("{} #{:06X}", tr!("Lighting"), color.packed()))
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .aria_selected(selected)
         .size(px(SWATCH))
         .rounded(pal.control_radius)
         .border_2()
@@ -187,6 +197,7 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
         })
         .bg(rgb(color.packed()))
         .cursor_pointer()
+        .focus_visible(|style| style.border_color(theme::accent()))
         .on_click(move |_event, _window, cx| {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);

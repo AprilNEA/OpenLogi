@@ -24,8 +24,9 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window, div, img, px,
+    SharedString, Styled, Subscription, Task, Window, div, img, px,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
@@ -186,12 +187,13 @@ impl Render for CameraPreview {
             openlogi_camera::camera_authorization(),
             CameraAuthorization::Undetermined
         ) {
-            div()
-                .id("camera-request-access")
+            BaseButton::new("camera-request-access")
+                .accessibility_label(tr!("Click to enable camera access."))
                 .text_body()
                 .text_color(pal.text_muted)
                 .cursor_pointer()
                 .hover(|s| s.text_color(pal.text_primary))
+                .focus_visible(|s| s.text_color(pal.text_primary))
                 .child(tr!("Click to enable camera access."))
                 .on_click(|_, _, cx| crate::features::camera::request_camera_access(cx))
                 .into_any_element()

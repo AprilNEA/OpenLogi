@@ -1,9 +1,9 @@
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::FluentBuilder as _, px, rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, TitleBar,
     button::{Button, ButtonVariants as _},
@@ -415,12 +415,13 @@ impl AppView {
                 "Takes effect automatically once granted — no restart needed."
             )))
             .child(
-                div()
-                    .id("skip-accessibility")
+                BaseButton::new("skip-accessibility")
+                    .accessibility_label(tr!("Not now (use DPI and other features only)"))
                     .text_caption()
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
+                    .focus_visible(|s| s.text_color(pal.text_primary))
                     .child(tr!("Not now (use DPI and other features only)"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;

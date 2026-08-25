@@ -153,14 +153,18 @@ fn accessibility_status(pal: Palette) -> AnyElement {
     // macOS-gated affordance (`.id()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
     use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    use gpui_base::Button as BaseButton;
 
-    h_flex()
-        .id("footer-accessibility")
+    BaseButton::new("footer-accessibility")
+        .accessibility_label(tr!("Accessibility not granted · click to grant"))
+        .flex()
         .gap_2()
         .items_center()
         .text_caption()
         .text_color(pal.text_primary)
         .cursor_pointer()
+        .hover(|style| style.text_color(pal.text_muted))
+        .focus_visible(|style| style.text_color(pal.text_muted))
         .child(
             div()
                 .size_1p5()

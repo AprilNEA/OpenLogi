@@ -1,13 +1,14 @@
 //! Assets (device-image cache) settings page.
 
 use crate::ui::theme::Typography as _;
+use gpui_base::Button as BaseButton;
 use std::time::Duration;
 
 use super::{
     App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Entity, IconName, IndexPath,
     InteractiveElement, IntoElement, Palette, ParentElement, Select, SelectItem, SelectState,
     SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, Sizable,
-    StateEvent, StatefulInteractiveElement, Styled, div, px,
+    StateEvent, Styled, div, px,
 };
 
 #[derive(Clone)]
@@ -205,8 +206,8 @@ fn action_button(
     pal: Palette,
     on_click: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    div()
-        .id(id)
+    BaseButton::new(id)
+        .accessibility_label(label.clone())
         .flex_shrink_0()
         .px_2()
         .py_1()
@@ -217,6 +218,7 @@ fn action_button(
         .cursor_pointer()
         .bg(pal.control)
         .hover(move |s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.bg(pal.control_hover))
         .child(label)
         .on_click(move |_, _, cx| on_click(cx))
 }
