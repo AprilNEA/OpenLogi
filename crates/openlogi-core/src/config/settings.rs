@@ -194,7 +194,9 @@ pub struct AppSettings {
     /// scroll animation. **Off by default**: while enabled the OS hook
     /// suppresses eligible physical wheel events only after its non-blocking
     /// scroll worker accepts them. Trackpad and other continuous pixel input
-    /// remains native.
+    /// remains native. Windows' low-level hook cannot attribute wheel messages
+    /// to a device, so the preference applies to every traditional mouse-wheel
+    /// message there.
     #[serde(default)]
     pub smooth_scroll: bool,
     /// Which app icon the user picked. Applied at launch, and whenever it

@@ -42,6 +42,7 @@ use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
+use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
 use openlogi_agent_core::watchers;
 use openlogi_core::config::Config;
@@ -164,18 +165,20 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
     );
 }
 
-struct ActionServices {
+struct InputServices {
     ring: Arc<ActionRingManager>,
     triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
     dispatcher: ActionDispatcher,
-    runtime: ActionRuntime,
+    action_runtime: ActionRuntime,
+    scroll_input: ScrollInputHandle,
+    scroll_runtime: ScrollRuntime,
 }
 
-impl ActionServices {
+impl InputServices {
     fn start(shared: &SharedRuntime) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = match ActionRuntime::new(
+        let action_runtime = match ActionRuntime::new(
             shared.dpi_cycle.clone(),
             shared.capture_channel.clone(),
             shared.channel_registry.clone(),
@@ -188,13 +191,28 @@ impl ActionServices {
                 return None;
             }
         };
-        let dispatcher = runtime.dispatcher();
+        let scroll_runtime = match ScrollRuntime::spawn(Arc::clone(&shared.smooth_scroll_enabled)) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!(error = %e, "could not start smooth-scroll worker — agent exiting");
+                return None;
+            }
+        };
+        let dispatcher = action_runtime.dispatcher();
+        let scroll_input = scroll_runtime.input();
         Some(Self {
             ring,
             triggers,
             dispatcher,
-            runtime,
+            action_runtime,
+            scroll_input,
+            scroll_runtime,
         })
+    }
+
+    fn shutdown(&mut self) {
+        self.scroll_runtime.shutdown();
+        self.action_runtime.shutdown();
     }
 }
 
@@ -204,7 +222,7 @@ impl ActionServices {
 fn start_hook(
     capture_mouse_events: bool,
     shared: &SharedRuntime,
-    dispatcher: &ActionDispatcher,
+    inputs: &InputServices,
     event_monitor: &Arc<EventMonitor>,
 ) -> Option<Hook> {
     if !capture_mouse_events {
@@ -218,7 +236,8 @@ fn start_hook(
     hook::start(
         shared.hook_maps.clone(),
         shared.keyboard_bindings.clone(),
-        dispatcher.clone(),
+        inputs.dispatcher.clone(),
+        inputs.scroll_input.clone(),
         Arc::clone(event_monitor),
     )
 }
@@ -329,14 +348,10 @@ fn shutdown_signals() -> (Option<()>, Option<()>) {
 /// would any other way of leaving that skips destructors. The agent's run loop
 /// is not the process — macOS keeps the AppKit tray loop on the main thread —
 /// so the exit has to be explicit.
-fn release_hook_and_exit(
-    hook: Option<Hook>,
-    action_runtime: &mut ActionRuntime,
-    reason: &str,
-) -> ! {
+fn release_hook_and_exit(hook: Option<Hook>, inputs: &mut InputServices, reason: &str) -> ! {
     info!(reason, "releasing the input hook and exiting");
     drop(hook);
-    action_runtime.shutdown();
+    inputs.shutdown();
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"
@@ -345,9 +360,10 @@ fn release_hook_and_exit(
 }
 
 /// Stop the hook so no new edge can race the lifecycle cancellation.
-fn stop_hook(hook: &mut Option<Hook>, dispatcher: &ActionDispatcher) {
+fn stop_hook(hook: &mut Option<Hook>, inputs: &InputServices) {
     *hook = None;
-    dispatcher.cancel_hook_buttons();
+    inputs.dispatcher.cancel_hook_buttons();
+    inputs.scroll_input.cancel_hooks();
 }
 
 /// Prompt for Accessibility when the enabled mouse hook needs it.
@@ -464,7 +480,7 @@ async fn run(
         Arc::clone(&observable),
     )));
     let shared = orchestrator.lock().await.shared();
-    let Some(mut actions) = ActionServices::start(&shared) else {
+    let Some(mut inputs) = InputServices::start(&shared) else {
         return;
     };
 
@@ -481,7 +497,7 @@ async fn run(
     ));
 
     // HID++ watchers need no Accessibility permission — start them up front.
-    spawn_hidpp_watchers(&shared, actions.dispatcher.clone());
+    spawn_hidpp_watchers(&shared, inputs.dispatcher.clone());
 
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),
@@ -503,8 +519,8 @@ async fn run(
         Arc::clone(&observable),
         Arc::clone(&pairing),
         Arc::clone(&event_monitor),
-        Arc::clone(&actions.ring),
-        actions.dispatcher.clone(),
+        Arc::clone(&inputs.ring),
+        inputs.dispatcher.clone(),
     );
 
     // The CGEventTap hook is installed once Accessibility is granted and dropped
@@ -542,21 +558,21 @@ async fn run(
                 camera_open = false;
             },
             Some(app) = app_rx.recv() => {
-                apply_foreground_update(app, &orchestrator, &actions.dispatcher).await;
+                apply_foreground_update(app, &orchestrator, &inputs.dispatcher).await;
             }
-            Some(device_key) = actions.triggers.recv() => {
-                begin_action_ring(&orchestrator, &actions.ring, &ring_haptics, device_key.as_deref()).await;
+            Some(device_key) = inputs.triggers.recv() => {
+                begin_action_ring(&orchestrator, &inputs.ring, &ring_haptics, device_key.as_deref()).await;
             }
             Some(granted) = accessibility_rx.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
-                    stop_hook(&mut hook, &actions.dispatcher);
+                    stop_hook(&mut hook, &inputs);
                 }
                 if granted && hook.is_none() {
                     hook = start_hook(
                         capture_mouse_events,
                         &shared,
-                        &actions.dispatcher,
+                        &inputs,
                         &event_monitor,
                     );
                 }
@@ -565,12 +581,12 @@ async fn run(
                 observable.set_hook_installed(hook.is_some());
             }
             () = shutdown_signal(&mut sigterm, &mut sigint) => {
-                release_hook_and_exit(hook.take(), &mut actions.runtime, "shutdown signal")
+                release_hook_and_exit(hook.take(), &mut inputs, "shutdown signal")
             }
             // The app was removed while we kept running from its bundle. Leave
             // through the same door, so the event tap goes with us (#807).
             Some(()) = uninstalled.recv() => {
-                release_hook_and_exit(hook.take(), &mut actions.runtime, "the app was uninstalled")
+                release_hook_and_exit(hook.take(), &mut inputs, "the app was uninstalled")
             }
             Some(granted) = input_monitoring_rx.recv() => {
                 observable.set_input_monitoring_granted(granted);
