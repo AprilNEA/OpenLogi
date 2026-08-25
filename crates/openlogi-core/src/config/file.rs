@@ -150,6 +150,15 @@ impl ConfigFile {
         }
     }
 
+    /// Re-read the retained path and return a freshly revision-tracked file.
+    ///
+    /// Feature-local conflict recovery uses this to merge its one confirmed
+    /// mutation onto the newest on-disk configuration without overwriting
+    /// unrelated edits made after the GUI started.
+    pub fn reload(&self) -> Result<(Config, Self), ConfigError> {
+        Self::load_from_path(&self.path)
+    }
+
     /// Save `config` only if the file still matches the loaded revision.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
         let current = match fs::read_to_string(&self.path) {
