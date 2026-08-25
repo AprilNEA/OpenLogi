@@ -588,10 +588,12 @@ fn plan_reapply_retries_a_first_sighting_for_a_bounded_run() {
 }
 
 #[test]
-fn plan_reapply_transitions_are_not_queued_for_confirmation() {
+fn plan_reapply_retries_an_offline_to_online_transition() {
     use std::collections::HashMap;
-    // A wake from device sleep re-applies once — the device was already
-    // booted, so no confirming write is queued.
+    // A wake from device sleep applies now and queues confirming writes. The
+    // inventory can report the device online before its HID++ feature path is
+    // ready, so a transient failure must not leave persisted settings
+    // unapplied until another reconnect.
     let (targets, followup) = plan_reapply(
         &[dev("a", 1, false)],
         &[dev("a", 1, true)],
@@ -599,7 +601,19 @@ fn plan_reapply_transitions_are_not_queued_for_confirmation() {
         false,
     );
     assert_eq!(targets, vec![0]);
-    assert!(followup.is_empty());
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+    );
+
+    // The next steady tick retries and consumes one unit of the bounded run.
+    let online = [dev("a", 1, true)];
+    let (targets, followup) = plan_reapply(&online, &online, &followup, false);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+    );
 }
 
 #[test]
