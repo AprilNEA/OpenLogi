@@ -6,14 +6,14 @@ use openlogi_core::config::AppIcon;
 
 use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
-    IconName, Input, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc,
-    SelectState, Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
-    SharedString, Sizable, StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor,
-    ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme,
-    v_flex,
+    IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
+    Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
+    StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
+    ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
 use crate::platform::app_icon;
 use crate::ui::choice_card::ChoiceCard;
+use crate::ui::components::control_input;
 use crate::ui::theme::Typography as _;
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
@@ -526,8 +526,7 @@ fn theme_picker(
                 )
                 .child(
                     div().w(px(200.)).flex_shrink_0().child(
-                        Input::new(theme_search)
-                            .small()
+                        control_input(theme_search)
                             .cleanable(true)
                             .prefix(IconName::Search),
                     ),

@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use appcatalog::{Application, ApplicationIdentity, IdentityKind};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, Image, InteractiveElement,
-    IntoElement, ParentElement, Role, StatefulInteractiveElement as _, Styled, Subscription, Task,
-    WeakEntity, Window, div, img, prelude::FluentBuilder as _, px, uniform_list,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement,
+    ParentElement, RenderImage, Role, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, div, img, prelude::FluentBuilder as _, px,
+    uniform_list,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -17,19 +18,25 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     popover::{Popover, PopoverState},
+    scroll::ScrollableElement as _,
+    spinner::Spinner,
     v_flex,
 };
 
 use crate::state::AppState;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 use super::mouse::picker::{compact_panel, divider, title};
 
-const PROFILE_CONTROL_H: f32 = 30.;
 const APP_ROW_H: f32 = 44.;
+/// Icon tile edge inside picker rows: the height of the two-line text block,
+/// so the 64 px source rendition maps 1:1 at 2× scale.
+const ROW_ICON_EDGE: f32 = 32.;
+/// Icon edge inside single-line profile tabs.
+const TAB_ICON_EDGE: f32 = 18.;
 
 #[derive(Clone)]
 struct ProfileChoice {
@@ -46,21 +53,34 @@ struct AddAppChoices {
     failed: bool,
 }
 
-/// Installed application icons are immutable for a GUI session. Keep AppKit
-/// lookup and image encoding out of the render loop after the first sighting.
+/// Installed application icons are immutable for a GUI session. The store
+/// only ever holds finished lookups — [`AppCatalogPicker::ensure_icon`] fills
+/// it from the background executor, so a miss renders the monogram fallback
+/// and the row repaints when the icon lands. AppKit never runs on the render
+/// path.
 #[derive(Clone, Default)]
 pub(crate) struct ProfileIconCache {
-    icons: Rc<RefCell<HashMap<String, Option<Arc<Image>>>>>,
+    icons: Rc<RefCell<HashMap<String, Option<Arc<RenderImage>>>>>,
 }
 
 impl ProfileIconCache {
-    fn icon(&self, app: &str) -> Option<Arc<Image>> {
-        self.icons
-            .borrow_mut()
-            .entry(app.to_string())
-            .or_insert_with(|| crate::platform::app_icon::application_icon(app))
-            .clone()
+    fn state(&self, app: &str) -> AppIconState {
+        match self.icons.borrow().get(app) {
+            Some(Some(icon)) => AppIconState::Ready(icon.clone()),
+            Some(None) => AppIconState::Missing,
+            None => AppIconState::Loading,
+        }
     }
+}
+
+/// One application icon as the UI sees it right now. The two icon-less
+/// states render differently on purpose: a resolve still in flight shows a
+/// spinner, while an application the platform has no icon for keeps its
+/// monogram — otherwise every icon looks broken for a frame.
+enum AppIconState {
+    Ready(Arc<RenderImage>),
+    Loading,
+    Missing,
 }
 
 enum CatalogLoad {
@@ -79,12 +99,23 @@ pub(crate) struct AppCatalogPicker {
     expanded: bool,
     load: CatalogLoad,
     preferred_identity: IdentityKind,
+    icons: ProfileIconCache,
+    /// One in-flight icon resolve per application; dropping the picker
+    /// cancels whatever has not landed yet.
+    icon_tasks: HashMap<String, Task<()>>,
+    /// Keeps the catalog list's scroll position across repaints and feeds
+    /// its scrollbar.
+    list_scroll: UniformListScrollHandle,
     _search_subscription: Subscription,
     _discovery_task: Task<()>,
 }
 
 impl AppCatalogPicker {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        icons: ProfileIconCache,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search applications…")));
         let search_subscription = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
@@ -125,6 +156,9 @@ impl AppCatalogPicker {
             expanded: false,
             load: CatalogLoad::Loading,
             preferred_identity: preferred_identity_kind(None),
+            icons,
+            icon_tasks: HashMap::new(),
+            list_scroll: UniformListScrollHandle::new(),
             _search_subscription: search_subscription,
             _discovery_task: discovery_task,
         }
@@ -133,6 +167,36 @@ impl AppCatalogPicker {
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search
             .update(cx, |search, cx| search.set_value("", window, cx));
+    }
+
+    /// Start a background resolve for `app`'s icon unless one already
+    /// finished or is in flight. Each application resolves independently and
+    /// repaints on arrival, so a slow icon never holds up the rest.
+    fn ensure_icon(&mut self, app: &str, cx: &mut Context<Self>) {
+        if self.icons.icons.borrow().contains_key(app) || self.icon_tasks.contains_key(app) {
+            return;
+        }
+        let app = app.to_string();
+        let task = cx.spawn({
+            let app = app.clone();
+            async move |picker, cx| {
+                let icon = cx
+                    .background_executor()
+                    .spawn({
+                        let app = app.clone();
+                        async move { crate::platform::app_icon::application_icon(&app) }
+                    })
+                    .await;
+                picker
+                    .update(cx, |picker, cx| {
+                        picker.icons.icons.borrow_mut().insert(app.clone(), icon);
+                        picker.icon_tasks.remove(&app);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        });
+        self.icon_tasks.insert(app, task);
     }
 
     fn available_profiles(
@@ -237,7 +301,7 @@ pub fn profile_scope_bar(
     pal: Palette,
     icons: &ProfileIconCache,
     catalog: &Entity<AppCatalogPicker>,
-    cx: &App,
+    cx: &mut App,
 ) -> Option<AnyElement> {
     let state = AppState::try_read(cx)?;
     if !state.current_device_is_persistent() {
@@ -295,6 +359,11 @@ pub fn profile_scope_bar(
     let mut unavailable = persisted_ids;
     unavailable.extend(observed_ids.iter().cloned());
     unavailable.extend(editing_app.iter().cloned());
+    catalog.update(cx, |picker, cx| {
+        for profile in &profiles {
+            picker.ensure_icon(&profile.app, cx);
+        }
+    });
     let available_catalog = catalog
         .read(cx)
         .available_profiles(&observed_ids, &unavailable);
@@ -375,8 +444,9 @@ fn profile_scope_content(
                 ("app-profile", index),
                 profile.name.clone(),
                 Some(application_mark(
-                    icons.icon(&profile.app),
+                    icons.state(&profile.app),
                     &profile.name,
+                    TAB_ICON_EDGE,
                     pal,
                 )),
                 selected,
@@ -461,7 +531,7 @@ fn profile_tab(
         .flex_none()
         .items_center()
         .gap_1p5()
-        .h(px(PROFILE_CONTROL_H))
+        .h(px(theme::CONTROL_H))
         .px_2p5()
         .rounded(pal.control_radius)
         .cursor_pointer()
@@ -486,26 +556,40 @@ fn profile_tab(
         .child(label)
 }
 
-fn application_mark(icon: Option<Arc<Image>>, name: &str, pal: Palette) -> AnyElement {
-    if let Some(icon) = icon {
-        return img(icon).size(px(18.)).flex_none().into_any_element();
-    }
-
-    let initial = name
-        .chars()
-        .find(|character| !character.is_whitespace())
-        .map_or_else(|| "?".to_string(), |character| character.to_string());
-    h_flex()
-        .size(px(18.))
+fn application_mark(icon: AppIconState, name: &str, edge: f32, pal: Palette) -> AnyElement {
+    let slot = h_flex()
+        .size(px(edge))
         .flex_none()
         .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .bg(pal.muted)
-        .text_caption()
-        .text_color(pal.text_muted)
-        .child(initial)
-        .into_any_element()
+        .justify_center();
+    match icon {
+        AppIconState::Ready(icon) => img(icon).size(px(edge)).flex_none().into_any_element(),
+        AppIconState::Loading => slot
+            .child(
+                Spinner::new()
+                    .with_size(px(edge * 0.6))
+                    .color(pal.text_muted),
+            )
+            .into_any_element(),
+        AppIconState::Missing => {
+            let initial = name
+                .chars()
+                .find(|character| !character.is_whitespace())
+                .map_or_else(|| "?".to_string(), |character| character.to_string());
+            slot.rounded(px(edge / 4.))
+                .bg(pal.muted)
+                .map(|tile| {
+                    if edge < 24. {
+                        tile.text_caption()
+                    } else {
+                        tile.text_body()
+                    }
+                })
+                .text_color(pal.text_muted)
+                .child(initial)
+                .into_any_element()
+        }
+    }
 }
 
 fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::SharedString {
@@ -538,11 +622,12 @@ fn add_app_popover(
     let catalog_on_open = catalog.clone();
     Popover::new("add-app-popover")
         .anchor(Anchor::TopRight)
+        // `compact_panel` is the surface; the popover chrome would wrap it in
+        // a second padded, differently-rounded box.
+        .appearance(false)
         .trigger(
-            Button::new("add-app-profile")
+            control_button("add-app-profile")
                 .outline()
-                .small()
-                .h(px(PROFILE_CONTROL_H))
                 .icon(IconName::Plus)
                 .label(tr!("Add app")),
         )
@@ -567,12 +652,21 @@ fn add_app_content(
     let search = catalog_state.search.clone();
     let query = search.read(cx).value().trim().to_lowercase();
     let show_applications = catalog_state.expanded || !query.is_empty();
+    let list_scroll = catalog_state.list_scroll.clone();
+    catalog.update(cx, |picker, cx| {
+        for choice in &choices.recent {
+            picker.ensure_icon(&choice.app, cx);
+        }
+    });
     let recent_rows = choices
         .recent
         .iter()
         .filter(|choice| profile_matches_query(choice, &query))
         .cloned()
-        .map(|choice| application_row(choice, icons, pal, popover.clone()))
+        .map(|choice| {
+            let icon = icons.state(&choice.app);
+            application_row(choice, icon, pal, popover.clone())
+        })
         .collect::<Vec<_>>();
     let application_rows = choices
         .applications
@@ -585,7 +679,7 @@ fn add_app_content(
         && !choices.failed
         && (query.is_empty() || recent_rows.is_empty());
     let catalog_for_toggle = catalog.clone();
-    let list_icons = icons.clone();
+    let list_catalog = catalog.clone();
     let list_popover = popover.clone();
     let list_len = application_rows.len();
     let application_rows = Arc::new(application_rows);
@@ -595,8 +689,7 @@ fn add_app_content(
         .child(title(tr!("Add app profile"), pal))
         .child(divider(pal))
         .child(
-            Input::new(&search)
-                .small()
+            control_input(&search)
                 .cleanable(true)
                 .prefix(IconName::Search),
         )
@@ -612,6 +705,7 @@ fn add_app_content(
             )
         })
         .children(recent_rows)
+        .child(div().pt_1().w_full().child(divider(pal)))
         .child(applications_toggle(
             show_applications,
             catalog_for_toggle,
@@ -627,29 +721,53 @@ fn add_app_content(
             ))
         })
         .when(show_applications && list_len > 0, |card| {
-            card.child(
-                uniform_list("application-catalog-list", list_len, {
-                    let application_rows = application_rows.clone();
-                    move |visible_range, _window, _cx| {
-                        visible_range
-                            .map(|index| {
-                                application_row(
-                                    application_rows[index].clone(),
-                                    &list_icons,
-                                    pal,
-                                    list_popover.clone(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                })
-                .h(px(application_list_height(list_len)))
-                .w_full(),
-            )
+            card.child(catalog_list(
+                application_rows,
+                list_catalog,
+                list_popover,
+                &list_scroll,
+                pal,
+            ))
         })
         .when(show_applications && no_matches, |card| {
             card.child(catalog_message(tr!("No applications found"), pal))
         })
+}
+
+/// The scrollable catalog body: a `uniform_list` capped at six rows, with a
+/// scrollbar signalling position in the full inventory. Rows resolve their
+/// icons as they enter the viewport.
+fn catalog_list(
+    rows: Arc<Vec<ProfileChoice>>,
+    catalog: Entity<AppCatalogPicker>,
+    popover: WeakEntity<PopoverState>,
+    scroll: &UniformListScrollHandle,
+    pal: Palette,
+) -> gpui::Div {
+    let count = rows.len();
+    div()
+        .h(px(application_list_height(count)))
+        .w_full()
+        .child(
+            uniform_list("application-catalog-list", count, {
+                move |visible_range, _window, cx| {
+                    catalog.update(cx, |picker, cx| {
+                        visible_range
+                            .map(|index| {
+                                let choice = rows[index].clone();
+                                picker.ensure_icon(&choice.app, cx);
+                                let icon = picker.icons.state(&choice.app);
+                                application_row(choice, icon, pal, popover.clone())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                }
+            })
+            .track_scroll(scroll)
+            .h_full()
+            .w_full(),
+        )
+        .vertical_scrollbar(scroll)
 }
 
 fn applications_toggle(
@@ -663,21 +781,48 @@ fn applications_toggle(
         .w_full()
         .flex()
         .items_center()
-        .gap_1p5()
+        .gap_2()
         .px_2()
         .py_1p5()
         .rounded(pal.control_radius)
         .text_body()
-        .text_color(pal.text_primary)
-        .hover(move |button| button.bg(pal.control_hover))
-        .focus_visible(move |button| button.bg(pal.control_hover))
-        .child(
-            Icon::new(if expanded {
-                IconName::ChevronDown
+        // Muted while collapsed so the section control reads apart from the
+        // application rows; primary once open, over the accent fill.
+        .text_color(if expanded {
+            pal.text_primary
+        } else {
+            pal.text_muted
+        })
+        .selected_fill(expanded)
+        .hover(move |button| {
+            button.bg(if expanded {
+                theme::accent_tint_hover()
             } else {
-                IconName::ChevronRight
+                pal.control_hover
             })
-            .size_3(),
+        })
+        .focus_visible(move |button| {
+            button.bg(if expanded {
+                theme::accent_tint_hover()
+            } else {
+                pal.control_hover
+            })
+        })
+        .child(
+            // The chevron sits centred in a row-icon-wide slot so the label
+            // starts where the application names below do.
+            h_flex()
+                .w(px(ROW_ICON_EDGE))
+                .flex_none()
+                .justify_center()
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_4(),
+                ),
         )
         .child(tr!("All applications"))
         .on_click(move |_event, _window, cx| {
@@ -696,7 +841,7 @@ fn profile_matches_query(choice: &ProfileChoice, query: &str) -> bool {
 
 fn application_row(
     choice: ProfileChoice,
-    icons: &ProfileIconCache,
+    icon: AppIconState,
     pal: Palette,
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
@@ -709,7 +854,7 @@ fn application_row(
                     .min_w_0()
                     .items_center()
                     .gap_2()
-                    .child(application_mark(icons.icon(&choice.app), &choice.name, pal))
+                    .child(application_mark(icon, &choice.name, ROW_ICON_EDGE, pal))
                     .child(
                         v_flex()
                             .min_w_0()
@@ -758,6 +903,8 @@ fn application_list_height(rows: usize) -> f32 {
 fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
     Popover::new("profile-options-popover")
         .anchor(Anchor::TopRight)
+        // `compact_panel` is the surface here too; see `add_app_popover`.
+        .appearance(false)
         .trigger(
             Button::new("profile-options")
                 .ghost()
@@ -846,11 +993,21 @@ pub(crate) fn friendly_app_name(identifier: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::HashSet;
+    use std::rc::Rc;
 
     use appcatalog::{Application, ApplicationIdentity, IdentityKind};
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render,
+        ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext, TouchPhase, Window, div, point,
+        px, uniform_list,
+    };
+    use gpui_component::button::Button;
+    use gpui_component::popover::Popover;
 
-    use super::{friendly_app_name, identity_for_application};
+    use super::{APP_ROW_H, MenuRow, compact_panel, friendly_app_name, identity_for_application};
+    use crate::ui::theme;
 
     #[test]
     fn profile_identifiers_have_a_readable_fallback() {
@@ -917,5 +1074,94 @@ mod tests {
             registration: "editor.desktop".into(),
             icon: None,
         }
+    }
+
+    /// The Add-app popover structure — unstyled popover, `compact_panel`
+    /// surface, `uniform_list` catalog — with rows that record activation
+    /// instead of touching `AppState`.
+    struct PickerScrollHarness {
+        clicked: Rc<RefCell<Option<usize>>>,
+    }
+
+    impl Render for PickerScrollHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let pal = theme::palette(cx);
+            let clicked = self.clicked.clone();
+            Popover::new("add-app-popover")
+                .appearance(false)
+                .trigger(Button::new("add-app-profile").label("Add app"))
+                .content(move |_state, _window, _cx| {
+                    let clicked = clicked.clone();
+                    compact_panel(pal).w(px(320.)).child(
+                        uniform_list(
+                            "application-catalog-list",
+                            30,
+                            move |range, _window, _cx| {
+                                range
+                                    .map(|index| {
+                                        let clicked = clicked.clone();
+                                        div()
+                                            .h(px(APP_ROW_H))
+                                            .debug_selector(move || format!("app-row-{index}"))
+                                            .child(
+                                                MenuRow::new(("catalog-app", index))
+                                                    .child(format!("App {index}"))
+                                                    .on_click(move |_, _, _| {
+                                                        clicked.replace(Some(index));
+                                                    }),
+                                            )
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                        )
+                        .h(px(APP_ROW_H * 6.))
+                        .w_full(),
+                    )
+                })
+        }
+    }
+
+    #[gpui::test]
+    fn catalog_list_scrolls_inside_the_picker_popover(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let clicked: Rc<RefCell<Option<usize>>> = Rc::default();
+        let (_, cx) = cx.add_window_view({
+            let clicked = clicked.clone();
+            move |_, _| PickerScrollHarness { clicked }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Open through the trigger, then let the deferred popup capture its
+        // anchor and paint the content on the following frame.
+        cx.simulate_click(point(px(20.), px(10.)), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let first_row = cx
+            .debug_bounds("app-row-0")
+            .expect("the catalog list renders in the popover");
+        let cursor = first_row.center();
+        cx.simulate_click(cursor, Modifiers::default());
+        assert_eq!(*clicked.borrow(), Some(0));
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: cursor,
+            delta: ScrollDelta::Lines(point(0., -5.)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert_ne!(
+            cx.debug_bounds("app-row-0"),
+            Some(first_row),
+            "wheel over the catalog list must scroll it"
+        );
+        cx.simulate_click(cursor, Modifiers::default());
+        assert_ne!(
+            *clicked.borrow(),
+            Some(0),
+            "after scrolling a different row sits under the cursor"
+        );
     }
 }

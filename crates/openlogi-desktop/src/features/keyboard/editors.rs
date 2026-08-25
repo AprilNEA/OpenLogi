@@ -21,7 +21,6 @@ use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants},
     h_flex,
-    input::Input,
     input::InputState,
     v_flex,
 };
@@ -31,7 +30,7 @@ use openlogi_core::config::KeyTrigger;
 use super::function_row::FunctionRowView;
 use crate::features::mouse::picker::{compact_panel, divider, editor_scroll_list, title};
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{Palette, Typography as _};
 
 /// Which power-user editor is showing for the selected key.
@@ -125,7 +124,7 @@ fn text_editor_card(
             v_flex()
                 .p_2()
                 .gap_2()
-                .child(div().child(Input::new(&text_state).cleanable(true)))
+                .child(div().child(control_input(&text_state).cleanable(true)))
                 .child(editor_action_row(trigger, kind, view, pal, cx)),
         )
         .into_any_element()

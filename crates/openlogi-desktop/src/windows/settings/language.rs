@@ -1,8 +1,10 @@
 //! Interface-language picker, shared by the Appearance page and the view.
 
+use crate::ui::components::control_select;
+
 use super::{
-    Entity, IndexPath, IntoElement, ParentElement, Select, SelectItem, SelectState, SharedString,
-    Sizable, Styled, div, px,
+    Entity, IndexPath, IntoElement, ParentElement, SelectItem, SelectState, SharedString, Styled,
+    div, px,
 };
 
 #[derive(Clone)]
@@ -71,8 +73,7 @@ pub(super) fn language_select_field(
     // The Select's root is `size_full`, so pin it to a fixed-size box instead
     // of letting it consume the whole Settings item row.
     div().flex_shrink_0().w(px(220.)).h_6().child(
-        Select::new(&language_select)
-            .small()
+        control_select(&language_select)
             .w(px(220.))
             .menu_width(px(220.)),
     )

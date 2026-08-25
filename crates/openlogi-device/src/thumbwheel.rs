@@ -133,11 +133,11 @@ impl WheelResolution {
     /// `getThumbwheelInfo` keeps the raw increment-per-unit behavior rather
     /// than having its scroll silently scaled by a guess.
     #[must_use]
-    pub fn native_per_increment(self) -> f32 {
+    pub fn native_per_increment(self) -> f64 {
         if self.native_res == 0 || self.diverted_res == 0 {
             return 1.0;
         }
-        f32::from(self.native_res) / f32::from(self.diverted_res)
+        f64::from(self.native_res) / f64::from(self.diverted_res)
     }
 }
 

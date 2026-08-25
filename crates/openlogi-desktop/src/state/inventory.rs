@@ -326,6 +326,54 @@ impl AppState {
     }
 }
 
+impl super::AppState {
+    /// Forget an offline device: drop its persisted identity, custom name,
+    /// and per-device settings, and remove its placeholder card. Live devices
+    /// are never offered this — the next inventory snapshot would simply
+    /// re-register them.
+    pub(crate) fn forget_device(&mut self, record_key: &str) -> bool {
+        let Some(index) = self
+            .devices
+            .records
+            .iter()
+            .position(|record| record.record_key() == record_key)
+        else {
+            return false;
+        };
+        let record = &self.devices.records[index];
+        if record.online {
+            return false;
+        }
+        let device_key = record.device_key();
+        let config_key = record.persistent_config_key().map(str::to_string);
+
+        // Dropping the config entry *is* the deletion, so the card only
+        // follows once the write lands. A failed save restores the persisted
+        // revision, so returning early keeps memory, disk, and the gallery in
+        // agreement: the device honestly stays instead of vanishing until the
+        // next inventory refresh resurrects it.
+        if let Some(config_key) = config_key {
+            self.config.edit(|config| config.remove_device(&config_key));
+            if !self.persist_and_reload("device removed") {
+                return false;
+            }
+        }
+
+        let mut records = self.devices.records.clone();
+        records.remove(index);
+        let selected = match self.devices.selected_index() {
+            Some(selected) if selected > index => selected - 1,
+            Some(selected) if selected == index => 0,
+            Some(selected) => selected,
+            None => 0,
+        };
+        self.devices.replace(records, selected);
+        self.devices.runtime.remove(&device_key);
+        self.pointer.reads.remove(&device_key);
+        true
+    }
+}
+
 pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> bool {
     let mut changed = false;
     for record in list {

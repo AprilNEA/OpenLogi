@@ -41,6 +41,7 @@ pub(crate) struct BatteryIndicator {
 #[derive(Clone, Copy)]
 enum Presentation {
     Inline,
+    Glance,
     Status { online: bool },
     Summary,
 }
@@ -51,6 +52,15 @@ impl BatteryIndicator {
         Self {
             battery: battery.clone(),
             presentation: Presentation::Inline,
+        }
+    }
+
+    /// The tersest readout — glyph and value only — for a card corner whose
+    /// context rides a hover tip (see [`battery_context`]).
+    pub(crate) fn glance(battery: &BatteryInfo) -> Self {
+        Self {
+            battery: battery.clone(),
+            presentation: Presentation::Glance,
         }
     }
 
@@ -76,6 +86,7 @@ impl RenderOnce for BatteryIndicator {
         let pal = theme::palette(cx);
         match self.presentation {
             Presentation::Inline => inline_readout(&self.battery, pal).into_any_element(),
+            Presentation::Glance => glance_readout(&self.battery, pal).into_any_element(),
             Presentation::Status { online } => {
                 status_readout(&self.battery, online, pal).into_any_element()
             }
@@ -96,6 +107,23 @@ fn inline_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
                 .text_color(pal.text_primary)
                 .child(value_label(battery)),
         )
+}
+
+fn glance_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap_2()
+        .text_caption()
+        .child(battery_glyph(battery, pal, GlyphSize::Compact, pal.panel))
+    // The number is hidden for now — the glyph's fill carries it, and
+    // [`glance_hint`] repeats it on hover. Re-enable if the glyph alone
+    // proves too coarse.
+    // .child(
+    //     gpui::div()
+    //         .font_weight(FontWeight::MEDIUM)
+    //         .text_color(pal.text_primary)
+    //         .child(value_label(battery)),
+    // )
 }
 
 fn status_readout(battery: &BatteryInfo, online: bool, pal: Palette) -> impl IntoElement {
@@ -156,6 +184,15 @@ fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
                 battery_needs_attention(battery).then(|| tr!("Low battery"))
             }
         }
+    }
+}
+
+/// Everything a [`BatteryIndicator::glance`] does not show — the value plus
+/// the status and last-known words — for its caller's hover tip.
+pub(crate) fn glance_hint(battery: &BatteryInfo, online: bool) -> String {
+    match context_label(battery, online) {
+        Some(context) => format!("{} · {context}", value_label(battery)),
+        None => value_label(battery),
     }
 }
 
