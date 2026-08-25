@@ -48,7 +48,7 @@ Ce qu'OpenLogi fait et qu'Options+ ne fait pas :
 
 - Appareils connectés via récepteurs Logi Bolt, récepteurs Unifying, Bluetooth ou câble, avec pourcentage de batterie et état de charge
 - Remappage des boutons via le hook d'entrée de l'OS : catalogue d'actions intégrées plus raccourcis clavier personnalisés (rédigés en TOML)¹
-- Surcouches de profil par application avec bascule automatique au focus (macOS + Windows ; Linux uniquement en X11 / XWayland)
+- Surcouches de profil par application avec bascule automatique au focus (macOS + Windows ; Linux sous GNOME via l'extension Shell fournie, avec les compositeurs wlroots, ou en X11 / XWayland)
 - Lampes Litra : alimentation, luminosité et température de couleur, avec allumage automatique optionnel suivant l'activité de la caméra
 
 **Souris**

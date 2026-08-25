@@ -48,7 +48,7 @@ Was OpenLogi kann und Options+ nicht:
 
 - Geräte über Logi-Bolt-Empfänger, Unifying-Empfänger, Bluetooth oder Kabel, mit Akkustand und Ladezustand
 - Tastenumbelegung über den OS-Input-Hook: Katalog eingebauter Aktionen plus eigene Tastenkürzel (in TOML angelegt)¹
-- Profil-Overlays pro Anwendung mit Auto-Wechsel bei App-Fokus (macOS + Windows; Linux nur X11 / XWayland)
+- Profil-Overlays pro Anwendung mit Auto-Wechsel bei App-Fokus (macOS + Windows; Linux unter GNOME über die mitgelieferte Shell-Erweiterung, mit wlroots-Compositoren oder über X11 / XWayland)
 - Litra-Leuchten: Ein/Aus, Helligkeit und Farbtemperatur, auf Wunsch automatisch an die Kameraaktivität gekoppelt
 
 **Maus**

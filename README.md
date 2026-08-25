@@ -53,7 +53,7 @@ Things OpenLogi does that Options+ won't:
 
 - Devices connected over Logi Bolt receivers, Unifying receivers, Bluetooth, or a wired connection, with battery percentage and charge state
 - Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config, including independent short/long-press actions and hold-until-release chords for push-to-talk¹
-- Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)
+- Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on GNOME via the bundled Shell extension, on wlroots compositors, or on X11 / XWayland)
 - Litra lights: power, brightness, and color temperature, with optional auto power that follows camera activity
 
 **Mouse**
