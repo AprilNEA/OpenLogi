@@ -44,6 +44,8 @@ const BASE_REM_SIZE: f32 = 16.;
 /// Maximum-width scale for detail-tab content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentWidth {
+    /// Compact explanatory copy and empty-state text (440 px at 100%).
+    Narrow,
     /// A single compact settings card (560 px at 100%).
     Small,
     /// A wider single panel (680 px at 100%).
@@ -61,6 +63,7 @@ impl ContentWidth {
     #[must_use]
     pub const fn rems(self) -> Rems {
         match self {
+            Self::Narrow => rems(27.5),
             Self::Small => rems(35.),
             Self::Medium => rems(42.5),
             Self::Large => rems(57.5),
@@ -85,12 +88,13 @@ pub const CARD_GAP: Rems = rems(0.75);
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
 
-/// Responsive bounds for a device card in the Home grid. At the 720 px minimum
-/// window width, two cards fit after the screen inset and gap; at the normal
-/// wide window, three grow to [`GALLERY_CARD_MAX_W`]. `GALLERY_PHOTO_H` is the
-/// product-image stage above the identity and status rows.
-pub const GALLERY_CARD_MIN_W: f32 = 310.;
-pub const GALLERY_CARD_MAX_W: f32 = 405.;
+/// Responsive bounds for a device card in the Home grid. At standard scale,
+/// two cards fit the 720 px minimum window after the screen inset and gap; at
+/// the normal wide window, three grow to [`GALLERY_CARD_MAX_W`].
+/// `GALLERY_PHOTO_H` is the fixed product-image stage above the scalable
+/// identity and status rows.
+pub const GALLERY_CARD_MIN_W: Rems = rems(19.375);
+pub const GALLERY_CARD_MAX_W: Rems = rems(25.3125);
 pub const GALLERY_PHOTO_H: f32 = 196.;
 
 /// Appearance-dependent surface + text colours for the bespoke (non
@@ -451,6 +455,7 @@ mod tests {
     fn content_width_scale_preserves_the_standard_layout() {
         assert_eq!(
             [
+                ContentWidth::Narrow,
                 ContentWidth::Small,
                 ContentWidth::Medium,
                 ContentWidth::Large,
@@ -458,7 +463,7 @@ mod tests {
                 ContentWidth::DoubleExtraLarge,
             ]
             .map(|width| width.rems().to_pixels(px(BASE_REM_SIZE))),
-            [px(560.), px(680.), px(920.), px(980.), px(1040.)]
+            [px(440.), px(560.), px(680.), px(920.), px(980.), px(1040.),]
         );
     }
 

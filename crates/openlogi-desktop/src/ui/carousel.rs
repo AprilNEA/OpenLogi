@@ -11,7 +11,7 @@
 //! navigation through [`Carousel::on_select`].
 //!
 //! ```ignore
-//! Carousel::new("devices", px(240.))
+//! Carousel::new("devices", rems(15.))
 //!     .len(devices.len())
 //!     .selected(current)
 //!     .render_item(move |ix, selected, _w, cx| render_device(ix, selected, cx))
@@ -21,9 +21,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
     RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _, rems,
 };
 use gpui_component::{
     Disableable as _, IconName, Sizable as _, Size,
@@ -35,30 +35,30 @@ type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 type ItemRenderer = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static>;
 
 /// Side padding of the scrolling row.
-const ROW_PAD: f32 = 24.;
+const ROW_PAD: Rems = rems(1.5);
 
 /// A controlled equal-size card carousel. See the module docs.
 #[derive(IntoElement)]
 pub struct Carousel {
     id: ElementId,
-    card_w: Pixels,
+    card_w: Rems,
     len: usize,
     selected: usize,
     render_item: Option<ItemRenderer>,
-    gap: Pixels,
+    gap: Rems,
     on_select: Option<SelectHandler>,
 }
 
 impl Carousel {
     /// Create a carousel whose cards are `card_w` wide. `id` keys scroll state.
-    pub fn new(id: impl Into<ElementId>, card_w: Pixels) -> Self {
+    pub fn new(id: impl Into<ElementId>, card_w: Rems) -> Self {
         Self {
             id: id.into(),
             card_w,
             len: 0,
             selected: 0,
             render_item: None,
-            gap: px(16.),
+            gap: rems(1.),
             on_select: None,
         }
     }
@@ -88,9 +88,9 @@ impl Carousel {
         self
     }
 
-    /// Gap between items. Default 16px.
+    /// Gap between items. Default 1rem.
     #[must_use]
-    pub fn gap(mut self, gap: Pixels) -> Self {
+    pub fn gap(mut self, gap: Rems) -> Self {
         self.gap = gap;
         self
     }
@@ -155,7 +155,7 @@ impl Carousel {
         // Flexible edge spacers centre short rows without putting overflowing
         // cards at a negative, unreachable offset. They are immediate children,
         // so the scroll handle targets cards at `selected + 1`.
-        let edge_spacer = px((ROW_PAD - f32::from(gap)).max(0.));
+        let edge_spacer = rems((ROW_PAD.0 - gap.0).max(0.));
         let row = h_flex()
             .id((id.clone(), "row"))
             .flex_1()
@@ -241,7 +241,7 @@ mod tests {
             for instance in 0..self.instances {
                 let selections = self.selections.clone();
                 row = row.child(
-                    Carousel::new(("test-carousel", instance), px(120.))
+                    Carousel::new(("test-carousel", instance), rems(7.5))
                         .len(3)
                         .selected(self.selected)
                         .render_item(|index, _, _, _| {

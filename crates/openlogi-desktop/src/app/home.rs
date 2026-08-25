@@ -38,7 +38,9 @@ use super::widgets::{
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{
+    self, ContentWidth, HEADER_H, Palette, SelectableStyle as _, Typography as _,
+};
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
@@ -572,7 +574,7 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
         )
         .child(
             div()
-                .max_w(px(440.))
+                .max_w(ContentWidth::Narrow.rems())
                 .text_body()
                 .text_center()
                 .child(tr!(
@@ -586,7 +588,7 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
                 .label(tr!("Add Device"))
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().mt_1().max_w(px(440.)).text_caption().text_center().text_color(pal.text_muted).child(tr!(
+        .child(div().mt_1().max_w(ContentWidth::Narrow.rems()).text_caption().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
         .into_any_element()

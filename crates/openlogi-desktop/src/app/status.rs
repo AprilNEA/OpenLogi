@@ -12,7 +12,7 @@ use gpui_component::{
 };
 
 use crate::app::menu::OpenConfigFolder;
-use crate::ui::theme::{self, FOOTER_H, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
@@ -50,7 +50,7 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, pal: Pa
         .child(div().text_title().child(headline))
         .child(
             div()
-                .max_w(px(440.))
+                .max_w(ContentWidth::Narrow.rems())
                 .text_body()
                 .text_center()
                 .text_color(pal.text_muted)

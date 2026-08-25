@@ -1,8 +1,9 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
 use gpui::{
-    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
+    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -70,12 +71,12 @@ pub(super) fn device_view_switcher(
     ])
 }
 
-/// Gap between gallery cards, in pixels.
-const GALLERY_GAP: f32 = 16.;
+/// Gap between gallery cards.
+const GALLERY_GAP: Rems = rems(1.);
 /// Fixed carousel width: three cards plus navigation fit the default window.
-const CAROUSEL_CARD_W: f32 = 340.;
+const CAROUSEL_CARD_W: Rems = rems(21.25);
 /// Maximum width of the grid: three cards at their maximum width plus gaps.
-const GALLERY_MAX_W: f32 = theme::GALLERY_CARD_MAX_W * 3. + GALLERY_GAP * 2.;
+const GALLERY_MAX_W: Rems = rems(77.9375);
 
 /// Render the persisted Home layout. All three modes share ordering, metadata,
 /// accessibility, and active-device semantics; only spatial density changes.
@@ -84,9 +85,9 @@ pub(in crate::app) fn device_gallery(cx: &mut Context<AppView>) -> AnyElement {
         state.app_settings().device_view_mode
     });
     match mode {
-        DeviceViewMode::Grid => device_grid(cx),
-        DeviceViewMode::List => device_list(cx),
-        DeviceViewMode::Carousel => device_carousel(cx),
+        DeviceViewMode::Grid => device_grid(cx).into_any_element(),
+        DeviceViewMode::List => device_list(cx).into_any_element(),
+        DeviceViewMode::Carousel => device_carousel(cx).into_any_element(),
     }
 }
 
@@ -98,7 +99,7 @@ pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<us
     indices
 }
 
-fn device_grid(cx: &mut Context<AppView>) -> AnyElement {
+fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
@@ -109,10 +110,9 @@ fn device_grid(cx: &mut Context<AppView>) -> AnyElement {
             .into_iter()
             .map(|idx| {
                 device_card_element(state, idx, active_idx, view.clone(), pal)
-                    .min_w(px(theme::GALLERY_CARD_MIN_W))
-                    .max_w(px(theme::GALLERY_CARD_MAX_W))
+                    .min_w(theme::GALLERY_CARD_MIN_W)
+                    .max_w(theme::GALLERY_CARD_MAX_W)
                     .flex_1()
-                    .into_any_element()
             })
             .collect()
     });
@@ -127,16 +127,15 @@ fn device_grid(cx: &mut Context<AppView>) -> AnyElement {
         .child(
             h_flex()
                 .w_full()
-                .max_w(px(GALLERY_MAX_W))
+                .max_w(GALLERY_MAX_W)
                 .items_stretch()
                 .flex_wrap()
-                .gap(px(GALLERY_GAP))
+                .gap(GALLERY_GAP)
                 .children(cards),
         )
-        .into_any_element()
 }
 
-fn device_list(cx: &mut Context<AppView>) -> AnyElement {
+fn device_list(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let rows = AppState::try_read(cx).map_or_else(Vec::new, |state| {
@@ -163,10 +162,9 @@ fn device_list(cx: &mut Context<AppView>) -> AnyElement {
                 .gap_2()
                 .children(rows),
         )
-        .into_any_element()
 }
 
-fn device_carousel(cx: &mut Context<AppView>) -> AnyElement {
+fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let (order, selected) = AppState::try_read(cx).map_or_else(
         || (Vec::new(), 0),
@@ -182,46 +180,40 @@ fn device_carousel(cx: &mut Context<AppView>) -> AnyElement {
     let render_order = order.clone();
     let select_order = order.clone();
 
-    v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .child(
-            Carousel::new("device-carousel", px(CAROUSEL_CARD_W))
-                .len(order.len())
-                .selected(selected)
-                .gap(px(GALLERY_GAP))
-                .render_item(move |position, _, _, cx| {
-                    let pal = theme::palette(cx);
-                    let Some(state) = AppState::try_read(cx) else {
-                        return div().into_any_element();
-                    };
-                    let Some(&idx) = render_order.get(position) else {
-                        return div().into_any_element();
-                    };
-                    let active_idx = state
-                        .current_device
-                        .min(state.device_list.len().saturating_sub(1));
-                    device_card_element(state, idx, active_idx, view.clone(), pal)
-                        .into_any_element()
-                })
-                .on_select(cx.listener(move |_, position: &usize, _, cx| {
-                    let Some(&idx) = select_order.get(*position) else {
+    v_flex().flex_1().w_full().min_h_0().child(
+        Carousel::new("device-carousel", CAROUSEL_CARD_W)
+            .len(order.len())
+            .selected(selected)
+            .gap(GALLERY_GAP)
+            .render_item(move |position, _, _, cx| {
+                let pal = theme::palette(cx);
+                let Some(state) = AppState::try_read(cx) else {
+                    return div().into_any_element();
+                };
+                let Some(&idx) = render_order.get(position) else {
+                    return div().into_any_element();
+                };
+                let active_idx = state
+                    .current_device
+                    .min(state.device_list.len().saturating_sub(1));
+                device_card_element(state, idx, active_idx, view.clone(), pal).into_any_element()
+            })
+            .on_select(cx.listener(move |_, position: &usize, _, cx| {
+                let Some(&idx) = select_order.get(*position) else {
+                    return;
+                };
+                AppState::global(cx).update(cx, |state, cx| {
+                    if state.current_device == idx || idx >= state.device_list.len() {
                         return;
-                    };
-                    AppState::global(cx).update(cx, |state, cx| {
-                        if state.current_device == idx || idx >= state.device_list.len() {
-                            return;
-                        }
-                        state.set_current_device(idx);
-                        cx.emit(StateEvent::DeviceSelected(
-                            state.device_list[idx].device_key(),
-                        ));
-                    });
-                    AppState::load_current_device_reads(cx);
-                })),
-        )
-        .into_any_element()
+                    }
+                    state.set_current_device(idx);
+                    cx.emit(StateEvent::DeviceSelected(
+                        state.device_list[idx].device_key(),
+                    ));
+                });
+                AppState::load_current_device_reads(cx);
+            })),
+    )
 }
 
 fn device_card_element(
@@ -269,7 +261,7 @@ fn device_list_row(
     active_idx: usize,
     view: gpui::Entity<AppView>,
     pal: Palette,
-) -> AnyElement {
+) -> BaseButton {
     let record = &state.device_list[idx];
     let active = idx == active_idx;
     let enabled = state.device_enabled(&record.config_key);
@@ -331,7 +323,7 @@ fn device_list_row(
         )
         .child(
             v_flex()
-                .min_w(px(132.))
+                .min_w(rems(8.25))
                 .flex_none()
                 .items_end()
                 .gap_2()
@@ -362,7 +354,6 @@ fn device_list_row(
                 this.open_device(record_key.clone(), cx);
             });
         })
-        .into_any_element()
 }
 
 fn device_accessibility_description(record: &DeviceRecord) -> SharedString {

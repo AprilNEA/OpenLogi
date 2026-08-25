@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
-    Window, div, prelude::FluentBuilder as _, px, rgb,
+    Window, div, prelude::FluentBuilder as _, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -26,7 +26,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profile_scope::ProfileIconCache;
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
 pub(crate) mod deeplink;
 mod detail;
@@ -382,7 +382,7 @@ impl AppView {
             )
             .child(
                 div()
-                    .max_w(px(440.))
+                    .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!(
@@ -394,7 +394,7 @@ impl AppView {
             )
             .child(
                 div()
-                    .max_w(px(440.))
+                    .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!(
