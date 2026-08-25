@@ -25,6 +25,7 @@ use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -92,6 +93,7 @@ pub(super) struct DetailPanels<'a> {
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
+    pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
@@ -131,7 +133,7 @@ pub(super) fn detail_content(
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
-        DetailTab::Device => device_tab(cx).into_any_element(),
+        DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
     v_flex()
@@ -632,15 +634,23 @@ fn light_tab(
 }
 
 /// Device tab: device details and configuration cards stacked.
-fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
+fn device_tab(
+    disable_keys_panel: &gpui::Entity<DisableKeysPanel>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let show_disable_keys = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .and_then(|record| record.capabilities)
+        .is_some_and(|capabilities| capabilities.disable_keys);
     tab_body(
         ContentWidth::Small,
         v_flex()
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
-            .child(configuration_card(pal, cx)),
+            .child(configuration_card(pal, cx))
+            .children(show_disable_keys.then(|| disable_keys_panel.clone())),
     )
 }
 
