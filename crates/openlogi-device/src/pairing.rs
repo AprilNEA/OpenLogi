@@ -78,13 +78,9 @@ impl From<ReceiverFamily> for PairingPhase {
 }
 
 fn family_for(product_id: u16) -> Option<ReceiverFamily> {
-    if crate::BOLT_PIDS.contains(&product_id) {
-        Some(ReceiverFamily::Bolt)
-    } else if crate::speaks_unifying_protocol(product_id) {
-        // Unifying proper plus protocol-compatible Lightspeed receivers.
-        Some(ReceiverFamily::Unifying)
-    } else {
-        None
+    match crate::find_receiver(crate::LOGITECH_VENDOR_ID, product_id)?.protocol {
+        crate::ReceiverProtocol::Bolt => Some(ReceiverFamily::Bolt),
+        crate::ReceiverProtocol::Unifying => Some(ReceiverFamily::Unifying),
     }
 }
 

@@ -75,7 +75,7 @@ impl GnomeShellSource {
 }
 
 impl FrontmostSource for GnomeShellSource {
-    fn frontmost_bundle_id(&self) -> Option<String> {
+    fn frontmost_app_id(&self) -> Option<String> {
         let proxy = FrontmostProxy::new(&self.conn)
             .map_err(|e| debug!("gnome-shell: proxy build failed: {e}"))
             .ok()?;

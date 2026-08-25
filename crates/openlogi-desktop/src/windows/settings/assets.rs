@@ -4,10 +4,10 @@ use crate::ui::theme::Typography as _;
 use std::time::Duration;
 
 use super::{
-    App, AppState, AssetCommand, AssetControl, AssetSourcePreference, BorrowAppContext, Entity,
-    IconName, IndexPath, InteractiveElement, IntoElement, Palette, ParentElement, Select,
-    SelectItem, SelectState, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
-    SharedString, Sizable, StatefulInteractiveElement, Styled, div, px,
+    App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Entity, IconName, IndexPath,
+    InteractiveElement, IntoElement, Palette, ParentElement, Select, SelectItem, SelectState,
+    SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, Sizable,
+    StateEvent, StatefulInteractiveElement, Styled, div, px,
 };
 
 #[derive(Clone)]
@@ -79,19 +79,19 @@ pub(super) fn assets_page(
                 tr!("Automatically download device images"),
                 SettingField::switch(
                     |cx| {
-                        cx.try_global::<AppState>()
+                        AppState::try_read(cx)
                             .is_none_or(|s| s.app_settings().auto_download_assets)
                     },
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_auto_download_assets(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_auto_download_assets(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
                         // Re-enabling should fetch right away, not wait for the
                         // next device event.
                         if enabled {
                             send_asset_command(cx, AssetCommand::Refresh);
                         }
-                        cx.refresh_windows();
                     },
                 ),
             )
@@ -123,7 +123,6 @@ pub(super) fn assets_page(
                     let view = view.clone();
                     action_button("assets-clear", tr!("Clear"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::ClearCache);
-                        cx.refresh_windows();
                         // The wipe runs on the main loop's channel arm, not
                         // synchronously here — without a recompute the row
                         // keeps quoting the pre-Clear size until the window
@@ -216,7 +215,8 @@ fn action_button(
         .border_color(pal.border)
         .text_caption()
         .cursor_pointer()
-        .hover(move |s| s.bg(pal.surface_hover))
+        .bg(pal.control)
+        .hover(move |s| s.bg(pal.control_hover))
         .child(label)
         .on_click(move |_, _, cx| on_click(cx))
 }

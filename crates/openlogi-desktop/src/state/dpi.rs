@@ -1,16 +1,36 @@
-//! DPI presets and live writes. Capability discovery itself lives in
-//! [`super::load::LazyDeviceData`], reached directly as `self.reads.dpi`.
+//! DPI presets and live writes. Capability discovery is an swr-backed query
+//! owned by the device-read service.
 
-use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities, DpiInfo, WriteError};
+use gpui::{App, Context};
+use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
 use crate::state::devices::DeviceRecord;
 
 use super::device_key::DeviceKey;
 use super::load::DpiStatus;
-use super::{AppState, DEFAULT_DPI};
+use super::{AppState, DEFAULT_DPI, StateEvent};
 
 impl AppState {
+    pub(super) fn load_current_dpi(&mut self, cx: &mut Context<Self>) {
+        let Some((key, route)) = self
+            .current_record()
+            .and_then(|record| Some((record.device_key(), record.route.clone()?)))
+        else {
+            return;
+        };
+        self.reads
+            .ensure_dpi(key.clone(), route, self.ipc_sender(), cx);
+        self.apply_dpi_read(&key);
+    }
+
+    pub(crate) fn retry_dpi_read(cx: &mut App, key: DeviceKey) {
+        Self::update(cx, |state, cx| {
+            state.reads.retry_dpi(&key);
+            cx.emit(StateEvent::DpiChanged(key));
+        });
+    }
+
     /// Replace the DPI preset list for the currently selected device. The
     /// new list is persisted to `config.toml` and pushed into the shared
     /// hook map so the next `CycleDpiPresets` press sees it. The cycle
@@ -45,43 +65,24 @@ impl AppState {
     #[must_use]
     pub(crate) fn dpi_for_current(&self) -> Dpi {
         self.current_record()
-            .and_then(|record| self.reads.dpi.get(&record.device_key()))
+            .and_then(|record| self.reads.dpi_load(&record.device_key()))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(info.current),
                 _ => None,
             })
             .unwrap_or(DEFAULT_DPI)
     }
-    /// Store a DPI capability discovery result if it still matches the known
-    /// device route. This guards against async reads completing after the
-    /// carousel or inventory changed.
-    pub fn store_dpi_info(
-        &mut self,
-        key: DeviceKey,
-        route: &DeviceRoute,
-        result: Result<DpiInfo, WriteError>,
-    ) {
-        let is_active = self.current_record().is_some_and(|r| r.device_key() == key);
-        let matches_route = self
-            .device_list
-            .iter()
-            .any(|record| record.device_key() == key && record.route.as_ref() == Some(route));
-        let still_present = self
-            .device_list
-            .iter()
-            .any(|record| record.device_key() == key);
-        // Only the active device owns the shared `self.dpi`; a result landing for
-        // a background device after a carousel switch must not clobber the
-        // visible value.
-        if let Some(info) = self.reads.dpi.store(
-            key,
-            result,
-            dpi_error_is_permanent,
-            matches_route,
-            still_present,
-            "DPI",
-        ) && is_active
+    /// Seed the active panel from the latest query. Query generations fence
+    /// disconnected routes; this selected-device check prevents an old
+    /// gallery card from changing the shared visible value.
+    pub(crate) fn apply_dpi_read(&mut self, key: &DeviceKey) {
+        if self
+            .current_record()
+            .is_none_or(|record| record.device_key() != *key)
         {
+            return;
+        }
+        if let Some(DpiStatus::Ready(info)) = self.reads.dpi_load(key) {
             self.dpi = info.current;
         }
     }
@@ -89,7 +90,7 @@ impl AppState {
     #[must_use]
     pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
         self.current_record()
-            .and_then(|record| self.reads.dpi.get(&record.device_key()))
+            .and_then(|record| self.reads.dpi_load(&record.device_key()))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(&info.capabilities),
                 DpiStatus::Unknown
@@ -131,11 +132,4 @@ impl AppState {
             self.send_ipc(crate::services::ipc::Command::SetDpi(route, dpi));
         }
     }
-}
-
-pub(crate) fn dpi_error_is_permanent(error: &WriteError) -> bool {
-    matches!(
-        error,
-        WriteError::FeatureUnsupported { .. } | WriteError::EmptyDpiList
-    )
 }

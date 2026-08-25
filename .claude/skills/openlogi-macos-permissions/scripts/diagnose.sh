@@ -94,14 +94,21 @@ say "5. Designated requirement recorded against the agent's grant"
 [ -d "$agent" ] && codesign -d --requirements - "$agent" 2>&1 | grep '^designated' | sed 's/^/   /'
 
 say "6. The agent's own log"
+# The agent ignores a relative XDG_STATE_HOME, as required by the XDG spec.
+state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
+case "$state_home" in
+  /*) ;;
+  *) state_home="$HOME/.local/state" ;;
+esac
+log_dir="$state_home/openlogi"
 # Names are agent.<ISO date>.log, so the lexically last one is the newest.
-logs=("$HOME"/.local/state/openlogi/agent.*.log)
+logs=("$log_dir"/agent.*.log)
 latest_log=${logs[${#logs[@]} - 1]}
 if [ -f "$latest_log" ]; then
   echo "   $latest_log"
   echo "   attach this file — it holds the classified open errors and any panic"
 else
-  echo "   none under ~/.local/state/openlogi (agent predates the log file, or never ran)"
+  echo "   none under $log_dir (agent predates the log file, or never ran)"
 fi
 cat <<TXT
 

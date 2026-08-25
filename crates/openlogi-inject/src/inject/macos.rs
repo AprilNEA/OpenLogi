@@ -424,7 +424,7 @@ fn run_shell_command(cmd: &str) {
 /// Runs on the hook/gesture dispatch threads, which have no run loop to
 /// drain autorelease pools, and both `NSEvent` creation and the `CGEvent`
 /// getter autorelease temporaries — so the exchange sits inside an
-/// explicit `autoreleasepool`, same as the hook's `frontmost_bundle_id`.
+/// explicit `autoreleasepool`, same as the hook's `frontmost_application`.
 fn post_media_key(nx_key: i32) {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};

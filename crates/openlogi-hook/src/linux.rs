@@ -42,7 +42,7 @@ use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, HookBackend, HookError, HookEvent,
+    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
     LOGITECH_VENDOR_ID, MouseEvent,
 };
 
@@ -120,14 +120,18 @@ impl HookBackend for Backend {
         shutdown(&inner.stop, &inner.stop_pipes, inner.threads);
     }
 
-    /// Return an opaque identifier of the currently frontmost application, or
-    /// `None` when unavailable. Dispatches to the backend chosen at startup.
+    /// Return the currently frontmost application, or `None` when unavailable.
+    /// Dispatches to the backend chosen at startup.
     ///
-    /// On an X11 session this is the `WM_CLASS` class component (e.g. "Firefox").
-    /// On a Wayland session the wlr-foreign-toplevel or gnome-shell backend is used
-    /// when available; XWayland windows fall back to the X11 backend.
-    fn frontmost_app() -> Option<String> {
-        FRONTMOST_SOURCE.frontmost_bundle_id()
+    /// On an X11 session the identifier is the `WM_CLASS` class component (e.g.
+    /// "Firefox"). On a Wayland session the wlr-foreign-toplevel or gnome-shell
+    /// backend is used when available; XWayland windows fall back to the X11
+    /// backend. No Linux source reports an application name separate from its
+    /// identifier, so the two are the same string here.
+    fn frontmost_app() -> Option<ForegroundApp> {
+        FRONTMOST_SOURCE
+            .frontmost_app_id()
+            .map(ForegroundApp::unnamed)
     }
 
     /// Read the global cursor position through X11 when an X server is available.
@@ -530,7 +534,7 @@ fn device_thread(
     // Dropping `device` releases the exclusive grab, restoring normal input delivery.
 }
 
-// ── frontmost_bundle_id ──────────────────────────────────────────────────────
+// ── frontmost_app_id ─────────────────────────────────────────────────────────
 
 // The frontmost-app reader is backend-driven so that Wayland support can be
 // added without touching callers. Exactly one backend is selected at startup
@@ -544,7 +548,7 @@ mod wlr_foreign_toplevel;
 /// A backend that reports which application is currently frontmost.
 ///
 /// Implementations are display-server / desktop specific. The string returned
-/// by `frontmost_bundle_id` is compared against per-app profile keys by exact
+/// by `frontmost_app_id` is compared against per-app profile keys by exact
 /// match (`openlogi_core::Config::effective_bindings`), so its exact form
 /// matters and is backend-specific. The X11 and gnome-shell backends both
 /// return the `WM_CLASS` class component (e.g. "Firefox"); the wlr backend
@@ -557,7 +561,7 @@ mod wlr_foreign_toplevel;
 trait FrontmostSource: Send + Sync {
     /// Opaque identifier of the frontmost application, or `None` when there is
     /// no frontmost window or it cannot be read.
-    fn frontmost_bundle_id(&self) -> Option<String>;
+    fn frontmost_app_id(&self) -> Option<String>;
 
     /// Short backend identifier, for diagnostics / logging only.
     fn name(&self) -> &'static str;
@@ -597,7 +601,7 @@ impl X11Source {
 }
 
 impl FrontmostSource for X11Source {
-    fn frontmost_bundle_id(&self) -> Option<String> {
+    fn frontmost_app_id(&self) -> Option<String> {
         // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
         let window: Window = self
             .conn
@@ -642,7 +646,7 @@ impl FrontmostSource for X11Source {
 struct NullSource;
 
 impl FrontmostSource for NullSource {
-    fn frontmost_bundle_id(&self) -> Option<String> {
+    fn frontmost_app_id(&self) -> Option<String> {
         None
     }
 
@@ -728,7 +732,7 @@ fn detect_frontmost_source() -> Box<dyn FrontmostSource> {
         }
     }
 
-    debug!("frontmost: no usable backend; frontmost_bundle_id will return None");
+    debug!("frontmost: no usable backend; frontmost_app_id will return None");
     Box::new(NullSource)
 }
 

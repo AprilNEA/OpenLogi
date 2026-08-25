@@ -4,10 +4,11 @@ mod action_icons;
 mod editor;
 
 use gpui::{
-    AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
     v_flex,
@@ -16,38 +17,57 @@ use openlogi_core::binding::{ActionRingEntry, ActionRingIcon, ActionRingLayout, 
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
 pub struct ActionRingPanel {
+    focus_handle: FocusHandle,
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
-    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
 
 impl ActionRingPanel {
     /// Create the editor and repaint it after any config/device change.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::BindingsChanged(key) => AppState::try_read(cx)
+                    .and_then(AppState::current_record)
+                    .is_some_and(|record| record.device_key() == *key),
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
+            focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
             application_input: None,
             shortcut_input: None,
             library_scroll: ScrollHandle::new(),
-            state_obs: cx.observe_global::<AppState>(|_, cx| cx.notify()),
+            state_obs,
         }
+    }
+}
+
+impl Focusable for ActionRingPanel {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
 impl Render for ActionRingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let ring = cx
-            .try_global::<AppState>()
+        let ring = AppState::try_read(cx)
             .map(AppState::current_action_ring)
             .unwrap_or_default();
         let haptics_supported = current_device_supports_haptics(cx);
@@ -68,6 +88,8 @@ impl Render for ActionRingPanel {
         v_flex()
             .w_full()
             .gap_4()
+            .tab_group()
+            .track_focus(&self.focus_handle)
             .child(
                 v_flex()
                     .gap_1()
@@ -158,7 +180,7 @@ fn editor_input(
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
-    cx.try_global::<AppState>().is_some_and(|state| {
+    AppState::try_read(cx).is_some_and(|state| {
         state.current_record().is_some_and(|record| {
             record
                 .capabilities
@@ -180,8 +202,13 @@ fn toggle_button(
         .label(if enabled { tr!("On") } else { tr!("Off") })
         .selected(enabled)
         .on_click(move |_, _, cx| {
-            cx.update_global::<AppState, _>(|state, _| commit(state, !enabled));
-            cx.refresh_windows();
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
+                commit(state, !enabled);
+                if let Some(key) = key {
+                    cx.emit(StateEvent::BindingsChanged(key));
+                }
+            });
         })
 }
 
@@ -208,7 +235,7 @@ fn ring_preview(
                 .rounded_full()
                 .border_1()
                 .border_color(pal.border)
-                .bg(pal.surface),
+                .bg(pal.panel),
         )
         .child(
             div()
@@ -220,7 +247,7 @@ fn ring_preview(
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(pal.surface_hover)
+                .bg(pal.muted)
                 .text_color(pal.text_muted)
                 .child("×"),
         )
@@ -258,8 +285,8 @@ fn slot_button(
     let accessible_label = label.clone();
     let selected_view = view.clone();
 
-    div()
-        .id(("action-ring-slot", index))
+    BaseButton::new(("action-ring-slot", index))
+        .selected(selected)
         .absolute()
         .left(px(left))
         .top(px(top))
@@ -277,7 +304,7 @@ fn slot_button(
         .bg(if selected {
             theme::accent_tint()
         } else {
-            pal.surface_hover
+            pal.control
         })
         .text_color(if selected {
             pal.text_primary
@@ -285,8 +312,7 @@ fn slot_button(
             pal.text_muted
         })
         .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(accessible_label)
+        .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .when_some(icon_path, |button, path| {
             button.child(svg().path(path).size(px(20.0)).text_color(if selected {
@@ -302,8 +328,17 @@ fn slot_button(
             button.bg(if selected {
                 theme::accent_tint_hover()
             } else {
-                pal.surface_hover
+                pal.control_hover
             })
+        })
+        .focus_visible(move |button| {
+            button
+                .border_color(rgb(theme::ACCENT_BLUE))
+                .bg(if selected {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
         })
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {

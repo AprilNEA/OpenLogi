@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::Action;
 use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
@@ -31,9 +32,9 @@ use tracing::{debug, info, warn};
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::hardware::DeviceOp;
-use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
+use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
@@ -72,7 +73,7 @@ pub struct SharedRuntime {
     pub hook_maps: SharedHookMaps,
     /// Function-key remapper bindings (keycode+modifiers → action). Not
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
-    pub keyboard_bindings: crate::hook_runtime::SharedKeyboardBindings,
+    pub keyboard_bindings: crate::runtime::hook::SharedKeyboardBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
     /// One capture plan per online device — what to divert and how to
     /// dispatch, keyed by the device the events arrive on. Carries each
@@ -287,6 +288,7 @@ impl Orchestrator {
             return None;
         }
         Some(KeyboardSpec {
+            config_key: dev.config_key.clone(),
             route: dev.route.clone()?,
             wanted,
             bindings,
@@ -716,11 +718,22 @@ impl Orchestrator {
     /// it into a single action for that app, dropping it from the OS-hook
     /// gesture set — so the gesture map is app-scoped too. The dedicated HID++
     /// gesture map is not app-scoped and stays untouched.
-    pub fn set_current_app(&mut self, bundle: Option<String>) {
-        if bundle == self.current_app {
-            return;
+    ///
+    /// Only the identifier decides whether any of that runs: an application
+    /// that merely changed its localized name resolves to the same bindings,
+    /// and republishing for it could restart a capture session (a plan's
+    /// divert set is part of its identity) over nothing. The observable cell
+    /// still gets the whole value — it dedupes on its own, and its recent list
+    /// is the only source a client has for these identifiers. Returns whether
+    /// the effective app identifier changed and active button lifecycles must
+    /// be canceled.
+    pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
+        let id = app.as_ref().map(|app| app.id.clone());
+        self.observable.set_foreground(app);
+        if id == self.current_app {
+            return false;
         }
-        self.current_app = bundle;
+        self.current_app = id;
         write_value(
             &self.shared.hook_maps,
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
@@ -729,6 +742,7 @@ impl Orchestrator {
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
+        true
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
@@ -1048,7 +1062,7 @@ fn is_hidpp_device(device: &AgentDevice) -> bool {
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
-/// background thread that paniced while holding the lock can't take the agent
+/// background thread that panicked while holding the lock can't take the agent
 /// down — it just keeps the stale value until the next successful rebuild.
 fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
     match lock.write() {

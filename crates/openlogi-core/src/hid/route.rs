@@ -15,6 +15,10 @@
 
 use std::fmt;
 
+pub use openlogi_device_registry::LOGITECH_VENDOR_ID;
+pub use openlogi_device_registry::receiver::{
+    RECEIVERS, ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::device::DeviceInventory;
@@ -22,11 +26,6 @@ use crate::device::DeviceInventory;
 /// HID++ device index that addresses a directly-attached device's own
 /// features (USB-cable or Bluetooth, no receiver indirection).
 pub const DIRECT_DEVICE_INDEX: u8 = 0xff;
-
-/// Logitech's USB/Bluetooth vendor ID. `u16` because that is the width of the
-/// field itself; readers whose API hands back a wider integer widen at the
-/// comparison.
-pub const LOGITECH_VENDOR_ID: u16 = 0x046d;
 
 /// How to reach a controllable HID++ device.
 ///
@@ -78,43 +77,21 @@ pub enum DeviceRoute {
     },
 }
 
-/// USB product IDs that identify Logi Bolt receivers.
-pub const BOLT_PIDS: &[u16] = &[0xc548];
-
-/// USB product IDs that identify Logi Unifying receivers. Used by callers that
-/// need to construct the correct [`DeviceRoute`] variant from a raw inventory.
-///
-/// `0xc537` is the Nano receiver bundled with the G602. It answers the same
-/// HID++ 1.0 enumeration and pairing-information registers as Unifying, so it
-/// routes as [`DeviceRoute::Unifying`].
-pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc537];
-
-/// USB product IDs that identify Logitech Lightspeed receivers — the
-/// receivers bundled with G-series wireless devices. `0xc539` ships with the
-/// G502 LIGHTSPEED and the G Pro Wireless — its USB product string is
-/// literally `LIGHTSPEED Receiver`; `0xc53f` is the nano receiver of wireless
-/// mice such as the G305; `0xc547` ships with newer G-series devices such as
-/// the G915 keyboard and the G502 X LIGHTSPEED; `0xc54d` ships with the
-/// PRO X SUPERLIGHT 2 DEX.
-/// They speak the same HID++ 1.0 receiver register protocol as Unifying, so
-/// they are enumerated, routed, and paired through the Unifying code path;
-/// only the user-facing receiver name (see [`receiver_display_name`]) differs.
-pub const LIGHTSPEED_PIDS: &[u16] = &[0xc539, 0xc53f, 0xc547, 0xc54d];
-
 /// Whether `product_id` is a receiver that speaks the Unifying HID++ 1.0
 /// register protocol — a Unifying receiver proper, or a protocol-compatible
-/// Lightspeed receiver. Such receivers are addressed with
+/// Nano or Lightspeed receiver. Such receivers are addressed with
 /// [`DeviceRoute::Unifying`].
 #[must_use]
 pub fn speaks_unifying_protocol(product_id: u16) -> bool {
-    UNIFYING_PIDS.contains(&product_id) || LIGHTSPEED_PIDS.contains(&product_id)
+    find_receiver(LOGITECH_VENDOR_ID, product_id)
+        .is_some_and(|receiver| receiver.protocol == ReceiverProtocol::Unifying)
 }
 
 /// Whether `product_id` is a known Logitech receiver dongle of any family
 /// (Bolt, Unifying, or Lightspeed).
 #[must_use]
 pub fn is_receiver_pid(product_id: u16) -> bool {
-    BOLT_PIDS.contains(&product_id) || speaks_unifying_protocol(product_id)
+    find_receiver(LOGITECH_VENDOR_ID, product_id).is_some()
 }
 
 /// Human-readable name for a receiver identified by `product_id`, used to label
@@ -122,7 +99,9 @@ pub fn is_receiver_pid(product_id: u16) -> bool {
 /// but are surfaced under their own name.
 #[must_use]
 pub fn receiver_display_name(product_id: u16) -> &'static str {
-    if LIGHTSPEED_PIDS.contains(&product_id) {
+    if find_receiver(LOGITECH_VENDOR_ID, product_id)
+        .is_some_and(|receiver| receiver.brand == ReceiverBrand::Lightspeed)
+    {
         "Lightspeed Receiver"
     } else {
         "Unifying Receiver"
@@ -170,10 +149,10 @@ impl DeviceRoute {
     /// Build the route that reaches a paired device from a receiver inventory.
     ///
     /// Picks [`DeviceRoute::Unifying`] or [`DeviceRoute::Bolt`] based on the
-    /// receiver's product ID via [`speaks_unifying_protocol`] (Unifying proper
-    /// plus protocol-compatible Lightspeed receivers). Any receiver that does
-    /// not speak the Unifying protocol — including future Bolt variants whose
-    /// PID isn't yet in `BOLT_PIDS` — defaults to [`DeviceRoute::Bolt`] so
+    /// receiver's identity in [`RECEIVERS`] (Unifying proper plus
+    /// protocol-compatible Nano and Lightspeed receivers). Any receiver that
+    /// does not speak the Unifying protocol — including future Bolt variants
+    /// whose PID is not yet registered — defaults to [`DeviceRoute::Bolt`] so
     /// writes keep working rather than silently dropping.
     /// [`DeviceRoute::Direct`] is used for directly-attached devices
     /// (slot == [`DIRECT_DEVICE_INDEX`] with no receiver UID). Returns `None`
@@ -189,11 +168,12 @@ impl DeviceRoute {
             }
             Some(uid) => {
                 // Default to Bolt for any receiver that does not speak the
-                // Unifying protocol. This covers both known Bolt PIDs
-                // (BOLT_PIDS) and any future Bolt-compatible receiver with a new
-                // PID — returning None would silently drop writes for such
-                // receivers.
-                if !BOLT_PIDS.contains(&inv.receiver.product_id) {
+                // Unifying protocol. This covers both known Bolt receivers and
+                // any future Bolt-compatible receiver with a new PID — returning
+                // None would silently drop writes for such receivers.
+                if find_receiver(LOGITECH_VENDOR_ID, inv.receiver.product_id)
+                    .is_none_or(|receiver| receiver.protocol != ReceiverProtocol::Bolt)
+                {
                     tracing::debug!(
                         pid = format_args!("{:04x}", inv.receiver.product_id),
                         "unknown receiver PID — routing as Bolt"
@@ -244,7 +224,7 @@ mod tests {
     use crate::device::{DeviceInventory, ReceiverInfo};
 
     use super::{
-        DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, UNIFYING_PIDS, receiver_display_name,
+        DIRECT_DEVICE_INDEX, DeviceRoute, RECEIVERS, ReceiverProtocol, receiver_display_name,
     };
 
     fn inv(product_id: u16, unique_id: Option<&str>) -> DeviceInventory {
@@ -260,27 +240,19 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_unifying_pids_create_unifying_route() {
-        for &pid in UNIFYING_PIDS {
-            let route = DeviceRoute::device_route_for(&inv(pid, Some("A1B2")), 2);
-            assert!(
-                matches!(route, Some(DeviceRoute::Unifying { ref receiver_uid, slot: 2 }) if receiver_uid == "A1B2"),
-                "pid {pid:#06x} should produce Unifying route"
-            );
-        }
-    }
-
-    #[test]
-    fn device_route_for_lightspeed_pids_create_unifying_route() {
-        // Lightspeed nano receivers (e.g. the G305's) speak the Unifying
-        // protocol, so writes must be routed through DeviceRoute::Unifying —
-        // not defaulted to Bolt, which would address the pairing slot wrong.
-        for &pid in LIGHTSPEED_PIDS {
-            let route = DeviceRoute::device_route_for(&inv(pid, Some("A1B2")), 2);
-            assert!(
-                matches!(route, Some(DeviceRoute::Unifying { ref receiver_uid, slot: 2 }) if receiver_uid == "A1B2"),
-                "lightspeed pid {pid:#06x} should produce a Unifying route"
-            );
+    fn device_route_for_known_receiver_follows_its_protocol() {
+        for receiver in RECEIVERS {
+            let route = DeviceRoute::device_route_for(&inv(receiver.product_id, Some("A1B2")), 2);
+            match receiver.protocol {
+                ReceiverProtocol::Bolt => assert_matches!(
+                    route,
+                    Some(DeviceRoute::Bolt { ref receiver_uid, slot: 2 }) if receiver_uid == "A1B2"
+                ),
+                ReceiverProtocol::Unifying => assert_matches!(
+                    route,
+                    Some(DeviceRoute::Unifying { ref receiver_uid, slot: 2 }) if receiver_uid == "A1B2"
+                ),
+            }
         }
     }
 
@@ -299,10 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_bolt_pid_creates_bolt_route() {
-        // 0xC548 is Bolt; anything not in UNIFYING_PIDS defaults to Bolt so
-        // future Bolt variants with unknown PIDs still work.
-        let route = DeviceRoute::device_route_for(&inv(0xc548, Some("UID")), 1);
+    fn device_route_for_unknown_receiver_defaults_to_bolt() {
+        let route = DeviceRoute::device_route_for(&inv(0xc5ff, Some("UID")), 1);
         assert_matches!(
             route,
             Some(DeviceRoute::Bolt { ref receiver_uid, slot: 1 }) if receiver_uid == "UID"

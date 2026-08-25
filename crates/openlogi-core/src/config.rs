@@ -30,9 +30,9 @@ use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
-    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, WheelMode,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
+    Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, UiScale, WheelMode,
 };
 
 use crate::binding::{
@@ -45,6 +45,13 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v5 adds the app-wide `ui_scale` preference. Older files default to the
+/// standard 100% scale.
+///
+/// Per-device custom names and the Home gallery view preference are optional
+/// and did not require a version bump: absent fields use the model name and
+/// responsive grid respectively.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer
@@ -64,7 +71,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +84,7 @@ pub struct Config {
     /// Non-device-scoped preferences (autostart, tray, language, …).
     #[serde(default, skip_serializing_if = "AppSettings::is_default")]
     pub app_settings: AppSettings,
-    /// Physical config key of the carousel-selected device, persisted so a
+    /// Physical config key of the active device, persisted so a
     /// restart restores the last view rather than always landing on the
     /// first paired device. `None` means "fall back to the first device".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,9 +102,10 @@ pub struct Config {
         allow(dead_code, reason = "only the `fs` half suppresses a save")
     )]
     ephemeral: bool,
-    /// Per-device state, keyed by the stable physical-device identifier
-    /// (e.g. `"receiver:abc123:slot:2"`) so two identical models never share
-    /// an entry.
+    /// Per-device state, normally keyed by the stable physical-device
+    /// identifier (e.g. `"receiver:abc123:slot:2"`). A serial-less camera's
+    /// custom name instead uses its OS capture id so same-model cameras remain
+    /// distinguishable.
     #[serde(default)]
     pub devices: BTreeMap<String, DeviceConfig>,
     /// Keyboard remappings, independent of device. The function-key remapper
@@ -464,6 +472,43 @@ impl Config {
         }
     }
 
+    /// The overrides `device_key` stores for the application key `app`,
+    /// or `None` when it has no profile for it.
+    ///
+    /// Exact key, deliberately: this answers "what did the user author under
+    /// this key", which is what an editor needs to show and to clear. The
+    /// question [`Self::has_app_override`] answers — "will the app in front hit
+    /// a profile" — is the matcher's, and goes through the same `exe:` fallback
+    /// the matcher does. The two look interchangeable and are not.
+    #[must_use]
+    pub fn per_app_overrides(
+        &self,
+        device_key: &str,
+        app: &str,
+    ) -> Option<&BTreeMap<ButtonId, Action>> {
+        self.devices
+            .get(device_key)?
+            .per_app_bindings
+            .get(app)
+            .filter(|overrides| !overrides.is_empty())
+    }
+
+    /// Every application key `device_key` has a profile for, in key order.
+    pub fn app_profiles(&self, device_key: &str) -> impl Iterator<Item = &str> {
+        self.devices
+            .get(device_key)
+            .into_iter()
+            .flat_map(|device| device.per_app_bindings.keys().map(String::as_str))
+    }
+
+    /// Drop `device_key`'s whole profile for `app`. Nothing happens when there
+    /// is none.
+    pub fn remove_app_profile(&mut self, device_key: &str, app: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.per_app_bindings.remove(app);
+        }
+    }
+
     /// Actions Ring settings for `device_key`, falling back to defaults when
     /// the device has no saved ring configuration.
     #[must_use]
@@ -522,13 +567,13 @@ impl Config {
             .set_icon(slot, icon);
     }
 
-    /// HID++ config key of the carousel-selected device, if any.
+    /// HID++ config key of the active device, if any.
     #[must_use]
     pub fn selected_device(&self) -> Option<&str> {
         self.selected_device.as_deref()
     }
 
-    /// Update the carousel-selected device. Pass `None` to clear the
+    /// Update the active device. Pass `None` to clear the
     /// selection (e.g. when the previously-selected device disappears).
     pub fn set_selected_device(&mut self, key: Option<String>) {
         self.selected_device = key;
@@ -571,6 +616,23 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .identity = Some(identity.without_unit_identifiers());
+    }
+
+    /// The user-assigned name for `device_key`, if one is configured.
+    #[must_use]
+    pub fn device_custom_name(&self, device_key: &str) -> Option<&str> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.custom_name.as_deref())
+    }
+
+    /// Set the user-assigned name for `device_key`, or clear it to use the
+    /// hardware model name again.
+    pub fn set_device_custom_name(&mut self, device_key: &str, custom_name: Option<String>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .custom_name = custom_name;
     }
 
     /// Whether `device_key` has a non-empty per-app binding overlay for the

@@ -3,7 +3,8 @@
 use super::AppState;
 use gpui::App;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, ThumbwheelSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
+    UiScale,
 };
 
 impl AppState {
@@ -76,6 +77,15 @@ impl AppState {
         self.config.app_settings.appearance = appearance;
         self.persist_config("appearance setting");
     }
+    /// Persist the text and interface scale. Open window roots apply the new
+    /// rem size when the caller refreshes them. No-op when unchanged.
+    pub fn set_ui_scale(&mut self, scale: UiScale) {
+        if self.config.app_settings.ui_scale == scale {
+            return;
+        }
+        self.config.app_settings.ui_scale = scale;
+        self.persist_config("UI scale setting");
+    }
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
     /// theme). No-op when unchanged.
     pub fn set_theme(&mut self, dark: bool, name: Option<String>) {
@@ -116,10 +126,46 @@ impl AppState {
         self.config.app_settings.ui_radius = radius;
         self.persist_config("UI radius setting");
     }
+    /// Persist the Home device-gallery layout. No-op when unchanged.
+    pub fn set_device_view_mode(&mut self, mode: DeviceViewMode) {
+        if self.config.app_settings.device_view_mode == mode {
+            return;
+        }
+        self.config.app_settings.device_view_mode = mode;
+        self.persist_config("device view mode");
+    }
     /// Whether OpenLogi manages `key` (capture + volatile re-apply).
     #[must_use]
     pub fn device_enabled(&self, key: &str) -> bool {
         self.config.device_enabled(key)
+    }
+
+    /// Set the user-facing name of one gallery device. Whitespace-only names
+    /// clear the alias and restore the hardware model name. `record_key` is
+    /// distinct per live serial-less camera even though their hardware settings
+    /// intentionally share a model-scoped config key.
+    pub fn set_device_custom_name(&mut self, record_key: &str, custom_name: &str) {
+        let custom_name = match custom_name.trim() {
+            "" => None,
+            name => Some(name.to_string()),
+        };
+        if self.config.device_custom_name(record_key) == custom_name.as_deref() {
+            return;
+        }
+        self.config
+            .set_device_custom_name(record_key, custom_name.clone());
+        if !self.persist_config("device name") {
+            return;
+        }
+        for record in self
+            .device_list
+            .iter_mut()
+            .filter(|record| record.record_key() == record_key)
+        {
+            record.display_name = custom_name
+                .clone()
+                .unwrap_or_else(|| record.model_name.clone());
+        }
     }
 
     /// Enable or disable OpenLogi's management of `key` and persist it. The
@@ -220,6 +266,7 @@ impl AppState {
         self.config.app_settings.language = language;
         self.persist_config("language setting");
         openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
+        // Locale lookup is process-global, so every open window must repaint.
         cx.refresh_windows();
         crate::app::menu::rebuild(cx);
     }

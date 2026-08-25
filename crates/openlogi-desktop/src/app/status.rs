@@ -1,6 +1,6 @@
-//! Whole-window and footer chrome for the agent-connection lifecycle: the
+//! Whole-window and contextual chrome for the agent-connection lifecycle: the
 //! pre-connection / unreachable / outdated-build frames rendered in place of
-//! the real UI, and the footer status bar shown once it's up.
+//! the real UI, and an attention bar shown only when action is required.
 
 use gpui::{AnyElement, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 use gpui_component::{
@@ -124,84 +124,50 @@ pub(super) fn config_issue_body(message: SharedString, pal: Palette) -> AnyEleme
         .into_any_element()
 }
 
-/// Footer status bar: passive state only. Left — the Accessibility-permission
-/// indicator; right — the app version. The former actions (Add Device /
-/// Settings / About) moved to where they belong: Add Device to the device
-/// header's "+", Settings to the right panel's Configuration card and the menu
-/// bar (⌘,), About to the menu bar. Keeping operations out of here leaves a
-/// genuine status bar — two quiet readouts at the edges, nothing in the middle.
-pub(super) fn footer(pal: Palette, granted: bool) -> impl IntoElement {
+/// Contextual attention bar. Normal operation has no footer; this row appears
+/// only after the user dismissed the permission gate while Accessibility is
+/// still unavailable.
+pub(super) fn attention_footer(pal: Palette) -> impl IntoElement {
     h_flex()
         .h(px(FOOTER_H))
-        // Fixed chrome — never shrink when a tab body overflows (see `detail_header`).
         .flex_shrink_0()
         .w_full()
         .px_5()
-        .gap_4()
         .items_center()
-        .justify_between()
         .border_t_1()
         .border_color(pal.border)
         .child({
             #[cfg(target_os = "macos")]
-            let el = accessibility_status(pal, granted);
+            let el = accessibility_status(pal);
             #[cfg(not(target_os = "macos"))]
             let el = div().into_any_element();
-            let _ = granted;
             el
         })
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(concat!("v", env!("CARGO_PKG_VERSION"))),
-        )
 }
 
-/// Footer Accessibility-permission indicator. Granted → a muted green-dot
-/// status; not granted → an amber-dot affordance that requests the grant on
-/// click (the native prompt + System Settings, via [`open_accessibility_settings`]).
+/// Accessibility affordance that requests the grant on click (the native
+/// prompt + System Settings, via [`super::request_accessibility`]).
 #[cfg(target_os = "macos")]
-fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
+fn accessibility_status(pal: Palette) -> AnyElement {
     // Scoped here rather than at module level: these traits' only user is this
     // macOS-gated affordance (`.id()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
     use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
 
-    if granted {
-        // Reassurance only — kept deliberately quiet: a small dimmed dot and
-        // muted text that recede until something is actually wrong.
-        h_flex()
-            .gap_1p5()
-            .items_center()
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(
-                div()
-                    .size_1p5()
-                    .rounded_full()
-                    .bg(rgb(theme::STATUS_CONNECTED)),
-            )
-            .child(div().child(tr!("Accessibility granted")))
-            .into_any_element()
-    } else {
-        // The state that needs attention — full-strength text, an amber dot,
-        // and a click target that requests the grant.
-        h_flex()
-            .id("footer-accessibility")
-            .gap_2()
-            .items_center()
-            .text_caption()
-            .text_color(pal.text_primary)
-            .cursor_pointer()
-            .child(
-                div()
-                    .size_1p5()
-                    .rounded_full()
-                    .bg(rgb(theme::STATUS_CONNECTING)),
-            )
-            .child(div().child(tr!("Accessibility not granted · click to grant")))
-            .on_click(|_, _, cx| super::request_accessibility(cx))
-            .into_any_element()
-    }
+    h_flex()
+        .id("footer-accessibility")
+        .gap_2()
+        .items_center()
+        .text_caption()
+        .text_color(pal.text_primary)
+        .cursor_pointer()
+        .child(
+            div()
+                .size_1p5()
+                .rounded_full()
+                .bg(rgb(theme::STATUS_CONNECTING)),
+        )
+        .child(div().child(tr!("Accessibility not granted · click to grant")))
+        .on_click(|_, _, cx| super::request_accessibility(cx))
+        .into_any_element()
 }

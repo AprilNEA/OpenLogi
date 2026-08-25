@@ -326,7 +326,7 @@ pub enum ErrorType {
     /// The receiver indicates that too many devices are connected to it.
     TooManyDevices = 0x05,
 
-    /// The reciever indicates that something already exists. This error is not
+    /// The receiver indicates that something already exists. This error is not
     /// further documented, please let me know what it means.
     AlreadyExists = 0x06,
 

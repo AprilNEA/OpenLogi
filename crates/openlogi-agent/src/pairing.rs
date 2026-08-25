@@ -294,8 +294,8 @@ mod tests {
     use std::sync::RwLock;
 
     use openlogi_agent_core::DpiCycles;
-    use openlogi_agent_core::hook_runtime::HookMaps;
     use openlogi_agent_core::receiver_access::ReceiverAccess;
+    use openlogi_agent_core::runtime::hook::HookMaps;
 
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {

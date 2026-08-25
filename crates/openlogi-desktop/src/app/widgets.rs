@@ -3,11 +3,11 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
+    AnyElement, Context, Hsla, IntoElement, ParentElement, SharedString, Styled, div,
     prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _,
+    IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -28,7 +28,7 @@ pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
     ) && b.percentage == 0
 }
 
-/// "← Back" affordance on the detail screen; returns to the gallery without
+/// "← Devices" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
 pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
@@ -36,24 +36,28 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
         .ghost()
         .small()
         .icon(IconName::ChevronLeft)
-        .label(tr!("Back"))
+        .label(tr!("Devices"))
         .on_click(move |_, _, cx| view.update(cx, AppView::go_home))
 }
 
-/// Square Settings gear in the Home header: opens the Settings window.
+/// Settings button in the Home header: opens the Settings window. The visible
+/// label keeps the action discoverable without requiring hover.
 pub(super) fn settings_button() -> impl IntoElement {
     Button::new("home-settings")
+        .outline()
         .icon(IconName::Settings)
+        .label(tr!("Settings"))
         .tooltip(tr!("Settings"))
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
-/// Trailing "+" button that opens the pairing window. Present in both screen
-/// headers; the empty state carries its own primary "Add Device" CTA, so this
-/// never floats alone in an empty header.
+/// Primary action that opens the pairing window. The empty state carries its
+/// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
     Button::new("header-add-device")
+        .primary()
         .icon(IconName::Plus)
+        .label(tr!("Add Device"))
         .tooltip(tr!("Add Device"))
         .on_click(|_, _, cx| crate::windows::add_device::open(cx))
 }
@@ -62,7 +66,8 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
     if !show_device {
         return SharedString::from("OpenLogi");
     }
-    cx.try_global::<AppState>()
+    AppState::try_global(cx)
+        .map(|state| state.read(cx))
         .and_then(AppState::current_record)
         .map_or_else(
             || SharedString::from("OpenLogi"),
@@ -70,63 +75,11 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
         )
 }
 
-pub(super) fn panel_card(
-    title: SharedString,
-    icon: Icon,
-    pal: Palette,
-    content: AnyElement,
-) -> impl IntoElement {
-    panel_card_inner(title, icon, pal, content, false)
-}
-
-pub(super) fn panel_card_fill(
-    title: SharedString,
-    icon: Icon,
-    pal: Palette,
-    content: AnyElement,
-) -> impl IntoElement {
-    panel_card_inner(title, icon, pal, content, true)
-}
-
-fn panel_card_inner(
-    title: SharedString,
-    icon: Icon,
-    pal: Palette,
-    content: AnyElement,
-    fill_height: bool,
-) -> impl IntoElement {
-    div()
-        .w_full()
-        .when(fill_height, gpui::Styled::h_full)
-        .max_w_full()
-        .min_w_0()
-        .rounded(pal.card_radius)
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .p(px(theme::CARD_PAD))
-        .child(
-            v_flex()
-                .gap(px(theme::CARD_GAP))
-                .when(!title.is_empty(), |this| {
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(pal.text_primary)
-                            .child(icon.size_4().text_color(pal.text_muted))
-                            .child(div().text_subheading().child(title)),
-                    )
-                })
-                .child(content),
-        )
-}
-
 pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
-    let (label, color) = if online {
-        (tr!("Connected"), theme::STATUS_CONNECTED)
+    let label = if online {
+        tr!("Connected")
     } else {
-        (tr!("Offline"), theme::STATUS_OFFLINE)
+        tr!("Offline")
     };
     h_flex()
         .gap_1()
@@ -138,8 +91,19 @@ pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
         .py_1()
         .text_caption()
         .text_color(pal.text_muted)
-        .child(div().size_1p5().rounded_full().bg(rgb(color)))
+        .child(connectivity_dot(online, pal))
         .child(label)
+}
+
+/// Neutral connectivity indicator: online is solid and offline is hollow, so
+/// the state never depends on hue alone.
+pub(super) fn connectivity_dot(online: bool, pal: Palette) -> impl IntoElement {
+    div()
+        .size_1p5()
+        .rounded_full()
+        .border_1()
+        .border_color(pal.text_muted)
+        .when(online, |dot| dot.bg(pal.text_primary))
 }
 
 pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
@@ -164,11 +128,7 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                 }),
         )
         .child({
-            let track = div()
-                .h(px(6.))
-                .w_full()
-                .rounded_full()
-                .bg(pal.surface_hover);
+            let track = div().h(px(6.)).w_full().rounded_full().bg(pal.muted);
             // Charging with no reliable %: leave the track empty rather than
             // drawing the 1%-wide red critical sliver that percentage==0 yields.
             if battery_charging_no_reading(battery) {
@@ -179,17 +139,17 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                         .h_full()
                         .w(relative(f32::from(battery.percentage.clamp(1, 100)) / 100.))
                         .rounded_full()
-                        .bg(rgb(battery_color(battery.percentage))),
+                        .bg(battery_color(battery.percentage, pal)),
                 )
             }
         })
 }
 
-fn battery_color(percentage: u8) -> u32 {
+fn battery_color(percentage: u8, pal: Palette) -> Hsla {
     match percentage {
-        0..=20 => 0x00ef_4444,
-        21..=50 => theme::STATUS_CONNECTING,
-        _ => theme::STATUS_CONNECTED,
+        0..=20 => rgb(0x00ef_4444).into(),
+        21..=50 => rgb(theme::STATUS_CONNECTING).into(),
+        _ => pal.text_primary,
     }
 }
 

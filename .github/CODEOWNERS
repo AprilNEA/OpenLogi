@@ -40,13 +40,11 @@
 /.github/                       @AprilNEA
 /xtask/                         @AprilNEA
 /packaging/                     @AprilNEA
+/.config/                       @AprilNEA
 /.cargo/                        @AprilNEA
 /Cargo.toml                     @AprilNEA
 /Cargo.lock                     @AprilNEA
 /release-plz.toml               @AprilNEA
-/cliff.toml                     @AprilNEA
-/deny.toml                      @AprilNEA
-/crowdin.yml                    @AprilNEA
 /rust-toolchain.toml            @AprilNEA
 /rustfmt.toml                   @AprilNEA
 /prek.toml                      @AprilNEA

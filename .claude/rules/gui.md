@@ -41,6 +41,20 @@ paths:
   new capability in `Capabilities::from_feature_ids` plus a `tabs_for` arm.
 - Mouse-diagram hotspots come from Logi metadata; if the metadata omits a button
   marker, omit the button — never synthesize hotspot positions.
+- Keep render helpers statically typed (`impl IntoElement` or a concrete element) until
+  a genuinely heterogeneous branch, collection, callback, or stored field requires
+  `AnyElement`. Prefer one typed `.when()` / `.when_some()` / `.children()` pipeline to
+  branching early and erasing each result.
+- A view, entity, or app service owns every `Task` and `Subscription` whose work belongs
+  to its lifetime. Use `.detach()` only for true process-lifetime work or bounded
+  one-shots whose completion is safe after the initiating view disappears.
+- When an async UI operation captures inputs that may change before it completes
+  (device, route, query, selection, or request), capture their identity or generation
+  at launch and compare again before committing the result. Cancellation is useful,
+  but is not the stale-result fence.
+- When changing reusable controls, prefer focused `#[gpui::test]` behavior contracts
+  over screenshot coverage: keyboard activation, disabled no-op, controlled selected
+  state/callbacks, and independent parent/child interaction targets.
 - Verifying UI changes needs the running app: re-`cargo run -p openlogi-desktop` (a plain
   `cargo build` leaves the dev bundle stale) after quitting the previous instance
   (singleton lock). The GUI shows only the empty state unless the agent is running.

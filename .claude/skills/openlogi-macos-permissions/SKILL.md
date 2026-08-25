@@ -70,7 +70,11 @@ read-only and safe to hand to a reporter.
 so the agent also writes a daily-rotated file (7 kept) a reporter can attach:
 
 ```sh
-ls ~/.local/state/openlogi/
+case ${XDG_STATE_HOME:-} in
+  /*) state_home=$XDG_STATE_HOME ;;
+  *) state_home=$HOME/.local/state ;;
+esac
+ls "$state_home/openlogi/"
 ```
 
 It carries panics too. Only when that file is missing or predates the failure

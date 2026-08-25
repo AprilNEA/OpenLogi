@@ -1,483 +1,23 @@
-//! Popover content for binding mouse buttons, plus the per-button gesture
-//! menu.
-//!
-//! - [`action_picker`] — one button → one [`Action`], rendered as a custom flat
-//!   list inside a gpui-component [`Popover`](gpui_component::popover::Popover).
-//!   Generic over the entity that should be notified after a binding changes so
-//!   the trigger re-renders with the new label. Gesture-capable buttons lead
-//!   with a pinned "Gestures" entry that promotes the button into gesture mode.
-//! - [`gesture_overview`] — a gesture-mode button's custom multi-level menu: a
-//!   plus-shaped navigator card (level 1) listing all five [`GestureDirection`]s
-//!   with their bound actions, and — once a direction is activated — a separate
-//!   action-list card (level 2) that flies out beside it. The two are distinct
-//!   floating cards (own surface + height), so this reads like a cascading menu
-//!   while staying fully custom-styled. The active direction is scratch state on
-//!   the [`MouseModelView`]. A footer row demotes the button back to a single
-//!   action. Any number of buttons can be in gesture mode at once, each with
-//!   its own menu.
-//!
-//! The [`action_picker`] [`Popover`] uses the framework's styled surface; the
-//! gesture menu uses `appearance(false)` and draws its own card surfaces, since
-//! its two levels need independent panels. Rows are transparent until hovered;
-//! the active binding is marked with accent text plus a check glyph.
+//! Shared action-catalog rows and menu surfaces used by binding editors.
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
-use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
-use openlogi_core::binding::{
-    Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
-};
+use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
+use openlogi_core::binding::{Action, Category};
 
-use super::thumbwheel::ThumbwheelPreset;
-use super::view::MouseModelView;
-use crate::state::AppState;
+use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
-/// Floor width for the [`action_picker`] popover. The action labels drive the
-/// actual width; this only stops the list from collapsing too narrow. Matches
-/// gpui-component's own `PopupMenu` floor (`min_w(rems(8.))`).
-pub(crate) const POPOVER_W: f32 = 128.;
+/// Height cap shared by compact inspector and editor lists.
+pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 
-/// Cap the scrollable action list height. The catalog has 29+ entries across
-/// half a dozen categories; without a cap the list overflows the window.
-pub(crate) const POPOVER_LIST_MAX_H: f32 = 360.;
-
-/// Build the popover body that re-binds a single `btn`.
-///
-/// `observer` is whatever entity wraps the trigger — it's notified after the
-/// global updates so the trigger re-renders. Picking an action commits it and
-/// dismisses the popover.
-pub fn action_picker<T: 'static>(
-    btn: ButtonId,
-    observer: &Entity<T>,
-    cx: &mut Context<PopoverState>,
-) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| s.button_bindings.get(&btn).cloned());
-
-    let observer = observer.clone();
-    let popover = cx.entity().downgrade();
-    let on_pick: PickFn = Rc::new({
-        let observer = observer.clone();
-        let popover = popover.clone();
-        move |action, window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.commit_binding(btn, action));
-            observer.update(cx, |_, cx| cx.notify());
-            if let Some(p) = popover.upgrade() {
-                p.update(cx, |s, cx| s.dismiss(window, cx));
-            }
-        }
-    });
-
-    let pal = theme::palette(cx);
-    let button = rust_i18n::t!(btn.label());
-    // A control that can gesture (a HID++ gesture source, or an OS-hook button
-    // the hook can hold-and-swipe) leads with a pinned mode entry above the
-    // action list: picking it promotes THIS button into gesture mode — any
-    // number of buttons may gesture at once — and the reopened popover then
-    // shows the gesture menu.
-    let gesture_capable = btn.is_hidpp_gesture_source() || btn.is_os_hook_button();
-    menu_card(pal)
-        .min_w(px(POPOVER_W))
-        .child(title(tr!("Bind %{name}", name => button), pal))
-        .child(divider(pal))
-        .when(gesture_capable, |card| {
-            card.child(gesture_mode_row(btn, &observer, &popover, pal))
-                .child(divider(pal))
-        })
-        .child(scroll_list(
-            "picker-scroll",
-            action_rows("action-item", current.as_ref(), &on_pick, pal),
-        ))
-        .into_any_element()
-}
-
-/// Build the paired preset picker for thumb-wheel rotation. One click updates
-/// both directional bindings and dismisses the popover.
-pub(crate) fn thumbwheel_picker<T: 'static>(
-    observer: &Entity<T>,
-    cx: &mut Context<PopoverState>,
-) -> AnyElement {
-    let current = cx.try_global::<AppState>().and_then(|state| {
-        let backward = state
-            .button_bindings
-            .get(&ButtonId::ThumbwheelScrollDown)
-            .cloned()
-            .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollDown));
-        let forward = state
-            .button_bindings
-            .get(&ButtonId::ThumbwheelScrollUp)
-            .cloned()
-            .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
-        ThumbwheelPreset::recognize(&backward, &forward)
-    });
-
-    let pal = theme::palette(cx);
-    let popover = cx.entity().downgrade();
-    let rows: Vec<AnyElement> = ThumbwheelPreset::ALL
-        .into_iter()
-        .enumerate()
-        .map(|(idx, preset)| {
-            let selected = current == Some(preset);
-            let label = tr!(preset.label());
-            let observer = observer.clone();
-            let popover = popover.clone();
-            menu_row(("thumbwheel-preset", idx), pal, selected)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            svg()
-                                .path(preset.icon())
-                                .size_4()
-                                .flex_none()
-                                .text_color(pal.text_muted),
-                        )
-                        .child(div().child(label)),
-                )
-                .when(selected, |row| {
-                    row.child(
-                        Icon::new(IconName::Check)
-                            .size_3()
-                            .text_color(rgb(ACCENT_BLUE)),
-                    )
-                })
-                .on_click(move |_event, window, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
-                        state.commit_thumbwheel_preset(preset);
-                    });
-                    observer.update(cx, |_, cx| cx.notify());
-                    if let Some(popover) = popover.upgrade() {
-                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                    }
-                })
-                .into_any_element()
-        })
-        .collect();
-
-    menu_card(pal)
-        .min_w(px(POPOVER_W))
-        .child(title(tr!("Bind %{name}", name => tr!("Thumb Wheel")), pal))
-        .child(divider(pal))
-        .when(current.is_none(), |card| {
-            card.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("Custom")),
-            )
-            .child(divider(pal))
-        })
-        .child(scroll_list("thumbwheel-picker-scroll", rows))
-        .into_any_element()
-}
-
-/// The pinned "Gestures" entry leading a gesture-capable button's picker.
-/// Clicking promotes the button into gesture mode (its single action becomes
-/// the Click arm, swipe arms seed from defaults) and dismisses the popover;
-/// reopening it lands on the gesture menu.
-fn gesture_mode_row<T: 'static>(
-    btn: ButtonId,
-    observer: &Entity<T>,
-    popover: &gpui::WeakEntity<PopoverState>,
-    pal: Palette,
-) -> AnyElement {
-    let observer = observer.clone();
-    let popover = popover.clone();
-    menu_row("gesture-mode-row", pal, false)
-        .child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    svg()
-                        .path(GESTURE_BUTTON_ICON)
-                        .size_4()
-                        .flex_none()
-                        .text_color(pal.text_muted),
-                )
-                .child(div().child(tr!("Gestures"))),
-        )
-        .child(
-            Icon::new(IconName::ChevronRight)
-                .size_3()
-                .text_color(pal.text_muted),
-        )
-        .on_click(move |_event, window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.commit_gesture_mode(btn, true));
-            observer.update(cx, |_, cx| cx.notify());
-            if let Some(p) = popover.upgrade() {
-                p.update(cx, |s, cx| s.dismiss(window, cx));
-            }
-        })
-        .into_any_element()
-}
-
-/// Floor width of a single direction cell in the plus navigator. Three sit side
-/// by side in the middle row, so the plus is roughly `3×` this plus gaps.
-const GESTURE_CELL_W: f32 = 104.;
-
-/// Build `btn`'s custom two-level gesture menu: the plus navigator card
-/// (level 1) plus, once a direction is activated, its action-list card (level 2)
-/// flown out beside it. The two are separate floating cards — own surface and
-/// height — so it reads like a cascading menu without sharing one box. The
-/// active direction is scratch UI state on the [`MouseModelView`] (`None` until
-/// a cell is clicked → only the plus shows), reset on popover close. Mutating it
-/// re-renders the view, which re-renders this open popover's content.
-pub fn gesture_overview(
-    btn: ButtonId,
-    view: &Entity<MouseModelView>,
-    cx: &mut Context<PopoverState>,
-) -> AnyElement {
-    let pal = theme::palette(cx);
-    let active = view.read(cx).gesture_selected_dir();
-    h_flex()
-        .items_start()
-        .gap_2()
-        .child(plus_card(btn, view, active, pal, cx))
-        // The flyout card only appears once a direction is activated.
-        .when_some(active, |row, dir| {
-            row.child(flyout_card(btn, dir, view, pal, cx))
-        })
-        .into_any_element()
-}
-
-/// The shared floating-card surface for every binding menu — the button picker,
-/// the gesture plus navigator, and its action flyout — so they read as one
-/// consistent, app-branded panel instead of two different surfaces.
-///
-/// Radius scale (shape lock): interactive rows/cells use `rounded_md` (6px); the
-/// card uses `rounded_lg` (8px). The shadow is gpui's soft `shadow_md`, not a
-/// hard drop. Not stateful (no interaction → no element id, so two sibling cards
-/// can't collide on one).
-pub(crate) fn menu_card(pal: Palette) -> gpui::Div {
-    v_flex()
-        .bg(pal.surface)
-        .border_1()
-        .border_color(pal.border)
-        .rounded(pal.card_radius)
-        .shadow_md()
-        .p_1p5()
-}
-
-/// The action a missing gesture-map entry actually performs at runtime, so the
-/// menu never shows a swipe or tap doing something it would not.
-///
-/// Only an OS-hook button's raw (hand-edited, sparse) map can be missing an
-/// entry — HID++ sources come fully seeded (see
-/// [`AppState::current_gesture_maps`]). A tap without a `Click` entry falls
-/// through to the button's plain click action ([`default_binding`]); an
-/// unbound swipe does nothing.
-fn sparse_gesture_fallback(btn: ButtonId, dir: GestureDirection) -> Action {
-    match dir {
-        GestureDirection::Click => default_binding(btn),
-        _ => Action::None,
-    }
-}
-
-/// Level 1: the plus navigator. `Up` on top, `Left`/`Click`/`Right` across the
-/// middle, `Down` on the bottom. Each cell shows its glyph + label and bound
-/// action; the `active` cell (if any) is accented. Clicking a cell activates
-/// that direction (flying out the level-2 card) without committing. A footer
-/// row turns gesture mode off for `btn`, demoting it back to a single action.
-fn plus_card(
-    btn: ButtonId,
-    view: &Entity<MouseModelView>,
-    active: Option<GestureDirection>,
-    pal: Palette,
-    cx: &mut Context<PopoverState>,
-) -> AnyElement {
-    let actions: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
-        .into_iter()
-        .map(|d| {
-            let action = cx
-                .try_global::<AppState>()
-                .and_then(|s| {
-                    s.gesture_bindings
-                        .get(&btn)
-                        .and_then(|m| m.get(&d))
-                        .cloned()
-                })
-                .unwrap_or_else(|| sparse_gesture_fallback(btn, d));
-            (d, action)
-        })
-        .collect();
-
-    let cell = |dir: GestureDirection| {
-        direction_cell(btn, dir, &actions[&dir], active == Some(dir), view, pal)
-    };
-
-    let view_off = view.clone();
-    let popover = cx.entity().downgrade();
-    menu_card(pal)
-        .gap_1p5()
-        .child(
-            h_flex()
-                .w_full()
-                .justify_center()
-                .child(cell(GestureDirection::Up)),
-        )
-        .child(
-            h_flex()
-                .w_full()
-                .justify_center()
-                .gap_1p5()
-                .child(cell(GestureDirection::Left))
-                .child(cell(GestureDirection::Click))
-                .child(cell(GestureDirection::Right)),
-        )
-        .child(
-            h_flex()
-                .w_full()
-                .justify_center()
-                .child(cell(GestureDirection::Down)),
-        )
-        .child(divider(pal))
-        .child(
-            // Demote back to a single action: the Click arm becomes the
-            // button's action, and the reopened popover shows the plain picker.
-            menu_row("gesture-off-row", pal, false)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            svg()
-                                .path("action-icons/ban.svg")
-                                .size_4()
-                                .flex_none()
-                                .text_color(pal.text_muted),
-                        )
-                        .child(div().child(tr!("Turn off gestures"))),
-                )
-                .on_click(move |_event, window, cx| {
-                    cx.update_global::<AppState, _>(|state, _| {
-                        state.commit_gesture_mode(btn, false);
-                    });
-                    view_off.update(cx, |_, vcx| vcx.notify());
-                    if let Some(p) = popover.upgrade() {
-                        p.update(cx, |s, cx| s.dismiss(window, cx));
-                    }
-                }),
-        )
-        .into_any_element()
-}
-
-/// One direction's cell in the plus: a fixed-width clickable card with the
-/// direction glyph + label above its bound-action label. The `active` cell is
-/// accented (border + faint fill); a default binding's action is muted.
-fn direction_cell(
-    btn: ButtonId,
-    dir: GestureDirection,
-    current: &Action,
-    active: bool,
-    view: &Entity<MouseModelView>,
-    pal: Palette,
-) -> AnyElement {
-    let idx = match dir {
-        GestureDirection::Up => 0usize,
-        GestureDirection::Down => 1,
-        GestureDirection::Left => 2,
-        GestureDirection::Right => 3,
-        GestureDirection::Click => 4,
-    } + 5 * (btn as usize);
-    let header = format!("{}  {}", dir.glyph(), tr!(dir.label()));
-    let action_label = tr!(current.label());
-    let accessible_label = format!("{}: {action_label}", tr!(dir.label()));
-    let is_default = *current == default_gesture_binding(dir);
-    let view = view.clone();
-    v_flex()
-        .id(("gesture-cell", idx))
-        .role(Role::Button)
-        .aria_label(accessible_label)
-        .aria_expanded(active)
-        .w(px(GESTURE_CELL_W))
-        .gap(px(2.))
-        .px_2()
-        .py_1p5()
-        .rounded(pal.control_radius)
-        .selected_border(active, pal)
-        .selected_fill(active)
-        .hover(move |s| s.bg(pal.surface_hover))
-        .child(div().text_caption().text_color(pal.text_muted).child(header))
-        .child(
-            div()
-                .text_body()
-                .text_color(if is_default {
-                    pal.text_muted
-                } else {
-                    pal.text_primary
-                })
-                .child(action_label),
-        )
-        // Click opens this direction's flyout; clicking the active cell again
-        // closes it. (Hover-to-open was too easy to mis-trigger while moving the
-        // cursor across the plus.)
-        .on_click(move |_event, _window, cx| {
-            view.update(cx, |v, vcx| {
-                let next = (v.gesture_selected_dir() != Some(dir)).then_some(dir);
-                v.set_gesture_selected_dir(next);
-                vcx.notify();
-            });
-        })
-        .into_any_element()
-}
-
-/// Level 2: the `dir` direction's action picker for `btn`, flown out as its
-/// own card — the category-grouped catalog with the current binding checked.
-/// Picking commits and stays open, so the level-1 cell + checkmark update in
-/// place and the user can keep editing other directions.
-fn flyout_card(
-    btn: ButtonId,
-    dir: GestureDirection,
-    view: &Entity<MouseModelView>,
-    pal: Palette,
-    cx: &mut Context<PopoverState>,
-) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| {
-            s.gesture_bindings
-                .get(&btn)
-                .and_then(|m| m.get(&dir))
-                .cloned()
-        })
-        .unwrap_or_else(|| sparse_gesture_fallback(btn, dir));
-
-    let view_pick = view.clone();
-    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| state.commit_gesture_binding(btn, dir, action));
-        // Stay open; re-render so the level-1 cell + checkmark update.
-        view_pick.update(cx, |_, vcx| vcx.notify());
-    });
-
-    menu_card(pal)
-        .min_w(px(POPOVER_W))
-        .child(title(format!("{}  {}", dir.glyph(), tr!(dir.label())), pal))
-        .child(divider(pal))
-        .child(scroll_list(
-            "gesture-dir-scroll",
-            action_rows("gesture-action", Some(&current), &on_pick, pal),
-        ))
-        .into_any_element()
-}
-
-// ── Shared building blocks ──────────────────────────────────────────────────
-
-/// Commit callback invoked when a row is clicked. Boxed so the row builder can
-/// be shared between the button picker and any future custom picker, which
-/// differ only in what they do after committing.
+/// Commit callback invoked when an action row is clicked.
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
@@ -485,32 +25,29 @@ pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
     for action in Action::catalog() {
-        let cat = action.category();
-        if let Some(sec) = sections.iter_mut().find(|(c, _)| *c == cat) {
-            sec.1.push(action);
+        let category = action.category();
+        if let Some(section) = sections
+            .iter_mut()
+            .find(|(existing, _)| *existing == category)
+        {
+            section.1.push(action);
         } else {
-            sections.push((cat, vec![action]));
+            sections.push((category, vec![action]));
         }
     }
     sections
 }
 
-/// Icon for the gesture button's label card — lucide `move` (a 4-way arrow
-/// cross), standing in for its five swipe directions since it has no single
-/// bound action.
+/// Icon for a gesture-mode button's five-direction summary.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
 
-/// Asset path (served by [`crate::app_assets`]) of the vendored lucide glyph for
-/// an action — the leading icon in each action row and in the leader-line label
-/// card. Exhaustive on purpose: a new [`Action`] variant must pick an icon here
-/// (no catch-all fallback).
+/// Asset path of the vendored glyph for an action. Exhaustive so a new action
+/// must deliberately choose an icon.
 pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     match action {
         Action::None => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
         Action::MiddleClick => "action-icons/mouse.svg",
-        // Circled arrows: visually "back/forward as a button", distinct from
-        // BrowserBack/BrowserForward's bare arrows in the Navigation section.
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
@@ -550,41 +87,68 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        // Power-user actions (M1 function-key remapper). TypeText shares the
-        // keyboard glyph with CustomShortcut; shell/script arms share terminal.
         Action::CustomShortcut(_) | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }
 
-/// Build the category-grouped action rows. Each row leads with the action's
-/// icon, then its label; `current` adds a trailing accent check. Clicking any
-/// row invokes `on_pick`. `id_prefix` disambiguates element IDs between pickers
-/// that share this builder.
+/// Build every category-grouped action row.
 pub(crate) fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<AnyElement> {
-    let mut idx = 0usize;
+    action_rows_matching(id_prefix, current, "", on_pick, pal)
+}
+
+/// Build action rows filtered by localized action or category name.
+pub(crate) fn action_rows_matching(
+    id_prefix: &'static str,
+    current: Option<&Action>,
+    query: &str,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> Vec<AnyElement> {
+    let query = query.trim().to_lowercase();
+    let mut catalog_index = 0usize;
     let mut children: Vec<AnyElement> = Vec::new();
     for (category, actions) in grouped_catalog() {
         let category_label = rust_i18n::t!(category.label());
-        children.push(popover_section(category_label.into_owned(), pal));
-        for action in actions {
+        let category_matches = category_label.to_lowercase().contains(&query);
+        // Number the full catalog before filtering so typing in the search box
+        // never changes an action row's element identity.
+        let actions: Vec<(usize, Action)> = actions
+            .into_iter()
+            .map(|action| {
+                let key = catalog_index;
+                catalog_index += 1;
+                (key, action)
+            })
+            .filter(|(_, action)| {
+                query.is_empty()
+                    || category_matches
+                    || rust_i18n::t!(action.label())
+                        .to_lowercase()
+                        .contains(&query)
+                    || action.label().to_lowercase().contains(&query)
+            })
+            .collect();
+        if actions.is_empty() {
+            continue;
+        }
+        children.push(editor_section(category_label.into_owned(), pal));
+        for (action_key, action) in actions {
             let selected = current == Some(&action);
             let label = tr!(action.label());
             let accessible_label = label.clone();
             let icon_path = action_icon_path(&action);
             let on_pick = on_pick.clone();
-            let row_id = idx;
-            idx += 1;
             children.push(
-                menu_row((id_prefix, row_id), pal, selected)
+                MenuRow::new((id_prefix, action_key))
+                    .selected(selected)
                     .role(Role::MenuItem)
                     .aria_label(accessible_label)
-                    .aria_selected(selected)
                     .child(
                         h_flex()
                             .items_center()
@@ -598,8 +162,8 @@ pub(crate) fn action_rows(
                             )
                             .child(div().child(label)),
                     )
-                    .when(selected, |s| {
-                        s.child(
+                    .when(selected, |row| {
+                        row.child(
                             Icon::new(IconName::Check)
                                 .size_3()
                                 .text_color(rgb(ACCENT_BLUE)),
@@ -613,42 +177,19 @@ pub(crate) fn action_rows(
     children
 }
 
-/// A clickable, full-width menu row: `text-sm`, children spread left/right.
-/// The label stays in `text_primary` in both states for readability; selection
-/// is shown by a subtle accent fill (plus the caller's trailing check), and the
-/// fill deepens on hover. Unselected rows are transparent at rest, neutral on
-/// hover. One accent, one signal per state — no blue label text (which fails AA
-/// contrast on the near-white surface).
-pub(crate) fn menu_row(
-    id: impl Into<gpui::ElementId>,
-    pal: Palette,
-    selected: bool,
-) -> gpui::Stateful<gpui::Div> {
-    h_flex()
-        .id(id)
-        .w_full()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_2()
-        .py_1p5()
-        .rounded(pal.control_radius)
-        .text_body()
-        .text_color(pal.text_primary)
-        .selected_fill(selected)
-        .hover(move |s| {
-            s.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.surface_hover
-            })
-        })
+/// Shared card surface for compact binding panels and menus.
+pub(crate) fn compact_panel(pal: Palette) -> gpui::Div {
+    v_flex()
+        .bg(pal.panel)
+        .border_1()
+        .border_color(pal.border)
+        .rounded(pal.card_radius)
+        .shadow_md()
+        .p_1p5()
 }
 
-/// A group heading in a popover list, inset to line up with the rows under it.
-/// Shared with the Actions Ring editor and the function-row list, which draw the
-/// same list.
-pub(crate) fn popover_section(label: impl Into<gpui::SharedString>, pal: Palette) -> AnyElement {
+/// A group heading inset to line up with the rows under it.
+pub(crate) fn editor_section(label: impl Into<gpui::SharedString>, pal: Palette) -> AnyElement {
     section_label(label, pal)
         .w_full()
         .px_2()
@@ -657,7 +198,7 @@ pub(crate) fn popover_section(label: impl Into<gpui::SharedString>, pal: Palette
         .into_any_element()
 }
 
-/// Popover title — the binding context, e.g. "Bind Back".
+/// Compact editor title.
 pub(crate) fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl IntoElement {
     div()
         .px_2()
@@ -667,16 +208,16 @@ pub(crate) fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl I
         .child(text.into())
 }
 
-/// 1px hairline separating the title from the list.
+/// Hairline separating compact editor regions.
 pub(crate) fn divider(pal: Palette) -> impl IntoElement {
     div().mb_1().h(px(1.)).w_full().bg(pal.border)
 }
 
-/// Wrap `rows` in the height-capped, vertically scrollable list region.
-pub(crate) fn scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
+/// Height-capped scroll region for compact editor rows.
+pub(crate) fn editor_scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
     div()
         .id(id)
-        .max_h(px(POPOVER_LIST_MAX_H))
+        .max_h(px(EDITOR_LIST_MAX_H))
         .overflow_y_scroll()
         .children(rows)
 }

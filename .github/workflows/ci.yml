@@ -36,6 +36,15 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  typos:
+    name: typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
+        with:
+          config: .config/typos.toml
+
   publish-closure:
     name: publish closure
     runs-on: ubuntu-latest
@@ -231,9 +240,9 @@ jobs:
       # crates.io. cargo-deny picks its roots from the manifest it is given, so
       # this was implicit while `openlogi` was the workspace root package; with a
       # virtual root it must be explicit, or the git-pinned gpui/zed tree enters
-      # the graph and the policy in deny.toml no longer holds. Widening the scope
-      # to the app crates is tracked separately — see deny.toml.
-      - run: cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check
+      # the graph and the policy in `.cargo/deny.toml` no longer holds. Widening
+      # the scope to the app crates is tracked separately — see that file.
+      - run: cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check
 
   clippy-windows:
     name: clippy (windows)
@@ -274,7 +283,7 @@ jobs:
       # picks up a filesystem, a randomness source or a thread stops compiling
       # here and nowhere else. The crate list lives in xtask
       # (`WASM_PORTABLE_CRATES`) and the drift test keeps the two in step.
-      - run: cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown
+      - run: cargo check -p openlogi-device-registry -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown
       # `openlogi-core` earns its place only with `fs` off: that feature is
       # the config file, and a config file needs a filesystem.
       - run: cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown

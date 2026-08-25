@@ -15,6 +15,9 @@ use url::Url;
 
 use crate::state::AppState;
 
+/// Keymap context installed on the main application surface.
+pub(crate) const APP_KEY_CONTEXT: &str = "OpenLogi";
+
 actions!(
     openlogi,
     [
@@ -30,6 +33,8 @@ actions!(
         HideOthers,
         /// Minimize the active window.
         Minimize,
+        /// Return from device details to the device gallery.
+        NavigateBack,
         /// Open the About window.
         OpenAbout,
         /// Open the Add Device (pairing) window.
@@ -103,6 +108,7 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("alt-left", NavigateBack, Some(APP_KEY_CONTEXT)),
     ]);
 
     cx.set_menus(menus(cx));
@@ -216,7 +222,8 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
         MenuItem::separator(),
     ];
 
-    match cx.try_global::<AppState>() {
+    let state = AppState::try_global(cx);
+    match state.as_ref().map(|state| state.read(cx)) {
         Some(state) if !state.device_list.is_empty() => {
             for record in &state.device_list {
                 let title = match &record.battery {

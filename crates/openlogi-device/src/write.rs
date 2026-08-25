@@ -50,9 +50,11 @@ pub use lighting::{
     LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
     set_keyboard_color_with_on,
 };
+pub(crate) use litra::litra_capabilities;
 pub use litra::{
-    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraModel, apply as apply_litra,
-    encode_command as encode_litra_command, matches_litra,
+    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
+    apply as apply_litra, encode_command as encode_litra_command, find_litra,
+    litra_model_for_route, matches_litra,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

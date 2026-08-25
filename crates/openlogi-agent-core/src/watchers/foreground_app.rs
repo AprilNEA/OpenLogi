@@ -2,14 +2,15 @@
 
 use std::time::Duration;
 
+use openlogi_core::app::ForegroundApp;
 use tokio::sync::mpsc;
 
 use super::poll::{self, Poll};
 
-/// Channel item: `Some(bundle_id)` when an app is frontmost; `None` for
-/// "no foreground app" (rare on macOS — Finder is usually frontmost even
-/// when nothing else is).
-pub type ForegroundUpdate = Option<String>;
+/// Channel item: `Some(app)` when an app is frontmost; `None` for "no
+/// foreground app" (rare on macOS — Finder is usually frontmost even when
+/// nothing else is).
+pub type ForegroundUpdate = Option<ForegroundApp>;
 
 /// Watch foreground application changes.
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
@@ -26,5 +27,5 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
         period,
         degrades: "per-app profiles are disabled",
     }
-    .on_change(openlogi_hook::frontmost_bundle_id)
+    .on_change(openlogi_hook::frontmost_application)
 }

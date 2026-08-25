@@ -1,10 +1,10 @@
 //! Updates settings page.
 
 use super::{
-    AnyElement, App, AppState, BorrowAppContext, Button, ButtonVariants, Disableable, Entity,
-    FontWeight, IconName, IntoElement, Palette, ParentElement, RELEASES_URL, SettingField,
-    SettingGroup, SettingItem, SettingPage, Sizable, Styled, Tag, UpdateStatus, Updater, div,
-    h_flex, img, px, v_flex,
+    AnyElement, App, AppState, Button, ButtonVariants, Disableable, Entity, FontWeight, IconName,
+    IntoElement, Palette, ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem,
+    SettingPage, Sizable, StateEvent, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px,
+    v_flex,
 };
 use crate::ui::theme::Typography as _;
 
@@ -21,15 +21,12 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
             SettingItem::new(
                 tr!("Check for updates"),
                 SettingField::switch(
-                    |cx| {
-                        cx.try_global::<AppState>()
-                            .is_some_and(|s| s.app_settings().check_for_updates)
-                    },
+                    |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().check_for_updates),
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_check_for_updates(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_check_for_updates(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
-                        cx.refresh_windows();
                     },
                 ),
             )
@@ -42,14 +39,14 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
                 tr!("Automatically download and install"),
                 SettingField::switch(
                     |cx| {
-                        cx.try_global::<AppState>()
+                        AppState::try_read(cx)
                             .is_some_and(|s| s.app_settings().auto_install_updates)
                     },
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_auto_install_updates(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_auto_install_updates(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
-                        cx.refresh_windows();
                     },
                 ),
             )

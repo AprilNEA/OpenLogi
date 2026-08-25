@@ -38,8 +38,10 @@ paths:
   stop, the thread exited). The watchdog must not call the Accessibility trust API —
   that query can stall during TCC revocation; monitor tap-thread progress instead, and
   force-exit the agent if revocation or shutdown stalls so macOS releases the HID tap.
-- The off-main `frontmost_bundle_id` read keeps its explicit `autoreleasepool` — the
+- The off-main `frontmost_application` read keeps its explicit `autoreleasepool` — the
   watcher thread has no run loop; that is the only place in this crate a pool belongs.
+  Every string it copies out (bundle id *and* localized name) must be owned before the
+  pool drops.
 - This crate ships non-macOS implementations (evdev/uinput, WH_MOUSE_LL) that a
   macOS-green build never compiles. CI lints them; treat the linux/windows CI jobs as
   the check, not local builds.

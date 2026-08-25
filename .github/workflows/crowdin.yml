@@ -10,7 +10,7 @@ on:
     paths:
       # English source is SoT; non-English catalogs come from Crowdin only.
       - crates/openlogi-ui/locales/en.yml
-      - crowdin.yml
+      - .config/crowdin.yml
       - .github/workflows/crowdin.yml
       - .github/scripts/i18n/**
       - .github/actions/github-app-token-from-1password/**
@@ -78,7 +78,7 @@ jobs:
       - name: Synchronize with Crowdin
         uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
-          config: crowdin.yml
+          config: .config/crowdin.yml
           upload_sources: true
           # Seed each language from git so Crowdin learns existing translations
           # (de/ja/…). import_eq_suggestions false: value==English is not a

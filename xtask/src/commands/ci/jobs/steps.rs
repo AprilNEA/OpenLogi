@@ -46,7 +46,11 @@ const WINDOWS_LINT_CRATES: [&str; 8] = [
 /// `openlogi-core` qualifies only with its `fs` feature off — that feature is
 /// the config file, and a config file needs a filesystem. Hence
 /// `--no-default-features`, which is why this job checks it in its own pass.
-const WASM_PORTABLE_CRATES: [&str; 2] = ["openlogi-hidpp", "openlogi-device"];
+const WASM_PORTABLE_CRATES: [&str; 3] = [
+    "openlogi-device-registry",
+    "openlogi-hidpp",
+    "openlogi-device",
+];
 
 /// The crates that are portable once their host-facing feature is off.
 const WASM_PORTABLE_NO_DEFAULT_CRATES: [&str; 1] = ["openlogi-core"];
@@ -137,6 +141,7 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
             job,
             [Step::new("cargo").args(["fmt", "--all", "--", "--check"])],
         )),
+        Job::Typos => Ok(typos(job)),
         Job::PublishClosure => Ok(Plan::run(
             job,
             [Step::new("cargo").args(["xtask", "release", "check-publish"])],
@@ -162,6 +167,16 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
             [Step::new("cargo").args(["test", "-p", "openlogi-ipc", "--test", "wire_format"])],
         )),
     }
+}
+
+fn typos(job: Job) -> Plan {
+    if !command_exists("typos") {
+        return Plan::skip(job, "needs typos-cli (included in the devenv shell)");
+    }
+    Plan::run(
+        job,
+        [Step::new("typos").args(["--config", ".config/typos.toml", "."])],
+    )
 }
 
 /// shellcheck and shfmt over every tracked shell script.
@@ -288,7 +303,9 @@ fn tests_macos(job: Job) -> Plan {
 /// crates.io. cargo-deny picks its roots from the manifest it is given, and a
 /// virtual workspace root would drag the git-pinned gpui tree into the graph.
 fn cargo_deny(job: Job) -> Plan {
-    const ARGS: [&str; 4] = [
+    const ARGS: [&str; 6] = [
+        "--config",
+        ".cargo/deny.toml",
         "--all-features",
         "--manifest-path",
         "crates/openlogi/Cargo.toml",

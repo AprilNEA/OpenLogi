@@ -72,7 +72,7 @@ impl UnifiedBatteryFeature {
     }
 }
 
-/// Represents the capabilites of this feature and the battery itself.
+/// Represents the capabilities of this feature and the battery itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]

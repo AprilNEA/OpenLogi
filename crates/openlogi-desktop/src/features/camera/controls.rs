@@ -12,13 +12,13 @@
 //! a single batched device-open.
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, ClickEvent, Context, Entity,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    h_flex,
+    Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -26,7 +26,8 @@ use openlogi_camera::{AutoToggle, CameraControl, CameraState, ControlRange};
 use openlogi_core::config::CameraControls;
 use tracing::debug;
 
-use crate::state::AppState;
+use crate::state::{AppState, StateEvent};
+use crate::ui::components::ProfileTab;
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
@@ -58,6 +59,13 @@ const BUILTIN_PROFILES: [BuiltinProfile; 3] = [
     },
 ];
 
+fn update_camera(cx: &mut App, update: impl FnOnce(&mut AppState)) {
+    AppState::update(cx, |state, cx| {
+        update(state);
+        cx.emit(StateEvent::CameraChanged);
+    });
+}
+
 /// One built-in profile: an id for persistence plus range-relative targets
 /// (an empty list means "device defaults for everything").
 struct BuiltinProfile {
@@ -72,7 +80,7 @@ pub struct CameraControlsPanel {
     uid: Option<String>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
-    #[expect(dead_code, reason = "held to keep the AppState observer alive")]
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
 
@@ -107,7 +115,20 @@ enum Reapplied {
 
 impl CameraControlsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.observe_global::<AppState>(|_panel, cx| cx.notify());
+        let state_obs = cx.subscribe(
+            &AppState::global(cx),
+            |_panel, _, event: &StateEvent, cx| {
+                if matches!(
+                    event,
+                    StateEvent::InventoryChanged
+                        | StateEvent::DeviceSelected(_)
+                        | StateEvent::CameraChanged
+                        | StateEvent::CameraPermissionChanged
+                ) {
+                    cx.notify();
+                }
+            },
+        );
         Self {
             key: None,
             uid: None,
@@ -119,7 +140,7 @@ impl CameraControlsPanel {
 
     /// The active camera's `(config_key, capture_id)`, if a webcam is selected.
     fn active_camera(cx: &Context<Self>) -> Option<(String, String)> {
-        let record = cx.try_global::<AppState>()?.current_record()?;
+        let record = AppState::try_read(cx)?.current_record()?;
         if !matches!(record.kind, openlogi_core::device::DeviceKind::Camera) {
             return None;
         }
@@ -150,7 +171,11 @@ impl CameraControlsPanel {
             return Reapplied::Clean;
         };
         debug!(error = %e, "saved camera state reapply failed");
-        cx.update_global::<AppState, _>(|state, _| {
+        // This runs while building the panel. Do not emit back into this same
+        // view: if the confirming read also fails, an event-driven repaint
+        // would immediately retry forever instead of waiting for a real UI or
+        // inventory event.
+        AppState::update(cx, |state, _| {
             state.set_camera_active_profile(key, None);
         });
         match openlogi_camera::read_camera_state(uid) {
@@ -172,7 +197,10 @@ impl CameraControlsPanel {
         self.sliders.clear();
         self.autos.clear();
         // Port-bound keys from older builds → stable serial key, once per open.
-        cx.update_global::<AppState, _>(|state, _| {
+        // This is part of render-time panel construction; emitting an event
+        // here would create a hot repaint loop while an unavailable camera
+        // keeps failing the state read below.
+        AppState::update(cx, |state, _| {
             state.migrate_legacy_camera_key(key, uid);
         });
 
@@ -194,9 +222,7 @@ impl CameraControlsPanel {
         let mut desired_autos = Vec::new();
         let mut apply_autos = Vec::new();
         for (toggle, st) in &snap.autos {
-            let saved = cx
-                .try_global::<AppState>()
-                .and_then(|s| s.camera_auto(key, *toggle));
+            let saved = AppState::try_read(cx).and_then(|s| s.camera_auto(key, *toggle));
             let on = saved.unwrap_or(st.current);
             if on != st.current {
                 apply_autos.push((*toggle, on));
@@ -213,9 +239,7 @@ impl CameraControlsPanel {
         let mut desired_values = Vec::new();
         let mut apply_values = Vec::new();
         for (control, range) in &snap.controls {
-            let saved = cx
-                .try_global::<AppState>()
-                .and_then(|s| s.camera_control(key, *control));
+            let saved = AppState::try_read(cx).and_then(|s| s.camera_control(key, *control));
             let initial = saved.unwrap_or(range.current).clamp(range.min, range.max);
             if saved.is_some()
                 && saved != Some(range.current)
@@ -348,11 +372,11 @@ impl CameraControlsPanel {
         }
         if let Some((toggle, ix)) = takeover {
             self.autos[ix].on = false;
-            cx.update_global::<AppState, _>(|state, _| {
+            update_camera(cx, |state| {
                 state.commit_camera_auto(key, toggle, false);
             });
         }
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             state.commit_camera_control(key, control, v);
         });
         self.sync_active_custom(cx);
@@ -396,7 +420,7 @@ impl CameraControlsPanel {
             return;
         }
         self.autos[ix].on = on;
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             state.commit_camera_auto(&key, toggle, on);
         });
         self.sync_active_custom(cx);
@@ -455,7 +479,7 @@ impl CameraControlsPanel {
                 });
             }
         }
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             for (toggle, on) in autos {
                 state.commit_camera_auto(key, *toggle, *on);
             }
@@ -494,14 +518,14 @@ impl CameraControlsPanel {
         if let Some(pos) = auto_pos {
             let (toggle, auto_default) = autos[0];
             self.autos[pos].on = auto_default;
-            cx.update_global::<AppState, _>(|state, _| {
+            update_camera(cx, |state| {
                 state.commit_camera_auto(&key, toggle, auto_default);
             });
         }
         state.update(cx, |slider, cx| {
             slider.set_value(to_slider(default), window, cx);
         });
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             state.commit_camera_control(&key, control, default);
         });
         self.sync_active_custom(cx);
@@ -515,8 +539,7 @@ impl CameraControlsPanel {
         let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
-        let custom = cx
-            .try_global::<AppState>()
+        let custom = AppState::try_read(cx)
             .map(|s| s.camera_profiles(&key))
             .unwrap_or_default();
 
@@ -584,7 +607,7 @@ impl CameraControlsPanel {
             return;
         }
         self.commit_batch(&key, &autos, &values, window, cx);
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             state.set_camera_active_profile(&key, Some(id.to_string()));
         });
         cx.notify();
@@ -614,7 +637,7 @@ impl CameraControlsPanel {
             return;
         };
         let snap = self.snapshot(cx);
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             let Some(active) = state.camera_active_profile(&key) else {
                 return;
             };
@@ -634,7 +657,7 @@ impl CameraControlsPanel {
     fn resync_after_failed_write(&mut self, cx: &mut Context<Self>) {
         self.uid = None;
         if let Some(key) = self.key.take() {
-            cx.update_global::<AppState, _>(|state, _| {
+            update_camera(cx, |state| {
                 state.set_camera_active_profile(&key, None);
             });
         }
@@ -648,7 +671,7 @@ impl CameraControlsPanel {
             return;
         };
         let snap = self.snapshot(cx);
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             let existing = state.camera_profiles(&key);
             let mut n = existing.len() + 1;
             let mut name = format!("Custom {n}");
@@ -668,7 +691,7 @@ impl CameraControlsPanel {
         let Some(key) = self.key.clone() else {
             return;
         };
-        cx.update_global::<AppState, _>(|state, _| {
+        update_camera(cx, |state| {
             state.delete_camera_profile(&key, name);
         });
         cx.notify();
@@ -698,7 +721,7 @@ impl Render for CameraControlsPanel {
         let lens: Vec<usize> = section_indices(&self.sliders, true);
         let image: Vec<usize> = section_indices(&self.sliders, false);
 
-        let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, pal, cx));
+        let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, cx));
         if !lens.is_empty() && !image.is_empty() {
             panel = panel.child(section_label(tr!("Lens"), pal).mt_1());
         }
@@ -732,8 +755,8 @@ fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usize> {
 }
 
 /// The one-click profile chips: built-ins, saved customs, then Save.
-fn profiles_row(key: &str, pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
-    let state = cx.try_global::<AppState>();
+fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
+    let state = AppState::try_read(cx);
     let active = state.and_then(|s| s.camera_active_profile(key));
     let customs: Vec<String> = state
         .map(|s| s.camera_profiles(key).keys().cloned().collect())
@@ -742,115 +765,39 @@ fn profiles_row(key: &str, pal: Palette, cx: &mut Context<CameraControlsPanel>) 
     let mut row = h_flex().flex_wrap().gap_1p5().items_center();
     for (ix, builtin) in BUILTIN_PROFILES.iter().enumerate() {
         let id = builtin.id;
-        row = row.child(profile_chip(
-            ("camera-profile-builtin", ix),
-            builtin_label(id),
-            active.as_deref() == Some(id),
-            pal,
-            cx.listener(move |panel, _: &ClickEvent, window, cx| {
-                panel.apply_profile(id, window, cx);
-            }),
-        ));
+        row = row.child(
+            ProfileTab::new(("camera-profile-builtin", ix), builtin_label(id))
+                .selected(active.as_deref() == Some(id))
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    panel.apply_profile(id, window, cx);
+                })),
+        );
     }
     for (ix, name) in customs.into_iter().enumerate() {
         let is_active = active.as_deref() == Some(name.as_str());
-        row = row.child(custom_profile_chip(ix, name, is_active, pal, cx));
+        let apply_name = name.clone();
+        let delete_name = name.clone();
+        let on_apply = cx.listener(move |panel, _: &ClickEvent, window, cx| {
+            panel.apply_profile(&apply_name, window, cx);
+        });
+        let on_delete = cx.listener(move |panel, _: &ClickEvent, _window, cx| {
+            panel.delete_profile(&delete_name, cx);
+        });
+        row = row.child(
+            ProfileTab::new(("camera-profile-custom", ix), name)
+                .selected(is_active)
+                .on_click(on_apply)
+                .on_delete(("camera-profile-del", ix), on_delete),
+        );
     }
     row = row.child(
-        div()
-            .id("camera-profile-save")
-            .px_2()
-            .py_0p5()
-            .rounded_full()
-            .border_1()
-            .border_color(pal.border)
-            .text_caption()
-            .text_color(pal.text_muted)
-            .hover(|s| s.bg(pal.surface_hover))
-            .child(format!("+ {}", tr!("New")))
-            .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
+        ProfileTab::new("camera-profile-save", format!("+ {}", tr!("New"))).on_click(cx.listener(
+            |panel, _: &ClickEvent, _window, cx| {
                 panel.save_profile(cx);
-            })),
+            },
+        )),
     );
     row.into_any_element()
-}
-
-fn profile_chip(
-    id: (&'static str, usize),
-    label: SharedString,
-    active: bool,
-    pal: Palette,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
-    let accent = rgb(ACCENT_BLUE);
-    div()
-        .id(id)
-        .px_2()
-        .py_0p5()
-        .rounded_full()
-        .border_1()
-        .border_color(if active { accent.into() } else { pal.border })
-        .text_caption()
-        .text_color(if active {
-            accent.into()
-        } else {
-            pal.text_muted
-        })
-        .when(active, |s| s.bg(pal.surface))
-        .hover(move |s| s.bg(pal.surface_hover))
-        .child(label)
-        .on_click(on_click)
-        .into_any_element()
-}
-
-/// A saved custom profile's chip: click applies it, the trailing `×` deletes
-/// it (stopping propagation so a delete never also applies the profile).
-fn custom_profile_chip(
-    ix: usize,
-    name: String,
-    active: bool,
-    pal: Palette,
-    cx: &mut Context<CameraControlsPanel>,
-) -> AnyElement {
-    let accent = rgb(ACCENT_BLUE);
-    let apply_name = name.clone();
-    let delete_name = name.clone();
-    h_flex()
-        .id(("camera-profile-custom", ix))
-        .pl_2()
-        .pr_1()
-        .py_0p5()
-        .gap_1()
-        .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(if active { accent.into() } else { pal.border })
-        .text_caption()
-        .text_color(if active {
-            accent.into()
-        } else {
-            pal.text_muted
-        })
-        .when(active, |s| s.bg(pal.surface))
-        .hover(move |s| s.bg(pal.surface_hover))
-        .child(SharedString::from(name))
-        .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
-            panel.apply_profile(&apply_name, window, cx);
-        }))
-        .child(
-            div()
-                .id(("camera-profile-del", ix))
-                .px_0p5()
-                .rounded_full()
-                .text_color(pal.text_muted)
-                .hover(|s| s.text_color(gpui::white()))
-                .child("×")
-                .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
-                    cx.stop_propagation();
-                    panel.delete_profile(&delete_name, cx);
-                })),
-        )
-        .into_any_element()
 }
 
 /// One compact control line: label · slider · live value (· Auto chip when the
@@ -944,8 +891,19 @@ fn control_row(
                 .border_1()
                 .border_color(if on { accent.into() } else { pal.border })
                 .text_caption()
-                .text_color(if on { accent.into() } else { pal.text_muted })
-                .hover(|s| s.bg(pal.surface_hover))
+                .text_color(if on { pal.text_primary } else { pal.text_muted })
+                .bg(if on {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                .hover(move |s| {
+                    s.bg(if on {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
                 .child(tr!("Auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
@@ -987,11 +945,22 @@ fn frequency_row(
                 .border_color(if active { accent.into() } else { pal.border })
                 .text_caption()
                 .text_color(if active {
-                    accent.into()
+                    pal.text_primary
                 } else {
                     pal.text_muted
                 })
-                .hover(|s| s.bg(pal.surface_hover))
+                .bg(if active {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                .hover(move |s| {
+                    s.bg(if active {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
                 .child(label)
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -1056,8 +1025,19 @@ fn binary_control_row(
                 .border_1()
                 .border_color(if on { accent.into() } else { pal.border })
                 .text_caption()
-                .text_color(if on { accent.into() } else { pal.text_muted })
-                .hover(|s| s.bg(pal.surface_hover))
+                .text_color(if on { pal.text_primary } else { pal.text_muted })
+                .bg(if on {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                .hover(move |s| {
+                    s.bg(if on {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
+                })
                 .child(if on { tr!("On") } else { tr!("Off") })
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -1091,8 +1071,8 @@ fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyEleme
                 .rounded_md()
                 .border_1()
                 .border_color(pal.border)
-                .bg(pal.surface)
-                .hover(|s| s.bg(pal.surface_hover))
+                .bg(pal.control)
+                .hover(|s| s.bg(pal.control_hover))
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!("Reset to defaults"))

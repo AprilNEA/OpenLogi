@@ -1,172 +1,289 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, Context, ElementId, Entity, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, RenderOnce, Role, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
+use gpui_base::Button as BaseButton;
+use gpui_component::{
+    Icon, IconName, h_flex,
+    input::{InputEvent, InputState},
+    v_flex,
+};
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
-    asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png, default_labels,
-    labels_from_hotspots,
+    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
+    default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::inspector::{BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
-use super::picker::{
-    GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview, thumbwheel_picker,
-};
+use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
+use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::AppState;
+use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
-const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
 const LABEL_H: f32 = 56.;
+const LABEL_GUTTER: f32 = LABEL_W + SIDE_GAP;
+const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
 
-const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
+const CARD_EDGE_INSET: f32 = SIDE_GAP;
 
 const HOTSPOT_DOT: f32 = 12.;
-
-/// Vertical space around the model that it can't draw into: the detail header
-/// and footer, plus the buttons-tab padding. The model scales to fit whatever
-/// viewport height remains.
-const MODEL_VERTICAL_RESERVE: f32 = 224.;
+/// Vertical space occupied by the device bar, profile context, and canvas
+/// padding. Normal operation no longer reserves a footer.
+const MODEL_VERTICAL_RESERVE: f32 = 154.;
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
-const MODEL_MIN_H: f32 = 448.;
+const MODEL_MIN_H: f32 = 360.;
 
 /// Max width the model (side gutter + image) may occupy, matching the
 /// `buttons_tab` content cap so a wide keyboard image never overflows the panel.
 const MODEL_CONTENT_MAX_W: f32 = 760.;
 /// Horizontal chrome the model can't draw into (the buttons-tab padding).
-const MODEL_HORIZONTAL_RESERVE: f32 = 48.;
+const MODEL_HORIZONTAL_RESERVE: f32 =
+    crate::ui::theme::DETAIL_RAIL_W + super::inspector::INSPECTOR_W + 48.;
 /// Floor for the model's available width on a narrow window.
-const MODEL_MIN_CONTENT_W: f32 = 320.;
+const MODEL_MIN_CONTENT_W: f32 = 200.;
+
+struct MouseWorkspaceData<'a> {
+    device_key: Option<&'a str>,
+    asset: Option<&'a ResolvedAsset>,
+    active: Option<MouseControlId>,
+    bindings: &'a BTreeMap<ButtonId, Action>,
+    gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    glow: Option<(Arc<GlowGeometry>, Hsla)>,
+    thumbwheel: bool,
+    editing_app: Option<String>,
+    overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+}
+
+impl<'a> MouseWorkspaceData<'a> {
+    fn read(cx: &'a App) -> Option<Self> {
+        AppState::try_read(cx).map(|state| Self {
+            device_key: state
+                .current_record()
+                .map(|record| record.config_key.as_str()),
+            asset: state
+                .current_record()
+                .and_then(|record| record.asset.as_ref()),
+            active: state.active_button.map(MouseControlId::from_active_button),
+            bindings: &state.button_bindings,
+            gesture_maps: &state.gesture_bindings,
+            glow: state
+                .current_record()
+                .and_then(|record| keyboard_glow(state, record)),
+            thumbwheel: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.thumbwheel),
+            editing_app: state.editing_app().map(|app| {
+                state
+                    .recent_app_name(app)
+                    .map_or_else(|| friendly_app_name(app), str::to_string)
+            }),
+            overridden: state.editing_app_overrides(),
+        })
+    }
+
+    fn empty(
+        bindings: &'a BTreeMap<ButtonId, Action>,
+        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    ) -> Self {
+        Self {
+            device_key: None,
+            asset: None,
+            active: None,
+            bindings,
+            gesture_maps,
+            glow: None,
+            thumbwheel: false,
+            editing_app: None,
+            overridden: None,
+        }
+    }
+}
 
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
+    focus_handle: FocusHandle,
     current_device_key: Option<String>,
     hovered: Option<MouseControlId>,
-    open_binding_popover: Option<BindingPopover>,
-    /// Which gesture direction the open gesture menu has activated (so its
-    /// level-2 flyout card shows), or `None` for the plus-only state. Scratch UI
-    /// state owned here (like [`Self::hovered`]) rather than in window-keyed
-    /// state, so the popover's `on_open_change` — which runs outside paint — can
-    /// reset it without tripping gpui's render-only guard.
+    selected: Option<MouseControlId>,
+    /// The gesture direction whose action is open in the fixed inspector.
     gesture_active_dir: Option<GestureDirection>,
+    action_picker_open: bool,
+    action_search: Entity<InputState>,
     _state_obs: Subscription,
 }
 
 impl MouseModelView {
     /// Create the mouse model view.
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let action_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search actions…")));
+        cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        let state = AppState::global(cx);
+        let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged
+                | StateEvent::DeviceSelected(_)
+                | StateEvent::ForegroundChanged => true,
+                StateEvent::BindingsChanged(key) | StateEvent::LightingChanged(key) => {
+                    AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .is_some_and(|record| record.device_key() == *key)
+                }
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
+            focus_handle: cx.focus_handle(),
             current_device_key: None,
             hovered: None,
-            open_binding_popover: None,
+            selected: None,
             gesture_active_dir: None,
+            action_picker_open: false,
+            action_search,
             _state_obs: state_obs,
         }
-    }
-
-    /// The gesture direction whose level-2 flyout is open, if any.
-    pub(crate) fn gesture_selected_dir(&self) -> Option<GestureDirection> {
-        self.gesture_active_dir
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
     /// `cx.notify()` to re-render.
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
+        self.action_picker_open = false;
     }
 
-    fn set_binding_popover_open(&mut self, popover: BindingPopover, open: bool) {
-        if open {
-            self.open_binding_popover = Some(popover);
-        } else if self.open_binding_popover == Some(popover) {
-            self.open_binding_popover = None;
+    pub(super) fn toggle_action_picker(&mut self) {
+        self.action_picker_open = !self.action_picker_open;
+    }
+
+    pub(super) fn close_action_picker(&mut self) {
+        self.action_picker_open = false;
+    }
+
+    fn reset_for_device(&mut self, device_key: Option<&str>) {
+        if self.current_device_key.as_deref() == device_key {
+            return;
+        }
+        self.current_device_key = device_key.map(str::to_string);
+        self.hovered = None;
+        self.selected = None;
+        self.gesture_active_dir = None;
+        self.action_picker_open = false;
+    }
+
+    fn select(&mut self, control: MouseControlId) {
+        if self.selected != Some(control) {
+            self.selected = Some(control);
+            self.gesture_active_dir = None;
+            self.action_picker_open = false;
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BindingPopover {
-    Label(MouseControlId),
-    Hotspot(MouseControlId),
+impl Focusable for MouseModelView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+fn set_control_hovered(
+    view: &Entity<MouseModelView>,
+    control: MouseControlId,
+    hovered: bool,
+    cx: &mut App,
+) {
+    view.update(cx, |this, cx| {
+        if hovered {
+            this.hovered = Some(control);
+        } else if this.hovered == Some(control) {
+            this.hovered = None;
+        }
+        cx.notify();
+    });
 }
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (device_key, asset, active, bindings, gesture_buttons, glow, thumbwheel) = cx
-            .try_global::<AppState>()
-            .map(|s| {
-                (
-                    s.current_record().map(|r| r.config_key.clone()),
-                    s.current_record().and_then(|r| r.asset.clone()),
-                    s.active_button.map(MouseControlId::from_active_button),
-                    s.button_bindings.clone(),
-                    s.gesture_bindings.keys().copied().collect::<Vec<_>>(),
-                    s.current_record().and_then(|r| keyboard_glow(s, r)),
-                    s.current_record()
-                        .and_then(|r| r.capabilities)
-                        .is_some_and(|capabilities| capabilities.thumbwheel),
-                )
+        let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
+        let MouseWorkspaceData {
+            device_key,
+            asset,
+            active,
+            bindings,
+            gesture_maps,
+            glow,
+            thumbwheel,
+            editing_app,
+            overridden,
+        } = MouseWorkspaceData::read(cx)
+            .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
+
+        self.reset_for_device(device_key);
+
+        let gesture_buttons: Vec<ButtonId> = gesture_maps
+            .keys()
+            .copied()
+            .filter(|button| {
+                editing_app.is_none()
+                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
             })
-            .unwrap_or_default();
+            .collect();
 
-        if self.current_device_key != device_key {
-            self.current_device_key = device_key;
-            self.hovered = None;
-            self.open_binding_popover = None;
-            self.gesture_active_dir = None;
-        }
-
-        // Scale the model to fit the content area in *both* axes. A tall mouse
-        // is bound by the viewport height (capped at the design height, floored
-        // so the side labels stay readable — the window's min height keeps the
-        // viewport above the floor, see `main`). A wide keyboard is bound by the
-        // available width so it can't overflow the panel (#272), and — having no
-        // side labels — drops the label gutter to centre at full width.
         let viewport_h = f32::from(window.viewport_size().height);
         let viewport_w = f32::from(window.viewport_size().width);
-        let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-        let has_labels = asset.as_ref().is_none_or(asset_has_button_labels);
-        let gutter = if has_labels { SIDE_W + SIDE_GAP } else { 0. };
-        let content_w =
-            (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
-        let max_image_w = (content_w - gutter).max(MODEL_MIN_CONTENT_W / 2.);
-        let (mouse_w, mouse_h, hotspots, labels) =
-            scaled_model(asset.as_ref(), target_h, max_image_w, thumbwheel);
-
-        let canvas_w = gutter + mouse_w;
+        let ModelLayout {
+            canvas_w,
+            mouse_left,
+            mouse_w,
+            mouse_h,
+            hotspots,
+            labels,
+        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
         let canvas_h = mouse_h;
-        let mouse_left = gutter;
 
         let highlight = self.hovered.or(active);
         let view = cx.entity();
         let hovered = self.hovered;
         let pal = theme::palette(cx);
+        let profile_status = profile_canvas_status(pal, cx);
 
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset.as_ref(), mouse_left, mouse_w, mouse_h, pal, glow);
+        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, pal, glow);
+        let model = ModelRect {
+            left: mouse_left,
+            width: mouse_w,
+            height: mouse_h,
+        };
         let hotspots_layer = hotspots_layer(
             &hotspots_outer,
-            mouse_left,
-            mouse_w,
-            mouse_h,
+            model,
             hovered,
             active,
-            &gesture_buttons,
-            self.open_binding_popover,
+            self.selected,
             &view,
         );
         let canvas = div()
@@ -176,29 +293,127 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, &bindings, &gesture_buttons);
-                label_popover(
+                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                label_control(
                     idx,
                     *label,
                     binding,
-                    highlight == Some(label.id),
-                    mouse_left,
-                    mouse_w,
-                    hovered,
-                    active,
-                    label
-                        .id
-                        .button()
-                        .filter(|button| gesture_buttons.contains(button)),
-                    self.open_binding_popover == Some(BindingPopover::Label(label.id)),
+                    hovered == Some(label.id) || active == Some(label.id),
+                    model,
+                    self.selected == Some(label.id),
                     &view,
                 )
             }))
             .child(hotspots_layer);
 
-        // Gesture mode is a per-button fact edited inside each button's own
-        // picker (the "Gestures" entry) — no device-level selector row.
-        v_flex().w(px(canvas_w)).gap_4().child(canvas)
+        let inspector = binding_inspector(
+            BindingInspectorData {
+                selected: self.selected,
+                gesture_direction: self.gesture_active_dir,
+                action_picker_open: self.action_picker_open,
+                bindings,
+                gesture_maps,
+                editing_app: editing_app.as_deref(),
+                overridden,
+            },
+            &self.action_search,
+            &view,
+            pal,
+            cx,
+        );
+        workspace_layout(
+            canvas.into_any_element(),
+            profile_status,
+            inspector,
+            &self.focus_handle,
+        )
+    }
+}
+
+fn workspace_layout(
+    canvas: AnyElement,
+    profile_status: Option<AnyElement>,
+    inspector: AnyElement,
+    focus_handle: &FocusHandle,
+) -> AnyElement {
+    h_flex()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .items_stretch()
+        .tab_group()
+        .track_focus(focus_handle)
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_hidden()
+                .children(profile_status)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .child(canvas),
+                ),
+        )
+        .child(inspector)
+        .into_any_element()
+}
+
+struct ModelLayout {
+    canvas_w: f32,
+    mouse_left: f32,
+    mouse_w: f32,
+    mouse_h: f32,
+    hotspots: Vec<Hotspot>,
+    labels: Vec<Label>,
+}
+
+/// Scale the model to fit the content area in both axes. A tall mouse is bound
+/// by the viewport height; a wide keyboard is bound by the available width and
+/// drops the label gutter so it remains centred.
+fn model_layout(
+    asset: Option<&ResolvedAsset>,
+    viewport_w: f32,
+    viewport_h: f32,
+    thumbwheel: bool,
+) -> ModelLayout {
+    let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+    let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
+    let content_w =
+        (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
+    let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {
+        LabelDistribution::BothSides
+    } else {
+        LabelDistribution::LeftOnly
+    };
+    let left_gutter = if has_labels { LABEL_GUTTER } else { 0. };
+    let right_gutter = if label_distribution == LabelDistribution::BothSides {
+        LABEL_GUTTER
+    } else {
+        0.
+    };
+    let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
+    let (mouse_w, mouse_h, hotspots, mut labels) =
+        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    if !has_labels {
+        labels.clear();
+    }
+
+    ModelLayout {
+        canvas_w: left_gutter + mouse_w + right_gutter,
+        mouse_left: left_gutter,
+        mouse_w,
+        mouse_h,
+        hotspots,
+        labels,
     }
 }
 
@@ -211,11 +426,12 @@ fn scaled_model(
     target_h: f32,
     max_w: f32,
     thumbwheel: bool,
+    label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
         let hotspots = asset_hotspots_for_png(a, w, h);
-        let labels = labels_from_hotspots(&hotspots, h);
+        let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
@@ -229,7 +445,7 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel)
+        let labels = default_labels(thumbwheel, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,
@@ -304,151 +520,62 @@ fn breathing_art(
         .child(device_art)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "layout inputs + hover/active/gesture state; bundling would just hide the dependency"
-)]
+#[derive(Clone, Copy)]
+struct ModelRect {
+    left: f32,
+    width: f32,
+    height: f32,
+}
+
 fn hotspots_layer(
     hotspots: &[Hotspot],
-    mouse_left: f32,
-    mouse_w: f32,
-    mouse_h: f32,
+    model: ModelRect,
     hovered: Option<MouseControlId>,
     active: Option<MouseControlId>,
-    gesture_buttons: &[ButtonId],
-    open_popover: Option<BindingPopover>,
+    selected: Option<MouseControlId>,
     view: &Entity<MouseModelView>,
 ) -> impl IntoElement {
     div()
         .absolute()
-        .left(px(mouse_left))
+        .left(px(model.left))
         .top(px(0.))
-        .w(px(mouse_w))
-        .h(px(mouse_h))
+        .w(px(model.width))
+        .h(px(model.height))
         .children(hotspots.iter().enumerate().map(|(idx, hotspot)| {
-            hotspot_popover(
+            hotspot_control(
                 idx,
                 *hotspot,
                 hovered,
                 active,
-                hotspot
-                    .id
-                    .button()
-                    .filter(|button| gesture_buttons.contains(button)),
-                open_popover == Some(BindingPopover::Hotspot(hotspot.id)),
+                selected == Some(hotspot.id),
                 view,
             )
         }))
 }
 
-/// Wrap `trigger` in a left-click [`Popover`] hosting the gesture button's
-/// custom two-level menu (see [`gesture_overview`]). `appearance(false)` because
-/// the menu draws its own card surfaces (plus + flyout); `overlay_closable`
-/// stays on so an outside click dismisses and re-clicking the trigger toggles.
-/// Closing resets the activated direction (scratch state on the view) so the
-/// next open starts on the plus.
-fn gesture_overview_popover<Tr>(
-    popover_id: impl Into<ElementId>,
-    anchor: Anchor,
-    btn: ButtonId,
-    trigger: Tr,
-    binding_popover: BindingPopover,
-    open: bool,
-    view: Entity<MouseModelView>,
-) -> impl IntoElement
-where
-    Tr: Selectable + IntoElement + 'static,
-{
-    let view_state = view.clone();
-    Popover::new(popover_id)
-        .appearance(false)
-        .mouse_button(MouseButton::Left)
-        .anchor(anchor)
-        .trigger(trigger)
-        .open(open)
-        .on_open_change(move |open, _window, cx| {
-            view_state.update(cx, |v, vcx| {
-                v.set_binding_popover_open(binding_popover, *open);
-                if !*open {
-                    v.set_gesture_selected_dir(None);
-                }
-                vcx.notify();
-            });
-        })
-        .content(move |_state, _window, cx| gesture_overview(btn, &view, cx))
-}
-
-/// Position the popover wrapper at the label's slot in the side gutter and
-/// host a Popover whose trigger is the label card itself. Same picker
-/// content as the hotspot dot — clicking either entry point lands on the
-/// same binding flow.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "wrapper position + trigger \
-state both need this many inputs; bundling would just hide the dependency"
-)]
-fn label_popover(
+/// Position a selectable control card at the label's slot in the side gutter.
+/// Selection updates the fixed inspector; labels never own editor overlays.
+fn label_control(
     idx: usize,
     label: Label,
     binding: BindingLabel,
     highlighted: bool,
-    mouse_left: f32,
-    mouse_w: f32,
-    hovered: Option<MouseControlId>,
-    active: Option<MouseControlId>,
-    // `Some` exactly when the control is a button in gesture mode — that button
-    // opens its gesture menu instead of the plain picker.
-    gesture_button: Option<ButtonId>,
-    open: bool,
+    model: ModelRect,
+    selected: bool,
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
     let x = match label.side {
-        Side::Left => mouse_left - SIDE_GAP - SIDE_W,
-        Side::Right => mouse_left + mouse_w + SIDE_GAP,
+        Side::Left => model.left - SIDE_GAP - LABEL_W,
+        Side::Right => model.left + model.width + SIDE_GAP,
     };
     let view = view.clone();
-    let binding_popover = BindingPopover::Label(label.id);
     let trigger = LabelTrigger {
         id: ("label-trigger", idx).into(),
         label,
         binding,
-        highlighted: highlighted || hovered == Some(label.id) || active == Some(label.id),
-        selected: false,
-        view: view.clone(),
-    };
-    let popover: AnyElement = if let Some(button) = gesture_button {
-        gesture_overview_popover(
-            ("label-popover", idx),
-            Anchor::TopLeft,
-            button,
-            trigger,
-            binding_popover,
-            open,
-            view.clone(),
-        )
-        .into_any_element()
-    } else {
-        let view_state = view.clone();
-        let view_content = view.clone();
-        Popover::new(("label-popover", idx))
-            // `action_picker` draws its own `menu_card` surface, matching the
-            // gesture menu — so suppress the framework popover surface.
-            .appearance(false)
-            .anchor(Anchor::TopLeft)
-            .mouse_button(MouseButton::Left)
-            .trigger(trigger)
-            .open(open)
-            .on_open_change(move |open, _window, cx| {
-                view_state.update(cx, |v, vcx| {
-                    v.set_binding_popover_open(binding_popover, *open);
-                    vcx.notify();
-                });
-            })
-            .content(move |_state, _window, cx| match label.id {
-                MouseControlId::Button(button) => action_picker(button, &view_content, cx),
-                MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
-            })
-            .into_any_element()
+        highlighted,
+        selected,
+        view,
     };
     div()
         .absolute()
@@ -456,13 +583,12 @@ fn label_popover(
         .top(px(label.y - LABEL_H / 2.))
         .w(px(LABEL_W))
         .h(px(LABEL_H))
-        .child(popover)
+        .child(trigger)
         .into_any_element()
 }
 
 struct BindingLabel {
     text: gpui::SharedString,
-    is_default: bool,
     /// Vendored action-icon asset path (see [`action_icon_path`]) for the
     /// card's leading glyph, or `None` for the gesture summary / unbound.
     icon: Option<&'static str>,
@@ -478,44 +604,33 @@ struct LabelTrigger {
     view: Entity<MouseModelView>,
 }
 
-impl Selectable for LabelTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
 impl RenderOnce for LabelTrigger {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let highlighted = self.highlighted || self.selected;
         let selected = self.selected;
         let btn = self.label.id;
         let view = self.view;
+        let click_view = view.clone();
         let pal = theme::palette(cx);
         let binding_color = if highlighted {
             rgb(ACCENT_BLUE).into()
-        } else if self.binding.is_default {
-            pal.text_muted
         } else {
             pal.text_primary
         };
-        // Always show the action the button actually performs; the muted colour
-        // (set above for `is_default`) is what signals "not customised" — more
-        // informative than the bare word "Default".
+        // Always show the action the button actually performs. Default and
+        // customised bindings use the same neutral value colour; only the
+        // actively highlighted control takes the accent.
         let binding = self.binding.text;
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
         let button_name = tr!(self.label.id.label());
-        v_flex()
-            .id(self.id)
-            .role(Role::Button)
-            .aria_label(tr!("Bind %{name}", name => button_name.clone()))
+        BaseButton::new(self.id)
+            .selected(selected)
+            .accessibility_label(tr!("Bind %{name}", name => button_name.clone()))
             .aria_description(binding_description)
-            .aria_expanded(selected)
+            .aria_selected(selected)
+            .flex()
+            .flex_col()
             .w(px(LABEL_W))
             .h(px(LABEL_H))
             .px_3()
@@ -529,14 +644,28 @@ impl RenderOnce for LabelTrigger {
                 pal.border
             })
             .bg(if highlighted {
-                pal.surface
+                theme::accent_tint()
             } else {
-                pal.surface_hover
+                pal.control
             })
             .cursor_pointer()
-            .hover(move |s| s.bg(pal.surface))
+            .hover(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+            })
+            .focus_visible(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+                .border_color(rgb(ACCENT_BLUE))
+            })
             // Button name — the caption (xs / muted), the same size as the
-            // popover title and category headers it shares the binding flow with.
+            // inspector title and category headers it shares the binding flow with.
             .child(
                 div()
                     .text_caption()
@@ -544,8 +673,7 @@ impl RenderOnce for LabelTrigger {
                     .child(button_name),
             )
             // Current binding — the value (sm), the same size as the action rows
-            // it edits. Colour, not weight or size, carries the default / set /
-            // highlighted state.
+            // it edits.
             .child(
                 h_flex()
                     .items_center()
@@ -581,23 +709,19 @@ impl RenderOnce for LabelTrigger {
                             .text_color(pal.text_muted),
                     ),
             )
-            // Popover owns the trigger gesture and updates controlled state via
-            // `on_open_change`. A second click toggle here would immediately close
-            // the menu on mouse-up, producing the one-frame flash regression.
-            .on_hover(move |hovered, _window, cx| {
-                let is_hovered = *hovered;
-                view.update(cx, |this, cx| {
-                    if is_hovered {
-                        this.hovered = Some(btn);
-                    } else if this.hovered == Some(btn) {
-                        this.hovered = None;
-                    }
+            .on_click(move |_event, _window, cx| {
+                click_view.update(cx, |this, cx| {
+                    this.select(btn);
                     cx.notify();
                 });
+            })
+            .on_hover(move |hovered, _window, cx| {
+                set_control_hovered(&view, btn, *hovered, cx);
             })
     }
 }
 
+/// The label card's text and icon for one control.
 fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
@@ -609,7 +733,6 @@ fn binding_label_for_control(
     {
         return BindingLabel {
             text: tr!("5 directions"),
-            is_default: false,
             icon: Some(GESTURE_BUTTON_ICON),
         };
     }
@@ -622,7 +745,6 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(button));
             BindingLabel {
                 text: localized_action_label(&action),
-                is_default: action == default_binding(button),
                 icon: Some(action_icon_path(&action)),
             }
         }
@@ -638,13 +760,11 @@ fn binding_label_for_control(
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
                     text: tr!(preset.label()),
-                    is_default: preset == ThumbwheelPreset::HorizontalScroll,
                     icon: Some(preset.icon()),
                 }
             } else {
                 BindingLabel {
                     text: tr!("Custom"),
-                    is_default: false,
                     icon: Some("action-icons/chevrons-right.svg"),
                 }
             }
@@ -652,7 +772,7 @@ fn binding_label_for_control(
     }
 }
 
-fn localized_action_label(action: &Action) -> gpui::SharedString {
+pub(super) fn localized_action_label(action: &Action) -> gpui::SharedString {
     match action {
         Action::SetDpiPreset(index) => {
             tr!("DPI Preset %{index}", index => (index + 1).to_string())
@@ -676,7 +796,7 @@ fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
         .rounded_3xl()
         .border_1()
         .border_color(pal.text_muted)
-        .bg(pal.surface_hover)
+        .bg(pal.muted)
         .child(
             div()
                 .absolute()
@@ -708,62 +828,21 @@ fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
         )
 }
 
-fn hotspot_popover(
+fn hotspot_control(
     idx: usize,
     hotspot: Hotspot,
     hovered: Option<MouseControlId>,
     active: Option<MouseControlId>,
-    // `Some` exactly when the control is a button in gesture mode — that button
-    // opens its gesture menu instead of the plain picker.
-    gesture_button: Option<ButtonId>,
-    open: bool,
+    selected: bool,
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
     let view = view.clone();
-    let binding_popover = BindingPopover::Hotspot(hotspot.id);
     let trigger = HotspotTrigger {
         id: ("hotspot-trigger", idx).into(),
         hotspot,
         hovered: hovered == Some(hotspot.id) || active == Some(hotspot.id),
-        view: view.clone(),
-        selected: false,
-    };
-    // Open the gesture menu for any button in gesture mode — matching the
-    // side-label path — so a promoted Middle/Back/Forward opens it here too and
-    // a demoted button opens the plain picker.
-    let popover: AnyElement = if let Some(button) = gesture_button {
-        gesture_overview_popover(
-            ("hotspot-popover", idx),
-            Anchor::TopRight,
-            button,
-            trigger,
-            binding_popover,
-            open,
-            view.clone(),
-        )
-        .into_any_element()
-    } else {
-        let view_state = view.clone();
-        let view_content = view.clone();
-        Popover::new(("hotspot-popover", idx))
-            // `action_picker` draws its own `menu_card` surface, matching the
-            // gesture menu — so suppress the framework popover surface.
-            .appearance(false)
-            .anchor(Anchor::TopRight)
-            .mouse_button(MouseButton::Left)
-            .trigger(trigger)
-            .open(open)
-            .on_open_change(move |open, _window, cx| {
-                view_state.update(cx, |v, vcx| {
-                    v.set_binding_popover_open(binding_popover, *open);
-                    vcx.notify();
-                });
-            })
-            .content(move |_state, _window, cx| match hotspot.id {
-                MouseControlId::Button(button) => action_picker(button, &view_content, cx),
-                MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
-            })
-            .into_any_element()
+        view,
+        selected,
     };
     div()
         .absolute()
@@ -771,7 +850,7 @@ fn hotspot_popover(
         .top(px(hotspot.y))
         .w(px(hotspot.w))
         .h(px(hotspot.h))
-        .child(popover)
+        .child(trigger)
         .into_any_element()
 }
 
@@ -784,30 +863,19 @@ struct HotspotTrigger {
     selected: bool,
 }
 
-impl Selectable for HotspotTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
 impl RenderOnce for HotspotTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
+        let click_view = view.clone();
         let hotspot = self.hotspot;
         let btn = hotspot.id;
 
-        div()
-            .id(self.id)
-            .role(Role::Button)
-            .aria_label(tr!("Bind %{name}", name => tr!(btn.label())))
-            .aria_expanded(selected)
+        BaseButton::new(self.id)
+            .selected(selected)
+            .accessibility_label(tr!("Bind %{name}", name => tr!(btn.label())))
+            .aria_selected(selected)
             .flex()
             .items_center()
             .justify_center()
@@ -830,26 +898,112 @@ impl RenderOnce for HotspotTrigger {
                         hsla(0., 0., 0.18, 0.85)
                     }),
             )
-            // Popover owns the trigger gesture and updates controlled state via
-            // `on_open_change`. A second click toggle here would immediately close
-            // the menu on mouse-up, producing the one-frame flash regression.
-            .on_hover(move |hovered, _window, cx| {
-                let is_hovered = *hovered;
-                view.update(cx, |this, cx| {
-                    if is_hovered {
-                        this.hovered = Some(btn);
-                    } else if this.hovered == Some(btn) {
-                        this.hovered = None;
-                    }
+            .focus_visible(|style| {
+                style
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(ACCENT_BLUE))
+            })
+            .on_click(move |_event, _window, cx| {
+                click_view.update(cx, |this, cx| {
+                    this.select(btn);
                     cx.notify();
                 });
+            })
+            .on_hover(move |hovered, _window, cx| {
+                set_control_hovered(&view, btn, *hovered, cx);
             })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use gpui::TestAppContext;
+    use openlogi_core::config::Config;
+
     use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::state::ConfigPersistence;
+
+    fn install_app_state(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let cache = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::with_runtime(
+                    Config::ephemeral(),
+                    &[],
+                    &[],
+                    &cache,
+                    &[],
+                    ConfigPersistence::MemoryOnly,
+                    commands,
+                )
+            });
+            AppState::set_global(state, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| {
+            view.set_gesture_selected_dir(Some(GestureDirection::Up));
+            let gesture_maps = BTreeMap::from([(
+                ButtonId::MiddleClick,
+                BTreeMap::from([(
+                    GestureDirection::Click,
+                    default_binding(ButtonId::MiddleClick),
+                )]),
+            )]);
+            let bindings = BTreeMap::new();
+            let entity = cx.entity();
+
+            binding_inspector(
+                BindingInspectorData {
+                    selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
+                    gesture_direction: Some(GestureDirection::Up),
+                    action_picker_open: false,
+                    bindings: &bindings,
+                    gesture_maps: &gesture_maps,
+                    editing_app: None,
+                    overridden: None,
+                },
+                &view.action_search,
+                &entity,
+                theme::palette(cx),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        view.update(cx, |view, _| {
+            view.selected = Some(MouseControlId::Button(ButtonId::Back));
+            view.action_picker_open = true;
+
+            view.select(MouseControlId::Button(ButtonId::Forward));
+
+            assert!(!view.action_picker_open);
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
 
     #[test]
     fn active_thumbwheel_directions_highlight_the_paired_control() {
@@ -865,8 +1019,8 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true);
+        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
+        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
         assert_eq!(
             without
                 .iter()

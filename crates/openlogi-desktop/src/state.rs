@@ -1,4 +1,4 @@
-//! App-wide UI state stored as a GPUI global.
+//! App-wide UI state owned by a GPUI entity.
 //!
 //! Anything that more than one view needs to read (current device, currently
 //! armed button, the DPI value the panel and the dot-preview share) lives
@@ -6,12 +6,13 @@
 //! in the owning entity.
 //!
 //! [`AppState::with_runtime`] resolves every paired device's asset + DPI
-//! target up front so views can switch instantly when the carousel selection
+//! target up front so views can switch instantly when the active device
 //! changes — no synchronous I/O during the device switch.
 
 use std::collections::BTreeMap;
 
-use gpui::Global;
+use gpui::{App, Context, Entity, EventEmitter, Global};
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, ButtonId, GestureDirection,
     RingAction,
@@ -19,14 +20,14 @@ use openlogi_core::binding::{
 use openlogi_core::config::{Config, ConfigFile, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
+use openlogi_ipc::ForegroundApps;
 use tokio::sync::mpsc;
 use tracing::warn;
 
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
-#[cfg(test)]
-pub use load::Load;
+pub(crate) use load::Load;
 pub use load::{DpiStatus, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -47,9 +48,9 @@ pub enum SmartShiftWriteStatus {
 
 use device_ui::DeviceUiState;
 pub(crate) use devices::camera_model_info;
-use load::DeviceReads;
 
 use crate::services::assets::AssetResolver;
+use crate::services::device_reads::DeviceReads;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
 mod agent;
@@ -73,6 +74,49 @@ mod tests;
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
+
+/// Semantic changes emitted by the shared application-state entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StateEvent {
+    /// Agent connection or permission state changed.
+    AgentChanged,
+    /// The foreground application or recent-application list changed.
+    ForegroundChanged,
+    /// Cached diagnostics/event-monitor data changed.
+    #[cfg_attr(
+        not(all(target_os = "macos", debug_assertions)),
+        expect(dead_code, reason = "the live event monitor is macOS debug-only")
+    )]
+    DiagnosticsChanged,
+    /// The merged device inventory changed.
+    InventoryChanged,
+    /// The active device changed.
+    DeviceSelected(DeviceKey),
+    /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
+    BindingsChanged(DeviceKey),
+    /// DPI data or the active DPI value changed.
+    DpiChanged(DeviceKey),
+    /// SmartShift data or write status changed.
+    SmartShiftChanged(DeviceKey),
+    /// Device or standalone-light settings changed.
+    LightingChanged(DeviceKey),
+    /// Camera settings or activity changed.
+    CameraChanged,
+    /// Host camera-permission status may have changed.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "camera consent polling is macOS-only")
+    )]
+    CameraPermissionChanged,
+    /// Per-device preferences outside the feature-specific events changed.
+    DeviceConfigChanged(DeviceKey),
+    /// Application-wide preferences changed.
+    SettingsChanged,
+}
+
+struct GlobalAppState(Entity<AppState>);
+
+impl Global for GlobalAppState {}
 
 /// The GUI's view of the agent connection: the latest status snapshot, or the
 /// reason there isn't one. One value instead of per-fact mirror fields
@@ -134,21 +178,43 @@ impl ConfigIssue {
 
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
-/// consecutive misses so a transient probe timeout does not make the carousel
+/// consecutive misses so a transient probe timeout does not make the device card
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
+
+/// The per-app profile the binding panels are editing, and the device it was
+/// chosen for.
+///
+/// The device is stored with it because an overlay is per-device: carrying
+/// Safari's scope onto the next mouse would silently edit a profile the user
+/// never opened. Pairing them makes the scope self-invalidating on a device
+/// switch, rather than something every path that moves the selection — there
+/// are two today — has to remember to reset.
+struct EditingScope {
+    device_key: String,
+    app: String,
+}
 
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
     /// be out of bounds briefly while inventories re-enumerate; views must
     /// bounds-check via [`Self::current_record`].
     pub current_device: usize,
-    /// Bundle identifier of the frontmost macOS app (P1.4), or `None` on
-    /// non-macOS / no frontmost app. Used to overlay per-app bindings on
-    /// top of the per-device global map.
-    pub current_app_bundle: Option<String>,
+    /// Which application the agent is resolving per-app profiles against, and
+    /// the ones it recently saw in front. Read-only: the agent owns it, and
+    /// these identifiers are the only ones guaranteed to match what its matcher
+    /// compares — see [`ForegroundApps`].
+    foreground: ForegroundApps,
+    /// The per-app profile the binding panels are editing, if not the device's
+    /// global one. See [`EditingScope`].
+    editing_scope: Option<EditingScope>,
     /// Aggregate host-camera activity reported by the agent. Runtime only.
     camera_active: bool,
+    /// Camera-consent poll started by an in-app macOS prompt. The app-state
+    /// entity owns it because permission can resolve after the initiating view
+    /// or window closes; dropping the entity at process shutdown cancels it.
+    #[cfg(target_os = "macos")]
+    camera_permission_poll: Option<gpui::Task<()>>,
     /// Per-device UI state outside the persisted config and the lazily-loaded
     /// DPI/SmartShift reads ([`Self::reads`]) —
     /// manual camera-light overrides, volatile light settings, in-flight
@@ -159,7 +225,7 @@ pub struct AppState {
     light_command_status: Option<(DeviceKey, u64, LightCommandStatus)>,
     next_light_request_id: u64,
     /// The hotspot the user most recently armed by clicking. Drives the
-    /// "selected button" outline on the mouse model and the popover content.
+    /// "selected button" outline on the mouse model and inspector content.
     pub active_button: Option<ButtonId>,
     /// Everything the GUI knows about the agent connection — the last status
     /// snapshot, or why there isn't one. The render path branches on this
@@ -167,13 +233,15 @@ pub struct AppState {
     /// connection-problem frames can never disagree about what the agent said.
     agent_link: AgentLink,
     /// Bindings for the *currently selected* device. Reloaded whenever the
-    /// carousel selection changes.
+    /// active device changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction sub-bindings for every gesture-mode button of the current
-    /// device, keyed by button. Edited via each button's gesture menu and
-    /// persisted as that button's [`Binding::Gesture`] entry in the device's
-    /// unified binding map ([`DeviceConfig::bindings`]). Rebuilt by
-    /// [`Self::current_gesture_maps`].
+    /// Cached per-direction sub-bindings for every gesture-mode button of the
+    /// current device's global profile, keyed by button. The cache remains
+    /// populated while editing a per-app profile so the inspector can describe
+    /// inherited gestures without rebuilding the maps during rendering. Edited
+    /// via each button's gesture menu and persisted as that button's
+    /// [`Binding::Gesture`] entry in the device's unified binding map
+    /// ([`DeviceConfig::bindings`]).
     ///
     /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -184,15 +252,13 @@ pub struct AppState {
     /// Sorted (`BTreeMap`) for stable render order in the function-row view.
     pub keyboard_bindings: BTreeMap<KeyTrigger, Action>,
     pub dpi: Dpi,
-    /// Lazily-loaded DPI and SmartShift read caches, keyed by [`DeviceKey`].
-    /// HID++ reads must not block device switching or rendering, so callers
-    /// reach these directly (`state.reads.dpi.retry(&key)`,
-    /// `state.reads.smartshift.status(&key)`, …) rather than through a
-    /// per-subsystem forwarding method.
+    /// SWR-backed DPI and SmartShift reads keyed by [`DeviceKey`]. HID++ reads
+    /// must not block device switching or rendering; feature modules project
+    /// this service into synchronous [`Load`] values for their render paths.
     pub(crate) reads: DeviceReads,
     /// Monotonic identity assigned to the next confirmable SmartShift write.
     next_smartshift_write_id: u64,
-    /// All paired devices, in carousel order. Each entry caches the per-
+    /// All paired devices, in stable gallery order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
     /// Live config — kept in sync with disk via [`Self::commit_binding`] and
@@ -233,7 +299,48 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build the global from a loaded config + enumerated inventories.
+    /// Return the shared state entity when runtime initialization has installed it.
+    pub(crate) fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalAppState>()
+            .map(|state| state.0.clone())
+    }
+
+    /// Return the shared state entity.
+    #[track_caller]
+    pub(crate) fn global(cx: &App) -> Entity<Self> {
+        cx.global::<GlobalAppState>().0.clone()
+    }
+
+    /// Borrow the shared state when runtime initialization has installed it.
+    pub(crate) fn try_read(cx: &App) -> Option<&Self> {
+        cx.try_global::<GlobalAppState>()
+            .map(|state| state.0.read(cx))
+    }
+
+    /// Update the shared state with its entity context.
+    pub(crate) fn update<R>(
+        cx: &mut App,
+        update: impl FnOnce(&mut Self, &mut Context<Self>) -> R,
+    ) -> R {
+        Self::global(cx).update(cx, update)
+    }
+
+    /// Start any pending DPI/SmartShift read for the selected device. Called
+    /// after inventory or selection changes; render paths only consume caches.
+    pub(crate) fn load_current_device_reads(cx: &mut App) {
+        Self::update(cx, |state, cx| {
+            state.load_current_dpi(cx);
+            state.load_current_smartshift(cx);
+            state.confirm_current_smartshift(cx);
+        });
+    }
+
+    /// Install the shared state entity behind its private global handle.
+    pub(crate) fn set_global(state: Entity<Self>, cx: &mut App) {
+        cx.set_global(GlobalAppState(state));
+    }
+
+    /// Build the state from a loaded config + enumerated inventories.
     ///
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
@@ -258,8 +365,11 @@ impl AppState {
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let mut state = Self {
             current_device,
-            current_app_bundle: None,
+            foreground: ForegroundApps::default(),
+            editing_scope: None,
             camera_active: false,
+            #[cfg(target_os = "macos")]
+            camera_permission_poll: None,
             device_ui: BTreeMap::new(),
             light_command_status: None,
             next_light_request_id: 0,
@@ -290,7 +400,7 @@ impl AppState {
             state.persist_config("device identity");
         }
         state.button_bindings = state.bindings_for_current();
-        state.gesture_bindings = state.current_gesture_maps();
+        state.gesture_bindings = state.device_gesture_maps();
         // Keyboard bindings are global, so they seed straight from the config
         // map — no per-device resolution like mouse bindings above.
         state.keyboard_bindings = state
@@ -357,7 +467,7 @@ impl AppState {
     fn restore_persisted_config(&mut self) {
         self.config.clone_from(&self.persisted_config);
         self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.current_gesture_maps();
+        self.gesture_bindings = self.device_gesture_maps();
         self.keyboard_bindings = self.config.keyboard.bindings.clone();
         if let Some(dpi) = self
             .current_record()
@@ -390,8 +500,8 @@ impl AppState {
         self.config_issue = next;
         true
     }
-    /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
-    /// can issue device reads and writes through the agent themselves.
+    /// A clone of the IPC command sender used by the state entity to issue
+    /// device reads and writes through the agent.
     #[must_use]
     pub fn ipc_sender(&self) -> mpsc::UnboundedSender<crate::services::ipc::Command> {
         self.ipc_commands.clone()
@@ -417,6 +527,120 @@ impl AppState {
     #[must_use]
     pub fn current_record(&self) -> Option<&DeviceRecord> {
         self.device_list.get(self.current_device)
+    }
+
+    /// The application whose profile the binding panels are editing, or `None`
+    /// for the device's global profile.
+    ///
+    /// Resolves against the *current* device, so a scope chosen for another one
+    /// simply does not apply — see [`EditingScope`].
+    #[must_use]
+    pub fn editing_app(&self) -> Option<&str> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        self.editing_scope
+            .as_ref()
+            .filter(|scope| scope.device_key == key)
+            .map(|scope| scope.app.as_str())
+    }
+
+    /// Edit `app`'s profile for the active device, or its global profile with
+    /// `None`. Re-derives what the panels show; nothing is persisted, because
+    /// which profile is open is a property of this window, not of the config.
+    pub fn set_editing_app(&mut self, app: Option<String>) {
+        self.editing_scope = app
+            .zip(
+                self.current_record()
+                    .and_then(DeviceRecord::persistent_config_key)
+                    .map(str::to_string),
+            )
+            .map(|(app, device_key)| EditingScope { device_key, app });
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.device_gesture_maps();
+    }
+
+    /// Whether the active device can carry saved configuration at all. A
+    /// transient probe — one with no stable unit id — cannot, so nothing that
+    /// would write to `config.toml` for it should be offered.
+    #[must_use]
+    pub fn current_device_is_persistent(&self) -> bool {
+        self.current_record()
+            .is_some_and(DeviceRecord::is_persistent)
+    }
+
+    /// Every application profile the active device has, as
+    /// `(identifier, override count)` in identifier order.
+    pub fn app_profiles(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .into_iter()
+            .flat_map(move |key| {
+                self.config.app_profiles(key).map(move |app| {
+                    let count = self
+                        .config
+                        .per_app_overrides(key, app)
+                        .map_or(0, BTreeMap::len);
+                    (app, count)
+                })
+            })
+    }
+
+    /// Applications the agent recently saw in front, newest first, as
+    /// `(identifier, display name)`. The only identifiers a picker may offer —
+    /// see [`ForegroundApps`].
+    pub fn recent_apps(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.foreground
+            .recent
+            .iter()
+            .map(|app| (app.id.as_str(), app.display_name.as_str()))
+    }
+
+    /// The name the agent last reported for `app`, or `None` for one it has not
+    /// seen this session — a hand-written profile, or one carried in from
+    /// another machine.
+    #[must_use]
+    pub fn recent_app_name(&self, app: &str) -> Option<&str> {
+        self.foreground
+            .recent
+            .iter()
+            .find(|seen| seen.id == app)
+            .map(|seen| seen.display_name.as_str())
+    }
+
+    /// Adopt the agent's view of the foreground application. Returns whether
+    /// anything changed, so the caller can decide to repaint.
+    pub fn set_foreground(&mut self, foreground: ForegroundApps) -> bool {
+        let changed = self.foreground != foreground;
+        self.foreground = foreground;
+        changed
+    }
+
+    /// The application whose profile the user is asking about.
+    ///
+    /// Not [`ForegroundApps::current`]: while this window has focus *OpenLogi*
+    /// is the frontmost application, so the app the user means is the one they
+    /// came from. The recent list is exactly that — it excludes OpenLogi's own
+    /// processes, so its head is the frontmost application whenever one is, and
+    /// the previous one whenever this window is.
+    #[must_use]
+    fn profile_app(&self) -> Option<&ForegroundApp> {
+        self.foreground.recent.first()
+    }
+
+    /// The name of the per-app profile the active device runs under, or `None`
+    /// when it falls back to the device's global bindings — which is also what
+    /// a device with no saved config, or a host with no readable foreground
+    /// app, reports.
+    #[must_use]
+    pub fn active_profile_name(&self) -> Option<&str> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        let app = self.profile_app()?;
+        self.config
+            .has_app_override(key, &app.id)
+            .then_some(app.display_name.as_str())
     }
 
     /// Actions Ring settings for the active device, including its implicit
@@ -482,4 +706,4 @@ impl AppState {
     }
 }
 
-impl Global for AppState {}
+impl EventEmitter<StateEvent> for AppState {}

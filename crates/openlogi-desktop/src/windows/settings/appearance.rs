@@ -1,16 +1,16 @@
-//! Appearance settings page: mode, theme grid, radius, language.
+//! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
 use gpui::img;
 use openlogi_core::config::AppIcon;
 
 use super::{
-    ActiveTheme, AnyElement, App, AppState, Appearance, Axis, BorrowAppContext, Button,
-    ButtonGroup, Entity, FluentBuilder, Hsla, IconName, Input, InputState, InteractiveElement,
-    IntoElement, Palette, ParentElement, Rc, SelectState, Selectable, SettingField, SettingGroup,
-    SettingItem, SettingPage, SettingsView, SharedString, Sizable, StatefulInteractiveElement,
-    Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px,
-    rgb, theme, v_flex,
+    ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
+    IconName, Input, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc,
+    SelectState, Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
+    SharedString, Sizable, StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor,
+    ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme,
+    v_flex,
 };
 use crate::platform::app_icon;
 use crate::ui::theme::Typography as _;
@@ -65,15 +65,23 @@ pub(super) fn appearance_page(
         );
     }
 
-    let theme_group = theme_group.item(
-        // Compact control → inline on the right of the label (HIG), unlike the
-        // wide thumbnail/grid controls which stack below.
-        SettingItem::new(
-            tr!("Corner radius"),
-            SettingField::render(move |_, _, cx| radius_segment(cx)),
+    let theme_group = theme_group
+        .item(
+            // Compact control → inline on the right of the label (HIG), unlike the
+            // wide thumbnail/grid controls which stack below.
+            SettingItem::new(
+                tr!("Corner radius"),
+                SettingField::render(move |_, _, cx| radius_segment(cx)),
+            )
+            .description(tr!("Roundness of buttons, cards, and controls.")),
         )
-        .description(tr!("Roundness of buttons, cards, and controls.")),
-    );
+        .item(
+            SettingItem::new(
+                tr!("Interface scale"),
+                SettingField::render(move |_, _, cx| scale_segment(cx)),
+            )
+            .description(tr!("Scale text and interface spacing.")),
+        );
 
     let language_group = SettingGroup::new().title(tr!("Language")).item(
         SettingItem::new(
@@ -92,59 +100,73 @@ pub(super) fn appearance_page(
 
 /// The stored light/dark preference (defaults to following the OS).
 fn appearance_of(cx: &App) -> Appearance {
-    cx.try_global::<AppState>()
-        .map_or(Appearance::System, |s| s.app_settings().appearance)
+    AppState::try_read(cx).map_or(Appearance::System, |s| s.app_settings().appearance)
 }
 
 /// Persist an appearance-mode choice and re-apply the live theme.
 fn set_appearance(cx: &mut App, appearance: Appearance) {
-    cx.update_global::<AppState, _>(|s, _| s.set_appearance(appearance));
+    AppState::update(cx, |state, cx| {
+        state.set_appearance(appearance);
+        cx.emit(StateEvent::SettingsChanged);
+    });
     theme::apply_from_settings(None, cx);
 }
 
 /// Persist a corner-radius choice and re-apply the live theme. `None` defers to
 /// the active theme's own radius.
 fn set_radius(cx: &mut App, radius: Option<u8>) {
-    cx.update_global::<AppState, _>(|s, _| s.set_ui_radius(radius));
+    AppState::update(cx, |state, cx| {
+        state.set_ui_radius(radius);
+        cx.emit(StateEvent::SettingsChanged);
+    });
     theme::apply_from_settings(None, cx);
+}
+
+/// Persist an interface-scale choice and repaint every desktop window. Each
+/// root applies its own rem size on that repaint, avoiding a re-entrant update
+/// of the Settings window currently dispatching this click.
+fn set_scale(cx: &mut App, scale: UiScale) {
+    AppState::update(cx, |state, cx| {
+        state.set_ui_scale(scale);
+        cx.emit(StateEvent::SettingsChanged);
+    });
+    cx.refresh_windows();
 }
 
 /// The Light / Dark / Follow-system appearance picker — three macOS-style
 /// preview thumbnails, each with a radio + label, mirroring System Settings.
-fn mode_segment(pal: Palette, cx: &App) -> AnyElement {
+fn mode_segment(pal: Palette, cx: &App) -> gpui::Div {
     let current = appearance_of(cx);
     let accent = cx.theme().primary;
-    h_flex()
-        .gap_4()
-        .items_start()
-        .child(mode_card(
+    h_flex().gap_4().items_start().children([
+        mode_card(
             "mode-light",
             tr!("Light"),
             ModePreview::Light,
             current == Appearance::Light,
             accent,
             pal,
-            |cx| set_appearance(cx, Appearance::Light),
-        ))
-        .child(mode_card(
+            Appearance::Light,
+        ),
+        mode_card(
             "mode-dark",
             tr!("Dark"),
             ModePreview::Dark,
             current == Appearance::Dark,
             accent,
             pal,
-            |cx| set_appearance(cx, Appearance::Dark),
-        ))
-        .child(mode_card(
+            Appearance::Dark,
+        ),
+        mode_card(
             "mode-system",
             tr!("Follow system"),
             ModePreview::Auto,
             current == Appearance::System,
             accent,
             pal,
-            |cx| set_appearance(cx, Appearance::System),
-        ))
-        .into_any_element()
+            Appearance::System,
+        ),
+    ])
 }
 
 /// Which scheme a mode card's thumbnail paints.
@@ -164,7 +186,7 @@ fn mode_card(
     selected: bool,
     accent: Hsla,
     pal: Palette,
-    on_click: impl Fn(&mut App) + 'static,
+    appearance: Appearance,
 ) -> impl IntoElement {
     let thumb = div()
         .w(px(104.))
@@ -212,22 +234,20 @@ fn mode_card(
                 .child(radio_dot(selected, accent, pal))
                 .child(div().text_body().child(label)),
         )
-        .on_click(move |_, _, cx| on_click(cx))
+        .on_click(move |_, _, cx| set_appearance(cx, appearance))
 }
 
 /// The app-icon picker: one card per icon, each showing a render of the
 /// compiled icon rather than its artwork, so the choice looks like what macOS
 /// will draw.
-fn icon_picker(pal: Palette, cx: &App) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
+fn icon_picker(pal: Palette, cx: &App) -> gpui::Div {
+    let current =
+        AppState::try_read(cx).map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
     let accent = cx.theme().primary;
     h_flex()
         .gap_4()
         .items_start()
         .children(AppIcon::ALL.map(|icon| icon_card(icon, current == icon, accent, pal)))
-        .into_any_element()
 }
 
 /// One icon card: the preview above a radio + label, ringed when it is the icon
@@ -262,7 +282,10 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
                 .child(div().text_body().child(icon_label(icon))),
         )
         .on_click(move |_, _, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.set_app_icon(icon));
+            AppState::update(cx, |state, cx| {
+                state.set_app_icon(icon);
+                cx.emit(StateEvent::SettingsChanged);
+            });
         })
 }
 
@@ -350,10 +373,8 @@ fn radio_dot(selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
 /// `None` — defer to the active theme's own radius — rather than a fixed 6px, so
 /// it neither mis-highlights under themes with a different radius nor traps the
 /// user away from the theme default.
-fn radius_segment(cx: &App) -> AnyElement {
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| s.app_settings().ui_radius);
+fn radius_segment(cx: &App) -> ButtonGroup {
+    let current = AppState::try_read(cx).and_then(|s| s.app_settings().ui_radius);
     let options: [Option<u8>; 3] = [Some(0), None, Some(12)];
     ButtonGroup::new("corner-radius")
         .outline()
@@ -377,7 +398,31 @@ fn radius_segment(cx: &App) -> AnyElement {
                 set_radius(cx, options[ix]);
             }
         })
-        .into_any_element()
+}
+
+/// The supported interface-scale presets. Keeping this finite makes every
+/// layout state reviewable and avoids arbitrary values that can render a
+/// window unusable.
+fn scale_segment(cx: &App) -> ButtonGroup {
+    let current =
+        AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
+    ButtonGroup::new("interface-scale")
+        .outline()
+        .children(UiScale::ALL.map(|scale| {
+            Button::new(format!("interface-scale-{}", scale.percent()))
+                .label(format!("{}%", scale.percent()))
+                .selected(current == scale)
+        }))
+        .on_click(|clicks, _, cx| {
+            let Some(scale) = clicks
+                .first()
+                .and_then(|index| UiScale::ALL.get(*index))
+                .copied()
+            else {
+                return;
+            };
+            set_scale(cx, scale);
+        })
 }
 
 /// Filter chips + the theme grid. Each card previews the theme's own colours
@@ -388,7 +433,7 @@ fn theme_picker(
     filter: ThemeFilter,
     pal: Palette,
     cx: &App,
-) -> AnyElement {
+) -> gpui::Div {
     let active = cx.theme().theme_name().clone();
     let query = theme_search.read(cx).value().trim().to_lowercase();
     // Collect just the preview colours per theme (small + `Copy`), so the 1.8 KB
@@ -416,28 +461,27 @@ fn theme_picker(
             .collect()
     };
 
-    let grid = if themes.is_empty() {
-        div()
-            .text_body()
-            .text_color(pal.text_muted)
-            .child(tr!("No themes match “%{query}”.", query => query))
-            .into_any_element()
-    } else {
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .children(
-                themes
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (name, mode, swatch))| {
-                        let selected = name == active;
-                        theme_card(i, name, mode, swatch, selected, pal)
-                    }),
-            )
-            .into_any_element()
-    };
+    let no_matches = themes.is_empty();
+    let grid = div()
+        .when(no_matches, |grid| {
+            grid.text_body()
+                .text_color(pal.text_muted)
+                .child(tr!("No themes match “%{query}”.", query => query))
+        })
+        .when(!no_matches, |grid| {
+            grid.flex()
+                .flex_wrap()
+                .gap_2()
+                .children(
+                    themes
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (name, mode, swatch))| {
+                            let selected = name == active;
+                            theme_card(i, name, mode, swatch, selected, pal)
+                        }),
+                )
+        });
 
     v_flex()
         .w_full()
@@ -492,7 +536,6 @@ fn theme_picker(
                 ),
         )
         .child(grid)
-        .into_any_element()
 }
 
 /// Resolve a theme config's colours into a concrete [`ThemeColor`] for its
@@ -531,14 +574,14 @@ fn theme_card(
     let dark = mode.is_dark();
     let stored = name.clone();
     v_flex()
-        .id(SharedString::from(format!("theme-{index}")))
+        .id(("theme", index))
         .w(px(132.))
         .p(px(8.))
         .gap_2()
         .rounded(pal.card_radius)
         .border_1()
         .border_color(if selected { swatch.primary } else { pal.border })
-        .bg(pal.surface)
+        .bg(pal.panel)
         .shadow_xs()
         .cursor_pointer()
         .hover(move |style| {
@@ -599,7 +642,7 @@ fn theme_card(
         )
         .on_click(move |_, _, cx| {
             let chosen = stored.to_string();
-            cx.update_global::<AppState, _>(move |s, _| {
+            AppState::update(cx, move |s, cx| {
                 s.set_theme(dark, Some(chosen.clone()));
                 // Picking a theme configures the light or dark *slot*. Only pin
                 // the mode when the user has already chosen an explicit
@@ -613,6 +656,7 @@ fn theme_card(
                         Appearance::Light
                     });
                 }
+                cx.emit(StateEvent::SettingsChanged);
             });
             theme::apply_from_settings(None, cx);
         })

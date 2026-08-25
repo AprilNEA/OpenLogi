@@ -14,12 +14,13 @@ use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 use crate::services::assets::AssetResolver;
 use crate::state::{AppState, DpiStatus};
 
-/// Build the report from the current app state, defaulting to an empty report before the global is installed.
+/// Build the report from the current app state, defaulting to an empty report before the entity is installed.
 #[must_use]
 pub fn collect(cx: &App) -> DiagnosticsReport {
     let resolver = AssetResolver::new();
     let assets = asset_info(&resolver);
-    let state = cx.try_global::<AppState>();
+    let state = AppState::try_global(cx);
+    let state = state.as_ref().map(|state| state.read(cx));
     let app = app_info(state, resolver.has_bundle_root());
     let (receivers, devices) = match state {
         Some(state) => (collect_receivers(state), collect_devices(state)),
@@ -124,7 +125,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
-                dpi: dpi_summary(state.reads.dpi.get(&record.device_key()).cloned()),
+                dpi: dpi_summary(state.reads.dpi_load(&record.device_key()).cloned()),
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),

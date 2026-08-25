@@ -176,8 +176,8 @@ crates/
 ## Local CI
 
 The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
-machine can reproduce — including MSRV, cargo-deny, and the Windows cross-lint
-the host-OS gate does not run:
+machine can reproduce — including typos, MSRV, cargo-deny, and the Windows
+cross-lint the host-OS gate does not run:
 
 ```sh
 cargo xtask ci
@@ -204,9 +204,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
 ```
 
 Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
-pipeline: Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell lint
-(shellcheck + shfmt) are separate CI jobs. Reproduce those with `cargo xtask ci` or the commands in
-`.claude/rules/ci.md`.
+pipeline: typos, Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell
+lint (shellcheck + shfmt) are separate CI jobs. Reproduce those with
+`cargo xtask ci` or the commands in `.claude/rules/ci.md`.
 
 ## Packaging the macOS DMG
 
@@ -298,8 +298,9 @@ cargo run -p xtask -- release latest-json \
 `.github/workflows/crowdin.yml` syncs GUI locales with
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when a **real** translation value improved — nightly, and on master pushes that
-touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
-script under `.github/scripts/i18n/`, or the shared GitHub App token action.
+touch English sources (`en.yml`), `.config/crowdin.yml`, the Crowdin workflow,
+the merge script under `.github/scripts/i18n/`, or the shared GitHub App token
+action.
 
 **How it helps translation**
 

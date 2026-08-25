@@ -60,8 +60,40 @@ contents:
       mode: 0644
 
   # ── icon ────────────────────────────────────────────────────────────────────
+  # Every standard indexed hicolor size, not just the 1024 master: a stock
+  # `hicolor/index.theme` stops at 512x512, so a launcher that resolves icons
+  # by theme index (KDE's kbuildsycoca, most GTK launchers) finds nothing at
+  # all when only `1024x1024/apps` is installed.
   - src: design/icon/openlogi.png
     dst: /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-512.png
+    dst: /usr/share/icons/hicolor/512x512/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-128.png
+    dst: /usr/share/icons/hicolor/128x128/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-64.png
+    dst: /usr/share/icons/hicolor/64x64/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-48.png
+    dst: /usr/share/icons/hicolor/48x48/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-32.png
+    dst: /usr/share/icons/hicolor/32x32/apps/openlogi.png
+    file_info:
+      mode: 0644
+  - src: design/icon/openlogi-16.png
+    dst: /usr/share/icons/hicolor/16x16/apps/openlogi.png
     file_info:
       mode: 0644
 

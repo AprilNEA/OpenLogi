@@ -18,7 +18,7 @@ on:
       - "Cargo.toml"
       - "crates/**/Cargo.toml"
       - "crates/**/build.rs"
-      - "design/icon/openlogi.png"
+      - "design/icon/**"
       - "docs/config.example.toml"
       - "flake.nix"
       - "flake.lock"

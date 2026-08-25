@@ -34,6 +34,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("pt-BR", "Português - Brasil"),
     ("fi", "Suomi"),
     ("sv", "Svenska"),
+    ("tr", "Türkçe"),
     ("el", "Ελληνικά"),
     ("ru", "Русский"),
     ("uk", "Українська"),
@@ -165,6 +166,8 @@ mod tests {
         assert_eq!(match_supported("pt"), Some("pt-PT"));
         assert_eq!(match_supported("pt-PT"), Some("pt-PT"));
         assert_eq!(match_supported("pt-BR"), Some("pt-BR"));
+        assert_eq!(match_supported("tr"), Some("tr"));
+        assert_eq!(match_supported("tr-TR"), Some("tr"));
         assert_eq!(match_supported("nb-NO"), Some("nb"));
         assert_eq!(match_supported("no"), Some("nb"));
         assert_eq!(match_supported("nn"), Some("nb"));
@@ -218,6 +221,7 @@ mod tests {
             ("pt-BR", include_str!("../locales/pt-BR.yml")),
             ("pt-PT", include_str!("../locales/pt-PT.yml")),
             ("sv", include_str!("../locales/sv.yml")),
+            ("tr", include_str!("../locales/tr.yml")),
         ];
 
         // `include_str!` needs literal paths, so this list is written out by

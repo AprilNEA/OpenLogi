@@ -48,7 +48,7 @@ pub(crate) fn detail(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.panel)
         .overflow_hidden()
         .child(content)
 }
@@ -102,7 +102,7 @@ fn generated_visual(
         .bg(if powered {
             glow.opacity(0.08 + brightness * 0.18)
         } else {
-            pal.surface_hover
+            pal.muted
         });
     let halo = if powered {
         halo.shadow(vec![BoxShadow {
@@ -140,7 +140,7 @@ fn generated_visual(
                     .bg(if powered {
                         glow.opacity(0.2)
                     } else {
-                        pal.surface
+                        pal.panel
                     })
                     .child(Icon::new(IconName::Sun).size_12().text_color(if powered {
                         glow

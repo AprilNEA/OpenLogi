@@ -14,9 +14,9 @@
 
 #[cfg(test)]
 use gpui::rgb;
-use gpui::{App, FontWeight, Hsla, Pixels, Rgba, Styled, Window, hsla, px, relative};
+use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
-use openlogi_core::config::Appearance;
+use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
 
@@ -35,10 +35,42 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 
 /// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 80.;
-pub const FOOTER_H: f32 = 50.;
+pub const HEADER_H: f32 = 64.;
+pub const FOOTER_H: f32 = 40.;
+pub const DETAIL_RAIL_W: f32 = 168.;
 
-/// Semantic spacing tokens (px), so surfaces that must agree share one value
+const BASE_REM_SIZE: f32 = 16.;
+
+/// Maximum-width scale for detail-tab content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentWidth {
+    /// A single compact settings card (560 px at 100%).
+    Small,
+    /// A wider single panel (680 px at 100%).
+    Medium,
+    /// A two-column settings layout (920 px at 100%).
+    Large,
+    /// A device visual beside its controls (980 px at 100%).
+    ExtraLarge,
+    /// The widest workspace layout (1040 px at 100%).
+    DoubleExtraLarge,
+}
+
+impl ContentWidth {
+    /// Resolve this semantic width in scalable rem units.
+    #[must_use]
+    pub const fn rems(self) -> Rems {
+        match self {
+            Self::Small => rems(35.),
+            Self::Medium => rems(42.5),
+            Self::Large => rems(57.5),
+            Self::ExtraLarge => rems(61.25),
+            Self::DoubleExtraLarge => rems(65.),
+        }
+    }
+}
+
+/// Semantic spacing tokens, so surfaces that must agree share one value
 /// instead of each call site hand-picking a `p_*` / `gap_*` step.
 ///
 /// - `SCREEN_PAD` — the inset around a detail-tab body. Uniform across tabs so
@@ -46,19 +78,20 @@ pub const FOOTER_H: f32 = 50.;
 ///   two-column grid is sized against this exact value; see its card min-width).
 /// - `CARD_PAD` / `CARD_GAP` — a card's inner padding and its title-to-content
 ///   gap, so every [`panel_card`](crate::app) reads the same.
-pub const SCREEN_PAD: f32 = 20.;
-pub const CARD_PAD: f32 = 16.;
-pub const CARD_GAP: f32 = 12.;
+pub const SCREEN_PAD: Rems = rems(1.25);
+pub const CARD_PAD: Rems = rems(1.);
+pub const CARD_GAP: Rems = rems(0.75);
 
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
 
-/// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
-/// out in a horizontally scrollable row (centred when they fit, scrollable when
-/// they don't); `GALLERY_PHOTO_H` is the height of the device photo above the
-/// name/battery row.
-pub const GALLERY_CARD_W: f32 = 240.;
-pub const GALLERY_PHOTO_H: f32 = 230.;
+/// Responsive bounds for a device card in the Home grid. At the 720 px minimum
+/// window width, two cards fit after the screen inset and gap; at the normal
+/// wide window, three grow to [`GALLERY_CARD_MAX_W`]. `GALLERY_PHOTO_H` is the
+/// product-image stage above the identity and status rows.
+pub const GALLERY_CARD_MIN_W: f32 = 310.;
+pub const GALLERY_CARD_MAX_W: f32 = 405.;
+pub const GALLERY_PHOTO_H: f32 = 196.;
 
 /// Appearance-dependent surface + text colours for the bespoke (non
 /// gpui-component) surfaces. Resolved once per render via [`palette`] and
@@ -68,15 +101,19 @@ pub const GALLERY_PHOTO_H: f32 = 230.;
 /// tokens* (see [`palette`]), so the hand-painted surfaces re-skin with whatever
 /// theme the user selects in Settings → Appearance — the same `cx.theme()` the
 /// framework widgets read. The bundled "OpenLogi" theme (`themes/openlogi.json`)
-/// encodes the original tuned values, so the default look is unchanged.
+/// provides the default values for those roles.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    /// Window background.
-    pub bg: Hsla,
+    /// Window and page background.
+    pub page: Hsla,
     /// Raised card / panel fill.
-    pub surface: Hsla,
-    /// Card hover / armed fill.
-    pub surface_hover: Hsla,
+    pub panel: Hsla,
+    /// Resting fill for bespoke interactive controls.
+    pub control: Hsla,
+    /// Hover fill for bespoke interactive controls.
+    pub control_hover: Hsla,
+    /// Muted, non-interactive fill for tracks and disabled illustrations.
+    pub muted: Hsla,
     /// Hairline border between cards and surface.
     pub border: Hsla,
     /// Foreground text.
@@ -163,17 +200,20 @@ fn normalize_theme_text_contrast(theme: &mut Theme) {
 /// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
 /// with the selected theme exactly as the framework widgets do.
 ///
-/// - `bg` ← `background` (window)
-/// - `surface` ← `group_box` (content cards), while `surface_hover` keeps the
-///   theme's interactive `secondary_hover` state.
+/// - `page` ← `background` (window and page canvas)
+/// - `panel` ← `group_box` (content cards)
+/// - `control` / `control_hover` ← `secondary` / `secondary_hover`
+/// - `muted` ← `muted` (non-interactive tracks and disabled illustrations)
 /// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
 #[must_use]
 pub fn palette(cx: &App) -> Palette {
     let t = cx.theme();
     Palette {
-        bg: t.background,
-        surface: t.group_box,
-        surface_hover: t.secondary_hover,
+        page: t.background,
+        panel: t.group_box,
+        control: t.secondary,
+        control_hover: t.secondary_hover,
+        muted: t.muted,
         border: t.border,
         text_primary: t.foreground,
         text_muted: t.muted_foreground,
@@ -209,6 +249,21 @@ pub fn register_builtin_themes(cx: &mut App) {
     }
 }
 
+fn rem_size(scale: UiScale) -> Pixels {
+    px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
+}
+
+/// Apply the stored interface scale to one desktop window.
+///
+/// Root views call this before building their elements so text and every
+/// rem-based layout token change together. The Actions Ring is a separate
+/// process and deliberately keeps its cursor-centred pixel geometry.
+pub fn apply_ui_scale(window: &mut Window, cx: &App) {
+    let scale =
+        AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
+    window.set_rem_size(rem_size(scale));
+}
+
 /// Resolve the user's stored appearance preference and apply it to the global
 /// [`Theme`]. Reads [`AppState`] live, so it is the single entry point for first
 /// paint, OS-appearance changes, and live edits on the Appearance page:
@@ -223,7 +278,7 @@ pub fn register_builtin_themes(cx: &mut App) {
 /// appearance is read directly and it repaints; pass `None` from a settings
 /// edit (no window in hand) — every open window is refreshed instead.
 pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
-    let (appearance, light_name, dark_name, radius) = cx.try_global::<AppState>().map_or_else(
+    let (appearance, light_name, dark_name, radius) = AppState::try_read(cx).map_or_else(
         || (Appearance::default(), None, None, None),
         |state| {
             let s = state.app_settings();
@@ -287,6 +342,7 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     if let Some(radius) = radius {
         theme.radius = px(f32::from(radius));
     }
+    // Theme tokens are app-global and consumed by every open window.
     cx.refresh_windows();
 }
 
@@ -348,7 +404,7 @@ pub trait Typography: Styled + Sized {
     /// heaviest, largest step — the one place Bold is used.
     #[must_use]
     fn text_title(self) -> Self {
-        self.text_size(px(26.))
+        self.text_size(rems(1.625))
             .font_weight(FontWeight::BOLD)
             .line_height(relative(1.2))
     }
@@ -357,7 +413,7 @@ pub trait Typography: Styled + Sized {
     /// primary heading.
     #[must_use]
     fn text_heading(self) -> Self {
-        self.text_size(px(20.))
+        self.text_size(rems(1.25))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.3))
     }
@@ -366,7 +422,7 @@ pub trait Typography: Styled + Sized {
     /// inside a card rather than titling a screen.
     #[must_use]
     fn text_subheading(self) -> Self {
-        self.text_size(px(15.))
+        self.text_size(rems(0.9375))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.4))
     }
@@ -374,14 +430,14 @@ pub trait Typography: Styled + Sized {
     /// Default body copy — control labels, descriptions, values.
     #[must_use]
     fn text_body(self) -> Self {
-        self.text_size(px(15.)).line_height(relative(1.45))
+        self.text_size(rems(0.9375)).line_height(relative(1.45))
     }
 
     /// De-emphasised metadata and helper text — the muted line under a label,
     /// battery readouts, hints. Pair with `pal.text_muted`.
     #[must_use]
     fn text_caption(self) -> Self {
-        self.text_size(px(12.)).line_height(relative(1.4))
+        self.text_size(rems(0.75)).line_height(relative(1.4))
     }
 }
 
@@ -390,6 +446,29 @@ impl<E: Styled> Typography for E {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_width_scale_preserves_the_standard_layout() {
+        assert_eq!(
+            [
+                ContentWidth::Small,
+                ContentWidth::Medium,
+                ContentWidth::Large,
+                ContentWidth::ExtraLarge,
+                ContentWidth::DoubleExtraLarge,
+            ]
+            .map(|width| width.rems().to_pixels(px(BASE_REM_SIZE))),
+            [px(560.), px(680.), px(920.), px(980.), px(1040.)]
+        );
+    }
+
+    #[test]
+    fn ui_scale_presets_map_to_expected_rem_sizes() {
+        assert_eq!(
+            UiScale::ALL.map(rem_size),
+            [px(14.4), px(16.), px(17.6), px(20.)]
+        );
+    }
 
     #[test]
     fn openlogi_theme_text_pairs_meet_normal_text_contrast() {

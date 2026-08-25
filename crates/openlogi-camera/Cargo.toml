@@ -11,6 +11,7 @@ keywords = ["logitech", "uvc", "webcam", "camera", "v4l2"]
 categories = ["hardware-support"]
 
 [dependencies]
+openlogi-device-registry = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

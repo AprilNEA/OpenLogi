@@ -31,6 +31,23 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::LeftClick => Action::LeftClick,
         ButtonId::RightClick => Action::RightClick,
         ButtonId::MiddleClick => Action::MiddleClick,
+        // The main wheel's tilt scrolls horizontally in firmware. Seeding each
+        // side with the matching scroll action is what keeps a tilt the user
+        // never touched native: the capture plan diverts a control only when
+        // its binding leaves this default (see `capture_plan`), so an untouched
+        // tilt is never diverted and its firmware scroll is untouched.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the tilt and the thumb wheel are separate physical controls that happen to \
+                      scroll the same way; merging their arms would tie two independent defaults \
+                      together"
+        )]
+        ButtonId::WheelTiltLeft => Action::HorizontalScrollLeft,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "see the left tilt above — same control pair, mirrored direction"
+        )]
+        ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
         ButtonId::Back => Action::BrowserBack,
         ButtonId::Forward => Action::BrowserForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,

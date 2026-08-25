@@ -448,8 +448,8 @@ mod tests {
     #[test]
     fn device_connection_decodes_its_status_bits() {
         // Bit 5 is the link encryption flag and bit 6 is *inverted*: it is set
-        // when the device is offline. Bolt puts encryption on a different bit
-        // than Unifying does (bit 4), so this is not a shared layout.
+        // when the device is offline. Unifying uses the same layout — bit 4 is
+        // the software-present flag on both receivers.
         let connection = |status: u8| {
             let mut payload = [0u8; 17];
             payload[1] = status;

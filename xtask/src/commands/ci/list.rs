@@ -31,7 +31,7 @@ Full map:       .claude/rules/ci.md
 
 /// Shown with an unknown job name.
 pub(crate) const JOB_NAMES_HELP: &str = "\
-Jobs: rustfmt publish-closure shell clippy msrv rustdoc tests cargo-deny clippy-windows
+Jobs: rustfmt typos publish-closure shell clippy msrv rustdoc tests cargo-deny clippy-windows
 Also: i18n wire
 The focused suites are not CI jobs of their own; they fail the test jobs.
 `cargo xtask ci --list` prints what each name runs.";

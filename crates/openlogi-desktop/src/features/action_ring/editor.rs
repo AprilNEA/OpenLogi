@@ -1,9 +1,8 @@
 //! Categorized action, shortcut, path, and icon editor for one ring slot.
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Entity, InteractiveElement, IntoElement, ParentElement,
-    Role, ScrollHandle, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
-    px, rgb, svg,
+    AnyElement, Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
@@ -19,9 +18,10 @@ use openlogi_core::binding::{
 };
 
 use super::action_icons::action_icon_path;
-use crate::features::mouse::picker::popover_section;
-use crate::state::AppState;
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::features::mouse::picker::editor_section;
+use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::components::MenuRow;
+use crate::ui::theme::{self, Palette, Typography as _};
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
@@ -46,7 +46,7 @@ pub(super) fn action_library(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.panel)
         .child(
             v_flex()
                 .flex_none()
@@ -121,7 +121,7 @@ fn icon_editor(
 
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Icon"), pal))
+        .child(editor_section(tr!("Icon"), pal))
         .child(
             h_flex().flex_wrap().gap_1().child(default).children(
                 ActionRingIcon::ALL
@@ -164,7 +164,7 @@ fn shortcut_editor(
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Custom shortcut"), pal))
+        .child(editor_section(tr!("Custom shortcut"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -192,7 +192,7 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Open application or folder"), pal))
+        .child(editor_section(tr!("Open application or folder"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -220,7 +220,7 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
     let mut index = 0usize;
     let mut rows = Vec::new();
     for (category, actions) in ring_catalog() {
-        rows.push(popover_section(rust_i18n::t!(category.label()), pal));
+        rows.push(editor_section(rust_i18n::t!(category.label()), pal));
         for action in actions {
             let selected = current == Some(&action);
             let action_to_commit = action.clone();
@@ -229,22 +229,10 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
             let row_index = index;
             index += 1;
             rows.push(
-                h_flex()
-                    .id(("ring-action", row_index))
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(pal.control_radius)
-                    .text_body()
-                    .text_color(pal.text_primary)
-                    .selected_fill(selected)
+                MenuRow::new(("ring-action", row_index))
                     .role(Role::MenuItem)
                     .aria_label(label.clone())
-                    .aria_selected(selected)
-                    .cursor_pointer()
+                    .selected(selected)
                     .child(
                         h_flex()
                             .items_center()
@@ -265,7 +253,6 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                                 .text_color(rgb(theme::ACCENT_BLUE)),
                         )
                     })
-                    .hover(move |row| row.bg(pal.surface_hover))
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);
                     })
@@ -303,17 +290,23 @@ fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
 }
 
 fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui::App) {
-    cx.update_global::<AppState, _>(|state, _| {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
         state.commit_action_ring_slot(slot, action);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
     });
-    cx.refresh_windows();
 }
 
 fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui::App) {
-    cx.update_global::<AppState, _>(|state, _| {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
         state.commit_action_ring_icon(slot, icon);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
     });
-    cx.refresh_windows();
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ categories = ["hardware-support"]
 [dependencies]
 hidpp = { workspace = true }
 openlogi-core = { version = "0.7.10", path = "../openlogi-core", default-features = false }
+openlogi-device-registry = { workspace = true }
 futures-lite = { workspace = true }
 futures-concurrency = "7"
 serde = { workspace = true }
