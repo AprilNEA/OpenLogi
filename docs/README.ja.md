@@ -111,7 +111,9 @@ sudo dpkg -i openlogi_*.deb
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
 
-# Arch Linux
+# Arch Linux — AUR から（システムと一緒に更新されます）:
+paru -S openlogi-bin   # or: yay -S openlogi-bin
+# …またはリリースパッケージを直接インストール:
 sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 
