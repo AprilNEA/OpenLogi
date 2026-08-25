@@ -259,7 +259,6 @@ fn ring_preview(
                 view,
                 pal,
             )
-            .into_any_element()
         }))
 }
 
