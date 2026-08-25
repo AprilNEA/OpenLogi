@@ -192,7 +192,7 @@ impl InputServices {
                 return None;
             }
         };
-        let scroll_runtime = match ScrollRuntime::spawn(Arc::clone(&shared.smooth_scroll_enabled)) {
+        let scroll_runtime = match ScrollRuntime::spawn(Arc::clone(&shared.scroll_preferences)) {
             Ok(runtime) => runtime,
             Err(e) => {
                 warn!(error = %e, "could not start smooth-scroll worker — agent exiting");
