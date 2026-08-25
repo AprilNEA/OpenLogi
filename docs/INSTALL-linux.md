@@ -96,7 +96,7 @@ Install the bundled udev rules to grant access to the active-seat user without
 requiring `sudo` or group membership (requires `systemd-logind`):
 
 ```sh
-sudo cp packaging/linux/udev/70-openlogi.rules /etc/udev/rules.d/
+sudo cp packaging/linux/udev/70-openlogi.rules /usr/lib/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```

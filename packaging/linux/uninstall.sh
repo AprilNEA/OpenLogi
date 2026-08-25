@@ -51,7 +51,8 @@ sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-desktop" \
 # ── udev rules ────────────────────────────────────────────────────────────────
 
 echo "Removing udev rules …"
-sudo rm -f /etc/udev/rules.d/70-openlogi.rules
+# The /etc path is the pre-0.9 install location.
+sudo rm -f /usr/lib/udev/rules.d/70-openlogi.rules /etc/udev/rules.d/70-openlogi.rules
 if command -v udevadm >/dev/null 2>&1; then
   sudo udevadm control --reload-rules
   sudo udevadm trigger --subsystem-match=hidraw

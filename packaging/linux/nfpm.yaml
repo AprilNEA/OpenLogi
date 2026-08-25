@@ -42,8 +42,11 @@ contents:
       mode: 0755
 
   # ── udev rules ──────────────────────────────────────────────────────────────
+  # Vendor directory, not /etc: /etc/udev/rules.d is reserved for the admin, and
+  # on Arch only usr/lib/udev/rules.d/* triggers the systemd hook that reloads
+  # and re-applies rules after a transaction.
   - src: packaging/linux/udev/70-openlogi.rules
-    dst: /etc/udev/rules.d/70-openlogi.rules
+    dst: /usr/lib/udev/rules.d/70-openlogi.rules
     file_info:
       mode: 0644
 

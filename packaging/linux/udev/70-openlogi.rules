@@ -4,8 +4,9 @@
 # input event nodes, and the uinput kernel module — no group membership required
 # on systems running systemd-logind (uaccess tag).
 #
-# Install:
-#   sudo cp 70-openlogi.rules /etc/udev/rules.d/
+# Install (packages place this in /usr/lib/udev/rules.d, the vendor directory;
+# a same-named file in /etc/udev/rules.d overrides it):
+#   sudo cp 70-openlogi.rules /usr/lib/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
 #

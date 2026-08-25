@@ -48,7 +48,7 @@ The script installs:
   PREFIX/bin/openlogi-desktop
   PREFIX/bin/openlogi-overlay
   PREFIX/bin/openlogi-agent
-  /etc/udev/rules.d/70-openlogi.rules
+  /usr/lib/udev/rules.d/70-openlogi.rules
   /usr/lib/systemd/user/openlogi-agent.service  (if systemd is present)
   /usr/share/applications/openlogi.desktop
   /usr/share/icons/hicolor/<size>/apps/openlogi.png  (16 … 1024)
@@ -85,7 +85,9 @@ sudo install -Dm755 "${BUILD_DIR}/openlogi-agent" "${BINDIR}/openlogi-agent"
 
 echo "Installing udev rules …"
 sudo install -Dm644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
-  /etc/udev/rules.d/70-openlogi.rules
+  /usr/lib/udev/rules.d/70-openlogi.rules
+# A leftover copy in the admin directory would shadow the vendor file.
+sudo rm -f /etc/udev/rules.d/70-openlogi.rules
 
 if command -v udevadm >/dev/null 2>&1; then
   echo "Reloading udev rules …"
