@@ -301,6 +301,8 @@ _version: 1
 "Thumb Wheel Up": "拇指滚轮向上"
 "Thumb Wheel Down": "拇指滚轮向下"
 "Do Nothing": "不执行任何操作"
+"Smooth scrolling": "平滑滚动"
+"Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "为传统鼠标滚轮输入添加平滑动画，不影响触控板滚动。"
 "Vertical Scroll Sensitivity": "垂直滚动灵敏度"
 "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "调整传统鼠标滚轮的垂直滚动距离，不影响触控板滚动。"
 "Thumb Wheel Sensitivity": "拇指滚轮灵敏度"

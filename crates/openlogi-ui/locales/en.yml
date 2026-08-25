@@ -301,6 +301,8 @@ _version: 1
 "Thumb Wheel Up": "Thumb Wheel Up"
 "Thumb Wheel Down": "Thumb Wheel Down"
 "Do Nothing": "Do Nothing"
+"Smooth scrolling": "Smooth scrolling"
+"Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"
 "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
 "Thumb Wheel Sensitivity": "Thumb Wheel Sensitivity"

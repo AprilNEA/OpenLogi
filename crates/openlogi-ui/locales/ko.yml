@@ -301,6 +301,8 @@ _version: 1
 "Thumb Wheel Up": "썸휠 위로"
 "Thumb Wheel Down": "썸휠 아래로"
 "Do Nothing": "동작 없음"
+"Smooth scrolling": "Smooth scrolling"
+"Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"
 "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
 "Thumb Wheel Sensitivity": "썸휠 민감도"

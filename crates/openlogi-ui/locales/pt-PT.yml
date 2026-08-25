@@ -301,6 +301,8 @@ _version: 1
 "Thumb Wheel Up": "Roda de polegar para cima"
 "Thumb Wheel Down": "Roda de polegar para baixo"
 "Do Nothing": "Não fazer nada"
+"Smooth scrolling": "Smooth scrolling"
+"Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"
 "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling.": "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
 "Thumb Wheel Sensitivity": "Sensibilidade da roda de polegar"

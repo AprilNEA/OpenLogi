@@ -14,6 +14,25 @@ pub(super) fn general_page(
     let group = SettingGroup::new()
         .item(
             SettingItem::new(
+                tr!("Smooth scrolling"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll)
+                    },
+                    |enabled, cx| {
+                        AppState::update(cx, move |state, cx| {
+                            state.set_smooth_scroll(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
+                        });
+                    },
+                ),
+            )
+            .description(tr!(
+                "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
+            )),
+        )
+        .item(
+            SettingItem::new(
                 tr!("Vertical Scroll Sensitivity"),
                 SettingField::render(move |_, _, cx| {
                     vertical_scroll_sensitivity_field(&vertical_scroll_sensitivity_slider, cx)
