@@ -257,6 +257,11 @@ fn rem_size(scale: UiScale) -> Pixels {
     px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
 }
 
+/// Apply one semantic interface scale to a window.
+pub(crate) fn apply_scale(window: &mut Window, scale: UiScale) {
+    window.set_rem_size(rem_size(scale));
+}
+
 /// Apply the stored interface scale to one desktop window.
 ///
 /// Root views call this before building their elements so text and every
@@ -265,7 +270,7 @@ fn rem_size(scale: UiScale) -> Pixels {
 pub fn apply_ui_scale(window: &mut Window, cx: &App) {
     let scale =
         AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
-    window.set_rem_size(rem_size(scale));
+    apply_scale(window, scale);
 }
 
 /// Resolve the user's stored appearance preference and apply it to the global

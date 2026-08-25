@@ -153,6 +153,19 @@ flow (discovery → passkey → paired). Its agent version carries a `-mock` suf
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
+### Component gallery
+
+Use the debug-only component gallery to review shared controls across light and
+dark themes and every supported interface scale without config, IPC, or hardware:
+
+```sh
+OPENLOGI_COMPONENT_GALLERY=1 cargo run -p openlogi-desktop
+```
+
+Gallery mode opens one isolated window and bypasses the normal single-instance,
+config, agent, asset-sync, and updater startup paths. The environment variable is
+ignored by release builds.
+
 ## Project layout
 
 ```
