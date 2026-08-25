@@ -12,7 +12,7 @@ use gpui_component::{
 };
 
 use crate::app::menu::OpenConfigFolder;
-use crate::ui::theme::{self, ContentWidth, FOOTER_H, Typography as _};
+use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
@@ -134,19 +134,13 @@ pub(super) fn attention_footer(cx: &App) -> impl IntoElement {
         .items_center()
         .border_t_1()
         .border_color(pal.border)
-        .child({
-            #[cfg(target_os = "macos")]
-            let el = accessibility_status(pal);
-            #[cfg(not(target_os = "macos"))]
-            let el = div().into_any_element();
-            el
-        })
+        .child(accessibility_status(pal))
 }
 
 /// Accessibility affordance that requests the grant on click (the native
 /// prompt + System Settings, via [`super::request_accessibility`]).
 #[cfg(target_os = "macos")]
-fn accessibility_status(pal: Palette) -> AnyElement {
+fn accessibility_status(pal: Palette) -> impl IntoElement {
     // Scoped here rather than at module level: these traits' only user is this
     // macOS-gated affordance (`.hover()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
@@ -171,5 +165,9 @@ fn accessibility_status(pal: Palette) -> AnyElement {
         )
         .child(div().child(tr!("Accessibility not granted · click to grant")))
         .on_click(|_, _, cx| super::request_accessibility(cx))
-        .into_any_element()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn accessibility_status(_pal: Palette) -> impl IntoElement {
+    div()
 }
