@@ -1,6 +1,7 @@
 //! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, and the stored bindings.
 
 use super::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn dpi_roundtrips_per_device() {
@@ -9,6 +10,20 @@ fn dpi_roundtrips_per_device() {
     let restored = write_and_read(&cfg);
     assert_eq!(restored.dpi("2b042"), Some(Dpi::new(1600)));
     assert_eq!(restored.dpi("absent"), None);
+}
+
+#[test]
+fn disabled_keys_roundtrip_and_clear_per_device() {
+    let mut cfg = Config::default();
+    let desired = BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]);
+
+    assert_eq!(cfg.disabled_keys("keyboard"), None);
+    cfg.set_disabled_keys("keyboard", desired.clone());
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.disabled_keys("keyboard"), Some(&desired));
+
+    cfg.clear_disabled_keys("keyboard");
+    assert_eq!(cfg.disabled_keys("keyboard"), None);
 }
 
 #[test]

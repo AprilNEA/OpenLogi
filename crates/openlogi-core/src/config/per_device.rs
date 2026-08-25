@@ -6,11 +6,11 @@
 //! beside this file: gesture mode in [`gestures`](super::gestures),
 //! per-application profiles in [`per_app`](super::per_app).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
@@ -272,6 +272,30 @@ impl Config {
     /// re-apply it when the device reconnects (#189).
     pub fn set_dpi(&mut self, device_key: &str, dpi: Dpi) {
         self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
+    }
+
+    /// Known keys managed for `device_key`, or `None` when OpenLogi should not
+    /// change the keyboard's current `DisableKeys` state.
+    #[must_use]
+    pub fn disabled_keys(&self, device_key: &str) -> Option<&BTreeSet<DisableKey>> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.disabled_keys.as_ref())
+    }
+
+    /// Persist the complete desired known-key set for `device_key`.
+    pub fn set_disabled_keys(&mut self, device_key: &str, disabled_keys: BTreeSet<DisableKey>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .disabled_keys = Some(disabled_keys);
+    }
+
+    /// Return `device_key` to unmanaged Disable Keys state.
+    pub fn clear_disabled_keys(&mut self, device_key: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.disabled_keys = None;
+        }
     }
 
     /// The SmartShift wheel config for `device_key`, or `None` if never set.

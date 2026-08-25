@@ -138,6 +138,10 @@ pub struct Capabilities {
     /// fn inversion. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub fn_lock: bool,
+    /// Fixed lock/system-key disabling through HID++ `0x4521 DisableKeys`.
+    /// This is measured only from feature-table presence.
+    #[serde(default)]
+    pub disable_keys: bool,
 }
 
 impl Capabilities {
@@ -162,6 +166,7 @@ impl Capabilities {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            disable_keys: ids.contains(&0x4521),
         }
     }
 
@@ -491,6 +496,7 @@ mod tests {
                     haptic_panel: false,
                     dpi_gestures: false,
                     fn_lock: false,
+                    disable_keys: false,
                 }),
             }],
         }
@@ -563,6 +569,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                disable_keys: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -581,6 +588,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                disable_keys: false,
             }
         );
         // No driving features → nothing offered.
@@ -605,6 +613,13 @@ mod tests {
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
+    }
+
+    #[test]
+    fn only_measured_disable_keys_feature_enables_the_capability() {
+        assert!(Capabilities::from_feature_ids(&[0x4521]).disable_keys);
+        assert!(!Capabilities::from_feature_ids(&[0x4522]).disable_keys);
+        assert!(!Capabilities::presumed_from_kind(DeviceKind::Keyboard).disable_keys);
     }
 
     #[test]

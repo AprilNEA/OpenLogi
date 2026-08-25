@@ -30,6 +30,7 @@ pub(super) fn unsupported_settings(route: DeviceRoute) -> ProfileDeviceSettings 
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
         fn_lock: ProfileSetting::Unsupported,
+        disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }
