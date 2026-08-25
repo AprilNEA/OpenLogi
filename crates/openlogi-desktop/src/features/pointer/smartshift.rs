@@ -330,7 +330,7 @@ impl Render for SmartShiftPanel {
         let (key, status) = AppState::try_read(cx)
             .and_then(|state| {
                 let key = state.current_record()?.device_key();
-                Some((Some(key.clone()), state.reads.smartshift_status(&key)))
+                Some((Some(key.clone()), state.smartshift_status_for(&key)))
             })
             .unwrap_or((None, SmartShiftLoad::Unknown));
         let write_status =

@@ -140,7 +140,7 @@ impl DpiPanel {
                         debug!(%dpi, "slider change → AppState.dpi");
                         AppState::update(cx, |state, cx| {
                             let key = state.current_record().map(DeviceRecord::device_key);
-                            state.dpi = dpi;
+                            state.set_dpi_preview(dpi);
                             if let Some(key) = key {
                                 cx.emit(StateEvent::DpiChanged(key));
                             }
@@ -271,9 +271,9 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             let record = s.current_record()?;
             let device_key = record.device_key();
             Some(DpiPanelSnapshot {
-                status: s.reads.dpi_status(&device_key),
+                status: s.dpi_status_for(&device_key),
                 device_key,
-                dpi: s.dpi,
+                dpi: s.dpi(),
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
             })
@@ -427,7 +427,7 @@ fn add_preset_chip() -> AnyElement {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);
                 let mut presets = state.dpi_presets();
-                presets.push(state.dpi);
+                presets.push(state.dpi());
                 state.commit_dpi_presets(presets);
                 if let Some(key) = key {
                     cx.emit(StateEvent::DpiChanged(key));

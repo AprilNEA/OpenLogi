@@ -253,7 +253,7 @@ fn state_with_same_model_cameras(config: Config) -> AppState {
 
 fn camera_record<'a>(state: &'a AppState, capture_id: &str) -> &'a super::DeviceRecord {
     state
-        .device_list
+        .devices()
         .iter()
         .find(|record| record.capture_id.as_deref() == Some(capture_id))
         .expect("camera record")
@@ -358,14 +358,14 @@ fn clearing_an_override_falls_back_to_the_global_binding() {
     state.set_editing_app(Some("com.apple.Safari".into()));
     state.commit_binding(ButtonId::Back, Action::Undo);
     assert_eq!(
-        state.button_bindings.get(&ButtonId::Back),
+        state.button_bindings().get(&ButtonId::Back),
         Some(&Action::Undo)
     );
 
     state.clear_app_binding(ButtonId::Back);
 
     assert_eq!(
-        state.button_bindings.get(&ButtonId::Back),
+        state.button_bindings().get(&ButtonId::Back),
         Some(&Action::Copy),
         "the panel falls back to what the default profile binds"
     );
@@ -388,11 +388,11 @@ fn clearing_a_thumbwheel_override_drops_both_directions() {
     state.clear_app_thumbwheel();
 
     assert_eq!(
-        state.button_bindings.get(&ButtonId::ThumbwheelScrollDown),
+        state.button_bindings().get(&ButtonId::ThumbwheelScrollDown),
         Some(&Action::VolumeDown)
     );
     assert_eq!(
-        state.button_bindings.get(&ButtonId::ThumbwheelScrollUp),
+        state.button_bindings().get(&ButtonId::ThumbwheelScrollUp),
         Some(&Action::VolumeUp)
     );
     assert!(
@@ -436,7 +436,8 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
     state.set_editing_app(Some("com.apple.Safari".into()));
     assert!(state.current_gesture_maps().is_empty());
     assert_eq!(
-        state.gesture_bindings, global,
+        state.gesture_bindings(),
+        &global,
         "the inspector cache keeps inherited gestures while per-app editing hides their controls"
     );
     // The device still has its gestures — only the open profile cannot show
@@ -469,12 +470,12 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
         commands,
     );
     let other = state
-        .device_list
+        .devices()
         .iter()
         .position(|record| record.config_key != KNOWN_MOUSE_KEY)
         .expect("the fixture pairs a second device");
     let known = state
-        .device_list
+        .devices()
         .iter()
         .position(|record| record.config_key == KNOWN_MOUSE_KEY)
         .expect("the fixture pairs the known mouse");
@@ -498,6 +499,16 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
 }
 
 #[test]
+fn invalid_device_selection_preserves_the_valid_current_device() {
+    let mut state = state_with_a_known_mouse();
+    let selected = state.selected_device_index();
+
+    assert_eq!(state.set_current_device(usize::MAX), None);
+    assert_eq!(state.selected_device_index(), selected);
+    assert!(state.current_record().is_some());
+}
+
+#[test]
 fn the_active_profile_is_the_default_until_the_app_in_front_is_overridden() {
     let mut state = state_with_a_known_mouse();
     let safari = app("com.apple.Safari", "Safari");
@@ -512,12 +523,14 @@ fn the_active_profile_is_the_default_until_the_app_in_front_is_overridden() {
         "an app with no overrides runs the device's global bindings"
     );
 
-    state.config.set_per_app_binding(
-        KNOWN_MOUSE_KEY,
-        "com.apple.Safari",
-        ButtonId::Back,
-        Some(Action::Undo),
-    );
+    state.config.edit(|config| {
+        config.set_per_app_binding(
+            KNOWN_MOUSE_KEY,
+            "com.apple.Safari",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+    });
     assert_eq!(state.active_profile_name(), Some("Safari"));
 }
 
@@ -529,12 +542,14 @@ fn the_profile_shown_is_the_apps_even_while_this_window_has_focus() {
     // at all before). The recent list excludes our own windows, so its head is
     // the app the user came from.
     let mut state = state_with_a_known_mouse();
-    state.config.set_per_app_binding(
-        KNOWN_MOUSE_KEY,
-        "com.apple.Safari",
-        ButtonId::Back,
-        Some(Action::Undo),
-    );
+    state.config.edit(|config| {
+        config.set_per_app_binding(
+            KNOWN_MOUSE_KEY,
+            "com.apple.Safari",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+    });
     state.set_foreground(ForegroundApps {
         current: Some(app(openlogi_core::brand::APP_ID, "OpenLogi")),
         recent: vec![app("com.apple.Safari", "Safari")],
@@ -546,12 +561,14 @@ fn the_profile_shown_is_the_apps_even_while_this_window_has_focus() {
 #[test]
 fn a_host_with_no_readable_foreground_app_reports_the_default_profile() {
     let mut state = state_with_a_known_mouse();
-    state.config.set_per_app_binding(
-        KNOWN_MOUSE_KEY,
-        "com.apple.Safari",
-        ButtonId::Back,
-        Some(Action::Undo),
-    );
+    state.config.edit(|config| {
+        config.set_per_app_binding(
+            KNOWN_MOUSE_KEY,
+            "com.apple.Safari",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+    });
     // A pure-Wayland session with no usable backend, or a watcher that could
     // not start: the agent reports nothing and no profile can be in effect.
     assert!(!state.set_foreground(ForegroundApps::default()));
@@ -574,7 +591,7 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
     );
     let transient_key = "direct:046d:b023:unit:00000000";
 
-    assert_eq!(state.device_list.len(), 1);
+    assert_eq!(state.devices().len(), 1);
     assert!(state.config.device_identity(transient_key).is_none());
     state.commit_dpi(Dpi::new(2400));
     assert!(state.config.dpi(transient_key).is_none());
@@ -610,7 +627,7 @@ fn transient_probe_folds_into_its_known_card() {
         commands,
     );
     let stable_key = "direct:046d:b023:unit:a393cae0";
-    assert_eq!(state.device_list[0].config_key, stable_key);
+    assert_eq!(state.devices()[0].config_key, stable_key);
 
     let transient_list =
         build_device_list(&[direct_inventory([0; 4])], &[], &cache, &state.config, &[]);
@@ -719,7 +736,7 @@ fn ambiguous_transient_probe_is_not_adopted() {
         ConfigPersistence::MemoryOnly,
         commands,
     );
-    assert_eq!(state.device_list.len(), 2);
+    assert_eq!(state.devices().len(), 2);
 
     let transient_list =
         build_device_list(&[direct_inventory([0; 4])], &[], &cache, &state.config, &[]);
@@ -750,7 +767,7 @@ fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
         commands,
     );
 
-    assert!(state.device_list.is_empty());
+    assert!(state.devices().is_empty());
     assert!(state.lighting_for(transient_key).is_none());
 }
 
@@ -1249,16 +1266,18 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
         .expect("light record")
         .config_key
         .clone();
-    state.config.set_light(
-        &key,
-        LightSettings {
-            enabled: false,
-            auto_camera: true,
-            brightness_percent: 70,
-            temperature_kelvin: None,
-            color: None,
-        },
-    );
+    state.config.edit(|config| {
+        config.set_light(
+            &key,
+            LightSettings {
+                enabled: false,
+                auto_camera: true,
+                brightness_percent: 70,
+                temperature_kelvin: None,
+                color: None,
+            },
+        );
+    });
 
     assert!(!state.light_enabled());
     assert!(state.set_camera_active(true));
@@ -1406,7 +1425,7 @@ fn a_battery_only_change_reaches_the_device_list() {
         commands,
     );
     assert_eq!(
-        state.device_list[0].battery.as_ref().map(|b| b.percentage),
+        state.devices()[0].battery.as_ref().map(|b| b.percentage),
         Some(50)
     );
 
@@ -1415,7 +1434,7 @@ fn a_battery_only_change_reaches_the_device_list() {
 
     assert!(changed, "a battery change is a change");
     assert_eq!(
-        state.device_list[0].battery.as_ref().map(|b| b.percentage),
+        state.devices()[0].battery.as_ref().map(|b| b.percentage),
         Some(40),
         "the fresh reading must replace the stale one"
     );

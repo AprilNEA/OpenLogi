@@ -655,7 +655,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
             || (0, 0, 0, tr!("Default profile").to_string()),
             |state| {
                 (
-                    state.button_bindings.len(),
+                    state.button_bindings().len(),
                     // Device-level, not scope-level: this card describes the
                     // device, and a per-app profile holds no gestures at all.
                     state.device_gesture_binding_count(),

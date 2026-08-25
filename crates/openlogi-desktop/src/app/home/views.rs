@@ -103,10 +103,8 @@ fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        ordered_device_indices(&state.device_list)
+        let active_idx = state.selected_device_index().unwrap_or(0);
+        ordered_device_indices(state.devices())
             .into_iter()
             .map(|idx| {
                 device_card_element(state, idx, active_idx, view.clone(), pal)
@@ -139,10 +137,8 @@ fn device_list(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let rows = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        ordered_device_indices(&state.device_list)
+        let active_idx = state.selected_device_index().unwrap_or(0);
+        ordered_device_indices(state.devices())
             .into_iter()
             .map(|idx| device_list_row(state, idx, active_idx, view.clone(), pal))
             .collect()
@@ -169,10 +165,8 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
     let (order, selected) = AppState::try_read(cx).map_or_else(
         || (Vec::new(), 0),
         |state| {
-            let active_idx = state
-                .current_device
-                .min(state.device_list.len().saturating_sub(1));
-            let order = ordered_device_indices(&state.device_list);
+            let active_idx = state.selected_device_index().unwrap_or(0);
+            let order = ordered_device_indices(state.devices());
             let selected = order.iter().position(|idx| *idx == active_idx).unwrap_or(0);
             (order, selected)
         },
@@ -193,9 +187,7 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                 let Some(&idx) = render_order.get(position) else {
                     return div().into_any_element();
                 };
-                let active_idx = state
-                    .current_device
-                    .min(state.device_list.len().saturating_sub(1));
+                let active_idx = state.selected_device_index().unwrap_or(0);
                 device_card_element(state, idx, active_idx, view.clone(), pal).into_any_element()
             })
             .on_select(cx.listener(move |_, position: &usize, _, cx| {
@@ -203,13 +195,9 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                     return;
                 };
                 AppState::global(cx).update(cx, |state, cx| {
-                    if state.current_device == idx || idx >= state.device_list.len() {
-                        return;
+                    if let Some(key) = state.set_current_device(idx) {
+                        cx.emit(StateEvent::DeviceSelected(key));
                     }
-                    state.set_current_device(idx);
-                    cx.emit(StateEvent::DeviceSelected(
-                        state.device_list[idx].device_key(),
-                    ));
                 });
                 AppState::load_current_device_reads(cx);
             })),
@@ -223,7 +211,7 @@ fn device_card_element(
     view: gpui::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
-    let record = &state.device_list[idx];
+    let record = &state.devices()[idx];
     let active = idx == active_idx;
     let record_key = record.record_key();
     let enabled = state.device_enabled(&record.config_key);
@@ -262,7 +250,7 @@ fn device_list_row(
     view: gpui::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
-    let record = &state.device_list[idx];
+    let record = &state.devices()[idx];
     let active = idx == active_idx;
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =

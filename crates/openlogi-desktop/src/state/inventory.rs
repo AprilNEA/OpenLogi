@@ -13,7 +13,7 @@ use crate::state::devices::{
 };
 
 use super::device_key::DeviceKey;
-use super::device_ui::DeviceUiState;
+use super::device_runtime::DeviceRuntimeState;
 use super::load::Load;
 use super::{AppState, INVENTORY_MISS_GRACE};
 
@@ -25,7 +25,8 @@ impl AppState {
     /// a device restored from its persisted identity.
     pub(crate) fn asset_models(&self) -> Vec<AssetTarget> {
         let mut seen = HashSet::new();
-        self.device_list
+        self.devices
+            .records
             .iter()
             .filter_map(|record| {
                 let target = record
@@ -42,7 +43,7 @@ impl AppState {
             })
             .collect()
     }
-    /// Replace [`Self::device_list`] from a fresh inventory snapshot,
+    /// Replace the merged device catalog from a fresh inventory snapshot,
     /// preserving the active device by `config_key` when possible. If
     /// the previously-selected device disappeared, the selection falls back
     /// to index 0. Returns whether anything actually changed.
@@ -64,7 +65,10 @@ impl AppState {
         // Capture any newly-probed identity before the unchanged-check can early
         // out: a device whose capabilities just resolved keeps the same
         // config_key + route, so that guard would otherwise skip the write.
-        if persist_identities(&mut self.config, &merged_list) {
+        if self
+            .config
+            .edit(|config| persist_identities(config, &merged_list))
+        {
             self.persist_config("device identity");
         }
         // Whole-record equality, not a field allowlist. Every field of a
@@ -73,7 +77,7 @@ impl AppState {
         // add — `battery` and the resolved `asset` were both being swallowed
         // here. Structural comparison also makes the guard immune to new
         // fields, which is what an allowlist can never be.
-        if merged_list == self.device_list {
+        if merged_list == self.devices.records {
             return false;
         }
 
@@ -97,34 +101,36 @@ impl AppState {
         let rerouted: Vec<DeviceKey> = merged_list
             .iter()
             .filter(|new| {
-                self.device_list
+                self.devices
+                    .records
                     .iter()
                     .any(|old| old.config_key == new.config_key && old.route != new.route)
             })
             .map(DeviceRecord::device_key)
             .collect();
 
-        self.device_list = merged_list;
+        self.devices.replace(merged_list, new_index);
         for key in &rerouted {
-            self.reads.remove(key);
-            if let Some(entry) = self.device_ui.get_mut(key) {
-                entry.smartshift_pending_confirm = None;
-                entry.smartshift_write_status = None;
+            self.pointer.reads.remove(key);
+            if let Some(entry) = self.devices.runtime.get_mut(key) {
+                entry.smartshift.pending_confirm = None;
+                entry.smartshift.write_status = None;
             }
         }
         let present: HashSet<_> = self
-            .device_list
+            .devices
+            .records
             .iter()
             .map(|record| record.config_key.as_str())
             .collect();
-        self.reads.retain_present(|key| present.contains(key));
-        self.current_device = new_index;
+        self.pointer
+            .reads
+            .retain_present(|key| present.contains(key));
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
         // tracks the now-current device rather than the old one.
-        self.dpi = self.dpi_for_current();
-        self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.device_gesture_maps();
+        self.pointer.dpi = self.dpi_for_current();
+        self.refresh_binding_projections();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
         true
@@ -138,18 +144,18 @@ impl AppState {
             .map(|record| (record.inventory_key(), record))
             .collect::<BTreeMap<_, _>>();
         let mut adopted = self.adopt_transient_records(&mut by_key);
-        let mut merged = Vec::with_capacity(by_key.len().max(self.device_list.len()));
+        let mut merged = Vec::with_capacity(by_key.len().max(self.devices.records.len()));
 
-        for previous in &self.device_list {
+        for previous in &self.devices.records {
             let inv = previous.inventory_key();
             if let Some(record) = by_key.remove(&inv) {
-                clear_inventory_misses(&mut self.device_ui, &inv);
+                clear_inventory_misses(&mut self.devices.runtime, &inv);
                 merged.push(record);
                 continue;
             }
 
             if let Some(record) = adopted.remove(&inv) {
-                clear_inventory_misses(&mut self.device_ui, &inv);
+                clear_inventory_misses(&mut self.devices.runtime, &inv);
                 merged.push(record);
                 continue;
             }
@@ -158,19 +164,20 @@ impl AppState {
             // the next snapshot resolves a physical serial/unit key, retaining
             // this record through the normal miss grace would show both cards.
             if !previous.is_persistent() {
-                clear_inventory_misses(&mut self.device_ui, &inv);
+                clear_inventory_misses(&mut self.devices.runtime, &inv);
                 continue;
             }
 
             // Cameras reappear under a new capture id after a port change —
             // do not grace-keep a stale cam-live entry beside the new one.
             if previous.kind == openlogi_core::device::DeviceKind::Camera {
-                clear_inventory_misses(&mut self.device_ui, &inv);
+                clear_inventory_misses(&mut self.devices.runtime, &inv);
                 continue;
             }
 
             let entry = self
-                .device_ui
+                .devices
+                .runtime
                 .entry(DeviceKey::from(inv.as_str()))
                 .or_default();
             entry.inventory_misses = entry.inventory_misses.saturating_add(1);
@@ -186,14 +193,16 @@ impl AppState {
         }
 
         for (key, record) in by_key {
-            clear_inventory_misses(&mut self.device_ui, &key);
+            clear_inventory_misses(&mut self.devices.runtime, &key);
             merged.push(record);
         }
         // Adopted records whose known card was never in the previous list
         // (identity known only from config) still belong in the gallery.
         merged.extend(adopted.into_values());
         let live: HashSet<String> = merged.iter().map(DeviceRecord::inventory_key).collect();
-        self.device_ui.retain(|key, _| live.contains(key.as_str()));
+        self.devices
+            .runtime
+            .retain(|key, _| live.contains(key.as_str()));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
         // canonical route order or a new device would be stuck at the end of
         // the gallery permanently.
@@ -234,7 +243,7 @@ impl AppState {
                 .filter(|(k, record)| same_wire(k, record) && !record.online)
                 .map(|(k, _)| k.clone())
                 .collect();
-            for previous in &self.device_list {
+            for previous in &self.devices.records {
                 if same_wire(&previous.config_key, previous)
                     && !by_key.contains_key(&previous.config_key)
                     && !candidates.contains(&previous.config_key)
@@ -255,7 +264,8 @@ impl AppState {
             // Last tick's record carries the freshest identity; the offline
             // placeholder built from config is the fallback.
             let known = self
-                .device_list
+                .devices
+                .records
                 .iter()
                 .find(|record| record.config_key == *known_key)
                 .cloned()
@@ -275,39 +285,44 @@ impl AppState {
     /// ignored so callers can pass them straight through from UI events.
     /// Persists the new selection (by config key, not index — index isn't
     /// stable across restarts), reloads bindings for the new device, and
-    /// pushes the new map into the hook-shared `Arc`.
-    pub fn set_current_device(&mut self, idx: usize) {
-        if idx >= self.device_list.len() || idx == self.current_device {
-            return;
+    /// pushes the new map into the hook-shared `Arc`. Returns the selected
+    /// device key only when the selection changed.
+    pub fn set_current_device(&mut self, idx: usize) -> Option<DeviceKey> {
+        if !self.devices.select(idx) {
+            return None;
         }
-        self.current_device = idx;
+        let selected_key = self.current_record().map(DeviceRecord::device_key)?;
         // A device left in `Failed` (transient read errors exhausted its retry
         // budget) gets one fresh attempt each time it is re-selected.
         if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
-            if matches!(self.reads.dpi_load(&key), Some(Load::Failed(_))) {
-                self.reads.retry_dpi(&key);
+            if matches!(self.pointer.reads.dpi_load(&key), Some(Load::Failed(_))) {
+                self.pointer.reads.retry_dpi(&key);
             }
-            if matches!(self.reads.smartshift_load(&key), Some(Load::Failed(_))) {
+            if matches!(
+                self.pointer.reads.smartshift_load(&key),
+                Some(Load::Failed(_))
+            ) {
                 self.retry_smartshift(&key);
             }
         }
-        // `self.dpi` is the active device's value; adopt the newly-selected
-        // device's known DPI so the panel doesn't keep showing the previous
-        // device's number until a fresh read lands.
-        self.dpi = self.dpi_for_current();
-        self.button_bindings = self.bindings_for_current();
-        self.gesture_bindings = self.device_gesture_maps();
+        // The pointer editor value follows the active device; adopt the newly
+        // selected device's known DPI so the panel doesn't keep showing the
+        // previous device's number until a fresh read lands.
+        self.pointer.dpi = self.dpi_for_current();
+        self.refresh_binding_projections();
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string)
         else {
             debug!("transient device selection not persisted");
-            return;
+            return Some(selected_key);
         };
-        self.config.set_selected_device(Some(key));
+        self.config
+            .edit(|config| config.set_selected_device(Some(key)));
         // The agent owns the hook + device I/O; have it switch devices too.
         self.persist_and_reload("selected device");
+        Some(selected_key)
     }
 }
 
@@ -345,11 +360,11 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
 
 /// Reset `key`'s consecutive-miss counter — the device was just confirmed
 /// present (live, adopted, or freshly appeared) or is a kind that never earns
-/// grace (transient, camera). Leaves the rest of the device's UI row
+/// grace (transient, camera). Leaves the rest of the device's runtime row
 /// untouched. A free function, not an `AppState` method, so callers can hold
-/// it alongside a live borrow of `self.device_list`.
-fn clear_inventory_misses(device_ui: &mut BTreeMap<DeviceKey, DeviceUiState>, key: &str) {
-    if let Some(entry) = device_ui.get_mut(key) {
+/// it alongside a live borrow of the device catalog.
+fn clear_inventory_misses(runtime: &mut BTreeMap<DeviceKey, DeviceRuntimeState>, key: &str) {
+    if let Some(entry) = runtime.get_mut(key) {
         entry.inventory_misses = 0;
     }
 }

@@ -23,7 +23,8 @@ impl AppState {
     pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
         if PhysicalDeviceKey::is_transient(key)
             || self
-                .device_list
+                .devices
+                .records
                 .iter()
                 .any(|record| record.config_key == key && !record.is_persistent())
         {
@@ -41,7 +42,8 @@ impl AppState {
         let key = record.persistent_config_key().map(str::to_string);
         let target = record.route.clone();
         if let Some(key) = key {
-            self.config.set_lighting(&key, lighting.clone());
+            self.config
+                .edit(|config| config.set_lighting(&key, lighting.clone()));
             // Keep the agent's config copy fresh: it re-applies the saved colour
             // when the keyboard reconnects, and without the reload it would
             // replay whatever was saved the last time something *else* reloaded.

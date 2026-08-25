@@ -244,7 +244,7 @@ impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
-        let bindings = state.map(|state| &state.keyboard_bindings);
+        let bindings = state.map(AppState::keyboard_bindings);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -803,8 +803,8 @@ impl FunctionRowView {
             );
         }
 
-        let current =
-            AppState::try_read(cx).and_then(|s| s.keyboard_bindings.get(&trigger).cloned());
+        let current = AppState::try_read(cx)
+            .and_then(|state| state.keyboard_bindings().get(&trigger).cloned());
 
         let view_for_pick = view.clone();
         let trigger_for_pick = trigger.clone();

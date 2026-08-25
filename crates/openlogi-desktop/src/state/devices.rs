@@ -23,8 +23,8 @@ use crate::services::assets::{AssetResolver, ResolvedAsset};
 /// The `kind` / `slot` / `online` / `battery` fields mirror the source
 /// [`PairedDevice`](openlogi_core::device::PairedDevice) so the gallery can
 /// render straight from the device list — the list is the single source of
-/// truth for "which devices exist", keeping gallery order aligned with
-/// [`super::AppState::current_device`].
+/// truth for "which devices exist", keeping gallery order aligned with the
+/// active selection in [`super::device_store::DeviceStore`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
     /// Key used for persisted hardware settings. A serial-less camera uses a

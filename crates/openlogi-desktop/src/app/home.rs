@@ -45,7 +45,7 @@ use crate::ui::theme::{
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
 pub(super) fn home_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let device_count = AppState::try_read(cx).map_or(0, |state| state.device_list.len());
+    let device_count = AppState::try_read(cx).map_or(0, |state| state.devices().len());
     let current_mode = AppState::try_read(cx).map_or(DeviceViewMode::Grid, |state| {
         state.app_settings().device_view_mode
     });

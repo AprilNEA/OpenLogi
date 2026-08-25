@@ -224,8 +224,8 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
 
     let state = AppState::try_global(cx);
     match state.as_ref().map(|state| state.read(cx)) {
-        Some(state) if !state.device_list.is_empty() => {
-            for record in &state.device_list {
+        Some(state) if !state.devices().is_empty() => {
+            for record in state.devices() {
                 let title = match &record.battery {
                     Some(battery) if crate::app::battery_charging_no_reading(battery) => {
                         format!("{} · {}", record.display_name, tr!("Charging"))

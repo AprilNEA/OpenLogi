@@ -308,17 +308,12 @@ impl AppView {
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
         AppState::global(cx).update(cx, |state, cx| {
             if let Some(idx) = state
-                .device_list
+                .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
+                && let Some(key) = state.set_current_device(idx)
             {
-                let changed = state.current_device != idx;
-                state.set_current_device(idx);
-                if changed {
-                    cx.emit(StateEvent::DeviceSelected(
-                        state.device_list[idx].device_key(),
-                    ));
-                }
+                cx.emit(StateEvent::DeviceSelected(key));
             }
         });
         AppState::load_current_device_reads(cx);
@@ -544,7 +539,7 @@ impl Render for AppView {
 
         let has_device = AppState::try_global(cx)
             .map(|state| state.read(cx))
-            .is_some_and(|s| !s.device_list.is_empty());
+            .is_some_and(|s| !s.devices().is_empty());
 
         // Resolve the route. A detail route lives only while its device is
         // still the live selection; if a hot-plug dropped or reordered it (or
