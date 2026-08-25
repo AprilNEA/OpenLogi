@@ -8,7 +8,9 @@ use gpui_component::{Disableable as _, Icon, button::Button, h_flex, switch::Swi
 use openlogi_core::config::DisableKey;
 use openlogi_core::hid::DisableKeysMask;
 
-use crate::state::{AppState, DisableKeysLoad, DisableKeysPersistenceStatus, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DisableKeysLoad, DisableKeysPersistenceStatus, StateEvent,
+};
 use crate::ui::components::PanelCard;
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -38,8 +40,7 @@ impl DisableKeysPanel {
 
     fn content(pal: Palette, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(state) = AppState::try_read(cx) else {
-            return status_text(tr!("keyboard.loading_disabled_key_state"), pal)
-                .into_any_element();
+            return status_text(tr!("keyboard.loading_disabled_key_state"), pal).into_any_element();
         };
         let Some(record) = state.current_record() else {
             return status_text(tr!("device.no_active_device"), pal).into_any_element();
@@ -50,139 +51,160 @@ impl DisableKeysPanel {
         let enabled = state.disable_keys_controls_enabled(&key);
         let persistence = state.disable_keys_status(&key).cloned().unwrap_or_default();
         let error = state.disable_keys_error(&key).map(str::to_owned);
-
-        let recovery = match &persistence {
-            DisableKeysPersistenceStatus::AppliedNotSaved { .. } => Some(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(status_text(
-                        tr!("keyboard.applied_to_keyboard_but_not_saved"),
-                        pal,
-                    ))
-                    .child(
-                        Button::new("disable-keys-save-retry")
-                            .label(tr!("keyboard.save_retry"))
-                            .on_click({
-                                let key = key.clone();
-                                move |_, _, cx| AppState::retry_disable_keys_save(cx, key.clone())
-                            }),
-                    )
-                    .into_any_element(),
-            ),
-            DisableKeysPersistenceStatus::SavedNotReloaded(_)
-            | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_) => Some(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(status_text(
-                        tr!("keyboard.saved_but_agent_not_reloaded"),
-                        pal,
-                    ))
-                    .child(
-                        Button::new("disable-keys-reload-retry")
-                            .label(tr!("keyboard.reload_retry"))
-                            .disabled(!online)
-                            .on_click({
-                                let key = key.clone();
-                                move |_, _, cx| {
-                                    AppState::retry_disable_keys_reload(cx, key.clone());
-                                }
-                            }),
-                    )
-                    .into_any_element(),
-            ),
-            DisableKeysPersistenceStatus::Applying(_)
-            | DisableKeysPersistenceStatus::AwaitingReload(_) => {
-                Some(
-                    status_text(tr!("keyboard.applying_and_confirming"), pal)
-                        .into_any_element(),
-                )
-            }
-            DisableKeysPersistenceStatus::Idle => None,
-        };
-
-        let body = match state.disable_keys_load_for(&key) {
-            DisableKeysLoad::Unknown | DisableKeysLoad::Loading => {
-                status_text(tr!("keyboard.loading_disabled_key_state"), pal)
-                    .into_any_element()
-            }
-            DisableKeysLoad::Failed(message) => v_flex()
-                .gap_2()
-                .child(status_text(
-                    format!(
-                        "{}: {message}",
-                        tr!("keyboard.could_not_read_disabled_keys")
-                    ),
-                    pal,
-                ))
-                .child(
-                    Button::new("disable-keys-read-retry")
-                        .label(tr!("keyboard.retry"))
-                        .on_click({
-                            let key = key.clone();
-                            move |_, _, cx| AppState::retry_disable_keys_read(cx, key.clone())
-                        }),
-                )
-                .into_any_element(),
-            DisableKeysLoad::Unsupported(message) => {
-                status_text(format!("{}: {message}", tr!("common.unavailable")), pal)
-                    .into_any_element()
-            }
-            DisableKeysLoad::Ready(snapshot) => {
-                let known_disabled =
-                    snapshot.disabled & snapshot.supported & DisableKeysMask::KNOWN;
-                let rows = DisableKey::ALL.into_iter().filter_map(|known_key| {
-                    let bit = known_key.mask();
-                    if !snapshot.supported.contains(bit) {
-                        return None;
-                    }
-                    let checked = known_disabled.contains(bit);
-                    let desired = if checked {
-                        known_disabled & !bit
-                    } else {
-                        known_disabled | bit
-                    };
-                    Some(
-                        h_flex()
-                            .justify_between()
-                            .items_center()
-                            .gap_4()
-                            .child(div().text_body().child(key_label(known_key)))
-                            .child(
-                                Switch::new(("disable-key", bit.bits() as usize))
-                                    .checked(checked)
-                                    .disabled(!enabled)
-                                    .on_click(move |_, _, cx| {
-                                        AppState::update_disable_keys(cx, desired);
-                                    }),
-                            ),
-                    )
-                });
-                v_flex()
-                    .gap_3()
-                    .when(!online, |this| {
-                        this.child(status_text(
-                            tr!("keyboard.offline_showing_last_confirmed_snapshot"),
-                            pal,
-                        ))
-                    })
-                    .when(!persistent, |this| {
-                        this.child(status_text(
-                            tr!("keyboard.no_stable_identity_for_reconnect_policy"),
-                            pal,
-                        ))
-                    })
-                    .when_some(error, |this, error| this.child(status_text(error, pal)))
-                    .children(rows)
-                    .into_any_element()
-            }
-        };
+        let recovery = recovery_content(&persistence, online, &key, pal);
+        let body = load_content(
+            state.disable_keys_load_for(&key),
+            online,
+            persistent,
+            enabled,
+            error,
+            &key,
+            pal,
+        );
         v_flex()
             .gap_3()
             .children(recovery)
             .child(body)
             .into_any_element()
+    }
+}
+
+fn recovery_content(
+    persistence: &DisableKeysPersistenceStatus,
+    online: bool,
+    key: &DeviceKey,
+    pal: Palette,
+) -> Option<gpui::AnyElement> {
+    match persistence {
+        DisableKeysPersistenceStatus::AppliedNotSaved { .. } => Some(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(status_text(
+                    tr!("keyboard.applied_to_keyboard_but_not_saved"),
+                    pal,
+                ))
+                .child(
+                    Button::new("disable-keys-save-retry")
+                        .label(tr!("keyboard.save_retry"))
+                        .on_click({
+                            let key = key.clone();
+                            move |_, _, cx| AppState::retry_disable_keys_save(cx, key.clone())
+                        }),
+                )
+                .into_any_element(),
+        ),
+        DisableKeysPersistenceStatus::SavedNotReloaded(_)
+        | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_) => Some(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(status_text(
+                    tr!("keyboard.saved_but_agent_not_reloaded"),
+                    pal,
+                ))
+                .child(
+                    Button::new("disable-keys-reload-retry")
+                        .label(tr!("keyboard.reload_retry"))
+                        .disabled(!online)
+                        .on_click({
+                            let key = key.clone();
+                            move |_, _, cx| {
+                                AppState::retry_disable_keys_reload(cx, key.clone());
+                            }
+                        }),
+                )
+                .into_any_element(),
+        ),
+        DisableKeysPersistenceStatus::Applying(_)
+        | DisableKeysPersistenceStatus::AwaitingReload(_) => {
+            Some(status_text(tr!("keyboard.applying_and_confirming"), pal).into_any_element())
+        }
+        DisableKeysPersistenceStatus::Idle => None,
+    }
+}
+
+fn load_content(
+    load: DisableKeysLoad,
+    online: bool,
+    persistent: bool,
+    enabled: bool,
+    error: Option<String>,
+    key: &DeviceKey,
+    pal: Palette,
+) -> gpui::AnyElement {
+    match load {
+        DisableKeysLoad::Unknown | DisableKeysLoad::Loading => {
+            status_text(tr!("keyboard.loading_disabled_key_state"), pal).into_any_element()
+        }
+        DisableKeysLoad::Failed(message) => v_flex()
+            .gap_2()
+            .child(status_text(
+                format!(
+                    "{}: {message}",
+                    tr!("keyboard.could_not_read_disabled_keys")
+                ),
+                pal,
+            ))
+            .child(
+                Button::new("disable-keys-read-retry")
+                    .label(tr!("keyboard.retry"))
+                    .on_click({
+                        let key = key.clone();
+                        move |_, _, cx| AppState::retry_disable_keys_read(cx, key.clone())
+                    }),
+            )
+            .into_any_element(),
+        DisableKeysLoad::Unsupported(message) => {
+            status_text(format!("{}: {message}", tr!("common.unavailable")), pal).into_any_element()
+        }
+        DisableKeysLoad::Ready(snapshot) => {
+            let known_disabled = snapshot.disabled & snapshot.supported & DisableKeysMask::KNOWN;
+            let rows = DisableKey::ALL.into_iter().filter_map(|known_key| {
+                let bit = known_key.mask();
+                if !snapshot.supported.contains(bit) {
+                    return None;
+                }
+                let checked = known_disabled.contains(bit);
+                let desired = if checked {
+                    known_disabled & !bit
+                } else {
+                    known_disabled | bit
+                };
+                Some(
+                    h_flex()
+                        .justify_between()
+                        .items_center()
+                        .gap_4()
+                        .child(div().text_body().child(key_label(known_key)))
+                        .child(
+                            Switch::new(("disable-key", bit.bits() as usize))
+                                .checked(checked)
+                                .disabled(!enabled)
+                                .on_click(move |_, _, cx| {
+                                    AppState::update_disable_keys(cx, desired);
+                                }),
+                        ),
+                )
+            });
+            v_flex()
+                .gap_3()
+                .when(!online, |this| {
+                    this.child(status_text(
+                        tr!("keyboard.offline_showing_last_confirmed_snapshot"),
+                        pal,
+                    ))
+                })
+                .when(!persistent, |this| {
+                    this.child(status_text(
+                        tr!("keyboard.no_stable_identity_for_reconnect_policy"),
+                        pal,
+                    ))
+                })
+                .when_some(error, |this, error| this.child(status_text(error, pal)))
+                .children(rows)
+                .into_any_element()
+        }
     }
 }
 

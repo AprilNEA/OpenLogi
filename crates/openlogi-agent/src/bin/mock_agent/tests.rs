@@ -529,7 +529,7 @@ fn disable_keys_scenarios_are_strict_and_reconnect_uses_logical_time() {
         DisableKeysScenario::parse("ready").expect("ready scenario"),
         DisableKeysScenario::Ready
     );
-    assert!(DisableKeysScenario::parse("READY").is_err());
+    DisableKeysScenario::parse("READY").expect_err("scenario names are case-sensitive");
 
     let mut state = test_state_with_disable_keys_scenario(DisableKeysScenario::SameRouteReconnect);
     assert_eq!(state.route_online(&keyboard_route()), Some(true));
@@ -597,36 +597,28 @@ async fn disable_keys_read_and_reload_failure_counters_match_scenarios() {
             })
         ));
     }
-    assert!(
-        read_agent
-            .read_disable_keys(tarpc::context::current(), keyboard_route())
-            .await
-            .is_ok()
-    );
+    read_agent
+        .read_disable_keys(tarpc::context::current(), keyboard_route())
+        .await
+        .expect("fourth read succeeds");
 
     let reload_agent = MockAgent::new(test_state_with_disable_keys_scenario(
         DisableKeysScenario::ReloadFailsOnce,
     ));
-    assert!(
-        reload_agent
-            .clone()
-            .reload_config(tarpc::context::current())
-            .await
-            .is_ok()
-    );
-    assert!(
-        reload_agent
-            .clone()
-            .reload_config(tarpc::context::current())
-            .await
-            .is_err()
-    );
-    assert!(
-        reload_agent
-            .reload_config(tarpc::context::current())
-            .await
-            .is_ok()
-    );
+    reload_agent
+        .clone()
+        .reload_config(tarpc::context::current())
+        .await
+        .expect("first reload succeeds");
+    reload_agent
+        .clone()
+        .reload_config(tarpc::context::current())
+        .await
+        .expect_err("second reload fails once");
+    reload_agent
+        .reload_config(tarpc::context::current())
+        .await
+        .expect("third reload succeeds");
 }
 
 #[tokio::test]
