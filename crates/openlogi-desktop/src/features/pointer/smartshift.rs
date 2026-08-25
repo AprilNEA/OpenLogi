@@ -12,6 +12,7 @@
 //! the current value through the agent when selection/inventory lifecycle
 //! events make a device active; this view only consumes the resulting cache.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
     SharedString, Styled, Subscription, Window, div, px, rgb,
@@ -250,11 +251,10 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
-            .child(if sensitivity_enabled {
-                Slider::new(&self.threshold).horizontal().into_any_element()
-            } else {
-                disabled_track(pal).into_any_element()
+            .when(sensitivity_enabled, |row| {
+                row.child(Slider::new(&self.threshold).horizontal())
             })
+            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
             .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Higher keeps the ratchet engaged longer before free-spin."
             )));
