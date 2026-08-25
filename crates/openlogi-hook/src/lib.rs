@@ -192,6 +192,15 @@ pub enum EventDisposition {
     PassThrough,
     /// Drop the event; the target application never sees it.
     Suppress,
+    /// Scale the horizontal delta of a macOS scroll-wheel event in place,
+    /// preserving its phase, momentum, source, and vertical-axis metadata.
+    /// Negative percentages also reverse direction. Ignored for non-scroll
+    /// events.
+    #[cfg(target_os = "macos")]
+    AdjustHorizontalScroll {
+        /// Signed percentage of the native Axis 2 delta (`100` = 1x).
+        scale_percent: i16,
+    },
 }
 
 /// Where in the event stream a tap is inserted (macOS `CGEventTapLocation`).

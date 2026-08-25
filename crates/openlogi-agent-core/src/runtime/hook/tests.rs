@@ -182,6 +182,7 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
             (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
         ]),
         gestures: BTreeMap::new(),
+        horizontal_scroll: BTreeMap::new(),
     };
     assert_eq!(
         rebound_thumbwheel_action(&maps, 1.0),
@@ -208,9 +209,46 @@ fn native_thumbwheel_scroll_stays_os_native() {
             ),
         ]),
         gestures: BTreeMap::new(),
+        horizontal_scroll: BTreeMap::new(),
     };
     assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
     assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn horizontal_scroll_adjustment_requires_exact_device_and_mouse_axis() {
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        horizontal_scroll: BTreeMap::from([((0x046d, 0xb01f), -300)]),
+        ..HookMaps::default()
+    }));
+    let anywhere = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xb01f),
+        product_name: Some("MX Anywhere 2".into()),
+    };
+    assert_eq!(
+        horizontal_scroll_scale(1.0, false, Some(&anywhere), &hooks),
+        Some(-300)
+    );
+    assert_eq!(
+        horizontal_scroll_scale(0.0, false, Some(&anywhere), &hooks),
+        None
+    );
+    assert_eq!(
+        horizontal_scroll_scale(1.0, true, Some(&anywhere), &hooks),
+        None
+    );
+
+    let other = EventDevice {
+        product_id: Some(0xb034),
+        ..anywhere
+    };
+    assert_eq!(
+        horizontal_scroll_scale(1.0, false, Some(&other), &hooks),
+        None
+    );
+    assert_eq!(horizontal_scroll_scale(1.0, false, None, &hooks), None);
 }
 
 #[test]

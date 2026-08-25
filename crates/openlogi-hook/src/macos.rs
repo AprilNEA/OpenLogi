@@ -481,6 +481,30 @@ fn line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     event.get_integer_value_field(axis.line) as f64
 }
 
+/// Scale every delta representation attached to one scroll axis in place.
+/// Applications choose independently between line, fixed-point, and point
+/// deltas, so changing only the preferred representation would be inconsistent.
+fn scale_scroll_axis(event: &CGEvent, axis: ScrollAxisFields, scale_percent: i16) {
+    let line = event.get_integer_value_field(axis.line);
+    let fixed = event.get_double_value_field(axis.fixed);
+    let point = event.get_double_value_field(axis.point);
+    event.set_integer_value_field(axis.line, scale_integer_delta(line, scale_percent));
+    let precise_scale = f64::from(scale_percent) / 100.0;
+    event.set_double_value_field(axis.fixed, fixed * precise_scale);
+    event.set_double_value_field(axis.point, point * precise_scale);
+}
+
+/// Scale a coarse line delta and round to the nearest whole tick, with halves
+/// away from zero. Saturating arithmetic keeps a malformed event fail-safe.
+fn scale_integer_delta(delta: i64, scale_percent: i16) -> i64 {
+    let product = delta.saturating_mul(i64::from(scale_percent));
+    if product >= 0 {
+        product.saturating_add(50) / 100
+    } else {
+        product.saturating_sub(50) / 100
+    }
+}
+
 const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
@@ -736,6 +760,12 @@ fn run_tap_callback(
         match cb(hook_event) {
             EventDisposition::PassThrough => CallbackResult::Keep,
             EventDisposition::Suppress => CallbackResult::Drop,
+            EventDisposition::AdjustHorizontalScroll { scale_percent } => {
+                if matches!(etype, CGEventType::ScrollWheel) {
+                    scale_scroll_axis(event, HORIZONTAL, scale_percent);
+                }
+                CallbackResult::Keep
+            }
         }
     }));
     if let Ok(disposition) = result {
@@ -1154,5 +1184,64 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
+    }
+
+    #[test]
+    fn scroll_axis_scale_updates_line_fixed_and_point_deltas() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+        event.set_type(CGEventType::ScrollWheel);
+        event.set_integer_value_field(HORIZONTAL.line, -2);
+        event.set_double_value_field(HORIZONTAL.fixed, -1.25);
+        event.set_double_value_field(HORIZONTAL.point, -4.0);
+
+        scale_scroll_axis(&event, HORIZONTAL, -300);
+
+        assert_eq!(event.get_integer_value_field(HORIZONTAL.line), 6);
+        let fixed = event.get_double_value_field(HORIZONTAL.fixed);
+        assert!((fixed - 3.75).abs() < f64::EPSILON, "fixed delta: {fixed}");
+        let point = event.get_double_value_field(HORIZONTAL.point);
+        assert!((point - 12.0).abs() < f64::EPSILON, "point delta: {point}");
+    }
+
+    #[test]
+    fn tap_callback_adjusts_only_horizontal_scroll_fields() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+        event.set_type(CGEventType::ScrollWheel);
+        event.set_integer_value_field(VERTICAL.line, 2);
+        event.set_integer_value_field(HORIZONTAL.line, -1);
+        event.set_integer_value_field(SCROLL_PHASE, 1);
+        event.set_integer_value_field(SCROLL_COUNT, 7);
+        event.set_integer_value_field(MOMENTUM_PHASE, 2);
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, 42);
+
+        let result = run_tap_callback(
+            &|_| EventDisposition::AdjustHorizontalScroll {
+                scale_percent: -300,
+            },
+            CGEventType::ScrollWheel,
+            &event,
+        );
+
+        assert!(matches!(result, CallbackResult::Keep));
+        assert_eq!(event.get_integer_value_field(VERTICAL.line), 2);
+        assert_eq!(event.get_integer_value_field(HORIZONTAL.line), 3);
+        assert_eq!(event.get_integer_value_field(SCROLL_PHASE), 1);
+        assert_eq!(event.get_integer_value_field(SCROLL_COUNT), 7);
+        assert_eq!(event.get_integer_value_field(MOMENTUM_PHASE), 2);
+        assert_eq!(
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            42
+        );
+    }
+
+    #[test]
+    fn integer_scroll_scaling_rounds_halves_away_from_zero() {
+        assert_eq!(scale_integer_delta(1, 150), 2);
+        assert_eq!(scale_integer_delta(-1, 150), -2);
+        assert_eq!(scale_integer_delta(1, -150), -2);
     }
 }

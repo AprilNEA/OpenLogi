@@ -266,11 +266,12 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 3 {
         config.migrate_owner_locked_gestures();
     }
-    // v5 is the schema this change is part of, so every *released* schema —
-    // v4 and below — is what needs the rename. A file already declaring v5 was
-    // written by an unpublished build of this branch and is not something users
-    // have on disk.
-    if header.schema_version <= 4 {
+    // v5 was never released, but native-horizontal-scroll prototype builds did
+    // write it before the canonical-key work independently claimed that schema
+    // number. The rename is shape-safe and idempotent: an ordinary v5 file has
+    // no transport-scoped direct key to rewrite, while a prototype file keeps
+    // its settings under the canonical identity expected by v6+.
+    if header.schema_version <= 5 {
         config.migrate_transport_scoped_keys();
     }
     config.schema_version = SCHEMA_VERSION;

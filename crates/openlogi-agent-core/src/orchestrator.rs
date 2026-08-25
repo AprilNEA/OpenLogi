@@ -250,15 +250,22 @@ impl Orchestrator {
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
-        // A disabled selected device gets empty maps: the OS hook then passes
-        // its events through untouched instead of applying remaps to a device
-        // the user asked OpenLogi to leave alone.
-        if key.is_some_and(|k| !self.config.device_enabled(k)) {
-            return HookMaps::default();
-        }
+        // A disabled selected device gets empty binding maps: the OS hook then
+        // passes its buttons through untouched. Horizontal-scroll routing is
+        // independent of UI selection and is derived from every direct device.
+        let enabled = key.is_none_or(|key| self.config.device_enabled(key));
         HookMaps {
-            bindings: button_bindings_for(&self.config, key, app),
-            gestures: oshook_gestures_for(&self.config, key, app),
+            bindings: if enabled {
+                button_bindings_for(&self.config, key, app)
+            } else {
+                BTreeMap::new()
+            },
+            gestures: if enabled {
+                oshook_gestures_for(&self.config, key, app)
+            } else {
+                BTreeMap::new()
+            },
+            horizontal_scroll: horizontal_scroll_adjustments(&self.config, &self.devices),
         }
     }
 
@@ -842,6 +849,51 @@ fn configured_wheel_mode(
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     (resolution, inverted)
+}
+
+/// Build the host-side horizontal-scroll policy macOS can attribute safely.
+/// Direct HID events expose only vendor/product ids, so receiver slots are not
+/// eligible. Identical direct devices share that same identity: conflicting
+/// settings fail closed and leave both devices native rather than applying one
+/// unit's preference to the other.
+fn horizontal_scroll_adjustments(
+    config: &Config,
+    devices: &[AgentDevice],
+) -> BTreeMap<(u32, u32), i16> {
+    let mut grouped = BTreeMap::<(u32, u32), Option<i16>>::new();
+    for device in devices {
+        let Some(DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        }) = &device.route
+        else {
+            continue;
+        };
+        let enabled = config.device_enabled(&device.config_key);
+        let scale = if enabled {
+            config
+                .horizontal_scroll_sensitivity(&device.config_key)
+                .scale_percent(config.invert_horizontal_scroll(&device.config_key))
+        } else {
+            100
+        };
+        grouped
+            .entry((u32::from(*vendor_id), u32::from(*product_id)))
+            .and_modify(|existing| {
+                if existing.is_some_and(|value| value != scale) {
+                    *existing = None;
+                }
+            })
+            .or_insert(Some(scale));
+    }
+    grouped
+        .into_iter()
+        .filter_map(|(key, scale)| {
+            scale
+                .filter(|scale| *scale != 100)
+                .map(|scale| (key, scale))
+        })
+        .collect()
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

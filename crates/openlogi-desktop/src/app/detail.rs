@@ -15,6 +15,8 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
+#[cfg(target_os = "macos")]
+use openlogi_core::config::HorizontalScrollSensitivity;
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
@@ -29,6 +31,8 @@ use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
+#[cfg(target_os = "macos")]
+use crate::features::mouse::geometry::asset_has_main_wheel_tilt;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
@@ -328,12 +332,10 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // At 100%, two cards plus one 16 px gap fit exactly inside the 720 px
     // window minimum after this tab's 20 px side insets, while still leaving a
     // usable slider: 332·2 + 16 + 20·2 = 720. In rems, the whole relationship
-    // scales together.
-    div()
-        .min_w(POINTER_CARD_MIN_W)
-        .flex_1()
-        .h_full()
-        .child(card)
+    // scales together. Do not force the wrapped Scrolling card to viewport
+    // height; its native-horizontal rows must remain reachable without a blank
+    // screen of vertical offset.
+    div().min_w(POINTER_CARD_MIN_W).flex_1().child(card)
 }
 
 /// What the scrolling card shows for the selected device — `Default` is the
@@ -384,6 +386,22 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             HiresWheel::Nowhere
         },
     });
+    #[cfg(target_os = "macos")]
+    let (horizontal_sensitivity, horizontal_inverted, horizontal_supported, horizontal_visible) =
+        AppState::try_read(cx).map_or(
+            (HorizontalScrollSensitivity::DEFAULT, false, false, false),
+            |state| {
+                (
+                    state.current_horizontal_scroll_sensitivity(),
+                    state.current_invert_horizontal_scroll(),
+                    state.current_horizontal_scroll_supported(),
+                    state
+                        .current_record()
+                        .and_then(|record| record.asset.as_ref())
+                        .is_some_and(asset_has_main_wheel_tilt),
+                )
+            },
+        );
     let inversion_description = if inversion_supported {
         tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
     } else {
@@ -457,11 +475,164 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             resolution,
             hires == HiresWheel::Here,
         ));
+    let content = v_flex().gap_4().child(inversion_row).child(resolution_row);
+    #[cfg(target_os = "macos")]
+    let content = content.when(horizontal_visible, |content| {
+        content.child(horizontal_scroll_rows(
+            horizontal_sensitivity,
+            horizontal_inverted,
+            horizontal_supported,
+            pal,
+        ))
+    });
     PanelCard::new(
         tr!("Scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
-        v_flex().gap_4().child(inversion_row).child(resolution_row),
+        content,
     )
+}
+
+/// Host-side controls for physical tilt wheels and other native Axis 2 input.
+/// They live beside vertical HID++ controls but remain explicitly distinct.
+#[cfg(target_os = "macos")]
+fn horizontal_scroll_rows(
+    sensitivity: HorizontalScrollSensitivity,
+    inverted: bool,
+    supported: bool,
+    pal: Palette,
+) -> impl IntoElement {
+    let multiplier = sensitivity.scroll_multiplier();
+    let speed_description = if supported {
+        tr!("Adjusts horizontal scrolling from this mouse's tilt wheel.")
+    } else {
+        tr!("Requires an enabled direct mouse that macOS can identify unambiguously.")
+    };
+    v_flex()
+        .gap_4()
+        .border_t_1()
+        .border_color(pal.border)
+        .pt_4()
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    v_flex()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_baseline()
+                                .child(
+                                    div()
+                                        .text_body()
+                                        .text_color(pal.text_primary)
+                                        .child(tr!("Horizontal scroll speed")),
+                                )
+                                .child(
+                                    div()
+                                        .text_body()
+                                        .text_color(pal.text_primary)
+                                        .child(format!("{multiplier:.1}×")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .child(speed_description),
+                        ),
+                )
+                .child(horizontal_scroll_speed_control(sensitivity, supported)),
+        )
+        .child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .child(
+                            div()
+                                .text_body()
+                                .text_color(pal.text_primary)
+                                .child(tr!("Invert horizontal scrolling")),
+                        )
+                        .child(div().text_caption().text_color(pal.text_muted).child(tr!(
+                            "Reverse horizontal scrolling without changing the vertical wheel."
+                        ))),
+                )
+                .child(
+                    Toggle::new("invert-horizontal-scroll-toggle")
+                        .selected(inverted)
+                        .disabled(!supported)
+                        .label((!supported).then(|| tr!("Unavailable")))
+                        .on_change(|inverted, _window, cx| {
+                            AppState::update(cx, |state, cx| {
+                                let key = state.current_record().map(DeviceRecord::device_key);
+                                state.commit_invert_horizontal_scroll(*inverted);
+                                if let Some(key) = key {
+                                    cx.emit(StateEvent::DeviceConfigChanged(key));
+                                }
+                            });
+                        }),
+                ),
+        )
+}
+
+#[cfg(target_os = "macos")]
+fn horizontal_scroll_speed_control(
+    selected: HorizontalScrollSensitivity,
+    enabled: bool,
+) -> impl IntoElement {
+    let selected = u8::from(selected);
+    let values = [14_u8, 28, 42, 56, 70];
+    ButtonGroup::new("horizontal-scroll-speed")
+        .w_full()
+        .outline()
+        .disabled(!enabled)
+        .child(
+            Button::new("horizontal-scroll-speed-1")
+                .flex_1()
+                .label("1×")
+                .selected(selected == 14),
+        )
+        .child(
+            Button::new("horizontal-scroll-speed-2")
+                .flex_1()
+                .label("2×")
+                .selected(selected == 28),
+        )
+        .child(
+            Button::new("horizontal-scroll-speed-3")
+                .flex_1()
+                .label("3×")
+                .selected(selected == 42),
+        )
+        .child(
+            Button::new("horizontal-scroll-speed-4")
+                .flex_1()
+                .label("4×")
+                .selected(selected == 56),
+        )
+        .child(
+            Button::new("horizontal-scroll-speed-5")
+                .flex_1()
+                .label("5×")
+                .selected(selected == 70),
+        )
+        .on_click(move |indices, _window, cx| {
+            let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
+                return;
+            };
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
+                state.commit_horizontal_scroll_sensitivity(
+                    HorizontalScrollSensitivity::from_rounded(f32::from(*value)),
+                );
+                if let Some(key) = key {
+                    cx.emit(StateEvent::DeviceConfigChanged(key));
+                }
+            });
+        })
 }
 
 fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {

@@ -420,6 +420,67 @@ fn default_invert_scroll_is_omitted_from_toml() {
 }
 
 #[test]
+fn horizontal_scroll_settings_roundtrip_per_device() {
+    let mut cfg = Config::default();
+    assert_eq!(
+        cfg.horizontal_scroll_sensitivity("mouse"),
+        HorizontalScrollSensitivity::DEFAULT
+    );
+    assert!(!cfg.invert_horizontal_scroll("mouse"));
+
+    let sensitivity = HorizontalScrollSensitivity::try_new(42).expect("valid 3x setting");
+    cfg.set_horizontal_scroll_sensitivity("mouse", sensitivity);
+    cfg.set_invert_horizontal_scroll("mouse", true);
+    let restored = write_and_read(&cfg);
+
+    assert_eq!(restored.horizontal_scroll_sensitivity("mouse"), sensitivity);
+    assert!(restored.invert_horizontal_scroll("mouse"));
+}
+
+#[test]
+fn prototype_v5_horizontal_settings_migrate_to_the_canonical_device_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+schema_version = 5
+
+[devices."direct:046d:b01f:unit:e4f84cf5"]
+horizontal_scroll_sensitivity = 100
+invert_horizontal_scroll = true
+"#,
+    )
+    .expect("write prototype config");
+
+    let config = Config::load_from_path(&path).expect("prototype config migrates");
+
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+    assert!(
+        !config
+            .devices
+            .contains_key("direct:046d:b01f:unit:e4f84cf5")
+    );
+    assert_eq!(
+        config.horizontal_scroll_sensitivity("unit:e4f84cf5"),
+        HorizontalScrollSensitivity::MAX
+    );
+    assert!(config.invert_horizontal_scroll("unit:e4f84cf5"));
+}
+
+#[test]
+fn default_horizontal_scroll_settings_are_omitted_from_toml() {
+    let mut cfg = Config::default();
+    cfg.set_binding("mouse", ButtonId::Back, Binding::Single(Action::Copy));
+    cfg.set_horizontal_scroll_sensitivity("mouse", HorizontalScrollSensitivity::DEFAULT);
+    cfg.set_invert_horizontal_scroll("mouse", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+
+    assert!(!body.contains("horizontal_scroll_sensitivity"), "{body}");
+    assert!(!body.contains("invert_horizontal_scroll"), "{body}");
+}
+
+#[test]
 fn scroll_resolution_roundtrips_all_three_states() {
     let mut cfg = Config::default();
     assert_eq!(cfg.scroll_resolution("mouse"), None);
