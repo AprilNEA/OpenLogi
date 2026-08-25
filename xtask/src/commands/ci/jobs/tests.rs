@@ -26,12 +26,39 @@ fn workflow() -> Option<String> {
 /// The workflow with its line continuations joined back up and every run of
 /// whitespace collapsed, so a command it wraps for readability is one line
 /// again.
+///
+/// Line endings are normalized first. Git hands Windows checkouts CRLF unless
+/// a `.gitattributes` overrides it, and a continuation is then a backslash
+/// followed by CRLF, which the join below does not match — leaving a stray
+/// backslash mid-command and failing every wrapped command in
+/// [`ci_yml_runs_what_this_runner_runs`] on exactly one platform.
 fn workflow_commands(workflow: &str) -> String {
     workflow
+        .replace("\r\n", "\n")
         .replace("\\\n", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The parser must not care how git checked the workflow out. A CRLF tree
+/// wraps continuations as a backslash followed by CRLF; missing that leaves a
+/// stray backslash mid-command and fails every wrapped command on Windows
+/// alone — invisible to CI, which is Linux and macOS.
+#[test]
+fn line_continuations_join_under_either_line_ending() {
+    let lf = "run: cargo doc --workspace \\\n  --no-deps --document-private-items";
+    let crlf = lf.replace('\n', "\r\n");
+
+    assert_eq!(
+        workflow_commands(lf),
+        "run: cargo doc --workspace --no-deps --document-private-items"
+    );
+    assert_eq!(
+        workflow_commands(&crlf),
+        workflow_commands(lf),
+        "a CRLF checkout must parse to the same commands as an LF one"
+    );
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
