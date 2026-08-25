@@ -16,7 +16,7 @@ use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 
-use super::KeyPhase;
+use super::{HeldKey, KeyPhase};
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.
@@ -105,16 +105,12 @@ fn press_combo(combo: &KeyCombo) {
     press_key(&modifiers_to_keycodes(combo), key);
 }
 
-/// Emit one isolated edge of a held chord.
-pub(super) fn hold_combo(combo: &KeyCombo, phase: KeyPhase) {
-    let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "held shortcut usage has no Linux mapping — edge ignored"
-        );
-        return;
-    };
-    emit(&key_phase_events(&modifiers_to_keycodes(combo), key, phase));
+/// Emit one edge for the physical keys whose ownership changed.
+pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let keys: Vec<_> = keys.iter().filter_map(|key| held_keycode(*key)).collect();
+    if !keys.is_empty() {
+        emit(&held_key_events(&keys, phase));
+    }
 }
 
 /// MPRIS targets the running media player; XF86 volume keys go to the
@@ -341,15 +337,20 @@ fn press_key(mods: &[KeyCode], key: KeyCode) {
 /// is the exact reverse so the ordinary key never escapes as an unmodified
 /// release.
 fn key_phase_events(mods: &[KeyCode], key: KeyCode, phase: KeyPhase) -> Vec<InputEvent> {
-    let mut events = Vec::with_capacity(mods.len() + 2);
+    let mut keys = Vec::with_capacity(mods.len() + 1);
+    keys.extend_from_slice(mods);
+    keys.push(key);
+    held_key_events(&keys, phase)
+}
+
+fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
+    let mut events = Vec::with_capacity(keys.len() + 1);
     match phase {
         KeyPhase::Down => {
-            events.extend(mods.iter().map(|modifier| key_ev(*modifier, 1)));
-            events.push(key_ev(key, 1));
+            events.extend(keys.iter().map(|key| key_ev(*key, 1)));
         }
         KeyPhase::Up => {
-            events.push(key_ev(key, 0));
-            events.extend(mods.iter().rev().map(|modifier| key_ev(*modifier, 0)));
+            events.extend(keys.iter().rev().map(|key| key_ev(*key, 0)));
         }
     }
     events.push(syn());
@@ -405,6 +406,24 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
         modifiers.push(KeyCode::KEY_LEFTALT);
     }
     modifiers
+}
+
+fn held_keycode(key: HeldKey) -> Option<KeyCode> {
+    match key {
+        HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
+        HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
+        HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
+        HeldKey::Key(usage) => {
+            let key = hid_usage_to_linux(usage.code());
+            if key.is_none() {
+                tracing::warn!(
+                    usage = usage.code(),
+                    "held shortcut usage has no Linux mapping — edge ignored"
+                );
+            }
+            key
+        }
+    }
 }
 
 /// Map a platform-neutral USB HID keyboard usage to evdev.

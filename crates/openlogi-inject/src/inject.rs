@@ -6,6 +6,13 @@
 //! of which translates an [`Action`] into the native event(s) — CGEvent/NSEvent
 //! on macOS, uinput/D-Bus on Linux, SendInput on Windows.
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::collections::HashMap;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::sync::{LazyLock, Mutex, PoisonError};
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, KeyCombo};
 
 #[cfg(target_os = "macos")]
@@ -22,6 +29,90 @@ mod windows;
 enum KeyPhase {
     Down,
     Up,
+}
+
+/// One physical keyboard output shared by held chords on Linux and Windows.
+///
+/// Both logical Cmd and Ctrl map to [`Self::Control`] on these platforms, so
+/// ownership is counted after that alias is resolved.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HeldKey {
+    Control,
+    Shift,
+    Alt,
+    Key(KeyboardUsage),
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HoldTransition {
+    up: Vec<HeldKey>,
+    down: Vec<HeldKey>,
+}
+
+/// Reference counts for physical keyboard outputs across active chords.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(Default)]
+struct HeldOutput {
+    owners: HashMap<HeldKey, usize>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl HeldOutput {
+    fn transition(
+        &mut self,
+        released: Option<&KeyCombo>,
+        pressed: Option<&KeyCombo>,
+    ) -> HoldTransition {
+        let released = released.map_or_else(Vec::new, held_keys);
+        let pressed = pressed.map_or_else(Vec::new, held_keys);
+        let before = self.owners.clone();
+
+        for key in &released {
+            match self.owners.get_mut(key) {
+                Some(owners) if *owners > 1 => *owners -= 1,
+                Some(_) => {
+                    self.owners.remove(key);
+                }
+                None => {}
+            }
+        }
+        for key in &pressed {
+            *self.owners.entry(*key).or_default() += 1;
+        }
+
+        HoldTransition {
+            up: released
+                .into_iter()
+                .filter(|key| before.contains_key(key) && !self.owners.contains_key(key))
+                .collect(),
+            down: pressed
+                .into_iter()
+                .filter(|key| !before.contains_key(key) && self.owners.contains_key(key))
+                .collect(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
+    LazyLock::new(|| Mutex::new(HeldOutput::default()));
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
+    let mut keys = Vec::with_capacity(4);
+    if combo.has_command() || combo.has_control() {
+        keys.push(HeldKey::Control);
+    }
+    if combo.has_shift() {
+        keys.push(HeldKey::Shift);
+    }
+    if combo.has_option() {
+        keys.push(HeldKey::Alt);
+    }
+    keys.push(HeldKey::Key(combo.key()));
+    keys
 }
 
 /// Synthesise the OS-level event for `action`.
@@ -95,7 +186,7 @@ pub fn execute(action: &Action) {
 /// including cancellation and shutdown paths. Prefer [`execute`] when the
 /// caller does not own a matching terminal event.
 pub fn press_hold(combo: &KeyCombo) {
-    hold_phase(combo, KeyPhase::Down);
+    hold_transition(None, Some(combo));
 }
 
 /// Synthesise the up edge matching a prior [`press_hold`].
@@ -103,24 +194,38 @@ pub fn press_hold(combo: &KeyCombo) {
 /// A redundant release is safe: platforms treat an up edge for an already-up
 /// key as a no-op, which lets cancellation paths release defensively.
 pub fn release_hold(combo: &KeyCombo) {
-    hold_phase(combo, KeyPhase::Up);
+    hold_transition(Some(combo), None);
 }
 
-fn hold_phase(combo: &KeyCombo, phase: KeyPhase) {
+/// Replace one held chord without releasing physical keys shared by both.
+pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
+    hold_transition(Some(old), Some(new));
+}
+
+fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {
-            macos::hold_combo(combo, phase);
+            if let Some(combo) = released {
+                macos::hold_combo(combo, KeyPhase::Up);
+            }
+            if let Some(combo) = pressed {
+                macos::hold_combo(combo, KeyPhase::Down);
+            }
         }
         target_os = "linux" => {
-            linux::hold_combo(combo, phase);
+            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let transition = output.transition(released, pressed);
+            linux::hold_keys(&transition.up, KeyPhase::Up);
+            linux::hold_keys(&transition.down, KeyPhase::Down);
         }
         target_os = "windows" => {
-            windows::hold_combo(combo, phase);
+            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let transition = output.transition(released, pressed);
+            windows::hold_keys(&transition.up, KeyPhase::Up);
+            windows::hold_keys(&transition.down, KeyPhase::Down);
         }
         _ => {
             tracing::warn!(
-                chord = %combo.rendered_label(),
-                ?phase,
                 "held shortcut output unsupported on this platform"
             );
         }
@@ -244,6 +349,95 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    use openlogi_core::binding::KeyCombo;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    use super::{HeldKey, HeldOutput, HoldTransition};
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn combo(label: &str) -> KeyCombo {
+        label.parse().expect("test shortcut must be valid")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn shared_control_stays_down_until_its_last_chord_ends() {
+        let control_a = combo("Ctrl+A");
+        let control_b = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some(&control_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some(&control_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(control_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&control_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(control_a.key())],
+                down: vec![],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&control_b), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn command_and_control_share_one_physical_output() {
+        let command_a = combo("Cmd+A");
+        let control_b = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&command_a));
+        assert_eq!(
+            output.transition(None, Some(&control_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(control_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn replacement_preserves_shared_physical_outputs() {
+        let old = combo("Ctrl+A");
+        let new = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&old));
+        assert_eq!(
+            output.transition(Some(&old), Some(&new)),
+            HoldTransition {
+                up: vec![HeldKey::Key(old.key())],
+                down: vec![HeldKey::Key(new.key())],
+            }
+        );
+    }
+
     #[test]
     fn hid_usages_map_across_windows_key_categories() {
         use super::hid_usage_to_windows;

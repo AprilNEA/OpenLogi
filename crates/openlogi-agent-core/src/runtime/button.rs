@@ -1,4 +1,4 @@
-//! Source-independent button lifecycle state.
+//! Source-independent button and key lifecycle state.
 //!
 //! Capture backends report different raw shapes: OS hooks carry discrete
 //! edges, while HID++ diverted-control reports carry complete held-control
@@ -70,16 +70,35 @@ impl ButtonSource {
     }
 }
 
+/// Physical control carried through a press lifecycle.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PressControl {
+    /// A mouse or HID++ control represented in the shared binding schema.
+    Button(ButtonId),
+    /// A function key represented by its platform-neutral macOS keycode.
+    Key(u16),
+}
+
 /// Correlation key shared by consecutive edges from one physical control.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct PressKey {
     source: ButtonSource,
-    button: ButtonId,
+    control: PressControl,
 }
 
 impl PressKey {
     fn new(source: ButtonSource, button: ButtonId) -> Self {
-        Self { source, button }
+        Self {
+            source,
+            control: PressControl::Button(button),
+        }
+    }
+
+    fn for_key(source: ButtonSource, keycode: u16) -> Self {
+        Self {
+            source,
+            control: PressControl::Key(keycode),
+        }
     }
 }
 
@@ -120,8 +139,8 @@ impl ActivePress {
         &self.token
     }
 
-    pub(crate) fn button(&self) -> ButtonId {
-        self.token.key.button
+    pub(crate) fn control(&self) -> &PressControl {
+        &self.token.key.control
     }
 
     pub(crate) fn device_key(&self) -> Option<&str> {
@@ -264,6 +283,26 @@ impl ButtonInputHandle {
         self.try_up(ButtonSource::current_hook(), button)
     }
 
+    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> Option<PressToken> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let press = self.new_press(
+            PressKey::for_key(ButtonSource::current_hook(), keycode),
+            Some(action),
+            generation,
+        );
+        let token = press.token.clone();
+        self.try_input(generation, ButtonInput::Down(press))
+            .then_some(token)
+    }
+
+    pub(crate) fn try_hook_key_up(&self, keycode: u16) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.try_input(
+            generation,
+            ButtonInput::Up(PressKey::for_key(ButtonSource::current_hook(), keycode)),
+        )
+    }
+
     pub(crate) fn cancel_hook_thread(&self) {
         self.try_command(ButtonCommand::CancelSource(ButtonSource::current_hook()));
     }
@@ -293,8 +332,7 @@ impl ButtonInputHandle {
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
-            ButtonSource::Hidpp(session.clone()),
-            button,
+            PressKey::new(ButtonSource::Hidpp(session.clone()), button),
             action,
             generation,
         );
@@ -337,7 +375,7 @@ impl ButtonInputHandle {
         action: Option<&Action>,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
-        let press = self.new_press(source, button, action, generation);
+        let press = self.new_press(PressKey::new(source, button), action, generation);
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
             .then_some(token)
@@ -348,18 +386,12 @@ impl ButtonInputHandle {
         self.try_input(generation, ButtonInput::Up(PressKey::new(source, button)))
     }
 
-    fn new_press(
-        &self,
-        source: ButtonSource,
-        button: ButtonId,
-        action: Option<&Action>,
-        generation: u64,
-    ) -> ActivePress {
+    fn new_press(&self, key: PressKey, action: Option<&Action>, generation: u64) -> ActivePress {
         let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
         ActivePress {
             token: PressToken {
                 id,
-                key: PressKey::new(source, button),
+                key,
                 generation,
             },
             action: action.cloned(),

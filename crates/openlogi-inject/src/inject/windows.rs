@@ -14,7 +14,7 @@ use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 
-use super::KeyPhase;
+use super::{HeldKey, KeyPhase};
 
 const WHEEL_DELTA: i32 = 120;
 
@@ -278,34 +278,36 @@ fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     modifiers
 }
 
-/// Emit one isolated edge of a held chord in a single `SendInput` batch.
-pub(super) fn hold_combo(combo: &KeyCombo, phase: KeyPhase) {
-    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            chord = %combo.rendered_label(),
-            "held shortcut usage has no Windows mapping — edge ignored"
-        );
-        return;
-    };
-    let modifiers = combo_modifiers(combo);
-    let mut inputs = Vec::with_capacity(modifiers.len() + 1);
-    match phase {
-        KeyPhase::Down => {
-            inputs.extend(modifiers.iter().map(|modifier| key_input(*modifier, false)));
-            inputs.push(key_input(vk, false));
-        }
-        KeyPhase::Up => {
-            inputs.push(key_input(vk, true));
-            inputs.extend(
-                modifiers
-                    .iter()
-                    .rev()
-                    .map(|modifier| key_input(*modifier, true)),
-            );
-        }
+/// Emit one edge for the physical keys whose ownership changed.
+pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let keys: Vec<_> = keys
+        .iter()
+        .filter_map(|key| held_virtual_key(*key))
+        .collect();
+    let key_up = phase == KeyPhase::Up;
+    let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
+    if key_up {
+        inputs.reverse();
     }
     send_inputs(&inputs);
+}
+
+fn held_virtual_key(key: HeldKey) -> Option<u16> {
+    match key {
+        HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::Shift => Some(VK_SHIFT),
+        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Key(usage) => {
+            let key = super::hid_usage_to_windows(usage.code());
+            if key.is_none() {
+                tracing::warn!(
+                    usage = usage.code(),
+                    "held shortcut usage has no Windows mapping — edge ignored"
+                );
+            }
+            key
+        }
+    }
 }
 
 fn send_inputs(inputs: &[INPUT]) {

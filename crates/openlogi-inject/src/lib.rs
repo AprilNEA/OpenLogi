@@ -4,7 +4,7 @@ mod inject;
 
 pub use inject::{
     SYNTHETIC_EVENT_USER_DATA, ax_navigate_browser, execute, post_horizontal_scroll, press_hold,
-    release_hold,
+    release_hold, replace_hold,
 };
 
 #[cfg(target_os = "linux")]

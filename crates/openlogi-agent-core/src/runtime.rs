@@ -17,7 +17,9 @@ use openlogi_core::binding::{Action, ButtonId, KeyCombo};
 use openlogi_hid::{CaptureChannel, ChannelRegistry};
 use tracing::{info, warn};
 
-use self::button::{ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason};
+use self::button::{
+    ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
+};
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
@@ -30,7 +32,7 @@ enum HoldStart {
     NotHeld,
     /// This press newly owns one held chord.
     Started(KeyCombo),
-    /// The same press changed its held action; release the old chord first.
+    /// The same press changed its held action.
     Replaced { old: KeyCombo, new: KeyCombo },
 }
 
@@ -180,7 +182,14 @@ impl ButtonEventHandler {
                     openlogi_inject::release_hold(&combo);
                 }
                 if let EndReason::Canceled(reason) = reason {
-                    info!(button = %press.button(), ?reason, "button lifecycle canceled");
+                    match press.control() {
+                        PressControl::Button(button) => {
+                            info!(button = %button, ?reason, "button lifecycle canceled");
+                        }
+                        PressControl::Key(keycode) => {
+                            info!(keycode, ?reason, "key lifecycle canceled");
+                        }
+                    }
                 }
             }
         }
@@ -191,8 +200,7 @@ impl ButtonEventHandler {
             HoldStart::NotHeld => self.executor.dispatch(action, device_key),
             HoldStart::Started(combo) => openlogi_inject::press_hold(&combo),
             HoldStart::Replaced { old, new } => {
-                openlogi_inject::release_hold(&old);
-                openlogi_inject::press_hold(&new);
+                openlogi_inject::replace_hold(&old, &new);
             }
         }
     }
@@ -274,6 +282,16 @@ impl ActionDispatcher {
     /// Queue one OS-hook up edge without blocking the callback.
     pub(crate) fn try_hook_button_up(&self, button: ButtonId) -> bool {
         self.buttons.try_hook_up(button)
+    }
+
+    /// Queue one function-key down edge without blocking the hook callback.
+    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> bool {
+        self.buttons.try_hook_key_down(keycode, action).is_some()
+    }
+
+    /// Queue one function-key up edge without blocking the hook callback.
+    pub(crate) fn try_hook_key_up(&self, keycode: u16) -> bool {
+        self.buttons.try_hook_key_up(keycode)
     }
 
     /// Execute a semantic gesture action only if its exact press is still live.

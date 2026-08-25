@@ -280,6 +280,34 @@ fn pulse_has_an_immediate_balanced_lifecycle() {
 }
 
 #[test]
+fn function_key_hold_has_one_balanced_lifecycle() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let action = Action::HoldShortcut("Ctrl+Space".parse().expect("valid shortcut"));
+    let token = input
+        .try_hook_key_down(0x7a, &action)
+        .expect("key down should be queued");
+
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("function key must start its lifecycle");
+    };
+    assert_eq!(started.token, token);
+    assert_eq!(started.control(), &PressControl::Key(0x7a));
+    assert!(input.try_hook_key_up(0x7a));
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("function key must end its lifecycle");
+    };
+    assert_eq!(press.token, token);
+    assert_eq!(reason, EndReason::Released);
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn worker_emits_balanced_shutdown_and_rejects_later_input() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {

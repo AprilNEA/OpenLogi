@@ -15,7 +15,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hook::{
-    EventDevice, EventDisposition, Hook, HookEvent, MouseEvent, source_is_remappable,
+    EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
 use tracing::{info, warn};
 
@@ -174,6 +174,10 @@ thread_local! {
     /// rejected the remap. Their matching release must also pass through so
     /// apps never see a stuck auxiliary button (down without up).
     static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    /// Function keys whose held action owns an accepted lifecycle. Repeated
+    /// key-down events are auto-repeat, not replacement presses; their first
+    /// matching key-up ends the lifecycle.
+    static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -340,6 +344,62 @@ fn handle_moved(
     EventDisposition::PassThrough
 }
 
+/// Remap one function-key edge without blocking the hook callback.
+fn handle_key(
+    event: KeyEvent,
+    bindings: &SharedKeyboardBindings,
+    action_tx: &mpsc::SyncSender<Action>,
+    dispatcher: &ActionDispatcher,
+) -> EventDisposition {
+    let KeyEvent {
+        keycode,
+        pressed,
+        modifiers,
+    } = event;
+    if !pressed {
+        return HELD_KEYS.with_borrow_mut(|keys| {
+            if keys.remove(&keycode) {
+                dispatcher.try_hook_key_up(keycode);
+                EventDisposition::Suppress
+            } else {
+                EventDisposition::PassThrough
+            }
+        });
+    }
+    if HELD_KEYS.with_borrow(|keys| keys.contains(&keycode)) {
+        return EventDisposition::Suppress;
+    }
+    let trigger = KeyTrigger {
+        keycode,
+        modifiers: convert_modifiers(modifiers),
+    };
+    let Some(action) = bindings
+        .try_read()
+        .ok()
+        .and_then(|map| map.get(&trigger).cloned())
+    else {
+        return EventDisposition::PassThrough;
+    };
+
+    info!(keycode, action = %action.label(), "key → executing bound action");
+    let queued = if action.held_combo().is_some() {
+        let queued = dispatcher.try_hook_key_down(keycode, &action);
+        if queued {
+            HELD_KEYS.with_borrow_mut(|keys| {
+                keys.insert(keycode);
+            });
+        }
+        queued
+    } else {
+        try_queue_action(action_tx, action)
+    };
+    if queued {
+        EventDisposition::Suppress
+    } else {
+        EventDisposition::PassThrough
+    }
+}
+
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
@@ -375,6 +435,7 @@ pub fn start(
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
+                    HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     EventDisposition::PassThrough
                 }
@@ -399,39 +460,11 @@ pub fn start(
                 }
             }
         }
-        // Function-key remapper: on key-down, look up a [keyboard.bindings]
-        // entry for this keycode + modifier mask. A match queues its action
-        // (suppressing the original key so it doesn't also type / trigger its
-        // native function); an unmatched key passes through untouched. Key-up
-        // is ignored to avoid double-firing the action.
-        HookEvent::Key(openlogi_hook::KeyEvent {
-            keycode,
-            pressed,
-            modifiers,
-        }) => {
-            if !pressed {
-                return EventDisposition::PassThrough;
-            }
-            let trigger = KeyTrigger {
-                keycode,
-                modifiers: convert_modifiers(modifiers),
-            };
-            match keyboard_bindings
-                .try_read()
-                .ok()
-                .and_then(|m| m.get(&trigger).cloned())
-            {
-                Some(action) => {
-                    info!(keycode, action = %action.label(), "key → executing bound action");
-                    if try_queue_action(&action_tx, action) {
-                        EventDisposition::Suppress
-                    } else {
-                        EventDisposition::PassThrough
-                    }
-                }
-                None => EventDisposition::PassThrough,
-            }
-        }
+        // Function-key remapper: ordinary actions remain one-shot, while a
+        // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
+        // button. The active set pairs key-up even if modifier state or config
+        // changes while the key is down.
+        HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),
     });
 
     match result {
