@@ -81,12 +81,15 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::SelectAll => "Cmd+A",
         Shortcut::Find => "Cmd+F",
         Shortcut::Save => "Cmd+S",
-        // Cmd+[ / Cmd+] for Chrome and other apps. Safari is handled
-        // upstream via ax_navigate_browser() with the PID captured at press
-        // time — by the time execute() is called the AX path has already
-        // run, so this is the fallback for non-Safari browsers only.
-        Shortcut::BrowserBack => "Cmd+[",
-        Shortcut::BrowserForward => "Cmd+]",
+        // Arrows, not Cmd+[ / Cmd+]: `hid_usage_to_macos` resolves a usage to
+        // a *fixed ANSI* virtual key, so the bracket usage presses whatever
+        // character that position carries — `Ü` on a German layout, where no
+        // browser navigates. The arrow block carries no layout variance, and
+        // every macOS browser takes it for history navigation. `inject.rs`
+        // also has an `ax_navigate_browser` for a Safari-specific AX path,
+        // but nothing calls it, so this table is the only path that runs.
+        Shortcut::BrowserBack => "Cmd+Left",
+        Shortcut::BrowserForward => "Cmd+Right",
         Shortcut::NewTab => "Cmd+T",
         Shortcut::CloseTab => "Cmd+W",
         Shortcut::ReopenTab => "Cmd+Shift+T",
@@ -439,7 +442,7 @@ mod tests {
     fn combo_table_pins_representative_shortcuts() {
         assert_eq!(combo(Shortcut::Copy).rendered_label(), "Cmd+C");
         assert_eq!(combo(Shortcut::Redo).rendered_label(), "Cmd+Shift+Z");
-        assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Cmd+[");
+        assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Cmd+Left");
         assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
         // hid_usage_to_macos must actually resolve every table entry, or a
         // `Shortcut` silently no-ops instead of pressing anything (see
@@ -452,6 +455,25 @@ mod tests {
             assert!(
                 hid_usage_to_macos(key).is_some(),
                 "{shortcut:?} table entry has no macOS virtual-key mapping"
+            );
+        }
+    }
+
+    /// Browser history navigation must not depend on the host keyboard
+    /// layout. `hid_usage_to_macos` maps a usage to a fixed ANSI virtual key,
+    /// so a punctuation or letter chord presses whichever character that ANSI
+    /// *position* carries on the active layout — ⌘[ becomes ⌘Ü on a German
+    /// one, and the browser stays put. Only the named navigation block
+    /// (`0x4a..=0x52`: home/page/end and the four arrows) is position-stable
+    /// across layouts, so browser navigation has to live there.
+    #[test]
+    fn browser_navigation_uses_layout_invariant_keys() {
+        for shortcut in [Shortcut::BrowserBack, Shortcut::BrowserForward] {
+            let usage = combo(shortcut).key().code();
+            assert!(
+                (0x4a..=0x52).contains(&usage),
+                "{shortcut:?} presses usage {usage:#04x}, whose ANSI position carries a \
+                 different character on every keyboard layout"
             );
         }
     }
