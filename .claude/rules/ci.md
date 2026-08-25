@@ -114,6 +114,13 @@ Not part of `ci.yml`, not in the default run:
 - **devenv CI** (path-filtered): format `devenv.nix` and `devenv --no-tui shell -- true`.
 - **Build**: unsigned installers on every PR. Run the matching `cargo xtask`
   package command only when the diff touches packaging.
+- **Build / Linux Flatpak**: gated behind the `needs: build` label like the rest
+  of that matrix, so a PR touching `packaging/linux/flatpak/**` gets no feedback
+  until someone labels it. Reproduce locally with
+  `flatpak-builder --user --disable-rofiles-fuse --force-clean --repo=repo
+  --default-branch=stable build packaging/linux/flatpak/org.openlogi.OpenLogi.yml`,
+  and keep the build tree off `/tmp` if it is a tmpfs: the workspace needs well
+  over 10 GB to compile inside the sandbox.
 
 ## When you add a CI job
 
