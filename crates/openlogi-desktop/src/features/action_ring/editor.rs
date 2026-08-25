@@ -5,12 +5,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _,
-    button::Button,
-    h_flex,
-    input::{Input, InputState},
-    scroll::ScrollableElement as _,
-    v_flex,
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
     Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, KeyCombo,
@@ -21,7 +17,7 @@ use super::action_icons::action_icon_path;
 use crate::features::mouse::picker::editor_section;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 pub(super) fn action_library(
@@ -169,12 +165,10 @@ fn shortcut_editor(
             h_flex()
                 .gap_2()
                 .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(input)
-                            .small()
-                            .min_h(px(theme::CONTROL_H))
-                            .cleanable(true),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
                     Button::new("ring-add-shortcut")
@@ -199,12 +193,10 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
             h_flex()
                 .gap_2()
                 .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(input)
-                            .small()
-                            .min_h(px(theme::CONTROL_H))
-                            .cleanable(true),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
                     Button::new("ring-add-path")

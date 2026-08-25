@@ -4,11 +4,13 @@ use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 use std::time::Duration;
 
+use crate::ui::components::control_select;
+
 use super::{
     App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Entity, IconName, IndexPath,
-    InteractiveElement, IntoElement, Palette, ParentElement, Select, SelectItem, SelectState,
-    SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, Sizable,
-    StateEvent, Styled, div, px,
+    InteractiveElement, IntoElement, Palette, ParentElement, SelectItem, SelectState, SettingField,
+    SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, StateEvent, Styled, div,
+    px,
 };
 
 #[derive(Clone)]
@@ -161,8 +163,7 @@ fn asset_source_select_field(
     asset_source_select: Entity<SelectState<Vec<AssetSourceOption>>>,
 ) -> impl IntoElement {
     div().flex_shrink_0().w(px(220.)).h_6().child(
-        Select::new(&asset_source_select)
-            .small()
+        control_select(&asset_source_select)
             .w(px(220.))
             .menu_width(px(220.)),
     )

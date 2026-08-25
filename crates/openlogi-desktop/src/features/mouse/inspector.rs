@@ -9,12 +9,8 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _,
-    button::Button,
-    h_flex,
-    input::{Input, InputState},
-    scroll::ScrollableElement as _,
-    v_flex,
+    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -26,8 +22,8 @@ use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
-use crate::ui::theme::{ACCENT_BLUE, CONTROL_H, Palette, Typography as _};
+use crate::ui::components::{MenuRow, control_button, control_input};
+use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -175,9 +171,7 @@ fn button_inspector(
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
-                Button::new("inspector-use-default")
-                    .small()
-                    .h(px(CONTROL_H))
+                control_button("inspector-use-default")
                     .w_full()
                     .icon(IconName::Undo)
                     .label(tr!("Use the default profile"))
@@ -198,9 +192,7 @@ fn button_inspector(
             |panel| {
                 let observer = picker.view.clone();
                 panel.child(
-                    Button::new("inspector-use-gestures")
-                        .small()
-                        .h(px(CONTROL_H))
+                    control_button("inspector-use-gestures")
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
                         .label(tr!("Use gestures"))
@@ -321,9 +313,7 @@ fn gesture_inspector(
         ))
         .child(current_action_card(&current, picker, pal))
         .child(
-            Button::new("inspector-single-action")
-                .small()
-                .h(px(CONTROL_H))
+            control_button("inspector-single-action")
                 .w_full()
                 .label(tr!("Use a single action"))
                 .on_click(move |_, _, cx| {
@@ -642,7 +632,7 @@ fn action_library(
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("Actions"), pal))
-        .child(Input::new(action_search).small().cleanable(true))
+        .child(control_input(action_search).cleanable(true))
         .child(
             v_flex()
                 .gap_0p5()

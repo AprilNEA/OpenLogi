@@ -16,6 +16,7 @@ use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use crate::state::AppState;
+use crate::ui::components::control_button;
 use crate::ui::theme::{Palette, Typography as _};
 
 /// "← Devices" affordance on the detail screen; returns to the gallery without
@@ -102,8 +103,7 @@ pub(super) fn sidebar_action(
     label: SharedString,
     handler: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
-    Button::new(id)
-        .small()
+    control_button(id)
         .icon(icon)
         .label(label)
         .on_click(handler)

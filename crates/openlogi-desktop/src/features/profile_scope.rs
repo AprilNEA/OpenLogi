@@ -17,13 +17,13 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, InputState},
     popover::{Popover, PopoverState},
     v_flex,
 };
 
 use crate::state::AppState;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 use super::mouse::picker::{compact_panel, divider, title};
@@ -585,10 +585,8 @@ fn add_app_popover(
         // a second padded, differently-rounded box.
         .appearance(false)
         .trigger(
-            Button::new("add-app-profile")
+            control_button("add-app-profile")
                 .outline()
-                .small()
-                .h(px(theme::CONTROL_H))
                 .icon(IconName::Plus)
                 .label(tr!("Add app")),
         )
@@ -649,9 +647,7 @@ fn add_app_content(
         .child(title(tr!("Add app profile"), pal))
         .child(divider(pal))
         .child(
-            Input::new(&search)
-                .small()
-                .min_h(px(theme::CONTROL_H))
+            control_input(&search)
                 .cleanable(true)
                 .prefix(IconName::Search),
         )

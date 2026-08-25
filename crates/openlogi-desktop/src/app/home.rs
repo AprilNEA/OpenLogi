@@ -21,7 +21,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputState},
+    input::InputState,
     v_flex,
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
@@ -37,6 +37,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
+use crate::ui::components::control_input;
 use crate::ui::theme::{
     self, ContentWidth, HEADER_H, Palette, SelectableStyle as _, Typography as _,
 };
@@ -315,7 +316,7 @@ fn open_rename_dialog(
             .w(px(420.))
             .title(tr!("Rename device"))
             .child(
-                v_flex().gap_2().child(Input::new(&input)).child(
+                v_flex().gap_2().child(control_input(&input)).child(
                     div()
                         .text_caption()
                         .text_color(theme::palette(cx).text_muted)
