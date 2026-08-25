@@ -322,6 +322,16 @@ async fn capture_hidpp_settings(
     } else {
         return Err(unknown_offline_support("backlight"));
     };
+    let disable_keys = match capability_setting(device.online, capabilities.disable_keys) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "Disable Keys",
+                client.read_disable_keys(context::current(), source_route.clone()),
+            )
+            .await?
+        }
+    };
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -329,6 +339,7 @@ async fn capture_hidpp_settings(
         smartshift,
         wheel,
         backlight,
+        disable_keys,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -389,6 +400,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         smartshift: ProfileSetting::Unsupported,
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
+        disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

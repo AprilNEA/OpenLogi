@@ -88,7 +88,8 @@
             "hires_wheel": false,
             "thumbwheel": false,
             "haptic_feedback": false,
-            "haptic_panel": false
+            "haptic_panel": false,
+            "disable_keys": true
           }
         }
       ]
@@ -212,6 +213,9 @@
       "backlight": {
         "support": "unsupported"
       },
+      "disable_keys": {
+        "support": "unsupported"
+      },
       "lighting": "unsupported",
       "light": "unsupported"
     },
@@ -232,6 +236,9 @@
         "support": "unsupported"
       },
       "backlight": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
         "support": "unsupported"
       },
       "lighting": "unsupported",
@@ -255,6 +262,13 @@
       },
       "backlight": {
         "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "supported",
+        "value": {
+          "supported": 177,
+          "disabled": 160
+        }
       },
       "lighting": "supported",
       "light": "unsupported"
@@ -284,6 +298,9 @@
       "backlight": {
         "support": "unsupported"
       },
+      "disable_keys": {
+        "support": "unsupported"
+      },
       "lighting": "unsupported",
       "light": "unsupported"
     },
@@ -307,6 +324,9 @@
         "support": "unsupported"
       },
       "backlight": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
         "support": "unsupported"
       },
       "lighting": "unsupported",

@@ -39,10 +39,11 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, DisableKeysMask,
+    DisableKeysState, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
+    LightCommand, PasskeyMethod, ReceiverSelector, ScrollReportingTarget, ScrollWheelMode,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -102,7 +103,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 31);
 }
 
 #[test]
@@ -189,6 +190,12 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+}
+
+/// Later request variants stay pinned separately so the append-only golden
+/// remains readable as the service grows.
+#[test]
+fn appended_request_variant_order() {
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Gui,
@@ -228,6 +235,23 @@ fn semantic_read_requests() {
             },
         },
         "1b0008463030444341464501",
+    );
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    };
+    assert_wire(
+        &AgentRequest::ReadDisableKeys {
+            route: route.clone(),
+        },
+        "1c0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetDisableKeys {
+            route,
+            desired: DisableKeysMask::CAPS_LOCK,
+        },
+        "1d000846303044434146450101",
     );
 }
 
@@ -438,12 +462,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                disable_keys: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010100",
     );
 }
 
@@ -484,6 +509,33 @@ fn pairing_updates() {
 
 #[test]
 fn device_settings_payloads() {
+    let disable_keys = DisableKeysState {
+        supported: DisableKeysMask::from_bits_retain(0xa1),
+        disabled: DisableKeysMask::from_bits_retain(0xe0),
+    };
+    assert_wire(&DisableKeysMask::from_bits_retain(0xa1), "a1");
+    assert_wire(&disable_keys, "a1e0");
+    assert_wire(&Ok::<DisableKeysState, WriteError>(disable_keys), "00a1e0");
+    assert_wire(&HidppOperation::ReadDisableKeys, "0f");
+    assert_wire(&HidppOperation::WriteDisableKeys, "10");
+    assert_wire(
+        &WriteError::UnsupportedMask {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            requested: 0x20,
+            supported: 0x1f,
+        },
+        "0e10fb2145201f",
+    );
+    assert_wire(
+        &WriteError::WriteNotApplied {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            expected: 0xa1,
+            actual: 0x01,
+        },
+        "0f10fb2145a101",
+    );
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
         current: Dpi::new(1600),
         capabilities: DpiCapabilities::new(vec![800, 1600, 3200]).expect("non-empty list"),
