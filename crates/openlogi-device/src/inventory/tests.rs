@@ -445,20 +445,26 @@ fn bolt_receiver_info() -> ReceiverInfo {
 /// timeout produces (#251): the device still surfaces from its pairing-register
 /// identity, so a timed-out slot counts as readable here.
 fn bolt_slot(slot: u8) -> (PairedDevice, CacheOutcome) {
+    bolt_slot_with_identity(slot, [0, 0, 0, slot], true)
+}
+
+fn bolt_slot_with_identity(
+    slot: u8,
+    unit_id: [u8; 4],
+    online: bool,
+) -> (PairedDevice, CacheOutcome) {
     (
         PairedDevice {
             slot,
             codename: Some(format!("device-{slot}")),
             wpid: None,
             kind: DeviceKind::Mouse,
-            online: true,
+            online,
             battery: None,
             model_info: None,
             capabilities: None,
         },
-        CacheOutcome::Seen(CacheKey::Bolt {
-            unit_id: [0, 0, 0, slot],
-        }),
+        CacheOutcome::Seen(CacheKey::Bolt { unit_id }),
     )
 }
 
@@ -487,6 +493,83 @@ fn bolt_probe_is_complete_when_count_matches_readable_slots() {
         probe.outcomes.len(),
         2,
         "one cache outcome per readable slot"
+    );
+}
+
+#[test]
+fn bolt_probe_suppresses_offline_duplicate_pairing_slot() {
+    let unit_id = [0x4e, 0x51, 0x01, 0xc4];
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            bolt_slot_with_identity(2, unit_id, true),
+            bolt_slot_with_identity(3, unit_id, false),
+        ],
+    );
+
+    assert!(probe.complete, "both receiver slots were readable");
+    assert!(
+        probe.healthy,
+        "deduplication must not make a complete walk unhealthy"
+    );
+    assert_eq!(paired_slots(&probe), vec![2], "the online slot wins");
+    assert_eq!(
+        probe.outcomes.len(),
+        2,
+        "both raw slots still contribute their cache outcome"
+    );
+}
+
+#[test]
+fn bolt_probe_replaces_earlier_offline_duplicate_with_online_slot() {
+    let unit_id = [0x4e, 0x51, 0x01, 0xc4];
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            bolt_slot_with_identity(2, unit_id, false),
+            bolt_slot_with_identity(3, unit_id, true),
+        ],
+    );
+
+    assert_eq!(
+        paired_slots(&probe),
+        vec![3],
+        "a later online slot replaces the stale route"
+    );
+}
+
+#[test]
+fn bolt_probe_keeps_distinct_units_of_the_same_model() {
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            bolt_slot_with_identity(2, [1, 2, 3, 4], true),
+            bolt_slot_with_identity(3, [1, 2, 3, 5], false),
+        ],
+    );
+
+    assert_eq!(
+        paired_slots(&probe),
+        vec![2, 3],
+        "model equality without physical-identity equality is not enough to merge devices"
+    );
+}
+
+#[test]
+fn bolt_probe_keeps_unkeyed_slots_separate() {
+    let unkeyed = |slot| {
+        let (device, _) = bolt_slot_with_identity(slot, [0; 4], false);
+        (device, CacheOutcome::Unkeyed)
+    };
+    let probe = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![unkeyed(2), unkeyed(3)]);
+
+    assert_eq!(
+        paired_slots(&probe),
+        vec![2, 3],
+        "all-zero identities are not strong enough to deduplicate"
     );
 }
 
