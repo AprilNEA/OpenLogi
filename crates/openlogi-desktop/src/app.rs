@@ -286,6 +286,7 @@ impl AppView {
                 // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
                 | StateEvent::DeviceRemovalFailed { .. }
+                | StateEvent::DisableKeysChanged(_)
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,

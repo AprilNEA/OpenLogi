@@ -39,7 +39,7 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_core::hid::{DeviceRoute, FnLockState, LightCommand, WriteError};
+use openlogi_core::hid::{DeviceRoute, DisableKeysState, FnLockState, LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -61,10 +61,28 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
-    SetSmartShift, StartPairing, UnpairDevice,
+    CancelPairing, Command, PairDevice, ReadDisableKeys, ReadDpi, ReadFnLock, ReadSmartShift,
+    ReloadConfig, RequestAccessibilityPrompt, SetDisableKeys, SetDpi, SetFnLock, SetLight,
+    SetLightManualPower, SetLighting, SetSmartShift, StartPairing, UnpairDevice,
 };
+
+/// Complete identity of one Disable Keys write/reload transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DisableKeysRequestContext {
+    pub(crate) key: DeviceKey,
+    pub(crate) route: DeviceRoute,
+    pub(crate) route_generation: u64,
+    pub(crate) request_id: u64,
+}
+
+/// Correlation scope for a config reload result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigReloadContext {
+    /// Existing application-wide reload behavior.
+    General,
+    /// Reload following one confirmed Disable Keys transaction.
+    DisableKeys(DisableKeysRequestContext),
+}
 
 /// How long to wait before retrying a connect that failed. This is a retry
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
@@ -96,8 +114,16 @@ pub enum GuiUpdate {
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
+    /// Result of a guarded Disable Keys replacement.
+    DisableKeysWriteResult {
+        context: DisableKeysRequestContext,
+        result: Result<DisableKeysState, WriteError>,
+    },
     /// Whether the agent adopted the config currently on disk.
-    ConfigReloadResult(Result<(), ConfigReloadError>),
+    ConfigReloadResult {
+        context: ConfigReloadContext,
+        result: Result<(), ConfigReloadError>,
+    },
     /// What a keyboard reports after an Fn-lock write the GUI asked for: the
     /// state it took, or the typed refusal. Answers [`SetFnLock`].
     FnLockWritten {
@@ -197,7 +223,7 @@ async fn observe_loop(
     // A `ReloadConfig` the agent has not answered yet — requested with no
     // connection, or lost with one. Idempotent (the agent re-reads the file),
     // so it is simply delivered again over the next live connection.
-    let mut reload_owed = false;
+    let mut reload_owed: Option<ReloadConfig> = None;
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
         let woken = tokio::select! {
@@ -220,7 +246,11 @@ async fn observe_loop(
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             // Not dispatched like the device commands below: held, and
             // delivered at the end of this turn if a connection exists.
-            Woken::Command(Some(Command::ReloadConfig(_))) => reload_owed = true,
+            Woken::Command(Some(Command::ReloadConfig(reload))) => {
+                reload_owed
+                    .get_or_insert_with(ReloadConfig::empty)
+                    .merge(reload);
+            }
             Woken::Command(Some(cmd)) => {
                 let client = link.ensure(effects, update_tx).await;
                 if cmd.run(client, update_tx).await.is_err() {
@@ -234,9 +264,9 @@ async fn observe_loop(
         // Whatever this turn did to the link, a held reload goes out the
         // moment there is one to carry it. A transport failure here is the
         // same as anywhere: drop the link, keep the reload for the next one.
-        if reload_owed && let Some(client) = link.client() {
-            match request::run(ReloadConfig, Some(client), update_tx).await {
-                Ok(()) => reload_owed = false,
+        if let (Some(reload), Some(client)) = (reload_owed.as_ref(), link.client()) {
+            match request::run(reload.clone(), Some(client), update_tx).await {
+                Ok(()) => reload_owed = None,
                 Err(LinkLost) => link.lose(Instant::now()),
             }
         }
@@ -388,7 +418,10 @@ mod tests {
     ) -> Result<(), ConfigReloadError> {
         loop {
             match updates.recv().await {
-                Some(GuiUpdate::ConfigReloadResult(verdict)) => return verdict,
+                Some(GuiUpdate::ConfigReloadResult {
+                    context: ConfigReloadContext::General,
+                    result,
+                }) => return result,
                 Some(_) => {}
                 None => panic!("the loop dropped its update channel"),
             }
@@ -405,7 +438,7 @@ mod tests {
         let mut effects = ScriptedEffects::answering([down(), down(), Ok(agent)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(ReloadConfig.into()).unwrap();
+        commands.send(ReloadConfig::general().into()).unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
@@ -435,7 +468,7 @@ mod tests {
         let mut effects = ScriptedEffects::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(ReloadConfig.into()).unwrap();
+        commands.send(ReloadConfig::general().into()).unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {

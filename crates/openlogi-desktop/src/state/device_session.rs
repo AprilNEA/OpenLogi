@@ -1,5 +1,6 @@
 //! What this GUI session knows about one device and never persists.
 
+use super::disable_keys::DisableKeysDeviceState;
 use super::light::LightDeviceState;
 use super::smartshift::SmartShiftDeviceState;
 
@@ -20,4 +21,5 @@ pub(super) struct DeviceSession {
     pub(super) inventory_misses: u8,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
+    pub(super) disable_keys: DisableKeysDeviceState,
 }
