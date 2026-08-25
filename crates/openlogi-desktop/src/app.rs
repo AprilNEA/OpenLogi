@@ -39,9 +39,6 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
-// Tray menu and other crate-level callers need the cold-start charging quirk.
-pub(crate) use widgets::battery_charging_no_reading;
-
 /// Which screen the root view is showing.
 ///
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
@@ -644,8 +641,9 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::home::{battery_needs_attention, connection_icon_path, ordered_device_indices};
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
+    use super::home::{connection_icon_path, ordered_device_indices};
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+    use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
         LightValueRange, LightValueUnit,

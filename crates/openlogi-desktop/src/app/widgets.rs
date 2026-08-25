@@ -3,30 +3,20 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, Hsla, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::FluentBuilder as _, px, relative, rgb,
+    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{
     IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
 };
-use openlogi_core::device::{BatteryInfo, BatteryStatus, DeviceKind};
+use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use crate::state::AppState;
-use crate::ui::theme::{self, Palette, Typography as _};
-
-/// True when the device is charging but still reports 0% — the MX2S `0x1000`
-/// firmware can't gauge charge under load, and on a cold start there's no
-/// pre-charge % cached to carry forward. Show "Charging" without the bogus 0%.
-pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
-    matches!(
-        b.status,
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow
-    ) && b.percentage == 0
-}
+use crate::ui::theme::{Palette, Typography as _};
 
 /// "← Devices" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
@@ -104,53 +94,6 @@ pub(super) fn connectivity_dot(online: bool, pal: Palette) -> impl IntoElement {
         .border_1()
         .border_color(pal.text_muted)
         .when(online, |dot| dot.bg(pal.text_primary))
-}
-
-pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
-    let status = match battery.status {
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow => tr!("Charging"),
-        BatteryStatus::Full => tr!("Full"),
-        BatteryStatus::Error => tr!("Battery error"),
-        BatteryStatus::Discharging | BatteryStatus::Unknown => tr!("Battery"),
-    };
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .justify_between()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(status)
-                .child(if battery_charging_no_reading(battery) {
-                    String::new()
-                } else {
-                    format!("{}%", battery.percentage)
-                }),
-        )
-        .child({
-            let track = div().h(px(6.)).w_full().rounded_full().bg(pal.muted);
-            // Charging with no reliable %: leave the track empty rather than
-            // drawing the 1%-wide red critical sliver that percentage==0 yields.
-            if battery_charging_no_reading(battery) {
-                track
-            } else {
-                track.child(
-                    div()
-                        .h_full()
-                        .w(relative(f32::from(battery.percentage.clamp(1, 100)) / 100.))
-                        .rounded_full()
-                        .bg(battery_color(battery.percentage, pal)),
-                )
-            }
-        })
-}
-
-fn battery_color(percentage: u8, pal: Palette) -> Hsla {
-    match percentage {
-        0..=20 => rgb(0x00ef_4444).into(),
-        21..=50 => rgb(theme::STATUS_CONNECTING).into(),
-        _ => pal.text_primary,
-    }
 }
 
 pub(super) fn sidebar_action(

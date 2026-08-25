@@ -17,10 +17,11 @@ use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
 
 use super::{
-    AppView, battery_view, connection_summary, connection_view, device_card,
-    device_identity_subtitle, device_image, device_ring, keyboard_glow, rename_device_button,
+    AppView, connection_summary, connection_view, device_card, device_identity_subtitle,
+    device_image, device_ring, keyboard_glow, rename_device_button,
 };
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
 use crate::ui::carousel::Carousel;
 use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
 
@@ -324,7 +325,7 @@ fn device_list_row(
                     )
                 })
                 .when_some(record.battery.as_ref(), |this, battery| {
-                    this.child(battery_view(battery, record.online, pal))
+                    this.child(BatteryIndicator::status(battery, record.online))
                 })
                 .when(record.persistent, |this| {
                     this.child(rename_device_button(record, pal))
@@ -357,7 +358,14 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     };
     let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
     if let Some(battery) = record.battery.as_ref() {
-        format!("{metadata} {} {}%.", tr!("Battery"), battery.percentage).into()
+        let battery = if battery_charging_no_reading(battery) {
+            tr!("Charging").to_string()
+        } else if record.online {
+            format!("{} {}%", tr!("Battery"), battery.percentage)
+        } else {
+            format!("{} {}%", tr!("Last known battery"), battery.percentage)
+        };
+        format!("{metadata} {battery}.").into()
     } else {
         metadata.into()
     }

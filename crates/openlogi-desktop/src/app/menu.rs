@@ -14,6 +14,7 @@ use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
 
 use crate::state::AppState;
+use crate::ui::battery::battery_charging_no_reading;
 
 /// Keymap context installed on the main application surface.
 pub(crate) const APP_KEY_CONTEXT: &str = "OpenLogi";
@@ -227,7 +228,7 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
         Some(state) if !state.devices().is_empty() => {
             for record in state.devices() {
                 let title = match &record.battery {
-                    Some(battery) if crate::app::battery_charging_no_reading(battery) => {
+                    Some(battery) if battery_charging_no_reading(battery) => {
                         format!("{} · {}", record.display_name, tr!("Charging"))
                     }
                     Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),

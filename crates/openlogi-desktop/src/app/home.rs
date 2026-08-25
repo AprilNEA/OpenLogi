@@ -25,9 +25,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
-use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
-};
+use openlogi_core::device::{DeviceKind, DeviceTransports};
 use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
@@ -38,6 +36,7 @@ use super::widgets::{
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::BatteryIndicator;
 use crate::ui::theme::{
     self, ContentWidth, HEADER_H, Palette, SelectableStyle as _, Typography as _,
 };
@@ -248,7 +247,7 @@ fn device_card(
                             .border_t_1()
                             .border_color(pal.border)
                             .pt_2()
-                            .child(battery_view(battery, record.online, pal))
+                            .child(BatteryIndicator::status(battery, record.online))
                     },
                 )),
         )
@@ -431,58 +430,6 @@ fn device_image(
         .justify_center()
         .child(Icon::new(icon).size_8().text_color(pal.text_muted))
         .into_any_element()
-}
-
-/// Battery readout for a gallery card. A low reading is one of the few states
-/// that needs to interrupt the otherwise-neutral grid, so both the glyph and
-/// text turn amber and an explicit label accompanies the percentage.
-fn battery_view(b: &BatteryInfo, online: bool, pal: Palette) -> AnyElement {
-    let low = battery_needs_attention(b);
-    let color = if low {
-        rgb(theme::STATUS_CONNECTING).into()
-    } else {
-        pal.text_muted
-    };
-    let row = h_flex()
-        .w_full()
-        .gap_1()
-        .items_center()
-        .text_caption()
-        .text_color(color)
-        .child(Icon::new(battery_icon(b)).size_3())
-        .when(!online, |this| this.child(tr!("Last known battery")));
-    if super::widgets::battery_charging_no_reading(b) {
-        row.child(tr!("Charging")).into_any_element()
-    } else {
-        row.child(format!("{}%", b.percentage))
-            .when(low, |this| this.child("·").child(tr!("Low battery")))
-            .into_any_element()
-    }
-}
-
-pub(super) fn battery_needs_attention(battery: &BatteryInfo) -> bool {
-    battery.percentage <= 20
-        && !matches!(
-            battery.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
-}
-
-/// Pick the battery glyph from charge state first (charging / full / error),
-/// then fall back to the discrete charge level for a plain discharge.
-fn battery_icon(b: &BatteryInfo) -> IconName {
-    match b.status {
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow => IconName::BatteryCharging,
-        BatteryStatus::Full => IconName::BatteryFull,
-        BatteryStatus::Error => IconName::BatteryWarning,
-        BatteryStatus::Discharging | BatteryStatus::Unknown => match b.level {
-            BatteryLevel::Critical => IconName::BatteryWarning,
-            BatteryLevel::Low => IconName::BatteryLow,
-            BatteryLevel::Good => IconName::BatteryMedium,
-            BatteryLevel::Full => IconName::BatteryFull,
-            BatteryLevel::Unknown => IconName::Battery,
-        },
-    }
 }
 
 /// Connection-type glyph for a gallery card: a dongle for receiver-paired

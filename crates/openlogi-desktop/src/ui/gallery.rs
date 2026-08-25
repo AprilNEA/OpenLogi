@@ -15,7 +15,9 @@ use gpui_component::{
 };
 use openlogi_core::brand::APP_ID;
 use openlogi_core::config::UiScale;
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
+use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
@@ -184,6 +186,7 @@ impl ComponentGallery {
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
+            .child(Self::battery_panel(pal))
     }
 
     fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -337,6 +340,47 @@ impl ComponentGallery {
                         .text_color(pal.text_muted)
                         .child("×"),
                 ),
+            pal,
+        )
+    }
+
+    fn battery_panel(pal: Palette) -> gpui::Div {
+        let battery = |percentage, level, status| BatteryInfo {
+            percentage,
+            level,
+            status,
+        };
+        gallery_panel(
+            "BatteryIndicator",
+            IconName::Battery,
+            v_flex()
+                .gap_3()
+                .child(BatteryIndicator::summary(&battery(
+                    78,
+                    BatteryLevel::Good,
+                    BatteryStatus::Discharging,
+                )))
+                .child(BatteryIndicator::status(
+                    &battery(100, BatteryLevel::Full, BatteryStatus::Full),
+                    true,
+                ))
+                .child(BatteryIndicator::status(
+                    &battery(42, BatteryLevel::Good, BatteryStatus::Charging),
+                    true,
+                ))
+                .child(BatteryIndicator::status(
+                    &battery(0, BatteryLevel::Unknown, BatteryStatus::Charging),
+                    true,
+                ))
+                .child(BatteryIndicator::status(
+                    &battery(14, BatteryLevel::Low, BatteryStatus::Discharging),
+                    false,
+                ))
+                .child(BatteryIndicator::summary(&battery(
+                    35,
+                    BatteryLevel::Unknown,
+                    BatteryStatus::Error,
+                ))),
             pal,
         )
     }
