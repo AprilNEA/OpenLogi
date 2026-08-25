@@ -1365,7 +1365,7 @@ fn set_gesture_mode_off_without_click_falls_back_to_the_default() {
 
     assert_eq!(
         cfg.bindings_for("2b042").get(&ButtonId::Back),
-        Some(&Binding::Single(Action::BrowserBack))
+        Some(&Binding::Single(Action::MouseBack))
     );
 }
 

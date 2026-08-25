@@ -184,6 +184,37 @@ mod tests {
     }
 
     #[test]
+    fn thumb_button_bound_to_a_browser_action_is_diverted() {
+        // The thumb buttons send mouse buttons 4/5 in firmware, which no
+        // Safari-style host consumes — reaching a browser action means the
+        // agent has to inject it, and that needs the button diverted. Seeding
+        // the default with `BrowserBack` made that unreachable: picking it
+        // matched the default, so the button stayed native and the action could
+        // never fire. Binding one side must arm its `0x1b04` divert.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b023",
+            ButtonId::Back,
+            Binding::Single(Action::BrowserBack),
+        );
+
+        let plan = plan_for_device(&cfg, "2b023", route(), None, 0);
+        assert!(
+            plan.divert_buttons.contains(&(0x0053, ButtonId::Back)),
+            "a thumb button bound to a browser action must be diverted, or the binding can never \
+             fire: {:?}",
+            plan.divert_buttons
+        );
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Forward),
+            "the untouched forward button must keep its native button 5"
+        );
+    }
+
+    #[test]
     fn haptic_panel_gestures_when_promoted() {
         // The MX Master 4 haptic panel is a HID++ gesture source: promoting it
         // into gesture mode must arm the raw-XY gesture divert, exactly like

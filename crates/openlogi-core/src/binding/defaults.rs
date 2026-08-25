@@ -48,8 +48,15 @@ pub fn default_binding(button: ButtonId) -> Action {
             reason = "see the left tilt above — same control pair, mirrored direction"
         )]
         ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
-        ButtonId::Back => Action::BrowserBack,
-        ButtonId::Forward => Action::BrowserForward,
+        // The thumb buttons send mouse buttons 4/5 in firmware — the very
+        // pairing `is_native_click` treats as native. Seeding that action is
+        // what keeps an untouched thumb button native (the capture plan diverts
+        // a control only when its binding leaves this default, see
+        // `capture_plan`), and it is what makes the browser actions selectable
+        // at all: seeded with `BrowserBack`, choosing `BrowserBack` matched the
+        // default, so the button was never diverted and the action never fired.
+        ButtonId::Back => Action::MouseBack,
+        ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
         #[expect(
             clippy::match_same_arms,
