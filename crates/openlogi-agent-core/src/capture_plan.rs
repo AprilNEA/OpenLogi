@@ -28,7 +28,8 @@ pub struct DeviceCapturePlan {
     /// Per-button single actions for this device (per-app effective).
     pub bindings: BTreeMap<ButtonId, Action>,
     /// Per-direction map for each HID++ gesture source (the dedicated gesture
-    /// button, the MX Master 4 haptic panel) in gesture mode on this device,
+    /// button, the MX Master 4 haptic panel, or a compatible DPI / ModeShift
+    /// control) in gesture mode on this device,
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -118,7 +119,9 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::Binding;
-    use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
+    use openlogi_hid::reprog_controls::{
+        DPI_MODE_SHIFT_CIDS, GESTURE_BUTTON_CID, HAPTIC_PANEL_CID,
+    };
 
     use super::*;
 
@@ -127,6 +130,32 @@ mod tests {
             receiver_uid: "cafe".into(),
             slot: 2,
         }
+    }
+
+    #[test]
+    fn dpi_toggle_is_a_hidpp_gesture_source() {
+        assert!(ButtonId::DpiToggle.is_hidpp_gesture_source());
+        assert!(GESTURE_SOURCE_BUTTONS.iter().any(|(_, button)| {
+            *button == ButtonId::DpiToggle
+        }));
+    }
+
+    #[test]
+    fn single_bound_dpi_toggle_uses_one_plain_capture_path() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::DpiToggle,
+            Binding::Single(Action::Copy),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            plan.divert_buttons.iter().any(|&(cid, button)| {
+                DPI_MODE_SHIFT_CIDS.contains(&cid) && button == ButtonId::DpiToggle
+            }),
+            "a non-default DPI binding must use the generic button capture"
+        );
     }
 
     #[test]

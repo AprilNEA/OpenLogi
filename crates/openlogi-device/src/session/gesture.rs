@@ -1,5 +1,6 @@
 //! Live control capture for one device: divert the device's gesture sources
-//! (the MX dedicated gesture button and/or the MX Master 4 haptic panel), the
+//! (the MX dedicated gesture button, MX Master 4 haptic panel, and compatible
+//! DPI / ModeShift controls), the
 //! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
 //! into [`CapturedInput`] the GUI can dispatch.
 //!
@@ -152,13 +153,16 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 5] = [
 ];
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
-/// delivers — the dedicated gesture button on most MX mice, and the Haptic
-/// Sense Panel on MX Master 4 (two distinct physical controls). Each source in
-/// gesture mode is diverted with raw-XY; one with a non-default single binding
-/// instead is plain-diverted like a standard button.
-pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
+/// delivers — the dedicated gesture button on most MX mice, the Haptic Sense
+/// Panel on MX Master 4, or a DPI / ModeShift control that advertises raw-XY.
+/// Each source in gesture mode is diverted with raw-XY; one with a non-default
+/// single binding instead is plain-diverted like a standard button.
+pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 5] = [
     (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
+    (reprog_controls::DPI_MODE_SHIFT_CIDS[0], ButtonId::DpiToggle),
+    (reprog_controls::DPI_MODE_SHIFT_CIDS[1], ButtonId::DpiToggle),
+    (reprog_controls::DPI_MODE_SHIFT_CIDS[2], ButtonId::DpiToggle),
 ];
 
 /// Which of one device's controls a capture session should divert.
@@ -488,6 +492,23 @@ async fn arm_controls_into(
             }
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
+            // A DPI / ModeShift control used as a gesture source must keep its
+            // raw-XY diversion; do not overwrite it with a plain DPI arm.
+            if armed.gesture_cids.contains(&cid) {
+                continue;
+            }
+            // A non-default single DpiToggle binding is delivered by the
+            // generic button path below. Arming the dedicated DPI path too
+            // would emit the same press twice.
+            if spec
+                .divert_buttons
+                .iter()
+                .any(|&(button_cid, button)| {
+                    button_cid == cid && button == ButtonId::DpiToggle
+                })
+            {
+                continue;
+            }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 let reporting = arm_reprog_control(&rc, cid, false).await?;
                 armed.reporting.push(reporting);
