@@ -51,6 +51,22 @@ fn mouse_route() -> DeviceRoute {
     }
 }
 
+fn keyboard_route() -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: KEYBOARD_SLOT,
+    }
+}
+
+fn test_state_with_disable_keys_scenario(scenario: DisableKeysScenario) -> State {
+    State::with_disable_keys_scenario(
+        built_in_profile().expect("built-in profile should construct"),
+        MockClock::Test(Duration::ZERO),
+        scenario,
+    )
+    .expect("Disable Keys profile should validate")
+}
+
 fn state_with_discovery() -> State {
     let mut state = demo_state();
     let id = state
@@ -505,4 +521,142 @@ fn cancel_and_device_selection_are_atomic_in_either_order() {
         select_first.next_pairing_update(),
         Some(PairingUpdate::Failed(PairingFailure::Cancelled))
     ));
+}
+
+#[test]
+fn disable_keys_scenarios_are_strict_and_reconnect_uses_logical_time() {
+    assert_eq!(
+        DisableKeysScenario::parse("ready").expect("ready scenario"),
+        DisableKeysScenario::Ready
+    );
+    assert!(DisableKeysScenario::parse("READY").is_err());
+
+    let mut state = test_state_with_disable_keys_scenario(DisableKeysScenario::SameRouteReconnect);
+    assert_eq!(state.route_online(&keyboard_route()), Some(true));
+    state.advance_test_time(Duration::from_secs(2));
+    assert_eq!(state.route_online(&keyboard_route()), Some(false));
+    state.advance_test_time(Duration::from_secs(2));
+    assert_eq!(state.route_online(&keyboard_route()), Some(true));
+}
+
+#[tokio::test]
+async fn disable_keys_mock_preserves_advertised_unknown_bits() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    let result = agent
+        .clone()
+        .set_disable_keys(
+            tarpc::context::current(),
+            keyboard_route(),
+            DisableKeysMask::CAPS_LOCK,
+        )
+        .await
+        .expect("guarded write");
+    assert_eq!(result.supported.bits(), 0xb1);
+    assert_eq!(result.disabled.bits(), 0xa1);
+    assert_eq!(agent.state.lock().await.disable_keys_writes, 1);
+}
+
+#[tokio::test]
+async fn disable_keys_mock_rejects_unknown_and_unadvertised_known_bits() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    for desired in [
+        DisableKeysMask::from_bits_retain(0x20),
+        DisableKeysMask::NUM_LOCK,
+    ] {
+        assert!(matches!(
+            agent
+                .clone()
+                .set_disable_keys(tarpc::context::current(), keyboard_route(), desired)
+                .await,
+            Err(WriteError::UnsupportedMask {
+                operation: HidppOperation::WriteDisableKeys,
+                feature_hex: 0x4521,
+                ..
+            })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn disable_keys_read_and_reload_failure_counters_match_scenarios() {
+    let read_agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::ReadFailsUntilRetry,
+    ));
+    for _ in 0..3 {
+        assert!(matches!(
+            read_agent
+                .clone()
+                .read_disable_keys(tarpc::context::current(), keyboard_route())
+                .await,
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::ReadDisableKeys
+            })
+        ));
+    }
+    assert!(
+        read_agent
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await
+            .is_ok()
+    );
+
+    let reload_agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::ReloadFailsOnce,
+    ));
+    assert!(
+        reload_agent
+            .clone()
+            .reload_config(tarpc::context::current())
+            .await
+            .is_ok()
+    );
+    assert!(
+        reload_agent
+            .clone()
+            .reload_config(tarpc::context::current())
+            .await
+            .is_err()
+    );
+    assert!(
+        reload_agent
+            .reload_config(tarpc::context::current())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn disable_keys_write_mismatch_is_retained_and_reported() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::WriteMismatch,
+    ));
+    assert!(matches!(
+        agent
+            .clone()
+            .set_disable_keys(
+                tarpc::context::current(),
+                keyboard_route(),
+                DisableKeysMask::CAPS_LOCK,
+            )
+            .await,
+        Err(WriteError::WriteNotApplied {
+            operation: HidppOperation::WriteDisableKeys,
+            expected: 0xa1,
+            actual: 0xa0,
+            ..
+        })
+    ));
+    assert_eq!(
+        agent
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await
+            .expect("retained mismatch")
+            .disabled
+            .bits(),
+        0xa0
+    );
 }

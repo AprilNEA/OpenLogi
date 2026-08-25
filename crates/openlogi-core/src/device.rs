@@ -132,6 +132,10 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
+    /// Fixed lock/system-key disabling through HID++ `0x4521 DisableKeys`.
+    /// This is measured only from feature-table presence.
+    #[serde(default)]
+    pub disable_keys: bool,
 }
 
 impl Capabilities {
@@ -155,6 +159,7 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
+            disable_keys: ids.contains(&0x4521),
         }
     }
 
@@ -176,6 +181,7 @@ impl Capabilities {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                disable_keys: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -482,6 +488,7 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     dpi_gestures: false,
+                    disable_keys: false,
                 }),
             }],
         }
@@ -553,6 +560,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                disable_keys: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -570,6 +578,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                disable_keys: false,
             }
         );
         // No driving features → nothing offered.
@@ -590,6 +599,13 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+    }
+
+    #[test]
+    fn only_measured_disable_keys_feature_enables_the_capability() {
+        assert!(Capabilities::from_feature_ids(&[0x4521]).disable_keys);
+        assert!(!Capabilities::from_feature_ids(&[0x4522]).disable_keys);
+        assert!(!Capabilities::presumed_from_kind(DeviceKind::Keyboard).disable_keys);
     }
 
     #[test]
