@@ -169,10 +169,12 @@ fn shortcut_editor(
             h_flex()
                 .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(input).small().cleanable(true)),
+                    div().flex_1().min_w_0().child(
+                        Input::new(input)
+                            .small()
+                            .min_h(px(theme::CONTROL_H))
+                            .cleanable(true),
+                    ),
                 )
                 .child(
                     Button::new("ring-add-shortcut")
@@ -197,10 +199,12 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
             h_flex()
                 .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(input).small().cleanable(true)),
+                    div().flex_1().min_w_0().child(
+                        Input::new(input)
+                            .small()
+                            .min_h(px(theme::CONTROL_H))
+                            .cleanable(true),
+                    ),
                 )
                 .child(
                     Button::new("ring-add-path")

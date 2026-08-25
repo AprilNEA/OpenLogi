@@ -27,7 +27,7 @@ use super::view::MouseModelView;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
-use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{ACCENT_BLUE, CONTROL_H, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -177,6 +177,7 @@ fn button_inspector(
             panel.child(
                 Button::new("inspector-use-default")
                     .small()
+                    .h(px(CONTROL_H))
                     .w_full()
                     .icon(IconName::Undo)
                     .label(tr!("Use the default profile"))
@@ -199,6 +200,7 @@ fn button_inspector(
                 panel.child(
                     Button::new("inspector-use-gestures")
                         .small()
+                        .h(px(CONTROL_H))
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
                         .label(tr!("Use gestures"))
@@ -321,6 +323,7 @@ fn gesture_inspector(
         .child(
             Button::new("inspector-single-action")
                 .small()
+                .h(px(CONTROL_H))
                 .w_full()
                 .label(tr!("Use a single action"))
                 .on_click(move |_, _, cx| {

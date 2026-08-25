@@ -28,7 +28,6 @@ use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 use super::mouse::picker::{compact_panel, divider, title};
 
-const PROFILE_CONTROL_H: f32 = 30.;
 const APP_ROW_H: f32 = 44.;
 
 #[derive(Clone)]
@@ -505,7 +504,7 @@ fn profile_tab(
         .flex_none()
         .items_center()
         .gap_1p5()
-        .h(px(PROFILE_CONTROL_H))
+        .h(px(theme::CONTROL_H))
         .px_2p5()
         .rounded(pal.control_radius)
         .cursor_pointer()
@@ -589,7 +588,7 @@ fn add_app_popover(
             Button::new("add-app-profile")
                 .outline()
                 .small()
-                .h(px(PROFILE_CONTROL_H))
+                .h(px(theme::CONTROL_H))
                 .icon(IconName::Plus)
                 .label(tr!("Add app")),
         )
@@ -652,6 +651,7 @@ fn add_app_content(
         .child(
             Input::new(&search)
                 .small()
+                .min_h(px(theme::CONTROL_H))
                 .cleanable(true)
                 .prefix(IconName::Search),
         )
