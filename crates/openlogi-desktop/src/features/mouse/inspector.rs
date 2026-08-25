@@ -17,13 +17,14 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_ipc::ShortcutRecordingPhase;
 
 use super::hotspots::MouseControlId;
 use super::picker::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
 };
 use super::thumbwheel::ThumbwheelPreset;
-use super::view::MouseModelView;
+use super::view::{MouseModelView, ShortcutBindingTarget};
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
@@ -163,7 +164,7 @@ fn button_inspector(
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::update_bindings(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
-            view.close_action_picker();
+            view.close_action_picker(cx);
             cx.notify();
         });
     });
@@ -185,7 +186,7 @@ fn button_inspector(
                             state.clear_app_binding(button);
                         });
                         observer.update(cx, |view, cx| {
-                            view.close_action_picker();
+                            view.close_action_picker(cx);
                             cx.notify();
                         });
                     }),
@@ -207,7 +208,7 @@ fn button_inspector(
                                 state.commit_gesture_mode(button, true);
                             });
                             observer.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                                view.set_gesture_selected_dir(Some(GestureDirection::Click), cx);
                                 cx.notify();
                             });
                         }),
@@ -220,6 +221,7 @@ fn button_inspector(
                 Some(&action),
                 picker.search,
                 &on_pick,
+                ShortcutBindingTarget::Button(button),
                 pal,
                 cx,
             ))
@@ -238,7 +240,7 @@ fn inherited_gesture_inspector(
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::update_bindings(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
-            view.close_action_picker();
+            view.close_action_picker(cx);
             cx.notify();
         });
     });
@@ -263,7 +265,7 @@ fn inherited_gesture_inspector(
                 .on_click(move |_, _, cx| {
                     AppState::update_bindings(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                        view.set_gesture_selected_dir(Some(GestureDirection::Click), cx);
                         cx.notify();
                     });
                 }),
@@ -274,6 +276,7 @@ fn inherited_gesture_inspector(
                 None,
                 picker.search,
                 &on_pick,
+                ShortcutBindingTarget::Button(button),
                 pal,
                 cx,
             ))
@@ -297,7 +300,7 @@ fn gesture_inspector(
             state.commit_gesture_binding(button, direction, action);
         });
         observer.update(cx, |view, cx| {
-            view.close_action_picker();
+            view.close_action_picker(cx);
             cx.notify();
         });
     });
@@ -328,7 +331,7 @@ fn gesture_inspector(
                         state.commit_gesture_mode(button, false);
                     });
                     turn_off.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(None);
+                        view.set_gesture_selected_dir(None, cx);
                         cx.notify();
                     });
                 }),
@@ -339,6 +342,7 @@ fn gesture_inspector(
                 Some(&current),
                 picker.search,
                 &on_pick,
+                ShortcutBindingTarget::Gesture(button, direction),
                 pal,
                 cx,
             ))
@@ -392,7 +396,7 @@ fn gesture_directions(
                         })
                         .on_click(move |_, _, cx| {
                             view.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(direction));
+                                view.set_gesture_selected_dir(Some(direction), cx);
                                 cx.notify();
                             });
                         })
@@ -477,7 +481,7 @@ fn thumbwheel_inspector(
                                         state.commit_thumbwheel_preset(preset);
                                     });
                                     observer.update(cx, |view, cx| {
-                                        view.close_action_picker();
+                                        view.close_action_picker(cx);
                                         cx.notify();
                                     });
                                 })
@@ -498,7 +502,7 @@ fn thumbwheel_inspector(
                             state.clear_app_thumbwheel();
                         });
                         observer.update(cx, |view, cx| {
-                            view.close_action_picker();
+                            view.close_action_picker(cx);
                             cx.notify();
                         });
                     }),
@@ -618,7 +622,7 @@ fn selection_card(
                 search.update(cx, |search, cx| search.set_value("", window, cx));
             }
             toggle.update(cx, |view, cx| {
-                view.toggle_action_picker();
+                view.toggle_action_picker(cx);
                 cx.notify();
             });
         })
@@ -630,20 +634,24 @@ fn action_library(
     current: Option<&Action>,
     action_search: &Entity<InputState>,
     on_pick: &PickFn,
+    shortcut_target: ShortcutBindingTarget,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> AnyElement {
     let query = action_search.read(cx).value();
     let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let shortcut_row = shortcut_recording_row(id_prefix, shortcut_target, &query, pal, cx);
+    let shortcut_visible = shortcut_row.is_some();
     v_flex()
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("Actions"), pal))
+        .children(shortcut_row)
         .child(Input::new(action_search).small().cleanable(true))
         .child(
             v_flex()
                 .gap_0p5()
-                .when(rows.is_empty(), |list| {
+                .when(rows.is_empty() && !shortcut_visible, |list| {
                     list.child(
                         div()
                             .py_3()
@@ -655,6 +663,115 @@ fn action_library(
                 .children(rows),
         )
         .into_any_element()
+}
+
+fn shortcut_recording_row(
+    id_prefix: &'static str,
+    target: ShortcutBindingTarget,
+    query: &str,
+    pal: Palette,
+    cx: &Context<MouseModelView>,
+) -> Option<AnyElement> {
+    let view = cx.entity();
+    let phase = view.read(cx).shortcut_phase(target, cx);
+    if let Some(phase) = phase {
+        let can_retry = matches!(
+            &phase,
+            ShortcutRecordingPhase::Interrupted | ShortcutRecordingPhase::Unavailable
+        );
+        let message = match &phase {
+            ShortcutRecordingPhase::Recording => tr!("Press a shortcut now"),
+            ShortcutRecordingPhase::WaitingForRelease => {
+                tr!("Release all modifier keys to continue")
+            }
+            ShortcutRecordingPhase::Complete(combo) => combo.rendered_label().into(),
+            ShortcutRecordingPhase::UnsupportedKey => {
+                tr!("That key isn't supported. Try another.")
+            }
+            ShortcutRecordingPhase::Interrupted => tr!("Recording interrupted. Try again."),
+            ShortcutRecordingPhase::Unavailable => tr!("Shortcut recording is unavailable."),
+        };
+        let cancel = view.clone();
+        return Some(
+            v_flex()
+                .gap_2()
+                .rounded(pal.control_radius)
+                .border_1()
+                .border_color(pal.border)
+                .bg(pal.control)
+                .p_3()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            svg()
+                                .path("action-icons/keyboard.svg")
+                                .size_4()
+                                .text_color(rgb(ACCENT_BLUE)),
+                        )
+                        .child(div().text_body().child(message)),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .when(can_retry, |row| {
+                            let retry = view.clone();
+                            row.child(
+                                Button::new("retry-shortcut-recording")
+                                    .small()
+                                    .label(tr!("Try again"))
+                                    .on_click(move |_, _, cx| {
+                                        retry.update(cx, |view, cx| {
+                                            view.begin_shortcut_recording(target, cx);
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                        })
+                        .child(
+                            Button::new("cancel-shortcut-recording")
+                                .small()
+                                .label(tr!("Cancel"))
+                                .on_click(move |_, _, cx| {
+                                    cancel.update(cx, |view, cx| {
+                                        view.cancel_pending_shortcut(cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                )
+                .into_any_element(),
+        );
+    }
+
+    let label = tr!("Record shortcut…");
+    if !query.trim().is_empty() && !label.to_lowercase().contains(&query.trim().to_lowercase()) {
+        return None;
+    }
+    Some(
+        MenuRow::new((id_prefix, usize::MAX))
+            .role(Role::Button)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path("action-icons/keyboard.svg")
+                            .size_4()
+                            .text_color(pal.text_muted),
+                    )
+                    .child(div().child(label)),
+            )
+            .on_click(move |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.begin_shortcut_recording(target, cx);
+                    cx.notify();
+                });
+            })
+            .into_any_element(),
+    )
 }
 
 fn gesture_action(

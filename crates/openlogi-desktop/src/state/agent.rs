@@ -37,6 +37,30 @@ impl AppState {
     pub fn request_accessibility_prompt(&self) {
         self.send_ipc(crate::services::ipc::Command::RequestAccessibilityPrompt);
     }
+    /// Start a fresh agent-owned physical shortcut recording session.
+    pub fn start_shortcut_recording(&self) {
+        self.send_ipc(crate::services::ipc::Command::StartShortcutRecording);
+    }
+    /// Cancel the active shortcut recorder or dismiss its terminal result.
+    pub fn cancel_shortcut_recording(&self) {
+        self.send_ipc(crate::services::ipc::Command::CancelShortcutRecording);
+    }
+    /// Current physical shortcut recording state, if any.
+    #[must_use]
+    pub fn shortcut_recording(&self) -> Option<&openlogi_ipc::ShortcutRecording> {
+        self.shortcut_recording.as_ref()
+    }
+    /// Replace the projected shortcut recording state, reporting a real change.
+    pub fn set_shortcut_recording(
+        &mut self,
+        recording: Option<openlogi_ipc::ShortcutRecording>,
+    ) -> bool {
+        if self.shortcut_recording == recording {
+            return false;
+        }
+        self.shortcut_recording = recording;
+        true
+    }
     /// The agent connection state the render path branches on.
     #[must_use]
     pub fn agent_link(&self) -> &AgentLink {

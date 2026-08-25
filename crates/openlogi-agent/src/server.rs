@@ -15,6 +15,7 @@ use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::ActionDispatcher;
+use openlogi_agent_core::shortcut_recording::ShortcutRecordingManager;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
@@ -51,6 +52,7 @@ pub struct AgentServer {
     pub pairing: Arc<PairingManager>,
     pub event_monitor: SharedEventMonitor,
     pub action_ring: Arc<ActionRingManager>,
+    pub shortcut_recording: Arc<ShortcutRecordingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
 }
@@ -67,6 +69,7 @@ impl AgentServer {
         dispatcher: ActionDispatcher,
     ) -> Self {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
+        let shortcut_recording = ShortcutRecordingManager::new(Arc::clone(&observable));
         Self {
             orchestrator,
             shared,
@@ -74,6 +77,7 @@ impl AgentServer {
             pairing,
             event_monitor,
             action_ring,
+            shortcut_recording,
             dispatcher,
             ring_haptics,
         }
@@ -299,6 +303,24 @@ impl Agent for AgentServer {
 
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
+    }
+
+    async fn start_shortcut_recording(self, _: Context) -> u64 {
+        let recording = Arc::clone(&self.shortcut_recording);
+        match tokio::task::spawn_blocking(move || recording.start()).await {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                warn!(%error, "shortcut recording setup task failed");
+                0
+            }
+        }
+    }
+
+    async fn cancel_shortcut_recording(self, _: Context) {
+        let recording = Arc::clone(&self.shortcut_recording);
+        if let Err(error) = tokio::task::spawn_blocking(move || recording.cancel()).await {
+            warn!(%error, "shortcut recording cancellation task failed");
+        }
     }
 }
 

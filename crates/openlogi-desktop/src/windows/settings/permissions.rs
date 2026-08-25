@@ -94,8 +94,9 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
                     PermissionStatus::Denied => Some(tr!(
                         "OpenLogi needs write access to /dev/uinput (for button \
                          remapping) and read/write access to /dev/hidraw* (for HID++ \
-                         communication). Install the OpenLogi udev rules to grant \
-                         access — see the Linux install guide."
+                         communication). Recording shortcuts also needs read access to \
+                         physical keyboard event nodes. Install the OpenLogi udev rules \
+                         to grant access — see the Linux install guide."
                     )),
                     PermissionStatus::Unknown => Some(tr!(
                         "No Logitech device detected. Connect your device or verify \

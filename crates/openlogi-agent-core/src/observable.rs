@@ -20,7 +20,7 @@ use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS, ShortcutRecording,
 };
 use tokio::sync::watch;
 
@@ -60,6 +60,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                shortcut_recording: None,
             },
         });
         Self { tx }
@@ -200,6 +201,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.pairing = phase;
+            true
+        });
+    }
+
+    /// Publish the current physical shortcut recording session, or `None` once
+    /// it is cancelled or consumed by the GUI.
+    pub fn set_shortcut_recording(&self, recording: Option<ShortcutRecording>) {
+        self.update(|snapshot| {
+            if snapshot.shortcut_recording == recording {
+                return false;
+            }
+            snapshot.shortcut_recording = recording;
             true
         });
     }

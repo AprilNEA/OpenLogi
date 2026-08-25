@@ -4,10 +4,10 @@
 use std::mem::size_of;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
 use openlogi_core::binding::{
@@ -210,14 +210,18 @@ fn post_click(button: MouseButton) {
 }
 
 fn post_key(vk: u16, modifiers: &[u16]) {
+    post_physical_key(vk, modifiers, false);
+}
+
+fn post_physical_key(vk: u16, modifiers: &[u16], extended: bool) {
     let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
     for modifier in modifiers {
-        inputs.push(key_input(*modifier, false));
+        inputs.push(key_input(*modifier, false, false));
     }
-    inputs.push(key_input(vk, false));
-    inputs.push(key_input(vk, true));
+    inputs.push(key_input(vk, false, extended));
+    inputs.push(key_input(vk, true, extended));
     for modifier in modifiers.iter().rev() {
-        inputs.push(key_input(*modifier, true));
+        inputs.push(key_input(*modifier, true, false));
     }
     send_inputs(&inputs);
 }
@@ -267,7 +271,11 @@ fn post_custom_shortcut(combo: &KeyCombo) {
         return;
     };
 
-    post_key(vk, &combo_modifiers(combo));
+    post_physical_key(
+        vk,
+        &combo_modifiers(combo),
+        is_extended_keyboard_usage(combo.key().code()),
+    );
 }
 
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
@@ -287,6 +295,12 @@ fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     modifiers
 }
 
+/// Keypad Enter and Divide share virtual keys with non-keypad keys unless
+/// `SendInput` carries the enhanced-key flag.
+const fn is_extended_keyboard_usage(usage: u8) -> bool {
+    matches!(usage, 0x54 | 0x58)
+}
+
 /// Emit one edge for the physical keys whose ownership changed.
 pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
     let keys: Vec<_> = keys
@@ -294,18 +308,21 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
         .filter_map(|key| held_virtual_key(*key))
         .collect();
     let key_up = phase == KeyPhase::Up;
-    let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
+    let mut inputs: Vec<_> = keys
+        .iter()
+        .map(|(key, extended)| key_input(*key, key_up, *extended))
+        .collect();
     if key_up {
         inputs.reverse();
     }
     send_inputs(&inputs);
 }
 
-fn held_virtual_key(key: HeldKey) -> Option<u16> {
+fn held_virtual_key(key: HeldKey) -> Option<(u16, bool)> {
     match key {
-        HeldKey::Control => Some(VK_CONTROL),
-        HeldKey::Shift => Some(VK_SHIFT),
-        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Control => Some((VK_CONTROL, false)),
+        HeldKey::Shift => Some((VK_SHIFT, false)),
+        HeldKey::Alt => Some((VK_MENU, false)),
         HeldKey::Key(usage) => {
             let key = super::hid_usage_to_windows(usage.code());
             if key.is_none() {
@@ -314,7 +331,7 @@ fn held_virtual_key(key: HeldKey) -> Option<u16> {
                     "held shortcut usage has no Windows mapping — edge ignored"
                 );
             }
-            key
+            key.map(|key| (key, is_extended_keyboard_usage(usage.code())))
         }
     }
 }
@@ -342,8 +359,11 @@ fn send_inputs(inputs: &[INPUT]) {
     }
 }
 
-fn key_input(vk: u16, key_up: bool) -> INPUT {
+fn key_input(vk: u16, key_up: bool, extended: bool) -> INPUT {
     let mut flags = 0;
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     if key_up {
         flags |= KEYEVENTF_KEYUP;
     }
@@ -381,7 +401,15 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 mod tests {
     use openlogi_core::binding::Shortcut;
 
-    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo, is_extended_keyboard_usage};
+
+    #[test]
+    fn keypad_enter_and_divide_use_the_extended_key_flag() {
+        assert!(is_extended_keyboard_usage(0x54));
+        assert!(is_extended_keyboard_usage(0x58));
+        assert!(!is_extended_keyboard_usage(0x28));
+        assert!(!is_extended_keyboard_usage(0x38));
+    }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.

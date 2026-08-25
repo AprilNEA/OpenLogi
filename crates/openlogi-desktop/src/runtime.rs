@@ -252,6 +252,30 @@ impl Runtime {
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
+            ipc::GuiUpdate::ShortcutRecordingStartResult(result) => {
+                // Session zero is reserved by the agent and represents only a
+                // local delivery/setup failure in the GUI model.
+                let recording = Some(openlogi_ipc::ShortcutRecording {
+                    session_id: result.unwrap_or(0),
+                    phase: result.map_or(openlogi_ipc::ShortcutRecordingPhase::Unavailable, |_| {
+                        openlogi_ipc::ShortcutRecordingPhase::Recording
+                    }),
+                });
+                // Camera-only refreshes reapply `self.snapshot`; keep that
+                // cache aligned so one cannot restore the pre-command session
+                // while the agent's next observation is still in flight.
+                if let Some(snapshot) = self.snapshot.as_mut() {
+                    snapshot.shortcut_recording.clone_from(&recording);
+                }
+                cx.update(|cx| {
+                    AppState::update(cx, |state, cx| {
+                        state.set_shortcut_recording(recording);
+                        // Emit even for repeated local failures (both use id 0):
+                        // each retry owns a new pending UI request.
+                        cx.emit(StateEvent::ShortcutRecordingChanged);
+                    });
+                });
+            }
             ipc::GuiUpdate::ConfigReloadResult(result) => {
                 cx.update(|cx| {
                     AppState::update(cx, |state, cx| {
@@ -304,6 +328,8 @@ impl Runtime {
                         state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
                     let camera_changed = state.set_camera_active(snapshot.camera_active);
                     let foreground_changed = state.set_foreground(snapshot.foreground.clone());
+                    let shortcut_recording_changed =
+                        state.set_shortcut_recording(snapshot.shortcut_recording.clone());
                     if merged {
                         cx.emit(StateEvent::InventoryChanged);
                     }
@@ -315,6 +341,9 @@ impl Runtime {
                     }
                     if foreground_changed {
                         cx.emit(StateEvent::ForegroundChanged);
+                    }
+                    if shortcut_recording_changed {
+                        cx.emit(StateEvent::ShortcutRecordingChanged);
                     }
                     let settings = state.app_settings();
                     (

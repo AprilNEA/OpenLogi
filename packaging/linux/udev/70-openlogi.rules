@@ -33,8 +33,17 @@ KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"
 # seat, so those rules never tag it and its event node stays root:input 0660.
 #
 # Scoped to event nodes the kernel classifies as a mouse (ID_INPUT_MOUSE, set by
-# the input_id builtin in 60-input-id.rules, which runs before this file): a
-# Logitech keyboard's keystrokes must never become readable session-wide. The
-# two matchers cover the same two transports as the hidraw block above.
+# the input_id builtin in 60-input-id.rules, which runs before this file). The
+# two matchers cover the same two transports as the hidraw block above; keyboard
+# access for the explicit recorder is handled separately below.
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", ATTRS{idVendor}=="046d", TAG+="uaccess"
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", KERNELS=="*:046D:*", TAG+="uaccess"
+
+# Physical keyboards — OpenLogi opens these read-only, and only while the active
+# user explicitly records a custom shortcut. Unlike pointer remapping, the
+# recorder must accept the keyboard the user actually types on, regardless of
+# vendor or whether a Wayland compositor can offer a global-shortcut protocol.
+# `uaccess` grants an ACL to the active local seat user; it does not make the node
+# world-readable. This also covers Bluetooth keyboards on the virtual uhid bus,
+# which logind's normal physical-seat rules may not classify on their own.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"

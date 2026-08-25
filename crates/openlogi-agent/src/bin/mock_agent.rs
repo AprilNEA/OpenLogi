@@ -29,6 +29,8 @@
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
+//! - Shortcut recording completes as `Cmd+Shift+P` after a short delay, so the
+//!   picker flow is testable without a global keyboard hook.
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -38,7 +40,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, KeyCombo, KeyboardUsage};
 use openlogi_core::config::SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
@@ -58,7 +60,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    PairingPhase, PairingUpdate, RingObservation, ShortcutRecording, ShortcutRecordingPhase,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -116,6 +118,8 @@ const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
 /// change. The real agent is told by its watchers and needs no tick at all; a
 /// mock has nothing to be told by, so it compares instead.
 const OBSERVE_TICK: Duration = Duration::from_millis(250);
+/// Delay before the mock recorder supplies its portable result.
+const SHORTCUT_RECORDING_DELAY: Duration = Duration::from_millis(750);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
@@ -279,6 +283,8 @@ struct State {
     phase: Option<PairingPhase>,
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
+    shortcut_recording: Option<ShortcutRecording>,
+    next_shortcut_recording_id: u64,
     started: Instant,
 }
 
@@ -329,6 +335,8 @@ impl State {
             pairing: None,
             phase: None,
             next_pairing_id: 0,
+            shortcut_recording: None,
+            next_shortcut_recording_id: 1,
             started: Instant::now(),
         })
     }
@@ -717,6 +725,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
+        shortcut_recording: state.shortcut_recording.clone(),
     }
 }
 
@@ -787,6 +796,45 @@ impl Agent for MockAgent {
     }
 
     async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
+
+    async fn start_shortcut_recording(self, _: Context) -> u64 {
+        let session_id = {
+            let mut state = self.state.lock().await;
+            let session_id = state.next_shortcut_recording_id;
+            state.next_shortcut_recording_id += 1;
+            state.shortcut_recording = Some(ShortcutRecording {
+                session_id,
+                phase: ShortcutRecordingPhase::Recording,
+            });
+            session_id
+        };
+
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            tokio::time::sleep(SHORTCUT_RECORDING_DELAY).await;
+            let Ok(key) = KeyboardUsage::try_from(0x13) else {
+                return;
+            };
+            let mut state = state.lock().await;
+            if state
+                .shortcut_recording
+                .as_ref()
+                .is_some_and(|recording| recording.session_id == session_id)
+            {
+                state.shortcut_recording = Some(ShortcutRecording {
+                    session_id,
+                    phase: ShortcutRecordingPhase::Complete(
+                        KeyCombo::new(key).with_command(true).with_shift(true),
+                    ),
+                });
+            }
+        });
+        session_id
+    }
+
+    async fn cancel_shortcut_recording(self, _: Context) {
+        self.state.lock().await.shortcut_recording = None;
+    }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;

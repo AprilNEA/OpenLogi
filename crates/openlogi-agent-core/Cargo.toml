@@ -16,6 +16,8 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+inputs = { workspace = true }
+controls = { workspace = true }
 futures-lite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

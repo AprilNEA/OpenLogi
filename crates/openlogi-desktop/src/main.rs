@@ -55,7 +55,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::services::assets::sync::{AssetCommand, AssetControl};
 use crate::services::{i18n, ipc};
-use crate::state::ConfigPersistence;
+use crate::state::{AppState, ConfigPersistence};
 use crate::ui::theme;
 
 fn main() -> Result<()> {
@@ -157,6 +157,11 @@ fn main() -> Result<()> {
         // the GUI is reopened), so nothing needs the GUI process to linger.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
+                if let Some(state) = AppState::try_read(cx)
+                    && state.shortcut_recording().is_some()
+                {
+                    state.cancel_shortcut_recording();
+                }
                 cx.quit();
             }
         })
