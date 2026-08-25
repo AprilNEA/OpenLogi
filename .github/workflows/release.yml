@@ -165,6 +165,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Best-effort alongside the packages, and separate from them: the Flatpak
+      # leg builds the whole workspace again inside the SDK, so it is the
+      # slowest Linux job and the one most likely to be the single leg missing.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: OpenLogi-linux-flatpak-*
+          path: dist
+          merge-multiple: true
+
       - name: Generate checksums
         run: |
           cd dist
@@ -176,7 +185,7 @@ jobs:
           # hashed alone. The Windows portable artifact is a zip of the GUI +
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst *.flatpak > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
@@ -187,7 +196,7 @@ jobs:
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
-          for ext in zip msi deb rpm; do
+          for ext in zip msi deb rpm flatpak; do
             if compgen -G "dist/*.$ext" > /dev/null; then
               echo "$ext=true" >> "$GITHUB_OUTPUT"
             else
@@ -330,6 +339,7 @@ jobs:
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
             ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
+            ${{ steps.artifacts.outputs.flatpak == 'true' && 'dist/*.flatpak' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
