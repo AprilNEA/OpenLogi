@@ -212,6 +212,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     for (key, value) in std::mem::take(&mut legacy.links) {
         device.links.entry(key).or_insert(value);
     }
+    fold_maps(device, &mut legacy, route_key);
+
     let link = device.links.entry(route_key.to_string()).or_default();
     if let Some(capabilities) = legacy
         .identity
@@ -282,35 +284,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(custom_name);
 
     if device.identity.is_none() {
-        device.identity = legacy.identity;
+        device.identity = legacy.identity.take();
     }
-
-    // Maps merge key by key: a legacy entry is taken only where the
-    // canonical map has no entry for that key. A genuine conflict on a
-    // shared key keeps the canonical entry and is logged, not silently
-    // dropped.
-    macro_rules! fold_map_field {
-        ($field:ident) => {
-            for (key, value) in legacy.$field {
-                if let Some(existing) = device.$field.get(&key) {
-                    if *existing != value {
-                        tracing::warn!(
-                            %route_key,
-                            field = stringify!($field),
-                            key = ?key,
-                            "entry differs between merged entries; keeping the canonical one"
-                        );
-                    }
-                } else {
-                    device.$field.insert(key, value);
-                }
-            }
-        };
-    }
-    fold_map_field!(bindings);
-    fold_map_field!(disabled_gestures);
-    fold_map_field!(per_app_bindings);
-    fold_map_field!(camera_profiles);
 
     // Collections with no natural per-item override: take the legacy value
     // wholesale when the canonical side is empty (i.e. never configured).
@@ -333,9 +308,17 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_if_empty!(dpi_presets);
     fold_if_empty!(host_switch_targets);
 
-    // `ActionRingConfig` has its own notion of "unset".
-    if device.action_ring.is_default() && !legacy.action_ring.is_default() {
-        device.action_ring = legacy.action_ring;
+    // `ActionRingConfig` has its own notion of "unset". Two configured rings
+    // cannot be merged — the slots are positional — so the canonical one wins
+    // and the displaced one is logged, as elsewhere.
+    if device.action_ring.is_default() {
+        device.action_ring = legacy.action_ring.clone();
+    } else if !legacy.action_ring.is_default() && device.action_ring != legacy.action_ring {
+        tracing::warn!(
+            %route_key,
+            field = "action_ring",
+            "ring differs between merged entries; keeping the canonical one"
+        );
     }
 
     // `enabled` defaults to `true` and is only ever persisted when `false`,
@@ -344,6 +327,37 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     if device.enabled && !legacy.enabled {
         device.enabled = false;
     }
+}
+
+/// The map-valued halves of [`fold`], split out to keep that function inside
+/// the workspace's line budget.
+///
+/// Maps merge key by key: a legacy entry is taken only where the canonical map
+/// has no entry for that key. A genuine conflict on a shared key keeps the
+/// canonical entry and is logged, not silently dropped.
+fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &str) {
+    macro_rules! fold_map_field {
+        ($field:ident) => {
+            for (key, value) in std::mem::take(&mut legacy.$field) {
+                if let Some(existing) = device.$field.get(&key) {
+                    if *existing != value {
+                        tracing::warn!(
+                            %route_key,
+                            field = stringify!($field),
+                            key = ?key,
+                            "entry differs between merged entries; keeping the canonical one"
+                        );
+                    }
+                } else {
+                    device.$field.insert(key, value);
+                }
+            }
+        };
+    }
+    fold_map_field!(bindings);
+    fold_map_field!(disabled_gestures);
+    fold_map_field!(per_app_bindings);
+    fold_map_field!(camera_profiles);
 }
 
 #[cfg(test)]
