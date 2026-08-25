@@ -153,7 +153,7 @@ fn rejected_key_edges_fail_open() {
 }
 
 #[test]
-fn smooth_scroll_uses_the_button_source_safety_policy_and_skips_trackpads() {
+fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads() {
     let logitech = EventDevice {
         vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
         product_name: Some("Logitech MX Master".to_string()),
@@ -164,11 +164,11 @@ fn smooth_scroll_uses_the_button_source_safety_policy_and_skips_trackpads() {
         ..EventDevice::default()
     };
 
-    assert!(scroll_source_may_smooth(false, Some(&logitech)));
-    assert!(!scroll_source_may_smooth(true, Some(&logitech)));
-    assert!(!scroll_source_may_smooth(false, Some(&trackpad)));
+    assert!(scroll_source_may_intercept(false, Some(&logitech)));
+    assert!(!scroll_source_may_intercept(true, Some(&logitech)));
+    assert!(!scroll_source_may_intercept(false, Some(&trackpad)));
     assert_eq!(
-        scroll_source_may_smooth(false, None),
+        scroll_source_may_intercept(false, None),
         !cfg!(target_os = "macos"),
         "only macOS requires callback-time device attribution"
     );
