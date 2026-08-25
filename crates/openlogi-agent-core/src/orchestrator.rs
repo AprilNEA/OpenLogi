@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    DisableKeysMask, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -598,6 +598,12 @@ impl Orchestrator {
                 fn_lock,
             );
         }
+        if let Some(desired) = configured_disabled_keys(&self.config, key) {
+            crate::hardware::write_disabled_keys_in_background(
+                self.shared.keyboard_device(&route),
+                desired,
+            );
+        }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -922,6 +928,13 @@ fn configured_wheel_mode(
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     (resolution, inverted)
+}
+
+fn configured_disabled_keys(config: &Config, device_key: &str) -> Option<DisableKeysMask> {
+    config.disabled_keys(device_key).map(|keys| {
+        keys.iter()
+            .fold(DisableKeysMask::EMPTY, |mask, key| mask | key.mask())
+    })
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
