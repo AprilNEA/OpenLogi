@@ -120,7 +120,9 @@ sudo dpkg -i openlogi_*.deb
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
 
-# Arch Linux
+# Arch Linux — from the AUR (updates with your system):
+paru -S openlogi-bin   # or: yay -S openlogi-bin
+# …or install the release package directly:
 sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 
