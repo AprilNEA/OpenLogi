@@ -33,7 +33,7 @@ jobs:
       # http.extraheader would win over the app token when we push crowdin/i18n
       # (403 as github-actions[bot] despite env GITHUB_TOKEN).
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -53,7 +53,7 @@ jobs:
 
       - name: Load Crowdin credentials from 1Password
         id: crowdin_config
-        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -76,7 +76,7 @@ jobs:
       # Upload sources + seed per-language translations, then download only
       # (no push/PR — we merge first so sparse/English exports never land).
       - name: Synchronize with Crowdin
-        uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
+        uses: crowdin/github-action@8f01d54f70f1713ee3f09d82c2bbb2daeac28689 # v2.17.1
         with:
           config: .config/crowdin.yml
           upload_sources: true

@@ -776,7 +776,9 @@ mod tests {
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {
             config_key: "test".to_string(),
+            canonical_key: None,
             persistent: true,
+            route_key: "test".to_string(),
             model_key: "test".to_string(),
             model_name: "Test".to_string(),
             display_name: "Test".to_string(),

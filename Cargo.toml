@@ -28,7 +28,7 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.7.10"
+version = "0.8.0"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
@@ -42,8 +42,8 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.10" }
-openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.7.10" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.0" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.0" }
 async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.

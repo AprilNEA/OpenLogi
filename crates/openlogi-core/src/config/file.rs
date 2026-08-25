@@ -100,6 +100,11 @@ pub enum ConfigError {
 pub struct ConfigFile {
     path: PathBuf,
     source: Option<String>,
+    /// Text of the file as loaded, when it was written by an older schema.
+    /// Copied aside on the first save so a key-rewriting migration is
+    /// recoverable; cleared once that save lands, so only the first
+    /// *successful* one pays for it and a failed save still owes the copy.
+    migrated_from: Option<(u32, String)>,
 }
 
 #[derive(Deserialize)]
@@ -118,12 +123,15 @@ impl ConfigFile {
     pub fn load_from_path(path: &Path) -> Result<(Config, Self), ConfigError> {
         match fs::read_to_string(path) {
             Ok(source) => {
-                let config = parse_config(path, &source)?;
+                let (config, loaded_version) = parse_config(path, &source)?;
+                let migrated_from =
+                    (loaded_version < SCHEMA_VERSION).then(|| (loaded_version, source.clone()));
                 Ok((
                     config,
                     Self {
                         path: path.to_path_buf(),
                         source: Some(source),
+                        migrated_from,
                     },
                 ))
             }
@@ -132,6 +140,7 @@ impl ConfigFile {
                 Self {
                     path: path.to_path_buf(),
                     source: None,
+                    migrated_from: None,
                 },
             )),
             Err(source) => Err(ConfigError::Read {
@@ -159,6 +168,27 @@ impl ConfigFile {
             });
         }
 
+        // Borrowed, not taken: a failed write must leave the recovery copy
+        // still owed. Taking here and then failing — a full disk, a
+        // read-only directory — would spend the only chance to keep the
+        // pre-migration file, and the next save that *did* succeed would
+        // overwrite it with migrated content and no backup anywhere.
+        if let Some((version, original)) = self.migrated_from.as_ref() {
+            let backup = migration_backup_path(&self.path, *version).map_err(|source| {
+                ConfigError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
+            // Atomic like the config write itself: this is the only copy of
+            // the pre-migration file, so an interrupted write must not be
+            // able to leave a truncated one behind.
+            write_atomic(&backup, original.as_bytes()).map_err(|source| ConfigError::Write {
+                path: backup,
+                source,
+            })?;
+        }
+
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
                 path: self.path.clone(),
@@ -174,6 +204,11 @@ impl ConfigFile {
             path: self.path.clone(),
             source,
         })?;
+        // The migrated file is gone from disk now, and its copy is safely
+        // beside it — only here is the debt actually settled, so only here is
+        // it cleared. A second save from this `ConfigFile` must not rewrite
+        // the backup with content that is no longer pre-migration.
+        self.migrated_from = None;
         self.source = Some(body);
         Ok(())
     }
@@ -209,7 +244,10 @@ impl Config {
     }
 }
 
-fn parse_config(path: &Path, source: &str) -> Result<Config, ConfigError> {
+/// Parse `source`, applying every migration its declared `schema_version`
+/// needs. Returns the migrated config plus the version the file actually
+/// declared, so callers can tell a migrated load from an already-current one.
+fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError> {
     let header: ConfigHeader = toml::from_str(source).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source: Box::new(source),
@@ -228,8 +266,15 @@ fn parse_config(path: &Path, source: &str) -> Result<Config, ConfigError> {
     if header.schema_version <= 3 {
         config.migrate_owner_locked_gestures();
     }
+    // v5 is the schema this change is part of, so every *released* schema —
+    // v4 and below — is what needs the rename. A file already declaring v5 was
+    // written by an unpublished build of this branch and is not something users
+    // have on disk.
+    if header.schema_version <= 4 {
+        config.migrate_transport_scoped_keys();
+    }
     config.schema_version = SCHEMA_VERSION;
-    Ok(config)
+    Ok((config, header.schema_version))
 }
 
 fn reject_obsolete_fields(path: &Path, source: &str, version: u32) -> Result<(), ConfigError> {
@@ -342,6 +387,23 @@ pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
         }
     }
     write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
+}
+
+/// Path of the pre-migration copy: the config's own name with
+/// `.v<version>.bak` appended, so `config.toml` yields
+/// `config.toml.v4.bak`. Appended, not substituted — `with_extension` would
+/// replace `.toml` and hand back `config.v4.bak`, which no longer names the
+/// file it is a copy of.
+pub(super) fn migration_backup_path(path: &Path, version: u32) -> io::Result<PathBuf> {
+    let Some(file_name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config path has no file name",
+        ));
+    };
+    let mut backup_name = OsString::from(file_name);
+    backup_name.push(format!(".v{version}.bak"));
+    Ok(path.with_file_name(backup_name))
 }
 
 pub(super) fn config_backup_path(path: &Path, generation: usize) -> io::Result<PathBuf> {

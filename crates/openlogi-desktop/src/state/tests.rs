@@ -111,7 +111,11 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
 }
 
 /// Config key of the mouse [`direct_inventory`] builds with a real unit id.
-const KNOWN_MOUSE_KEY: &str = "direct:046d:b023:unit:a393cae0";
+///
+/// The transport-free identity, not the `direct:046d:b023:…` route it is
+/// reached on: a device whose unit id is known resolves to its identity key,
+/// which is what settings are now written under.
+const KNOWN_MOUSE_KEY: &str = "unit:a393cae0";
 
 fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     DeviceInventory {
@@ -147,6 +151,102 @@ fn second_mouse_inventory() -> DeviceInventory {
     inventory.receiver.name = "MX Anywhere 3S".to_string();
     inventory.receiver.product_id = 0xb037;
     inventory
+}
+
+/// A mouse paired to a Bolt receiver, reachable by receiver UID + slot.
+/// Shares its receiver UID (`82839805`) and unit id (`6be9d300`) with
+/// `identity::tests::settings_still_under_the_pre_upgrade_key_are_read_from_it`,
+/// so a config entry pre-seeded at `"receiver:82839805:slot:1"` is exactly
+/// the legacy, route-keyed entry `adopt_routes` folds into `"unit:6be9d300"`.
+fn receiver_inventory() -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("82839805".to_string()),
+        },
+        paired: vec![PairedDevice {
+            slot: 1,
+            codename: Some("MX Master 3S".to_string()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: None,
+                unit_id: [0x6b, 0xe9, 0xd3, 0x00],
+                transports: DeviceTransports::default(),
+                model_ids: [0xb034, 0, 0],
+                extended_model_id: 2,
+            }),
+            capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+        }],
+    }
+}
+
+#[test]
+fn failed_fold_persist_does_not_orphan_the_device_list() {
+    // Reproduces the bug traced in the pre-PR review: `refresh_inventories`
+    // folds a legacy route-keyed config entry into the device's canonical
+    // identity key, then tries to persist. When the write fails (here,
+    // `ConfigPersistence::ReadOnly`), `persist_config` rolls `self.config`
+    // back to its pre-fold, legacy-keyed state — but without the fix,
+    // `refresh_inventories` still assigned `self.device_list` from the
+    // now-stale, folded `merged_list`. From then on `device_list` names a
+    // `config_key` that does not exist in `config`, so every
+    // `config.devices.get(record.config_key)` lookup silently misses.
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = Config::ephemeral();
+    config.set_dpi("receiver:82839805:slot:1", Dpi::new(3200));
+    let mut state = AppState::with_runtime(
+        config,
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::ReadOnly("simulated unwritable config.toml".to_string()),
+        commands,
+    );
+    assert!(state.devices().is_empty(), "no inventory seen yet");
+
+    let changed = state.refresh_inventories(&[receiver_inventory()], &[], &cache, &[]);
+
+    assert!(
+        !changed,
+        "a failed fold-persist must not report a change — a caller \
+         acting on `true` would treat the now-discarded `merged_list` as live"
+    );
+    assert!(
+        state.devices().is_empty(),
+        "device_list must stay at its pre-refresh value — built from the \
+         folded config that failed to persist and was rolled back, the new \
+         list would no longer agree with `state.config`"
+    );
+    assert!(
+        state
+            .config
+            .devices
+            .contains_key("receiver:82839805:slot:1"),
+        "the rollback must restore the legacy entry still holding the \
+         user's settings"
+    );
+    assert!(
+        !state.config.devices.contains_key("unit:6be9d300"),
+        "the folded canonical entry must not survive a rolled-back persist"
+    );
+    for record in state.devices() {
+        let Some(config_key) = record.persistent_config_key() else {
+            continue;
+        };
+        assert!(
+            state.config.devices.contains_key(config_key),
+            "device_list record names {config_key}, which must exist in \
+             `config` — device_list and config must never disagree"
+        );
+    }
 }
 
 fn superseded_litra_light() -> StandaloneDevice {
@@ -640,7 +740,9 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
     let merged = state.merge_inventory_snapshot(stable_list);
 
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
+    // The device's own unit id is known and online: the transport-free
+    // identity key wins over the direct-route runtime key.
+    assert_eq!(merged[0].config_key, "unit:a393cae0");
     assert!(merged[0].is_persistent());
 }
 
@@ -660,7 +762,9 @@ fn transient_probe_folds_into_its_known_card() {
         ConfigPersistence::MemoryOnly,
         commands,
     );
-    let stable_key = "direct:046d:b023:unit:a393cae0";
+    // The device's own unit id is known and online: the transport-free
+    // identity key wins over the direct-route runtime key.
+    let stable_key = "unit:a393cae0";
     assert_eq!(state.devices()[0].config_key, stable_key);
 
     let transient_list =
@@ -704,7 +808,7 @@ fn transient_record_beside_its_live_device_is_dropped() {
     let merged = state.merge_inventory_snapshot(both);
 
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
+    assert_eq!(merged[0].config_key, "unit:a393cae0");
     assert!(merged[0].online);
 }
 
@@ -739,10 +843,9 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
     let merged = state.merge_inventory_snapshot(snapshot);
 
     assert_eq!(merged.len(), 2, "no third card for the half-read probe");
-    let Some(sibling) = merged
-        .iter()
-        .find(|r| r.config_key == "direct:046d:b023:unit:02020202")
-    else {
+    // The sibling's own unit id is known and online: the transport-free
+    // identity key wins over the direct-route runtime key.
+    let Some(sibling) = merged.iter().find(|r| r.config_key == "unit:02020202") else {
         panic!("the sibling card must survive under its physical key");
     };
     assert!(
@@ -785,6 +888,53 @@ fn ambiguous_transient_probe_is_not_adopted() {
 }
 
 #[test]
+fn a_route_shared_by_two_online_twins_is_never_adopted() {
+    // #482 corollary: `route_key` for a Direct route strips the device's own
+    // identity, so two same-model direct devices online in the same
+    // snapshot report the *same* route key. `Config::adopt_route` is
+    // exclusive per route, so adopting it for either twin would just get it
+    // stolen back by the other on the very next tick — a persist-and-reload
+    // storm. The route cannot be attributed to either by route alone, so
+    // neither claims it, and nothing is persisted or reloaded.
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    state.refresh_inventories(
+        &[
+            direct_inventory([1, 1, 1, 1]),
+            direct_inventory([2, 2, 2, 2]),
+        ],
+        &[],
+        &cache,
+        &[],
+    );
+
+    for key in ["unit:01010101", "unit:02020202"] {
+        assert!(
+            !state
+                .config
+                .devices
+                .get(key)
+                .is_some_and(|device| device.links.contains_key("direct:046d:b023")),
+            "{key} must not claim a route its twin equally owns"
+        );
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "a route that was never adopted must not trigger a persist/reload"
+    );
+}
+
+#[test]
 fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
     let transient_key = "direct:046d:b023:unit:00000000";
     let mut config = Config::ephemeral();
@@ -802,7 +952,7 @@ fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
     );
 
     assert!(state.devices().is_empty());
-    assert!(state.lighting_for(transient_key).is_none());
+    assert!(state.lighting_for(transient_key, transient_key).is_none());
 }
 
 #[test]

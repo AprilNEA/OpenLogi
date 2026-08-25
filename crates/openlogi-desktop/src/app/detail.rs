@@ -345,13 +345,14 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, inversion_supported, resolution, hires_supported) = AppState::try_read(cx)
-        .map_or((false, false, None, false), |state| {
+    let (inverted, inversion_supported, resolution, hires_supported, hires_elsewhere) =
+        AppState::try_read(cx).map_or((false, false, None, false, false), |state| {
             (
                 state.current_invert_scroll(),
                 state.current_scroll_inversion_supported(),
                 state.current_scroll_resolution(),
                 state.current_hires_wheel_supported(),
+                state.hires_wheel_supported_on_another_link(),
             )
         });
     let inversion_description = if inversion_supported {
@@ -401,6 +402,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                 tr!("Detects finer movement between ratchet steps.")
             }
         }
+    } else if hires_elsewhere {
+        tr!("This device supports wheel resolution on its other connection, but not this one.")
     } else {
         tr!("This device does not support wheel resolution control.")
     };
