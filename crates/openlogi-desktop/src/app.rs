@@ -233,7 +233,8 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
-        let app_catalog = cx.new(|cx| AppCatalogPicker::new(window, cx));
+        let profile_icons = ProfileIconCache::default();
+        let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
             let active_key = AppState::try_read(cx)
@@ -289,7 +290,7 @@ impl AppView {
             camera_preview,
             camera_controls,
             light_panel,
-            profile_icons: ProfileIconCache::default(),
+            profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
