@@ -244,6 +244,17 @@ impl AppState {
             .edit(|config| config.app_settings.thumbwheel_sensitivity = sensitivity);
         self.persist_and_reload("thumbwheel sensitivity");
     }
+    /// Toggle finite animation for traditional mouse-wheel input and persist
+    /// it. The agent publishes the change to the scroll worker on config
+    /// reload. No-op when unchanged; disk failures restore the persisted value.
+    pub fn set_smooth_scroll(&mut self, enabled: bool) {
+        if self.config.app_settings.smooth_scroll == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.smooth_scroll = enabled);
+        self.persist_and_reload("smooth scroll");
+    }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. No-op
     /// when unchanged; disk failures restore the persisted value.

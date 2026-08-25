@@ -45,17 +45,45 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
     );
 
     state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
+    state.set_smooth_scroll(true);
     state.set_vertical_scroll_sensitivity(VerticalScrollSensitivity::from_rounded(7.0));
 
     assert_eq!(
         state.app_settings().thumbwheel_sensitivity,
         ThumbwheelSensitivity::DEFAULT
     );
+    assert!(!state.app_settings().smooth_scroll);
     assert_eq!(
         state.app_settings().vertical_scroll_sensitivity,
         VerticalScrollSensitivity::DEFAULT
     );
     assert_eq!(state.config_issue(), Some("invalid config"));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn smooth_scroll_change_reloads_the_agent_once() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    state.set_smooth_scroll(true);
+
+    assert!(state.app_settings().smooth_scroll);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+
+    state.set_smooth_scroll(true);
     assert!(receiver.try_recv().is_err());
 }
 
