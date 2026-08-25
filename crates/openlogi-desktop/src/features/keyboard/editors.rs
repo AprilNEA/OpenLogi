@@ -15,8 +15,7 @@
 )]
 
 use gpui::{
-    AnyElement, App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window,
-    div, px, svg,
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -87,17 +86,14 @@ pub fn editor_card(
     workflow_draft: Vec<WorkflowStep>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Div {
     match kind {
-        PowerUserKind::Workflow => {
-            workflow_editor_card(trigger, workflow_draft, view, pal).into_any_element()
-        }
+        PowerUserKind::Workflow => workflow_editor_card(trigger, workflow_draft, view, pal),
         _ => match text_state {
-            Some(state) => text_editor_card(trigger, kind, state, view, pal).into_any_element(),
+            Some(state) => text_editor_card(trigger, kind, state, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
-                .child(title(tr!("Editor unavailable"), pal))
-                .into_any_element(),
+                .child(title(tr!("Editor unavailable"), pal)),
         },
     }
 }
@@ -110,7 +106,7 @@ fn text_editor_card(
     text_state: Entity<InputState>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> impl IntoElement {
+) -> gpui::Div {
     let heading = kind.heading();
     let key_name = trigger.to_string();
 
@@ -185,20 +181,17 @@ fn workflow_editor_card(
     steps: Vec<WorkflowStep>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> impl IntoElement {
+) -> gpui::Div {
     let key_name = trigger.to_string();
 
-    let mut rows: Vec<AnyElement> = Vec::new();
-    for (idx, step) in steps.iter().enumerate() {
-        rows.push(
-            WorkflowStepRow {
-                idx,
-                step: step.clone(),
-                view: view.clone(),
-            }
-            .into_any_element(),
-        );
-    }
+    let rows = steps
+        .into_iter()
+        .enumerate()
+        .map(|(idx, step)| WorkflowStepRow {
+            idx,
+            step,
+            view: view.clone(),
+        });
 
     compact_panel(pal)
         .w(px(320.))

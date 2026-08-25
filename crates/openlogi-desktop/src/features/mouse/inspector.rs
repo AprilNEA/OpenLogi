@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
@@ -51,7 +51,7 @@ pub(super) fn binding_inspector(
     view: &Entity<MouseModelView>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,
@@ -62,16 +62,14 @@ pub(super) fn binding_inspector(
             data.editing_app,
             data.overridden.map_or(0, BTreeMap::len),
             pal,
-        )
-        .into_any_element(),
+        ),
         Some(MouseControlId::ThumbwheelRotation) => thumbwheel_inspector(
             data.bindings,
             data.editing_app,
             data.overridden,
             picker,
             pal,
-        )
-        .into_any_element(),
+        ),
         Some(MouseControlId::Button(button)) => button_inspector(button, &data, picker, pal, cx),
     };
 
@@ -92,10 +90,9 @@ pub(super) fn binding_inspector(
                 .p_4()
                 .child(body),
         )
-        .into_any_element()
 }
 
-fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> impl IntoElement {
+fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui::Div {
     let summary = match (app, override_count) {
         (Some(app), 0) => tr!(
             "No overrides yet. Select a button to customize for %{app}.",
@@ -124,7 +121,7 @@ fn button_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let gesture_map = data.gesture_maps.get(&button);
     let overridden = data
         .overridden
@@ -219,7 +216,6 @@ fn button_inspector(
                 cx,
             ))
         })
-        .into_any_element()
 }
 
 fn inherited_gesture_inspector(
@@ -228,7 +224,7 @@ fn inherited_gesture_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::update_bindings(cx, |state| state.commit_binding(button, action));
@@ -273,7 +269,6 @@ fn inherited_gesture_inspector(
                 cx,
             ))
         })
-        .into_any_element()
 }
 
 fn gesture_inspector(
@@ -283,7 +278,7 @@ fn gesture_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let direction = selected_direction.unwrap_or(GestureDirection::Click);
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
@@ -337,7 +332,6 @@ fn gesture_inspector(
                 cx,
             ))
         })
-        .into_any_element()
 }
 
 fn gesture_directions(
@@ -400,7 +394,7 @@ fn thumbwheel_inspector(
     overridden: Option<&BTreeMap<ButtonId, Action>>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Div {
     let backward = bindings
         .get(&ButtonId::ThumbwheelScrollDown)
         .cloned()
@@ -497,7 +491,6 @@ fn thumbwheel_inspector(
                     }),
             )
         })
-        .into_any_element()
 }
 
 fn inspector_heading(

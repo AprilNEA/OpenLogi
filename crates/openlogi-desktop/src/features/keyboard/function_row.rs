@@ -355,7 +355,7 @@ struct KeySlot {
 #[derive(IntoElement)]
 struct InspectorRow {
     keyboard: KeyboardPane,
-    panel: Option<AnyElement>,
+    panel: Option<gpui::Div>,
 }
 
 impl InspectorRow {
@@ -367,8 +367,8 @@ impl InspectorRow {
     }
 
     #[must_use]
-    fn panel(mut self, panel: impl Into<Option<AnyElement>>) -> Self {
-        self.panel = panel.into();
+    fn panel(mut self, panel: Option<gpui::Div>) -> Self {
+        self.panel = panel;
         self
     }
 }
@@ -786,7 +786,7 @@ impl FunctionRowView {
         slots: &[KeySlot],
         view: &Entity<Self>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Div {
         let pal = theme::palette(cx);
         let slot = &slots[selected_idx];
         let trigger = slot.trigger.clone();
@@ -828,7 +828,6 @@ impl FunctionRowView {
             .child(title_header(&key_name, &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
-            .into_any_element()
     }
 }
 
@@ -855,9 +854,8 @@ fn panel_action_rows(
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
-) -> Vec<AnyElement> {
+) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
-    children.push(editor_section(tr!("Power User").to_string(), *pal).into_any_element());
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (
@@ -882,52 +880,55 @@ fn panel_action_rows(
         ),
     ];
 
-    for (idx, (kind, label, icon_path)) in power_user_actions.iter().enumerate() {
-        let kind = *kind;
-        let view = view.clone();
-        let selected = matches!(
-            (current, kind),
-            (Some(Action::TypeText(_)), PowerUserKind::TypeText)
-                | (
-                    Some(Action::RunAppleScript(_)),
-                    PowerUserKind::RunAppleScript
-                )
-                | (
-                    Some(Action::RunShellCommand(_)),
-                    PowerUserKind::RunShellCommand
-                )
-                | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
-        );
-        children.push(
-            MenuRow::new(format!("panel-power-{idx}"))
-                .selected(selected)
-                .role(Role::MenuItem)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
+    children.push(
+        v_flex()
+            .child(editor_section(tr!("Power User").to_string(), *pal))
+            .children(power_user_actions.iter().enumerate().map(
+                |(idx, (kind, label, icon_path))| {
+                    let kind = *kind;
+                    let view = view.clone();
+                    let selected = matches!(
+                        (current, kind),
+                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+                            | (
+                                Some(Action::RunAppleScript(_)),
+                                PowerUserKind::RunAppleScript
+                            )
+                            | (
+                                Some(Action::RunShellCommand(_)),
+                                PowerUserKind::RunShellCommand
+                            )
+                            | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
+                    );
+                    MenuRow::new(format!("panel-power-{idx}"))
+                        .selected(selected)
+                        .role(Role::MenuItem)
                         .child(
-                            svg()
-                                .path(*icon_path)
-                                .size_4()
-                                .flex_none()
-                                .text_color(pal.text_muted),
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path(*icon_path)
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(div().child((*label).to_string())),
                         )
-                        .child(div().child((*label).to_string())),
-                )
-                .when(selected, |s| {
-                    s.child(
-                        gpui_component::Icon::new(gpui_component::IconName::Check)
-                            .size_3()
-                            .text_color(rgb(ACCENT_BLUE)),
-                    )
-                })
-                .on_click(move |_ev, _window, cx| {
-                    view.update(cx, |v, vcx| v.open_editor(kind, vcx));
-                })
-                .into_any_element(),
-        );
-    }
+                        .when(selected, |s| {
+                            s.child(
+                                gpui_component::Icon::new(gpui_component::IconName::Check)
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
+                            )
+                        })
+                        .on_click(move |_ev, _window, cx| {
+                            view.update(cx, |v, vcx| v.open_editor(kind, vcx));
+                        })
+                },
+            )),
+    );
     children
 }
 
