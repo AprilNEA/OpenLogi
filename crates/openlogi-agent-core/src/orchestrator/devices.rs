@@ -227,12 +227,6 @@ pub(super) fn plan_reapply(
     let mut targets = reapply_targets(prev, next, reapply_all);
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
-        .filter(|&&idx| {
-            reapply_all || {
-                let id = stable_id(&next[idx]);
-                !prev.iter().any(|p| stable_id(p) == id)
-            }
-        })
         .map(|&idx| {
             (
                 next[idx].config_key.clone(),

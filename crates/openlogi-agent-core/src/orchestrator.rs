@@ -245,9 +245,10 @@ pub struct Orchestrator {
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
-    /// Config keys of devices first sighted (or targeted after wake) recently,
-    /// with remaining confirming re-apply budget: the first write can race the
-    /// device's own boot or reconnect and be lost.
+    /// Config keys of devices recently targeted after discovery, reconnect,
+    /// or system wake, with their remaining confirming re-apply budget. An
+    /// online inventory state does not guarantee that every HID++ feature is
+    /// ready, so the first detached write can still time out or fail.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
