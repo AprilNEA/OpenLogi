@@ -1,5 +1,6 @@
 //! Worker ownership and non-blocking producer capability for smooth scrolling.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,6 +36,12 @@ struct ShutdownRequest {
     done: mpsc::SyncSender<()>,
 }
 
+/// Lossless fallback for overflow cancellation and graceful shutdown.
+enum ScrollControl {
+    CancelOverflowSource(ScrollSource),
+    Shutdown(ShutdownRequest),
+}
+
 /// Cloneable, non-owning capability for physical input producers.
 ///
 /// Submission is always non-blocking. `false` asks each producer to use its
@@ -42,6 +49,7 @@ struct ShutdownRequest {
 #[derive(Clone)]
 pub struct ScrollInputHandle {
     commands: mpsc::SyncSender<ScrollCommand>,
+    controls: mpsc::Sender<ScrollControl>,
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
@@ -100,13 +108,19 @@ impl ScrollInputHandle {
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         let source = ScrollSource::Hidpp(session.clone());
-        match self.commands.try_send(ScrollCommand::CancelSource(source)) {
+        match self
+            .commands
+            .try_send(ScrollCommand::CancelSource(source.clone()))
+        {
             Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
             Err(mpsc::TrySendError::Full(_)) => {
-                // A stale diverted session must not retain active output. The
-                // bounded queue cannot guarantee source-local cancellation
-                // here, so invalidate all accepted input as the safe fallback.
-                self.cancel_all();
+                if self
+                    .controls
+                    .send(ScrollControl::CancelOverflowSource(source))
+                    .is_ok()
+                {
+                    self.wake();
+                }
             }
         }
     }
@@ -129,7 +143,7 @@ impl ScrollInputHandle {
 /// Unique owner of the smooth-scroll worker and its graceful shutdown.
 pub struct ScrollRuntime {
     input: ScrollInputHandle,
-    shutdown: mpsc::Sender<ShutdownRequest>,
+    controls: mpsc::Sender<ScrollControl>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -144,10 +158,11 @@ impl ScrollRuntime {
         mut emit: impl FnMut(ScrollFrame) + Send + 'static,
     ) -> io::Result<Self> {
         let (commands, command_rx) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
-        let (shutdown, shutdown_rx) = mpsc::channel();
+        let (controls, control_rx) = mpsc::channel();
         let generation = Arc::new(AtomicU64::new(0));
         let input = ScrollInputHandle {
             commands,
+            controls: controls.clone(),
             generation: Arc::clone(&generation),
             accepting: Arc::new(AtomicBool::new(true)),
             enabled: Arc::clone(&enabled),
@@ -155,11 +170,11 @@ impl ScrollRuntime {
         let worker = thread::Builder::new()
             .name("openlogi-scroll".into())
             .spawn(move || {
-                run_worker(&command_rx, &shutdown_rx, &generation, &enabled, &mut emit);
+                run_worker(&command_rx, &control_rx, &generation, &enabled, &mut emit);
             })?;
         Ok(Self {
             input,
-            shutdown,
+            controls,
             worker: Some(worker),
         })
     }
@@ -181,7 +196,11 @@ impl ScrollRuntime {
         };
         self.input.stop_accepting();
         let (done, wait) = mpsc::sync_channel(0);
-        if self.shutdown.send(ShutdownRequest { done }).is_err() {
+        if self
+            .controls
+            .send(ScrollControl::Shutdown(ShutdownRequest { done }))
+            .is_err()
+        {
             let _ = worker.join();
             return false;
         }
@@ -208,18 +227,29 @@ impl Drop for ScrollRuntime {
 
 fn run_worker(
     commands: &mpsc::Receiver<ScrollCommand>,
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    controls: &mpsc::Receiver<ScrollControl>,
     shared_generation: &AtomicU64,
     enabled: &AtomicBool,
     emit: &mut impl FnMut(ScrollFrame),
 ) {
     let mut engine = ScrollEngine::default();
+    // An overflow-cancelled incarnation stays tombstoned so accepted input that
+    // was already queued when control overtook the saturated queue is ignored.
+    let mut overflow_cancelled_sources = HashSet::new();
     let mut generation = shared_generation.load(Ordering::Acquire);
     loop {
-        if let Ok(request) = shutdown.try_recv() {
-            engine.cancel_all(emit);
-            let _ = request.done.send(());
-            return;
+        while let Ok(control) = controls.try_recv() {
+            match control {
+                ScrollControl::CancelOverflowSource(source) => {
+                    engine.cancel_source(&source, emit);
+                    overflow_cancelled_sources.insert(source);
+                }
+                ScrollControl::Shutdown(request) => {
+                    engine.cancel_all(emit);
+                    let _ = request.done.send(());
+                    return;
+                }
+            }
         }
 
         let current_generation = shared_generation.load(Ordering::Acquire);
@@ -238,7 +268,9 @@ fn run_worker(
         );
         match command {
             Ok(ScrollCommand::Input(input))
-                if input.generation == generation && enabled.load(Ordering::Relaxed) =>
+                if input.generation == generation
+                    && enabled.load(Ordering::Relaxed)
+                    && !overflow_cancelled_sources.contains(&input.source) =>
             {
                 engine.impulse(input.source, input.impulse, input.at, emit);
             }
@@ -260,25 +292,32 @@ mod tests {
     fn standalone_input(
         capacity: usize,
         enabled: bool,
-    ) -> (ScrollInputHandle, mpsc::Receiver<ScrollCommand>) {
+    ) -> (
+        ScrollInputHandle,
+        mpsc::Receiver<ScrollCommand>,
+        mpsc::Receiver<ScrollControl>,
+    ) {
         let (commands, receiver) = mpsc::sync_channel(capacity);
+        let (controls, control_rx) = mpsc::channel();
         (
             ScrollInputHandle {
                 commands,
+                controls,
                 generation: Arc::new(AtomicU64::new(0)),
                 accepting: Arc::new(AtomicBool::new(true)),
                 enabled: Arc::new(AtomicBool::new(enabled)),
             },
             receiver,
+            control_rx,
         )
     }
 
     #[test]
     fn callback_submission_rejects_ineligible_input_and_fails_open_when_full() {
-        let (disabled, _receiver) = standalone_input(1, false);
+        let (disabled, _commands, _controls) = standalone_input(1, false);
         assert!(!disabled.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
 
-        let (input, _receiver) = standalone_input(1, true);
+        let (input, _commands, _controls) = standalone_input(1, true);
         assert!(!input.try_hook_scroll(ScrollDelta::pixels(0.0, 1.0)));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         assert!(!input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
@@ -286,12 +325,12 @@ mod tests {
 
     #[test]
     fn hidpp_cancellation_targets_its_session() {
-        let (input, receiver) = standalone_input(1, true);
+        let (input, commands, _controls) = standalone_input(1, true);
         let session = HidppSessionId::new("mouse-a", 7);
         input.cancel_hidpp_session(&session);
 
         let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
-            receiver.recv().expect("queued cancellation")
+            commands.recv().expect("queued cancellation")
         else {
             panic!("expected HID++ source cancellation");
         };
@@ -300,12 +339,60 @@ mod tests {
     }
 
     #[test]
-    fn full_queue_falls_back_to_global_cancellation() {
-        let (input, _receiver) = standalone_input(1, true);
-        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+    fn cancellation_overtakes_a_full_queue_without_discarding_another_source() {
+        let (input, commands, controls) = standalone_input(2, true);
+        let cancelled = HidppSessionId::new("mouse-a", 7);
+        let survivor = HidppSessionId::new("mouse-b", 3);
+        assert!(input.try_hidpp_scroll(&cancelled, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        assert!(input.try_hidpp_scroll(&survivor, ScrollDelta::wheel_ticks(0.0, 1.0)));
 
-        input.cancel_hidpp_session(&HidppSessionId::new("mouse-a", 7));
-        assert_eq!(input.generation.load(Ordering::Acquire), 1);
+        input.cancel_hidpp_session(&cancelled);
+        assert_eq!(
+            input.generation.load(Ordering::Acquire),
+            0,
+            "source-local cancellation must not invalidate unrelated accepted input"
+        );
+
+        let generation = Arc::clone(&input.generation);
+        let enabled = Arc::clone(&input.enabled);
+        let (emitted, frames) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_worker(&commands, &controls, &generation, &enabled, &mut |frame| {
+                emitted.send(frame).expect("frame receiver remains open");
+            });
+        });
+
+        let mut output = Vec::new();
+        loop {
+            let frame = frames
+                .recv_timeout(Duration::from_secs(1))
+                .expect("surviving source completes");
+            output.push(frame);
+            if frame.phase == openlogi_inject::SmoothScrollPhase::Ended {
+                break;
+            }
+        }
+
+        let (done, wait) = mpsc::sync_channel(0);
+        input
+            .controls
+            .send(ScrollControl::Shutdown(ShutdownRequest { done }))
+            .expect("worker control channel remains open");
+        input.wake();
+        wait.recv_timeout(Duration::from_secs(1))
+            .expect("worker acknowledges shutdown");
+        worker.join().expect("worker exits cleanly");
+
+        let total = output
+            .iter()
+            .fold(WheelDelta::ZERO, |sum, frame| sum.plus(frame.delta));
+        assert!(total.x.abs() < f64::EPSILON, "cancelled source emitted");
+        assert!((total.y - 1.0).abs() < f64::EPSILON);
+        assert!(
+            output
+                .iter()
+                .all(|frame| frame.phase != openlogi_inject::SmoothScrollPhase::Cancelled)
+        );
     }
 
     #[test]
