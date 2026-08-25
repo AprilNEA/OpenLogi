@@ -195,6 +195,18 @@ pub async fn dump_onboard_profiles_sector(
     device::dump_onboard_profiles_sector(&*native_backend(), route, sector, sector_size).await
 }
 
+/// Write one onboard-memory sector (via `0x8100`'s `MEMORY_ADDR_WRITE` /
+/// `MEMORY_WRITE` / `MEMORY_WRITE_END`) of the device `route` reaches. See
+/// `openlogi_device::write::write_onboard_profiles_sector` — this performs a
+/// real write to onboard flash.
+pub async fn write_onboard_profiles_sector(
+    route: &DeviceRoute,
+    sector: u16,
+    data: Vec<u8>,
+) -> Result<(), WriteError> {
+    device::write_onboard_profiles_sector(&*native_backend(), route, sector, data).await
+}
+
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await

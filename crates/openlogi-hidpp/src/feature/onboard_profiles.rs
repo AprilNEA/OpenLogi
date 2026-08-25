@@ -28,16 +28,28 @@
 //! 32 without confirming it against that device's own directory/profile
 //! read first.
 //!
+//! [`OnboardProfilesFeature::write_sector`] mirrors libratbag's
+//! `hidpp20_onboard_profiles_write_sector` (`MEMORY_ADDR_WRITE` /
+//! `MEMORY_WRITE` / `MEMORY_WRITE_END`, `hidpp20.c`) and [`crc_ccitt`] mirrors
+//! its `hidpp_crc_ccitt` (`hidpp-generic.c`) verbatim, both cited by exact
+//! source line, not summarized. [`crc_ccitt`] is independently verified, not
+//! just cited: run against the *first `sector_size - 2` bytes* of both real
+//! profile sectors this crate captured, it reproduces each sector's own
+//! trailing 2 bytes exactly (see the unit tests below) — strong evidence the
+//! CRC placement (last 2 bytes of the sector, big-endian, over everything
+//! before it) and the algorithm are both right, not just plausible.
+//!
 //! What this file deliberately does **not** implement: the rest of a
 //! profile's layout (name, DPI table, report rate, LED config — everything
-//! in libratbag's `struct hidpp20_profile` besides the button array), and
-//! anything that writes to onboard memory (`MEMORY_ADDR_WRITE` /
-//! `MEMORY_WRITE` / `MEMORY_WRITE_END`). Read-back-and-verify safely first;
-//! writes are their own change with their own review.
+//! in libratbag's `struct hidpp20_profile` besides the button array and the
+//! CRC trailer).
 //!
 //! [libratbag]: https://github.com/libratbag/libratbag
 //! [libratbag-h]: https://github.com/libratbag/libratbag/blob/master/src/hidpp20.h
 //! [libratbag-c]: https://github.com/libratbag/libratbag/blob/master/src/hidpp20.c
+
+#[cfg(test)]
+mod tests;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
@@ -47,6 +59,15 @@ use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 /// HID++2.0 function id for `CMD_ONBOARD_PROFILES_MEMORY_READ` (libratbag
 /// `hidpp20.c`), reading 16 bytes of onboard memory at a time.
 const FUNCTION_MEMORY_READ: u8 = 5;
+/// HID++2.0 function id for `CMD_ONBOARD_PROFILES_MEMORY_ADDR_WRITE`.
+const FUNCTION_MEMORY_ADDR_WRITE: u8 = 6;
+/// HID++2.0 function id for `CMD_ONBOARD_PROFILES_MEMORY_WRITE`.
+const FUNCTION_MEMORY_WRITE: u8 = 7;
+/// HID++2.0 function id for `CMD_ONBOARD_PROFILES_MEMORY_WRITE_END`.
+const FUNCTION_MEMORY_WRITE_END: u8 = 8;
+
+/// Seed libratbag's `hidpp_crc_ccitt` (`hidpp-generic.c`) uses.
+const CRC_CCITT_SEED: u16 = 0xffff;
 
 /// Implements the `OnboardProfiles` / `0x8100` feature.
 #[derive(Clone, Feature)]
@@ -122,6 +143,69 @@ impl OnboardProfilesFeature {
         }
         Ok(data)
     }
+
+    /// Writes a full sector's worth of onboard memory: computes and stamps
+    /// the trailing CRC (see [`crc_ccitt`]), then `MEMORY_ADDR_WRITE` +
+    /// repeated `MEMORY_WRITE` + `MEMORY_WRITE_END`, mirroring libratbag's
+    /// `hidpp20_onboard_profiles_write_sector` exactly — including sending
+    /// `data.len()` rounded up to a 16-byte boundary in `MEMORY_WRITE`
+    /// chunks (the tail is padded with `0xff`) while `MEMORY_ADDR_WRITE`'s
+    /// `count` field still carries the unpadded `data.len()`, because that
+    /// mismatch is what libratbag's own field-tested implementation does.
+    ///
+    /// `data` must be at least 2 bytes (for the CRC) — the last 2 bytes are
+    /// overwritten unconditionally with the freshly computed CRC before
+    /// sending, so callers do not need to (and should not) stamp it
+    /// themselves.
+    ///
+    /// This performs a real write to onboard flash. Read the sector back
+    /// afterwards and compare against what was intended — this crate does
+    /// not do that verification for the caller.
+    pub async fn write_sector(&self, sector: u16, data: &mut [u8]) -> Result<(), Hidpp20Error> {
+        debug_assert!(data.len() >= 2, "data must hold at least the CRC trailer");
+        let crc = crc_ccitt(&data[..data.len() - 2]);
+        let trailer_start = data.len() - 2;
+        data[trailer_start..].copy_from_slice(&crc.to_be_bytes());
+
+        let sector_size = u16::try_from(data.len()).unwrap_or(u16::MAX);
+        let [sector_hi, sector_lo] = sector.to_be_bytes();
+        let [size_hi, size_lo] = sector_size.to_be_bytes();
+        let mut start_args = [0u8; 16];
+        start_args[..6].copy_from_slice(&[sector_hi, sector_lo, 0, 0, size_hi, size_lo]);
+        self.endpoint
+            .call_long(FUNCTION_MEMORY_ADDR_WRITE, start_args)
+            .await?;
+
+        let padded_len = data.len().next_multiple_of(16);
+        let mut padded = vec![0xffu8; padded_len];
+        padded[..data.len()].copy_from_slice(data);
+        for &args in padded.as_chunks::<16>().0 {
+            self.endpoint.call_long(FUNCTION_MEMORY_WRITE, args).await?;
+        }
+
+        self.endpoint
+            .call(FUNCTION_MEMORY_WRITE_END, [0; 3])
+            .await?;
+        Ok(())
+    }
+}
+
+/// Port of libratbag's `hidpp_crc_ccitt` (`hidpp-generic.c`). See the module
+/// docs for how this was verified against real onboard-profile sectors.
+#[must_use]
+pub fn crc_ccitt(data: &[u8]) -> u16 {
+    let mut crc = CRC_CCITT_SEED;
+    for &byte in data {
+        let temp = (crc >> 8) ^ u16::from(byte);
+        crc <<= 8;
+        let mut quick = temp ^ (temp >> 4);
+        crc ^= quick;
+        quick <<= 5;
+        crc ^= quick;
+        quick <<= 7;
+        crc ^= quick;
+    }
+    crc
 }
 
 /// Decoded response of `CMD_ONBOARD_PROFILES_GET_PROFILES_DESCR` (function

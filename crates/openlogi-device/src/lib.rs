@@ -74,4 +74,5 @@ pub use write::{
     set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    write_onboard_profiles_sector,
 };

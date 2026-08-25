@@ -160,7 +160,11 @@ pub async fn dump_onboard_profiles_info(
     with_route(backend, route, move |channel| async move {
         let onboard_profiles = open_onboard_profiles(&channel, index).await?;
         onboard_profiles.get_info().await.map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+            classify_hidpp_error(
+                e,
+                HidppOperation::OnboardProfiles,
+                OnboardProfilesFeature::ID,
+            )
         })
     })
     .await
@@ -185,7 +189,41 @@ pub async fn dump_onboard_profiles_sector(
             .read_sector(sector, sector_size)
             .await
             .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+                classify_hidpp_error(
+                    e,
+                    HidppOperation::OnboardProfiles,
+                    OnboardProfilesFeature::ID,
+                )
+            })
+    })
+    .await
+}
+
+/// Writes a full sector of onboard memory via `0x8100`'s `MEMORY_ADDR_WRITE`
+/// / `MEMORY_WRITE` / `MEMORY_WRITE_END`, stamping a fresh CRC over `data`
+/// first — see `hidpp::feature::onboard_profiles::OnboardProfilesFeature::
+/// write_sector`. This performs a real write to onboard flash; callers are
+/// responsible for reading the sector back afterwards to confirm it landed
+/// as intended.
+pub async fn write_onboard_profiles_sector(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    sector: u16,
+    data: Vec<u8>,
+) -> Result<(), WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut data = data;
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles
+            .write_sector(sector, &mut data)
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(
+                    e,
+                    HidppOperation::OnboardProfiles,
+                    OnboardProfilesFeature::ID,
+                )
             })
     })
     .await
@@ -205,7 +243,11 @@ async fn open_onboard_profiles(
         .get_feature(OnboardProfilesFeature::ID)
         .await
         .map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+            classify_hidpp_error(
+                e,
+                HidppOperation::OnboardProfiles,
+                OnboardProfilesFeature::ID,
+            )
         })?
         .ok_or(WriteError::FeatureUnsupported {
             feature_hex: OnboardProfilesFeature::ID,

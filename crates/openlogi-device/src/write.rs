@@ -31,6 +31,7 @@ pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, OnboardProfilesInfo, ReprogControlEntry,
     dump_features, dump_firmware_entities, dump_onboard_profiles_info,
     dump_onboard_profiles_sector, dump_reprog_controls, read_battery_raw,
+    write_onboard_profiles_sector,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
