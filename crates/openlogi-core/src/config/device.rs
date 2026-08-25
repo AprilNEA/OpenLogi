@@ -2,7 +2,7 @@
 //! [`RawDeviceConfig`] migration shim that folds pre-v2 files into the
 //! unified `bindings` map.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,46 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{DisableKeysMask, Dpi};
+
+/// A known key controlled by HID++ `0x4521 DisableKeys`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisableKey {
+    /// Caps Lock.
+    CapsLock,
+    /// Num Lock.
+    NumLock,
+    /// Scroll Lock.
+    ScrollLock,
+    /// Insert.
+    Insert,
+    /// Windows on non-macOS hosts and Command on macOS.
+    WindowsCommand,
+}
+
+impl DisableKey {
+    /// Known keys in stable display order.
+    pub const ALL: [Self; 5] = [
+        Self::CapsLock,
+        Self::NumLock,
+        Self::ScrollLock,
+        Self::Insert,
+        Self::WindowsCommand,
+    ];
+
+    /// Raw `DisableKeys` bit for this key.
+    #[must_use]
+    pub const fn mask(self) -> DisableKeysMask {
+        match self {
+            Self::CapsLock => DisableKeysMask::CAPS_LOCK,
+            Self::NumLock => DisableKeysMask::NUM_LOCK,
+            Self::ScrollLock => DisableKeysMask::SCROLL_LOCK,
+            Self::Insert => DisableKeysMask::INSERT,
+            Self::WindowsCommand => DisableKeysMask::WINDOWS_COMMAND,
+        }
+    }
+}
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -270,6 +309,10 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Known keys OpenLogi should disable on reconnect. `None` leaves the
+    /// firmware unmanaged; an explicit empty set re-enables every known key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_keys: Option<BTreeSet<DisableKey>>,
 }
 
 impl DeviceConfig {
@@ -370,6 +413,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            disabled_keys: None,
         }
     }
 }
@@ -490,6 +534,8 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    disabled_keys: Option<BTreeSet<DisableKey>>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -550,13 +596,16 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            disabled_keys: raw.disabled_keys,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceConfig;
+    use std::collections::BTreeSet;
+
+    use super::{DeviceConfig, DisableKey};
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
@@ -573,6 +622,30 @@ mod tests {
         );
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_keys_preserves_unmanaged_empty_and_non_empty_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let missing: DeviceConfig = toml::from_str("")?;
+        assert_eq!(missing.disabled_keys, None);
+
+        let empty: DeviceConfig = toml::from_str("disabled_keys = []")?;
+        assert_eq!(empty.disabled_keys, Some(BTreeSet::new()));
+        assert!(toml::to_string(&empty)?.contains("disabled_keys = []"));
+
+        let configured: DeviceConfig =
+            toml::from_str("disabled_keys = [\"caps_lock\", \"windows_command\"]")?;
+        assert_eq!(
+            configured.disabled_keys,
+            Some(BTreeSet::from([
+                DisableKey::CapsLock,
+                DisableKey::WindowsCommand,
+            ]))
+        );
+        let round_trip: DeviceConfig = toml::from_str(&toml::to_string(&configured)?)?;
+        assert_eq!(round_trip.disabled_keys, configured.disabled_keys);
         Ok(())
     }
 }

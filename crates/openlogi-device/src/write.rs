@@ -17,6 +17,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 
 mod backlight;
 mod diagnostics;
+mod disable_keys;
 mod dpi;
 mod error;
 mod fn_lock;
@@ -30,6 +31,9 @@ pub use backlight::{get_backlight, set_backlight_enabled};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
+};
+pub use disable_keys::{
+    get_disable_keys, get_disable_keys_on, set_disable_keys, set_disable_keys_on,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
@@ -53,6 +57,7 @@ pub use litra::{
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
 };
+pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,

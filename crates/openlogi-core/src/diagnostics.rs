@@ -597,6 +597,7 @@ mod tests {
                         thumbwheel: false,
                         haptic_feedback: false,
                         haptic_panel: false,
+                        disable_keys: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

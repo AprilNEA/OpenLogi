@@ -46,7 +46,7 @@ use openlogi_core::device::{
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
-use openlogi_core::hid::LOGITECH_VENDOR_ID;
+use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation, LOGITECH_VENDOR_ID};
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
@@ -236,6 +236,7 @@ struct DeviceSettings {
     dpi: Option<DpiState>,
     smartshift: Option<SmartShiftStatus>,
     lighting: bool,
+    disable_keys: Option<DisableKeysState>,
 }
 
 impl DeviceSettings {
@@ -244,6 +245,51 @@ impl DeviceSettings {
             dpi: None,
             smartshift: None,
             lighting: false,
+            disable_keys: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DisableKeysScenario {
+    #[default]
+    Ready,
+    ReadFailsUntilRetry,
+    WriteMismatch,
+    WriteDelaySwitch,
+    SameRouteReconnect,
+    ReloadFailsOnce,
+}
+
+impl DisableKeysScenario {
+    fn parse(value: &str) -> Result<Self, WriteError> {
+        match value {
+            "ready" => Ok(Self::Ready),
+            "read-fails-until-retry" => Ok(Self::ReadFailsUntilRetry),
+            "write-mismatch" => Ok(Self::WriteMismatch),
+            "write-delay-switch" => Ok(Self::WriteDelaySwitch),
+            "same-route-reconnect" => Ok(Self::SameRouteReconnect),
+            "reload-fails-once" => Ok(Self::ReloadFailsOnce),
+            _ => Err(WriteError::Hidpp(format!(
+                "unknown OPENLOGI_MOCK_DISABLE_KEYS_SCENARIO={value}"
+            ))),
+        }
+    }
+
+    fn from_env() -> Result<Self, WriteError> {
+        match std::env::var("OPENLOGI_MOCK_DISABLE_KEYS_SCENARIO") {
+            Ok(value) => Self::parse(&value),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Ready),
+            Err(std::env::VarError::NotUnicode(_)) => Err(WriteError::Hidpp(
+                "OPENLOGI_MOCK_DISABLE_KEYS_SCENARIO is not valid Unicode".into(),
+            )),
+        }
+    }
+
+    fn keyboard_online(self, elapsed: Duration) -> bool {
+        match self {
+            Self::SameRouteReconnect => !(2..4).contains(&elapsed.as_secs()),
+            _ => true,
         }
     }
 }
@@ -283,10 +329,20 @@ struct State {
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
     started: Instant,
+    disable_keys_scenario: DisableKeysScenario,
+    disable_keys_reads: u64,
+    disable_keys_writes: u64,
+    reload_calls: u64,
 }
 
 impl State {
     fn new() -> Result<Self, WriteError> {
+        Self::with_disable_keys_scenario(DisableKeysScenario::from_env()?)
+    }
+
+    fn with_disable_keys_scenario(
+        disable_keys_scenario: DisableKeysScenario,
+    ) -> Result<Self, WriteError> {
         let mut settings = HashMap::new();
         settings.insert(
             MOUSE_SLOT,
@@ -303,6 +359,7 @@ impl State {
                     tunable_torque: Some(MOCK_TORQUE),
                 }),
                 lighting: false,
+                disable_keys: None,
             },
         );
         settings.insert(OFFLINE_SLOT, DeviceSettings::unsupported());
@@ -312,6 +369,10 @@ impl State {
                 dpi: None,
                 smartshift: None,
                 lighting: true,
+                disable_keys: Some(DisableKeysState {
+                    supported: DisableKeysMask::from_bits_retain(0xb1),
+                    disabled: DisableKeysMask::from_bits_retain(0xa0),
+                }),
             },
         );
         settings.insert(
@@ -323,6 +384,7 @@ impl State {
                 }),
                 smartshift: None,
                 lighting: false,
+                disable_keys: None,
             },
         );
         Ok(Self {
@@ -334,6 +396,10 @@ impl State {
             phase: None,
             next_pairing_id: 0,
             started: Instant::now(),
+            disable_keys_scenario,
+            disable_keys_reads: 0,
+            disable_keys_writes: 0,
+            reload_calls: 0,
         })
     }
 
@@ -447,7 +513,11 @@ impl State {
     /// is re-derived from elapsed time: successive snapshots visibly differ and
     /// the GUI's poll → repaint loop can be watched working.
     fn render_inventory(&self) -> Vec<DeviceInventory> {
-        let mut bolt = bolt_inventory(draining_battery(self.started.elapsed()));
+        let mut bolt = bolt_inventory(
+            draining_battery(self.started.elapsed()),
+            self.disable_keys_scenario
+                .keyboard_online(self.started.elapsed()),
+        );
         bolt.paired.extend_from_slice(&self.paired_extra);
         vec![bolt, direct_inventory()]
     }
@@ -558,7 +628,7 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
 
 /// The scripted Bolt receiver and its devices. `mouse_battery` is passed in
 /// because it is the one field that moves between polls.
-fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
+fn bolt_inventory(mouse_battery: BatteryInfo, keyboard_online: bool) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
             name: "Logi Bolt Receiver".to_string(),
@@ -596,6 +666,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: true,
                     haptic_feedback: true,
                     haptic_panel: true,
+                    disable_keys: false,
                 }),
             },
             PairedDevice {
@@ -615,7 +686,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                 codename: Some("MX Keys".to_string()),
                 wpid: Some(0x408a),
                 kind: DeviceKind::Keyboard,
-                online: true,
+                online: keyboard_online,
                 battery: Some(BatteryInfo {
                     percentage: 100,
                     level: BatteryLevel::Full,
@@ -643,6 +714,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    disable_keys: true,
                 }),
             },
         ],
@@ -692,6 +764,7 @@ fn direct_inventory() -> DeviceInventory {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                disable_keys: false,
             }),
         }],
     }
@@ -793,7 +866,19 @@ impl Agent for MockAgent {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        info!("reload_config (no-op in the mock)");
+        let mut state = self.state.lock().await;
+        state.reload_calls += 1;
+        if state.disable_keys_scenario == DisableKeysScenario::ReloadFailsOnce
+            && state.reload_calls == 2
+        {
+            return Err(ConfigReloadError {
+                message: "scripted Disable Keys reload failure".into(),
+            });
+        }
+        info!(
+            call = state.reload_calls,
+            "reload_config (no-op in the mock)"
+        );
         Ok(())
     }
 
@@ -911,6 +996,76 @@ impl Agent for MockAgent {
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })
+    }
+
+    async fn read_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<DisableKeysState, WriteError> {
+        let mut state = self.state.lock().await;
+        state.disable_keys_reads += 1;
+        if state.disable_keys_scenario == DisableKeysScenario::ReadFailsUntilRetry
+            && state.disable_keys_reads <= 3
+        {
+            return Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::ReadDisableKeys,
+            });
+        }
+        state
+            .settings_for(&route)?
+            .disable_keys
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x4521,
+            })
+    }
+
+    async fn set_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        desired: DisableKeysMask,
+    ) -> Result<DisableKeysState, WriteError> {
+        let delay = {
+            let state = self.state.lock().await;
+            state.disable_keys_scenario == DisableKeysScenario::WriteDelaySwitch
+        };
+        if delay {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
+        let mut state = self.state.lock().await;
+        state.disable_keys_writes += 1;
+        let mismatch = state.disable_keys_scenario == DisableKeysScenario::WriteMismatch;
+        let settings = state.settings_for_mut(&route)?;
+        let current = settings
+            .disable_keys
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x4521,
+            })?;
+        let replacement = current.replacement_for(desired)?;
+        let actual = if mismatch {
+            replacement & !DisableKeysMask::CAPS_LOCK
+        } else {
+            replacement
+        };
+        let confirmed = DisableKeysState {
+            supported: current.supported,
+            disabled: actual,
+        };
+        settings.disable_keys = Some(confirmed);
+        let expected_supported = replacement & current.supported;
+        let actual_supported = actual & current.supported;
+        if expected_supported != actual_supported {
+            return Err(WriteError::WriteNotApplied {
+                operation: HidppOperation::WriteDisableKeys,
+                feature_hex: 0x4521,
+                expected: u64::from(expected_supported.bits()),
+                actual: u64::from(actual_supported.bits()),
+            });
+        }
+        info!(%route, desired = desired.bits(), actual = actual.bits(), "set_disable_keys");
+        Ok(confirmed)
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
@@ -1112,5 +1267,150 @@ mod tests {
             select_first.next_pairing_update(),
             Some(PairingUpdate::Failed(PairingFailure::Cancelled))
         ));
+    }
+}
+
+#[cfg(test)]
+mod disable_keys_tests {
+    use super::*;
+    use tarpc::context;
+
+    fn keyboard_route() -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: RECEIVER_UID.into(),
+            slot: KEYBOARD_SLOT,
+        }
+    }
+
+    #[test]
+    fn disable_keys_scenarios_are_strict_and_reconnect_is_deterministic() {
+        assert_eq!(
+            DisableKeysScenario::parse("ready").expect("ready scenario"),
+            DisableKeysScenario::Ready
+        );
+        assert!(DisableKeysScenario::parse("READY").is_err());
+        assert!(DisableKeysScenario::SameRouteReconnect.keyboard_online(Duration::from_secs(1)));
+        assert!(!DisableKeysScenario::SameRouteReconnect.keyboard_online(Duration::from_secs(2)));
+        assert!(DisableKeysScenario::SameRouteReconnect.keyboard_online(Duration::from_secs(4)));
+    }
+
+    #[tokio::test]
+    async fn disable_keys_mock_preserves_advertised_unknown_bits() {
+        let agent = MockAgent::new(
+            State::with_disable_keys_scenario(DisableKeysScenario::Ready).expect("mock state"),
+        );
+        let result = agent
+            .clone()
+            .set_disable_keys(
+                context::current(),
+                keyboard_route(),
+                DisableKeysMask::CAPS_LOCK,
+            )
+            .await
+            .expect("guarded write");
+        assert_eq!(result.supported.bits(), 0xb1);
+        assert_eq!(result.disabled.bits(), 0xa1);
+        assert_eq!(agent.state.lock().await.disable_keys_writes, 1);
+    }
+
+    #[tokio::test]
+    async fn disable_keys_mock_rejects_unknown_and_unadvertised_known_bits() {
+        let agent = MockAgent::new(
+            State::with_disable_keys_scenario(DisableKeysScenario::Ready).expect("mock state"),
+        );
+        for desired in [
+            DisableKeysMask::from_bits_retain(0x20),
+            DisableKeysMask::NUM_LOCK,
+        ] {
+            assert!(matches!(
+                agent
+                    .clone()
+                    .set_disable_keys(context::current(), keyboard_route(), desired)
+                    .await,
+                Err(WriteError::UnsupportedMask {
+                    operation: HidppOperation::WriteDisableKeys,
+                    feature_hex: 0x4521,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn disable_keys_read_and_reload_failure_counters_match_scenarios() {
+        let read_agent = MockAgent::new(
+            State::with_disable_keys_scenario(DisableKeysScenario::ReadFailsUntilRetry)
+                .expect("mock state"),
+        );
+        for _ in 0..3 {
+            assert!(matches!(
+                read_agent
+                    .clone()
+                    .read_disable_keys(context::current(), keyboard_route())
+                    .await,
+                Err(WriteError::RequestTimedOut {
+                    operation: HidppOperation::ReadDisableKeys
+                })
+            ));
+        }
+        assert!(
+            read_agent
+                .read_disable_keys(context::current(), keyboard_route())
+                .await
+                .is_ok()
+        );
+
+        let reload_agent = MockAgent::new(
+            State::with_disable_keys_scenario(DisableKeysScenario::ReloadFailsOnce)
+                .expect("mock state"),
+        );
+        assert!(
+            reload_agent
+                .clone()
+                .reload_config(context::current())
+                .await
+                .is_ok()
+        );
+        assert!(
+            reload_agent
+                .clone()
+                .reload_config(context::current())
+                .await
+                .is_err()
+        );
+        assert!(reload_agent.reload_config(context::current()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn disable_keys_write_mismatch_is_retained_and_reported() {
+        let agent = MockAgent::new(
+            State::with_disable_keys_scenario(DisableKeysScenario::WriteMismatch)
+                .expect("mock state"),
+        );
+        assert!(matches!(
+            agent
+                .clone()
+                .set_disable_keys(
+                    context::current(),
+                    keyboard_route(),
+                    DisableKeysMask::CAPS_LOCK,
+                )
+                .await,
+            Err(WriteError::WriteNotApplied {
+                operation: HidppOperation::WriteDisableKeys,
+                expected: 0xa1,
+                actual: 0xa0,
+                ..
+            })
+        ));
+        assert_eq!(
+            agent
+                .read_disable_keys(context::current(), keyboard_route())
+                .await
+                .expect("retained mismatch")
+                .disabled
+                .bits(),
+            0xa0
+        );
     }
 }

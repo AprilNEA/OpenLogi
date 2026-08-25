@@ -209,6 +209,33 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        self.shared
+            .keyboard_device(&route)
+            .run(HidppOperation::ReadDisableKeys, |channel| async move {
+                openlogi_hid::get_disable_keys_on(&channel).await
+            })
+            .await
+    }
+
+    async fn set_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        desired: openlogi_hid::DisableKeysMask,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        self.shared
+            .keyboard_device(&route)
+            .run(HidppOperation::WriteDisableKeys, |channel| async move {
+                openlogi_hid::set_disable_keys_on(&channel, desired).await
+            })
+            .await
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }

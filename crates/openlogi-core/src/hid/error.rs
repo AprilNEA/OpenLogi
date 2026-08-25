@@ -96,6 +96,34 @@ pub enum WriteError {
     /// Multiple raw HID nodes matched one physical route.
     #[error("multiple raw HID devices matched the route")]
     AmbiguousRawDevice,
+    /// A requested bit mask contains unknown or device-unsupported bits.
+    #[error(
+        "unsupported mask during {operation:?} for feature {feature_hex:#06x}: requested {requested:#x}, supported {supported:#x}"
+    )]
+    UnsupportedMask {
+        /// Operation being performed.
+        operation: HidppOperation,
+        /// HID++ feature ID involved in the operation.
+        feature_hex: u16,
+        /// Complete requested mask.
+        requested: u64,
+        /// Complete device-advertised mask.
+        supported: u64,
+    },
+    /// A successful write did not produce the expected supported mask.
+    #[error(
+        "write not applied during {operation:?} for feature {feature_hex:#06x}: expected {expected:#x}, actual {actual:#x}"
+    )]
+    WriteNotApplied {
+        /// Operation being performed.
+        operation: HidppOperation,
+        /// HID++ feature ID involved in the operation.
+        feature_hex: u16,
+        /// Complete expected effective mask.
+        expected: u64,
+        /// Complete actual effective mask.
+        actual: u64,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -133,6 +161,10 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read HID++ `0x4521` capabilities/current disabled-key mask.
+    ReadDisableKeys,
+    /// Write and verify HID++ `0x4521` disabled-key mask.
+    WriteDisableKeys,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

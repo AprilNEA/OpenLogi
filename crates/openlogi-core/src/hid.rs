@@ -8,6 +8,7 @@
 //! I/O of its own) depends on this module directly instead of linking the
 //! HID stack.
 
+pub mod disable_keys;
 pub mod dpi;
 pub mod error;
 pub mod light;
@@ -15,6 +16,7 @@ pub mod pairing;
 pub mod route;
 pub mod smartshift;
 
+pub use disable_keys::{DisableKeysMask, DisableKeysState};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use light::{LightCommand, commands_for_light_settings};
