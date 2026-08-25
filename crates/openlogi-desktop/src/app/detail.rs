@@ -308,9 +308,9 @@ fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card. Use a responsive two-column
-/// grid that still fits the window's 720 px minimum width, so these short
-/// controls don't force a vertical scroll.
+/// scroll-wheel preferences, each in a titled card. The two compact panels
+/// share a responsive row that still fits the window's 720 px minimum width;
+/// the taller scrolling card gets a full-width row of its own beneath them.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
@@ -319,33 +319,36 @@ fn pointer_tab(
 ) -> impl IntoElement {
     tab_body(
         ContentWidth::Large,
-        h_flex()
+        // Its own row, not a third grid slot: a wrapped flex line sizes its
+        // item before the item's text reflows to the line's real width, so this
+        // tall card under-reported its height and painted past the row.
+        v_flex()
             .w_full()
-            .items_stretch()
             .gap_4()
-            .flex_wrap()
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("Pointer tuning"),
-                    Icon::empty().path("action-icons/gauge.svg"),
-                    dpi_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
-            .child(pointer_grid_card(
-                PanelCard::new(
-                    tr!("SmartShift"),
-                    Icon::empty().path("action-icons/refresh-cw.svg"),
-                    smartshift_panel.clone().into_any_element(),
-                )
-                .fill(),
-            ))
             .child(
-                div()
-                    .min_w(POINTER_CARD_MIN_W)
-                    .flex_1()
-                    .child(scrolling_card(pal, cx)),
-            ),
+                h_flex()
+                    .w_full()
+                    .items_stretch()
+                    .gap_4()
+                    .flex_wrap()
+                    .child(pointer_grid_card(
+                        PanelCard::new(
+                            tr!("Pointer tuning"),
+                            Icon::empty().path("action-icons/gauge.svg"),
+                            dpi_panel.clone().into_any_element(),
+                        )
+                        .fill(),
+                    ))
+                    .child(pointer_grid_card(
+                        PanelCard::new(
+                            tr!("SmartShift"),
+                            Icon::empty().path("action-icons/refresh-cw.svg"),
+                            smartshift_panel.clone().into_any_element(),
+                        )
+                        .fill(),
+                    )),
+            )
+            .child(scrolling_card(pal, cx)),
     )
 }
 
