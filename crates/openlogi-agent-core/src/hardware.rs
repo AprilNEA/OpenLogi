@@ -281,7 +281,8 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
 ///
 /// This is used only by reconnect/wake reapply. The device layer validates the
 /// complete desired known mask, preserves advertised unknown bits, and
-/// verifies the complete supported mask before reporting success.
+/// verifies the replacement across the previously advertised supported bits
+/// before reporting success.
 pub fn write_disabled_keys_in_background(op: DeviceOp<'_>, desired: DisableKeysMask) {
     let index = op.route.device_index();
     op.spawn_write(

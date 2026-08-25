@@ -1288,7 +1288,7 @@ mod disable_keys_tests {
             DisableKeysScenario::parse("ready").expect("ready scenario"),
             DisableKeysScenario::Ready
         );
-        assert!(DisableKeysScenario::parse("READY").is_err());
+        DisableKeysScenario::parse("READY").expect_err("scenario names are case-sensitive");
         assert!(DisableKeysScenario::SameRouteReconnect.keyboard_online(Duration::from_secs(1)));
         assert!(!DisableKeysScenario::SameRouteReconnect.keyboard_online(Duration::from_secs(2)));
         assert!(DisableKeysScenario::SameRouteReconnect.keyboard_online(Duration::from_secs(4)));
@@ -1353,32 +1353,29 @@ mod disable_keys_tests {
                 })
             ));
         }
-        assert!(
-            read_agent
-                .read_disable_keys(context::current(), keyboard_route())
-                .await
-                .is_ok()
-        );
+        read_agent
+            .read_disable_keys(context::current(), keyboard_route())
+            .await
+            .expect("fourth read succeeds");
 
         let reload_agent = MockAgent::new(
             State::with_disable_keys_scenario(DisableKeysScenario::ReloadFailsOnce)
                 .expect("mock state"),
         );
-        assert!(
-            reload_agent
-                .clone()
-                .reload_config(context::current())
-                .await
-                .is_ok()
-        );
-        assert!(
-            reload_agent
-                .clone()
-                .reload_config(context::current())
-                .await
-                .is_err()
-        );
-        assert!(reload_agent.reload_config(context::current()).await.is_ok());
+        reload_agent
+            .clone()
+            .reload_config(context::current())
+            .await
+            .expect("first reload succeeds");
+        reload_agent
+            .clone()
+            .reload_config(context::current())
+            .await
+            .expect_err("second reload fails once");
+        reload_agent
+            .reload_config(context::current())
+            .await
+            .expect("third reload succeeds");
     }
 
     #[tokio::test]
