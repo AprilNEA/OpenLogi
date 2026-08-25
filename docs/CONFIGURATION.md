@@ -43,6 +43,9 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
+- `smooth_scroll` toggles finite animation for traditional mouse-wheel input
+- `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
+  continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like

@@ -9,6 +9,7 @@ auto_install_updates = false
 show_in_menu_bar = true
 capture_mouse_events = true
 smooth_scroll = false
+vertical_scroll_sensitivity = 14
 auto_download_assets = true
 asset_source = "automatic"
 language = "en"

@@ -822,6 +822,24 @@ fn app_settings_smooth_scroll_is_opt_in_and_roundtrips() {
 }
 
 #[test]
+fn app_settings_vertical_scroll_sensitivity_defaults_and_roundtrips() {
+    let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
+    assert_eq!(
+        default.app_settings.vertical_scroll_sensitivity,
+        VerticalScrollSensitivity::DEFAULT
+    );
+
+    let mut cfg = Config::default();
+    cfg.app_settings.vertical_scroll_sensitivity =
+        VerticalScrollSensitivity::try_new(7).expect("valid sensitivity");
+    let parsed = write_and_read(&cfg);
+    assert_eq!(
+        parsed.app_settings.vertical_scroll_sensitivity,
+        VerticalScrollSensitivity::try_new(7).expect("valid sensitivity")
+    );
+}
+
+#[test]
 fn app_settings_ui_scale_roundtrips() {
     let mut cfg = Config::default();
     cfg.app_settings.ui_scale = UiScale::ExtraLarge;
@@ -1122,6 +1140,9 @@ fn persisted_numeric_contracts_reject_unsafe_values() {
         "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 0\n",
         "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 101\n",
         "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
+        "schema_version = 5\n[app_settings]\nvertical_scroll_sensitivity = 0\n",
+        "schema_version = 5\n[app_settings]\nvertical_scroll_sensitivity = 101\n",
+        "schema_version = 5\n[app_settings]\nvertical_scroll_sensitivity = -2147483648\n",
         "schema_version = 5\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
         "schema_version = 5\n[devices.mouse]\ndpi = 65536\n",
         "schema_version = 5\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
