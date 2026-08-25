@@ -10,6 +10,10 @@ description = "The contract between OpenLogi's HID++ layer and the HID stack ben
 keywords = ["logitech", "hidpp", "hid", "backend"]
 categories = ["hardware-support"]
 
+[features]
+# Scripted channels used by higher-layer tests. Never enabled by shipped bins.
+test-support = []
+
 # Nothing here may reach a host. That is not a style preference — it is what
 # lets a second backend (a scripted device tree, WebHID under wasm) exist at
 # all, and CI's `wasm (portable crates)` job holds this manifest to it. Adding
