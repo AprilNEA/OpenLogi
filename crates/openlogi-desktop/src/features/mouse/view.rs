@@ -19,7 +19,9 @@ use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
     default_labels, labels_from_hotspots,
 };
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::hotspots::{
+    Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots, is_standard_button_hotspot,
+};
 use super::inspector::{BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
@@ -450,7 +452,10 @@ fn scaled_model(
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let mut hotspots = asset_hotspots_for_png(a, w, h);
+        if standard_buttons_only {
+            hotspots.retain(|hs| is_standard_button_hotspot(hs.id));
+        }
         let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {

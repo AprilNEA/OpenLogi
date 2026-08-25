@@ -27,6 +27,14 @@ use crate::write::{HidppOperation, WriteError, classify_hidpp_error, with_route}
 /// is the same assumption `openlogi diag onboard-profiles --sector` makes.
 const OBSERVED_BUTTON_TABLE_OFFSET: usize = 32;
 
+/// The `(memory_model_id, profile_format_id)` pair both devices
+/// [`OBSERVED_BUTTON_TABLE_OFFSET`] was captured from actually report. A
+/// third device with either field different has an unverified memory layout
+/// — decoding it at this offset would be a guess, not a citation, so
+/// [`decode_button_bindings`] refuses instead of risking silently wrong
+/// output. Widen this once another real device confirms the same offset.
+const VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT: (u8, u8) = (1, 3);
+
 /// Safety cap on how many button-binding entries to decode, so a wrong
 /// offset guess on an unfamiliar device produces a bounded amount of
 /// (possibly nonsensical) output instead of walking the whole sector.
@@ -107,14 +115,28 @@ async fn read_active_profile_bindings(
 
     Ok(OnboardProfileBindings {
         active_profile: Some(active),
-        bindings: decode_button_bindings(&profile),
+        bindings: decode_button_bindings(info.memory_model_id, info.profile_format_id, &profile),
     })
 }
 
 /// Walks the button-binding table from [`OBSERVED_BUTTON_TABLE_OFFSET`],
 /// stopping at the first disabled slot, an unrecognized entry, or
 /// [`MAX_DECODED_ENTRIES`] — whichever comes first.
-fn decode_button_bindings(profile_sector: &[u8]) -> Vec<OnboardProfileBinding> {
+///
+/// Returns an empty `Vec` — the same shape as "no bindings configured" — for
+/// any device whose `(memory_model_id, profile_format_id)` doesn't match
+/// [`VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT`], rather than applying the
+/// offset blind. An empty result is honest; decoding an unverified layout at
+/// this offset could produce plausible-looking but wrong bindings, which is
+/// worse than showing nothing.
+fn decode_button_bindings(
+    memory_model_id: u8,
+    profile_format_id: u8,
+    profile_sector: &[u8],
+) -> Vec<OnboardProfileBinding> {
+    if (memory_model_id, profile_format_id) != VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT {
+        return Vec::new();
+    }
     let Some(table) = profile_sector.get(OBSERVED_BUTTON_TABLE_OFFSET..) else {
         return Vec::new();
     };
@@ -243,5 +265,63 @@ fn describe_special(special: SpecialFunction) -> &'static str {
         SpecialFunction::ScrollUp => "Scroll up",
         // SpecialFunction is #[non_exhaustive] in `hidpp`.
         _ => "Unrecognized special function",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT, decode_button_bindings, describe_binding,
+    };
+
+    /// A sector whose byte 32 onward looks exactly like a valid button
+    /// table (`Mouse { buttons: 1 }`, matching real captured data) — the
+    /// point of this fixture is that it decodes to *something* plausible if
+    /// the format gate is skipped, not that it's obviously garbage.
+    fn sector_with_plausible_binding_at_offset_32() -> [u8; 255] {
+        let mut sector = [0u8; 255];
+        sector[32..36].copy_from_slice(&[0x80, 0x01, 0x00, 0x01]);
+        sector[36] = 0xff; // Disabled sentinel, stops the decode loop.
+        sector
+    }
+
+    #[test]
+    fn unverified_profile_format_decodes_to_no_bindings() {
+        let (memory_model_id, profile_format_id) = VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT;
+        let sector = sector_with_plausible_binding_at_offset_32();
+        assert_eq!(
+            decode_button_bindings(memory_model_id, profile_format_id.wrapping_add(1), &sector),
+            Vec::new(),
+            "an unverified profile_format_id must never produce decoded bindings"
+        );
+    }
+
+    #[test]
+    fn unverified_memory_model_decodes_to_no_bindings() {
+        let (memory_model_id, profile_format_id) = VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT;
+        let sector = sector_with_plausible_binding_at_offset_32();
+        assert_eq!(
+            decode_button_bindings(memory_model_id.wrapping_add(1), profile_format_id, &sector),
+            Vec::new(),
+            "an unverified memory_model_id must never produce decoded bindings"
+        );
+    }
+
+    #[test]
+    fn verified_format_still_decodes() {
+        let (memory_model_id, profile_format_id) = VERIFIED_MEMORY_MODEL_AND_PROFILE_FORMAT;
+        let sector = sector_with_plausible_binding_at_offset_32();
+        let bindings = decode_button_bindings(memory_model_id, profile_format_id, &sector);
+        assert_eq!(
+            bindings.len(),
+            1,
+            "the gate must not block the verified combination"
+        );
+        assert_eq!(bindings[0].slot, 0);
+        assert_eq!(bindings[0].description, describe_binding_for_test());
+    }
+
+    fn describe_binding_for_test() -> String {
+        describe_binding(hidpp::feature::onboard_profiles::ButtonBinding::Mouse { buttons: 1 })
     }
 }

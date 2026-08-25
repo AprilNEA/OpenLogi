@@ -68,6 +68,23 @@ impl Hotspot {
     }
 }
 
+/// True for hotspot targets that are native OS-hook signals needing no HID++
+/// diversion — the only ones safe to offer on an `OnboardProfiles`-only
+/// device (no `ReprogControls` at all). [`default_hotspots`] already limits
+/// the synthetic fallback to this set when `standard_buttons_only` is set;
+/// this lets a caller apply the same rule to a *real* asset's decoded
+/// hotspots, so a depot that happens to carry `DpiToggle`/`GestureButton`/
+/// `HapticPanel`/wheel-tilt slot names doesn't offer a control on these
+/// devices that can never fire.
+#[must_use]
+pub(crate) fn is_standard_button_hotspot(id: MouseControlId) -> bool {
+    matches!(
+        id,
+        MouseControlId::Button(ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward)
+            | MouseControlId::ThumbwheelRotation
+    )
+}
+
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
 /// as remappable and we follow the same rule everywhere.
@@ -220,6 +237,44 @@ mod tests {
                     .iter()
                     .any(|h| h.id == MouseControlId::Button(expected)),
                 "{expected:?} must remain a hotspot in the reduced set"
+            );
+        }
+    }
+
+    /// Real asset depots (not just the synthetic silhouette) can carry
+    /// `DpiToggle`/`GestureButton`/`HapticPanel`/wheel-tilt slot markers too
+    /// (see `geometry::map_slot_name`) — `is_standard_button_hotspot` is what
+    /// `scaled_model`'s asset branch filters an asset's decoded hotspots
+    /// through for an `OnboardProfiles`-only device, so it must reject every
+    /// non-native-signal control, not just the two `default_hotspots` builds
+    /// by hand.
+    #[test]
+    fn is_standard_button_hotspot_rejects_diversion_only_controls() {
+        for id in [
+            MouseControlId::Button(ButtonId::DpiToggle),
+            MouseControlId::Button(ButtonId::GestureButton),
+            MouseControlId::Button(ButtonId::HapticPanel),
+            MouseControlId::Button(ButtonId::WheelTiltLeft),
+            MouseControlId::Button(ButtonId::WheelTiltRight),
+        ] {
+            assert!(
+                !is_standard_button_hotspot(id),
+                "{id:?} needs HID++ diversion and must be filtered on OnboardProfiles-only devices"
+            );
+        }
+    }
+
+    #[test]
+    fn is_standard_button_hotspot_accepts_native_os_hook_controls() {
+        for id in [
+            MouseControlId::Button(ButtonId::MiddleClick),
+            MouseControlId::Button(ButtonId::Back),
+            MouseControlId::Button(ButtonId::Forward),
+            MouseControlId::ThumbwheelRotation,
+        ] {
+            assert!(
+                is_standard_button_hotspot(id),
+                "{id:?} is a native OS-hook signal and must stay available"
             );
         }
     }
