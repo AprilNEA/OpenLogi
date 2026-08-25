@@ -317,16 +317,23 @@ impl SettingsView {
     )]
     fn on_vertical_scroll_sensitivity_slider(
         &mut self,
-        _: &Entity<SliderState>,
+        slider: &Entity<SliderState>,
         event: &SliderEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let SliderEvent::Release(value) = event {
             let sensitivity = VerticalScrollSensitivity::from_rounded(value.start());
-            AppState::update(cx, |state, cx| {
+            let committed = AppState::update(cx, |state, cx| {
                 state.set_vertical_scroll_sensitivity(sensitivity);
                 cx.emit(StateEvent::SettingsChanged);
+                state.app_settings().vertical_scroll_sensitivity
+            });
+            // A failed write restores AppState's persisted configuration. Re-seat
+            // this independently owned slider so it cannot keep presenting the
+            // rejected value after that rollback.
+            slider.update(cx, |slider, cx| {
+                slider.set_value(f32::from(committed), window, cx);
             });
         }
         cx.notify();

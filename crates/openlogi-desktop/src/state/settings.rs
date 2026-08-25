@@ -251,7 +251,8 @@ impl AppState {
         if self.config.app_settings.vertical_scroll_sensitivity == sensitivity {
             return;
         }
-        self.config.app_settings.vertical_scroll_sensitivity = sensitivity;
+        self.config
+            .edit(|config| config.app_settings.vertical_scroll_sensitivity = sensitivity);
         self.persist_and_reload("vertical scroll sensitivity");
     }
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
