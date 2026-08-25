@@ -35,7 +35,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::{ProfileIconCache, profile_scope_bar};
+use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -126,7 +126,8 @@ pub(super) struct DetailPanels<'a> {
 /// device's tab set.
 pub(super) fn detail_content(
     panels: &DetailPanels<'_>,
-    profile_icons: &mut ProfileIconCache,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
     tabs: &[DetailTab],
     active: DetailTab,
     pal: Palette,
@@ -137,7 +138,7 @@ pub(super) fn detail_content(
         .is_some_and(|record| record.online);
     let content = match active {
         DetailTab::Buttons => {
-            buttons_tab(panels.mouse_model, profile_icons, pal, cx).into_any_element()
+            buttons_tab(panels.mouse_model, profile_icons, app_catalog, pal, cx).into_any_element()
         }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
@@ -272,7 +273,8 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
 /// binding inspector.
 fn buttons_tab(
     mouse_model: &gpui::Entity<MouseModelView>,
-    profile_icons: &mut ProfileIconCache,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
@@ -280,7 +282,7 @@ fn buttons_tab(
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(pal, profile_icons, cx))
+        .children(profile_scope_bar(pal, profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
 }
 

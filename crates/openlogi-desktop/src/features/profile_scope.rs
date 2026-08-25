@@ -1,11 +1,15 @@
 //! Profile context bar for the Buttons workspace.
 
-use std::collections::{BTreeMap, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
+use appcatalog::{Application, ApplicationIdentity, IdentityKind};
 use gpui::{
-    Anchor, AnyElement, App, Image, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, Image, InteractiveElement,
+    IntoElement, ParentElement, Role, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    WeakEntity, Window, div, img, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -13,7 +17,9 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    popover::Popover,
+    input::{Input, InputEvent, InputState},
+    popover::{Popover, PopoverState},
+    v_flex,
 };
 
 use crate::state::AppState;
@@ -23,29 +29,205 @@ use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 use super::mouse::picker::{compact_panel, divider, title};
 
 const PROFILE_CONTROL_H: f32 = 30.;
+const APP_ROW_H: f32 = 44.;
 
 #[derive(Clone)]
 struct ProfileChoice {
     app: String,
     name: String,
-    icon: Option<Arc<Image>>,
     override_count: usize,
     persisted: bool,
 }
 
+struct AddAppChoices {
+    recent: Vec<ProfileChoice>,
+    applications: Vec<ProfileChoice>,
+    loading: bool,
+    failed: bool,
+}
+
 /// Installed application icons are immutable for a GUI session. Keep AppKit
 /// lookup and image encoding out of the render loop after the first sighting.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ProfileIconCache {
-    icons: HashMap<String, Option<Arc<Image>>>,
+    icons: Rc<RefCell<HashMap<String, Option<Arc<Image>>>>>,
 }
 
 impl ProfileIconCache {
-    fn icon(&mut self, app: &str) -> Option<Arc<Image>> {
+    fn icon(&self, app: &str) -> Option<Arc<Image>> {
         self.icons
+            .borrow_mut()
             .entry(app.to_string())
             .or_insert_with(|| crate::platform::app_icon::application_icon(app))
             .clone()
+    }
+}
+
+enum CatalogLoad {
+    Loading,
+    Ready(Vec<Application>),
+    Failed,
+}
+
+/// Search, expansion, and discovery state for the Add App picker.
+///
+/// The entity owns the one-shot discovery task so closing the app window
+/// cancels work whose result no view can consume. Host enumeration stays on
+/// GPUI's background executor and never delays the first paint.
+pub(crate) struct AppCatalogPicker {
+    search: Entity<InputState>,
+    expanded: bool,
+    load: CatalogLoad,
+    preferred_identity: IdentityKind,
+    _search_subscription: Subscription,
+    _discovery_task: Task<()>,
+}
+
+impl AppCatalogPicker {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search applications…")));
+        let search_subscription = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        let discovery_task = cx.spawn(async move |picker, cx| {
+            let discovered = cx
+                .background_executor()
+                .spawn(async {
+                    let runtime_identity = appcatalog::foreground_application()
+                        .ok()
+                        .flatten()
+                        .and_then(|app| app.identities.first().map(ApplicationIdentity::kind));
+                    appcatalog::applications().map(|applications| (applications, runtime_identity))
+                })
+                .await;
+            picker
+                .update(cx, |picker, cx| {
+                    match discovered {
+                        Ok((applications, runtime_identity)) => {
+                            picker.preferred_identity = preferred_identity_kind(runtime_identity);
+                            picker.load = CatalogLoad::Ready(applications);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to load application catalog");
+                            picker.load = CatalogLoad::Failed;
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+        });
+
+        Self {
+            search,
+            expanded: false,
+            load: CatalogLoad::Loading,
+            preferred_identity: preferred_identity_kind(None),
+            _search_subscription: search_subscription,
+            _discovery_task: discovery_task,
+        }
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+    }
+
+    fn available_profiles(
+        &self,
+        observed: &HashSet<String>,
+        unavailable: &HashSet<String>,
+    ) -> Vec<ProfileChoice> {
+        let CatalogLoad::Ready(applications) = &self.load else {
+            return Vec::new();
+        };
+        let mut seen = HashSet::new();
+        let mut profiles = applications
+            .iter()
+            .filter_map(|application| {
+                let app = identity_for_application(application, observed, self.preferred_identity)?;
+                if unavailable.contains(&app) || !seen.insert(app.clone()) {
+                    return None;
+                }
+                Some(ProfileChoice {
+                    app,
+                    name: application.name.clone(),
+                    override_count: 0,
+                    persisted: false,
+                })
+            })
+            .collect::<Vec<_>>();
+        profiles.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.app.cmp(&right.app))
+        });
+        profiles
+    }
+}
+
+fn identity_for_application(
+    application: &Application,
+    observed: &HashSet<String>,
+    preferred: IdentityKind,
+) -> Option<String> {
+    application
+        .identities
+        .iter()
+        .find(|identity| observed.contains(identity.value()))
+        .or_else(|| {
+            application
+                .identities
+                .iter()
+                .find(|identity| identity.kind() == preferred)
+        })
+        // `StartupWMClass` is optional in desktop files. Keep the installed
+        // catalog complete on X11/GNOME by falling back to its stable desktop
+        // ID. Recently observed candidates always take the exact runtime ID
+        // above instead of this registration-time best effort.
+        .or_else(|| {
+            if preferred != IdentityKind::LinuxStartupWmClass {
+                return None;
+            }
+            application
+                .identities
+                .iter()
+                .find(|identity| identity.kind() == IdentityKind::LinuxDesktopId)
+        })
+        .map(|identity| identity.value().to_string())
+}
+
+fn preferred_identity_kind(runtime: Option<IdentityKind>) -> IdentityKind {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = runtime;
+        IdentityKind::MacBundleIdentifier
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = runtime;
+        IdentityKind::WindowsExecutablePath
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(kind @ (IdentityKind::LinuxStartupWmClass | IdentityKind::LinuxWaylandAppId)) =
+            runtime
+        {
+            return kind;
+        }
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
+        let x11 = std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "x11")
+            || std::env::var_os("WAYLAND_DISPLAY").is_none();
+        if x11 || desktop.contains("gnome") {
+            IdentityKind::LinuxStartupWmClass
+        } else {
+            IdentityKind::LinuxWaylandAppId
+        }
     }
 }
 
@@ -53,7 +235,8 @@ impl ProfileIconCache {
 /// active, but never changes which profile this editor has open.
 pub fn profile_scope_bar(
     pal: Palette,
-    icons: &mut ProfileIconCache,
+    icons: &ProfileIconCache,
+    catalog: &Entity<AppCatalogPicker>,
     cx: &App,
 ) -> Option<AnyElement> {
     let state = AppState::try_read(cx)?;
@@ -68,7 +251,6 @@ pub fn profile_scope_bar(
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
-            icon: icons.icon(app),
             override_count: count,
             persisted: true,
         })
@@ -82,7 +264,6 @@ pub fn profile_scope_bar(
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
-            icon: icons.icon(app),
             override_count: 0,
             persisted: false,
         });
@@ -93,30 +274,44 @@ pub fn profile_scope_bar(
         .map(|(app, name)| (app.to_string(), name.to_string()))
         .collect();
 
-    let persisted_ids: Vec<String> = profiles
+    let persisted_ids: HashSet<String> = profiles
         .iter()
         .filter(|profile| profile.persisted)
         .map(|profile| profile.app.clone())
         .collect();
-    let available_apps: Vec<ProfileChoice> = recent_apps
-        .into_iter()
+    let observed_ids: HashSet<String> = recent_apps.iter().map(|(app, _)| app.clone()).collect();
+    let available_recent: Vec<ProfileChoice> = recent_apps
+        .iter()
         .filter(|(app, _)| {
-            !persisted_ids.iter().any(|existing| existing == app)
-                && editing_app.as_deref() != Some(app.as_str())
+            !persisted_ids.contains(app) && editing_app.as_deref() != Some(app.as_str())
         })
         .map(|(app, name)| ProfileChoice {
-            icon: icons.icon(&app),
-            app,
-            name,
+            app: app.clone(),
+            name: name.clone(),
             override_count: 0,
             persisted: false,
         })
         .collect();
+    let mut unavailable = persisted_ids;
+    unavailable.extend(observed_ids.iter().cloned());
+    unavailable.extend(editing_app.iter().cloned());
+    let available_catalog = catalog
+        .read(cx)
+        .available_profiles(&observed_ids, &unavailable);
+    let loading = matches!(catalog.read(cx).load, CatalogLoad::Loading);
+    let failed = matches!(catalog.read(cx).load, CatalogLoad::Failed);
 
     Some(profile_scope_content(
         editing_app.as_deref(),
         &profiles,
-        available_apps,
+        AddAppChoices {
+            recent: available_recent,
+            applications: available_catalog,
+            loading,
+            failed,
+        },
+        catalog,
+        icons,
         pal,
     ))
 }
@@ -161,7 +356,9 @@ pub(crate) fn profile_canvas_status(pal: Palette, cx: &App) -> Option<AnyElement
 fn profile_scope_content(
     editing_app: Option<&str>,
     profiles: &[ProfileChoice],
-    available_apps: Vec<ProfileChoice>,
+    choices: AddAppChoices,
+    catalog: &Entity<AppCatalogPicker>,
+    icons: &ProfileIconCache,
     pal: Palette,
 ) -> AnyElement {
     let default_selected = editing_app.is_none();
@@ -177,7 +374,11 @@ fn profile_scope_content(
             profile_tab(
                 ("app-profile", index),
                 profile.name.clone(),
-                Some(application_mark(profile.icon.clone(), &profile.name, pal)),
+                Some(application_mark(
+                    icons.icon(&profile.app),
+                    &profile.name,
+                    pal,
+                )),
                 selected,
                 pal,
             )
@@ -230,7 +431,12 @@ fn profile_scope_content(
                 )
                 .children(profile_tabs),
         )
-        .child(add_app_popover(available_apps, pal))
+        .child(add_app_popover(
+            choices,
+            catalog.clone(),
+            icons.clone(),
+            pal,
+        ))
         .when_some(
             selected_profile.filter(|profile| profile.persisted),
             |row, profile| row.child(profile_options_popover(profile, pal)),
@@ -323,7 +529,13 @@ fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::Sh
     }
 }
 
-fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
+fn add_app_popover(
+    choices: AddAppChoices,
+    catalog: Entity<AppCatalogPicker>,
+    icons: ProfileIconCache,
+    pal: Palette,
+) -> AnyElement {
+    let catalog_on_open = catalog.clone();
     Popover::new("add-app-popover")
         .anchor(Anchor::TopRight)
         .trigger(
@@ -334,51 +546,213 @@ fn add_app_popover(apps: Vec<ProfileChoice>, pal: Palette) -> AnyElement {
                 .icon(IconName::Plus)
                 .label(tr!("Add app")),
         )
-        .content(move |_state, _window, cx| {
-            let popover = cx.entity().downgrade();
-            let rows = apps
-                .iter()
-                .enumerate()
-                .map(|(index, choice)| {
-                    let app = choice.app.clone();
-                    let popover = popover.clone();
-                    MenuRow::new(("recent-app", index))
-                        .role(Role::MenuItem)
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(application_mark(choice.icon.clone(), &choice.name, pal))
-                                .child(choice.name.clone()),
-                        )
-                        .on_click(move |_event, window, cx| {
-                            AppState::update_bindings(cx, |state| {
-                                state.set_editing_app(Some(app.clone()));
-                            });
-                            if let Some(popover) = popover.upgrade() {
-                                popover.update(cx, |state, cx| state.dismiss(window, cx));
-                            }
-                        })
-                })
-                .collect::<Vec<_>>();
-
-            compact_panel(pal)
-                .w(px(260.))
-                .child(title(tr!("Add app profile"), pal))
-                .child(divider(pal))
-                .when(rows.is_empty(), |card| {
-                    card.child(
-                        div()
-                            .px_2()
-                            .py_2()
-                            .text_caption()
-                            .text_color(pal.text_muted)
-                            .child(tr!("Open an app to add it here.")),
-                    )
-                })
-                .children(rows)
+        .on_open_change(move |open, window, cx| {
+            if *open {
+                catalog_on_open.update(cx, |catalog, cx| catalog.clear_search(window, cx));
+            }
         })
+        .content(move |_state, _window, cx| add_app_content(&choices, &catalog, &icons, pal, cx))
         .into_any_element()
+}
+
+fn add_app_content(
+    choices: &AddAppChoices,
+    catalog: &Entity<AppCatalogPicker>,
+    icons: &ProfileIconCache,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> gpui::Div {
+    let popover = cx.entity().downgrade();
+    let catalog_state = catalog.read(cx);
+    let search = catalog_state.search.clone();
+    let query = search.read(cx).value().trim().to_lowercase();
+    let show_applications = catalog_state.expanded || !query.is_empty();
+    let recent_rows = choices
+        .recent
+        .iter()
+        .filter(|choice| profile_matches_query(choice, &query))
+        .cloned()
+        .map(|choice| application_row(choice, icons, pal, popover.clone()))
+        .collect::<Vec<_>>();
+    let application_rows = choices
+        .applications
+        .iter()
+        .filter(|choice| profile_matches_query(choice, &query))
+        .cloned()
+        .collect::<Vec<_>>();
+    let no_matches = application_rows.is_empty()
+        && !choices.loading
+        && !choices.failed
+        && (query.is_empty() || recent_rows.is_empty());
+    let catalog_for_toggle = catalog.clone();
+    let list_icons = icons.clone();
+    let list_popover = popover.clone();
+    let list_len = application_rows.len();
+    let application_rows = Arc::new(application_rows);
+
+    compact_panel(pal)
+        .w(px(320.))
+        .child(title(tr!("Add app profile"), pal))
+        .child(divider(pal))
+        .child(
+            Input::new(&search)
+                .small()
+                .cleanable(true)
+                .prefix(IconName::Search),
+        )
+        .when(!recent_rows.is_empty(), |card| {
+            card.child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("Recent applications")),
+            )
+        })
+        .children(recent_rows)
+        .child(applications_toggle(
+            show_applications,
+            catalog_for_toggle,
+            pal,
+        ))
+        .when(show_applications && choices.loading, |card| {
+            card.child(catalog_message(tr!("Loading applications…"), pal))
+        })
+        .when(show_applications && choices.failed, |card| {
+            card.child(catalog_message(
+                tr!("Application catalog unavailable."),
+                pal,
+            ))
+        })
+        .when(show_applications && list_len > 0, |card| {
+            card.child(
+                uniform_list("application-catalog-list", list_len, {
+                    let application_rows = application_rows.clone();
+                    move |visible_range, _window, _cx| {
+                        visible_range
+                            .map(|index| {
+                                application_row(
+                                    application_rows[index].clone(),
+                                    &list_icons,
+                                    pal,
+                                    list_popover.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                })
+                .h(px(application_list_height(list_len)))
+                .w_full(),
+            )
+        })
+        .when(show_applications && no_matches, |card| {
+            card.child(catalog_message(tr!("No applications found"), pal))
+        })
+}
+
+fn applications_toggle(
+    expanded: bool,
+    catalog: Entity<AppCatalogPicker>,
+    pal: Palette,
+) -> impl IntoElement {
+    BaseButton::new("all-applications-toggle")
+        .role(Role::Button)
+        .aria_expanded(expanded)
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .px_2()
+        .py_1p5()
+        .rounded(pal.control_radius)
+        .text_body()
+        .text_color(pal.text_primary)
+        .hover(move |button| button.bg(pal.control_hover))
+        .focus_visible(move |button| button.bg(pal.control_hover))
+        .child(
+            Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size_3(),
+        )
+        .child(tr!("All applications"))
+        .on_click(move |_event, _window, cx| {
+            catalog.update(cx, |catalog, cx| {
+                catalog.expanded = !catalog.expanded;
+                cx.notify();
+            });
+        })
+}
+
+fn profile_matches_query(choice: &ProfileChoice, query: &str) -> bool {
+    query.is_empty()
+        || choice.name.to_lowercase().contains(query)
+        || choice.app.to_lowercase().contains(query)
+}
+
+fn application_row(
+    choice: ProfileChoice,
+    icons: &ProfileIconCache,
+    pal: Palette,
+    popover: WeakEntity<PopoverState>,
+) -> gpui::Div {
+    let app = choice.app.clone();
+    div().h(px(APP_ROW_H)).child(
+        MenuRow::new(format!("catalog-app:{}", choice.app))
+            .role(Role::MenuItem)
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .child(application_mark(icons.icon(&choice.app), &choice.name, pal))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().truncate().text_body().child(choice.name))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_caption()
+                                    .text_color(pal.text_muted)
+                                    .child(choice.app),
+                            ),
+                    ),
+            )
+            .on_click(move |_event, window, cx| {
+                AppState::update_bindings(cx, |state| {
+                    state.set_editing_app(Some(app.clone()));
+                });
+                if let Some(popover) = popover.upgrade() {
+                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                }
+            }),
+    )
+}
+
+fn catalog_message(message: gpui::SharedString, pal: Palette) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_2()
+        .text_caption()
+        .text_color(pal.text_muted)
+        .child(message)
+}
+
+fn application_list_height(rows: usize) -> f32 {
+    match rows.min(6) {
+        0 => 0.,
+        1 => APP_ROW_H,
+        2 => APP_ROW_H * 2.,
+        3 => APP_ROW_H * 3.,
+        4 => APP_ROW_H * 4.,
+        5 => APP_ROW_H * 5.,
+        _ => APP_ROW_H * 6.,
+    }
 }
 
 fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
@@ -472,11 +846,76 @@ pub(crate) fn friendly_app_name(identifier: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::friendly_app_name;
+    use std::collections::HashSet;
+
+    use appcatalog::{Application, ApplicationIdentity, IdentityKind};
+
+    use super::{friendly_app_name, identity_for_application};
 
     #[test]
     fn profile_identifiers_have_a_readable_fallback() {
         assert_eq!(friendly_app_name("com.google.Chrome"), "Chrome");
         assert_eq!(friendly_app_name("exe:C:\\Tools\\Zed.exe"), "Zed");
+    }
+
+    #[test]
+    fn observed_identity_wins_over_the_platform_default() {
+        let application = application_with_identities(vec![
+            ApplicationIdentity::new(IdentityKind::LinuxWaylandAppId, "org.example.Editor"),
+            ApplicationIdentity::new(IdentityKind::LinuxStartupWmClass, "Editor"),
+        ]);
+        let observed = HashSet::from(["Editor".to_string()]);
+
+        assert_eq!(
+            identity_for_application(&application, &observed, IdentityKind::LinuxWaylandAppId,)
+                .as_deref(),
+            Some("Editor")
+        );
+    }
+
+    #[test]
+    fn unobserved_application_uses_the_active_identity_namespace() {
+        let application = application_with_identities(vec![
+            ApplicationIdentity::new(IdentityKind::LinuxWaylandAppId, "org.example.Editor"),
+            ApplicationIdentity::new(IdentityKind::LinuxStartupWmClass, "Editor"),
+        ]);
+
+        assert_eq!(
+            identity_for_application(
+                &application,
+                &HashSet::new(),
+                IdentityKind::LinuxWaylandAppId,
+            )
+            .as_deref(),
+            Some("org.example.Editor")
+        );
+    }
+
+    #[test]
+    fn linux_desktop_id_keeps_apps_without_startup_class_available() {
+        let application = application_with_identities(vec![ApplicationIdentity::new(
+            IdentityKind::LinuxDesktopId,
+            "org.example.Editor",
+        )]);
+
+        assert_eq!(
+            identity_for_application(
+                &application,
+                &HashSet::new(),
+                IdentityKind::LinuxStartupWmClass,
+            )
+            .as_deref(),
+            Some("org.example.Editor")
+        );
+    }
+
+    fn application_with_identities(identities: Vec<ApplicationIdentity>) -> Application {
+        Application {
+            name: "Editor".into(),
+            identities,
+            executable: None,
+            registration: "editor.desktop".into(),
+            icon: None,
+        }
     }
 }

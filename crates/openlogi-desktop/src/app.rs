@@ -23,7 +23,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::ProfileIconCache;
+use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
@@ -175,6 +175,9 @@ pub struct AppView {
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
     profile_icons: ProfileIconCache,
+    app_catalog: Entity<AppCatalogPicker>,
+    /// Redraw the profile picker after discovery, filtering, or expansion changes.
+    _app_catalog_obs: Subscription,
     appearance_obs: Option<Subscription>,
     /// Invalidates the root only for semantic state changes its current route
     /// reads; feature entities subscribe to their own events directly.
@@ -233,6 +236,8 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let app_catalog = cx.new(|cx| AppCatalogPicker::new(window, cx));
+        let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
             let active_key = AppState::try_read(cx)
                 .and_then(AppState::current_record)
@@ -288,6 +293,8 @@ impl AppView {
             camera_controls,
             light_panel,
             profile_icons: ProfileIconCache::default(),
+            app_catalog,
+            _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
             config_issue_visible: false,
@@ -602,7 +609,8 @@ impl Render for AppView {
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
                     },
-                    &mut self.profile_icons,
+                    &self.profile_icons,
+                    &self.app_catalog,
                     &tabs,
                     active,
                     pal,
