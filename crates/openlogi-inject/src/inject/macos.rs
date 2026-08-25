@@ -1,5 +1,7 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
+use std::sync::{LazyLock, Mutex};
+
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
     ScrollEventUnit,
@@ -11,8 +13,14 @@ use core_foundation::base::TCFType as _;
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, HeldModifiers, KeyPhase};
+use super::{HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer};
+
+static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -602,23 +610,67 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     ev.post(CGEventTapLocation::HID);
 }
 
-/// Post `(delta_x, delta_y)` scroll lines. Line units suit the thumb wheel's
-/// ratchet-like increments better than pixels.
-pub(super) fn post_scroll(delta_x: i32, delta_y: i32) {
-    if delta_x == 0 && delta_y == 0 {
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let (quantizer, unit) = match delta {
+        ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
+        ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
+    };
+    let Ok(mut quantizer) = quantizer.lock() else {
+        tracing::warn!("macOS scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, 1.0);
+    drop(quantizer);
+    if delta == QuantizedScroll::default() {
         return;
     }
+
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for thumbwheel scroll");
+        tracing::warn!("CGEventSource::new failed for precise scroll");
         return;
     };
-    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::LINE, 2, delta_y, delta_x, 0)
-    else {
-        tracing::warn!("CGEvent::new_scroll_event failed for thumbwheel");
+    let Ok(ev) = CGEvent::new_scroll_event(src, unit, 2, delta.y, delta.x, 0) else {
+        tracing::warn!("CGEvent::new_scroll_event failed for precise scroll");
         return;
     };
+    if unit == ScrollEventUnit::PIXEL {
+        set_continuous_scroll_fields(&ev, delta);
+    }
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
+}
+
+fn set_continuous_scroll_fields(event: &CGEvent, delta: QuantizedScroll) {
+    event.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+    set_continuous_axis(
+        event,
+        delta.y,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+    );
+    set_continuous_axis(
+        event,
+        delta.x,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+    );
+}
+
+fn set_continuous_axis(
+    event: &CGEvent,
+    points: i32,
+    line_field: u32,
+    fixed_field: u32,
+    point_field: u32,
+) {
+    const POINTS_PER_LINE: i64 = 10;
+    const FIXED_POINT_SCALE: i64 = 1 << 16;
+    let points = i64::from(points);
+    event.set_integer_value_field(point_field, points);
+    event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
+    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
 }
 
 /// Raw FFI surface for the AXUIElement/CF calls used by [`ax_browser_navigate`]

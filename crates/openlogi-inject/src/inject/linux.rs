@@ -15,8 +15,20 @@ use zbus::blocking::Connection as DbusConn;
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase};
+use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+
+const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
+
+#[derive(Default)]
+struct ScrollOutput {
+    high_resolution: ScrollQuantizer,
+    legacy: ScrollQuantizer,
+}
+
+static SCROLL_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
+    LazyLock::new(|| Mutex::new(ScrollOutput::default()));
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.
@@ -284,7 +296,12 @@ fn build() -> io::Result<VirtualDevice> {
     // which can otherwise cause injected key/wheel events to be grabbed by
     // pointer-grabbing X11 clients or routed oddly by some Wayland compositors.
     let mut axes = AttributeSet::<RelativeAxisCode>::default();
-    for a in [RelativeAxisCode::REL_WHEEL, RelativeAxisCode::REL_HWHEEL] {
+    for a in [
+        RelativeAxisCode::REL_WHEEL,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+    ] {
         axes.insert(a);
     }
 
@@ -364,8 +381,56 @@ fn click(button: KeyCode) {
 }
 
 /// Inject a single relative-axis delta followed by `SYN_REPORT`.
-pub(super) fn scroll(axis: RelativeAxisCode, value: i32) {
+fn scroll(axis: RelativeAxisCode, value: i32) {
     emit(&[rel_ev(axis, value), syn()]);
+}
+
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Linux");
+        return;
+    };
+    let Ok(mut output) = SCROLL_OUTPUT.lock() else {
+        tracing::warn!("Linux scroll quantizer mutex poisoned");
+        return;
+    };
+    let high_resolution = output
+        .high_resolution
+        .quantize(delta, HIGH_RES_UNITS_PER_TICK);
+    let legacy = output.legacy.quantize(delta, 1.0);
+    drop(output);
+
+    let mut events = Vec::with_capacity(5);
+    push_scroll_axes(
+        &mut events,
+        high_resolution,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+    );
+    push_scroll_axes(
+        &mut events,
+        legacy,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL,
+    );
+    if !events.is_empty() {
+        events.push(syn());
+        emit(&events);
+    }
+}
+
+fn push_scroll_axes(
+    events: &mut Vec<InputEvent>,
+    delta: QuantizedScroll,
+    horizontal: RelativeAxisCode,
+    vertical: RelativeAxisCode,
+) {
+    if delta.x != 0 {
+        events.push(rel_ev(horizontal, delta.x));
+    }
+    if delta.y != 0 {
+        events.push(rel_ev(vertical, delta.y));
+    }
 }
 
 /// Force the virtual device to initialise (if it hasn't already) and return
