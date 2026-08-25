@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+pub use hidpp::feature::onboard_profiles::OnboardProfilesInfo;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
@@ -150,35 +151,66 @@ pub async fn dump_reprog_controls(
 /// `Capabilities::buttons` never becomes true for them and the desktop app's
 /// Buttons panel never appears — see `openlogi-core/src/device.rs`. Both
 /// devices do expose `0x8100`, the feature Logitech's gaming line actually
-/// uses for on-device profile and button-assignment storage. This probe just
-/// captures the raw `getInfo`-equivalent payload (function `0`) with no
-/// official spec available yet — see `hidpp::feature::onboard_profiles` for
-/// why the layout isn't parsed here.
+/// uses for on-device profile and button-assignment storage.
 pub async fn dump_onboard_profiles_info(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
-) -> Result<[u8; 16], WriteError> {
+) -> Result<OnboardProfilesInfo, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let info = device
-            .root()
-            .get_feature(OnboardProfilesFeature::ID)
-            .await
-            .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
-            })?
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: OnboardProfilesFeature::ID,
-            })?;
-        let onboard_profiles = device.add_feature::<OnboardProfilesFeature>(info.index);
-        onboard_profiles.get_info_raw().await.map_err(|e| {
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles.get_info().await.map_err(|e| {
             classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
         })
     })
     .await
+}
+
+/// Diagnostic, read-only dump of one onboard-memory sector via `0x8100`'s
+/// `MEMORY_READ`. `sector_size` should come from a prior
+/// [`dump_onboard_profiles_info`] call. Sector `0x0000` is the profile
+/// directory on every device libratbag documents; see
+/// `hidpp::feature::onboard_profiles` for what is (and is not) decoded from
+/// it yet.
+pub async fn dump_onboard_profiles_sector(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    sector: u16,
+    sector_size: u16,
+) -> Result<Vec<u8>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles
+            .read_sector(sector, sector_size)
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+            })
+    })
+    .await
+}
+
+/// Resolves `0x8100`'s feature index on `device_index` and returns it bound
+/// to a fresh [`Device`], shared by every `OnboardProfiles` diagnostic above.
+async fn open_onboard_profiles(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Arc<OnboardProfilesFeature>, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let info = device
+        .root()
+        .get_feature(OnboardProfilesFeature::ID)
+        .await
+        .map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+        })?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: OnboardProfilesFeature::ID,
+        })?;
+    Ok(device.add_feature::<OnboardProfilesFeature>(info.index))
 }
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`

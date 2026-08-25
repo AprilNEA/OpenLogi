@@ -25,7 +25,7 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    LitraModel, OnboardProfilesInfo, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 
 /// This host's HID stack.
@@ -178,10 +178,21 @@ pub async fn dump_reprog_controls(
     device::dump_reprog_controls(&*native_backend(), route).await
 }
 
-/// Read the raw HID++ `0x8100 OnboardProfiles` info payload of the device
-/// `route` reaches.
-pub async fn dump_onboard_profiles_info(route: &DeviceRoute) -> Result<[u8; 16], WriteError> {
+/// Read the HID++ `0x8100 OnboardProfiles` info of the device `route` reaches.
+pub async fn dump_onboard_profiles_info(
+    route: &DeviceRoute,
+) -> Result<OnboardProfilesInfo, WriteError> {
     device::dump_onboard_profiles_info(&*native_backend(), route).await
+}
+
+/// Read one onboard-memory sector (via `0x8100`'s `MEMORY_READ`) of the
+/// device `route` reaches.
+pub async fn dump_onboard_profiles_sector(
+    route: &DeviceRoute,
+    sector: u16,
+    sector_size: u16,
+) -> Result<Vec<u8>, WriteError> {
+    device::dump_onboard_profiles_sector(&*native_backend(), route, sector, sector_size).await
 }
 
 /// Read the raw battery report of the device `route` reaches.
