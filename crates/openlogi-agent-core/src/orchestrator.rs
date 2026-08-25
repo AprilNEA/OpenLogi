@@ -23,8 +23,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
-    HidppOperation, WriteError, is_reserved_keyboard_control,
+    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, DisableKeysMask,
+    FnLockState, HidppOperation, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -754,6 +754,12 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        if let Some(desired) = configured_disabled_keys(&self.config, key) {
+            crate::hardware::write_disabled_keys_in_background(
+                self.shared.keyboard_device(&route),
+                desired,
+            );
+        }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -1075,6 +1081,12 @@ impl Orchestrator {
     }
 }
 
+fn configured_disabled_keys(config: &Config, device_key: &str) -> Option<DisableKeysMask> {
+    config.disabled_keys(device_key).map(|keys| {
+        keys.iter()
+            .fold(DisableKeysMask::EMPTY, |mask, key| mask | key.mask())
+    })
+}
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
 /// background thread that panicked while holding the lock can't take the agent
 /// down — it just keeps the stale value until the next successful rebuild.

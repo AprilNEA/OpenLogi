@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi,
+    HidppOperation, ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -393,6 +393,32 @@ impl VolatileMouseSettings {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Spawn a guarded Disable Keys replacement on the keyboard channel.
+///
+/// This is used only by reconnect/wake reapply. The device layer validates the
+/// complete desired known mask, preserves advertised unknown bits, and
+/// verifies the complete supported mask before reporting success.
+pub fn write_disabled_keys_in_background(op: DeviceOp<'_>, desired: DisableKeysMask) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "Disable Keys write",
+        move |channel| async move { openlogi_hid::set_disable_keys_on(&channel, desired).await },
+        move |result| match result {
+            Ok(Ok(state)) => debug!(
+                index,
+                desired = desired.bits(),
+                confirmed = state.disabled.bits(),
+                "disabled keys written"
+            ),
+            Ok(Err(error)) => warn!(error = ?error, "Disable Keys write failed"),
+            Err(_) => warn!(
+                index,
+                "Disable Keys write timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
 }
 
 /// Re-apply every volatile mouse setting for `op`'s device on a **single**
