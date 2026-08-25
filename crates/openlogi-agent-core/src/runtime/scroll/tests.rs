@@ -228,7 +228,50 @@ fn cancellation_emits_one_terminal_phase_only_after_output_began() {
 }
 
 #[test]
-fn source_cancellation_does_not_interrupt_another_device() {
+fn concurrent_sources_share_one_balanced_output_stream() {
+    let base = Instant::now();
+    let first = hidpp_source("mouse-a", 1);
+    let second = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.impulse(first, wheel(1.0, 0.0), base, &mut |frame| {
+        frames.push(frame);
+    });
+    engine.impulse(second, wheel(0.0, 1.0), base, &mut |frame| {
+        frames.push(frame);
+    });
+    engine.advance_due(base + Duration::from_millis(25), &mut |frame| {
+        frames.push(frame);
+    });
+    engine.advance_due(base + ANIMATION_DURATION, &mut |frame| {
+        frames.push(frame);
+    });
+
+    assert_delta(cumulative(&frames), wheel(1.0, 1.0));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.phase == SmoothScrollPhase::Began)
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.phase == SmoothScrollPhase::Ended)
+            .count(),
+        1
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| { !matches!(frame.phase, SmoothScrollPhase::Cancelled) })
+    );
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn source_cancellation_does_not_interrupt_another_source() {
     let base = Instant::now();
     let first = hidpp_source("mouse-a", 1);
     let second = hidpp_source("mouse-b", 1);
@@ -248,7 +291,8 @@ fn source_cancellation_does_not_interrupt_another_device() {
             .iter()
             .filter(|frame| frame.phase == SmoothScrollPhase::Cancelled)
             .count(),
-        1
+        0,
+        "a source-local cancellation cannot terminate the shared output stream"
     );
 
     engine.advance_due(base + ANIMATION_DURATION, &mut |frame| frames.push(frame));
