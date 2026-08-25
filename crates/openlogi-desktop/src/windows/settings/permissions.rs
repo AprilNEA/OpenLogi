@@ -1,9 +1,7 @@
 //! Permissions settings page (macOS / Linux).
 
 #[cfg(target_os = "macos")]
-use super::{
-    AnyElement, App, AppState, InteractiveElement, Permission, StatefulInteractiveElement,
-};
+use super::{AnyElement, App, AppState, InteractiveElement, Permission};
 use super::{IconName, Palette, SettingPage};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{

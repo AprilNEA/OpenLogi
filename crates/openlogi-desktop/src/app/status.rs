@@ -150,9 +150,9 @@ pub(super) fn attention_footer(pal: Palette) -> impl IntoElement {
 #[cfg(target_os = "macos")]
 fn accessibility_status(pal: Palette) -> AnyElement {
     // Scoped here rather than at module level: these traits' only user is this
-    // macOS-gated affordance (`.id()` + `.on_click()`), so an ungated import
+    // macOS-gated affordance (`.hover()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
-    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    use gpui::InteractiveElement as _;
     use gpui_base::Button as BaseButton;
 
     BaseButton::new("footer-accessibility")
