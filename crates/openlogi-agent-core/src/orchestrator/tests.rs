@@ -7,14 +7,13 @@ use super::{
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, ButtonId};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, LightSettings, ScrollResolution, VerticalScrollSensitivity};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use crate::observable::ObservableState;
 
@@ -707,16 +706,26 @@ fn config_reload_keeps_manual_override_for_parameter_edits() {
 }
 
 #[test]
-fn config_reload_publishes_smooth_scroll_without_restarting_the_hook() {
+fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     let mut orch = orchestrator(Config::default());
-    let setting = Arc::clone(&orch.shared.smooth_scroll_enabled);
-    assert!(!setting.load(Ordering::Relaxed));
+    let preferences = Arc::clone(&orch.shared.scroll_preferences);
+    assert!(!preferences.smooth_scroll_enabled());
+    assert_eq!(
+        preferences.vertical_sensitivity(),
+        VerticalScrollSensitivity::DEFAULT
+    );
 
     let mut config = Config::default();
     config.app_settings.smooth_scroll = true;
+    config.app_settings.vertical_scroll_sensitivity =
+        VerticalScrollSensitivity::try_new(7).expect("valid sensitivity");
     orch.reload_config(config);
 
-    assert!(setting.load(Ordering::Relaxed));
+    assert!(preferences.smooth_scroll_enabled());
+    assert_eq!(
+        preferences.vertical_sensitivity(),
+        VerticalScrollSensitivity::try_new(7).expect("valid sensitivity")
+    );
 }
 
 #[test]

@@ -206,7 +206,7 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
 /// requires a known Logitech sender; Linux and Windows perform device
 /// selection before this callback and therefore admit their unattributed
 /// wheel events through the same policy as button remapping.
-fn scroll_source_may_smooth(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
+fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
     !from_trackpad && button_source_may_remap(device)
 }
 
@@ -472,7 +472,7 @@ pub fn start(
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
                         return queued_event_disposition(try_queue_action(&action_tx, action));
                     }
-                    if scroll_source_may_smooth(from_trackpad, device.as_ref()) {
+                    if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
                     }
                     EventDisposition::PassThrough

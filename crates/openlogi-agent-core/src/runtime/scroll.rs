@@ -1,14 +1,14 @@
-//! Finite smooth-scroll animation owned by one dedicated worker.
+//! Traditional wheel output owned by one dedicated worker.
 //!
 //! Hook callbacks submit typed wheel impulses through [`ScrollInputHandle`]
-//! without blocking. The worker evaluates motion from absolute timestamps,
-//! retargets an active segment when more input arrives, and emits balanced
-//! phased output. Pixel-precise input never enters this runtime, so native
-//! trackpad and continuous wheel streams cannot be mixed with wheel ticks.
+//! without blocking. The worker either scales and emits them directly or
+//! evaluates finite smooth motion from absolute timestamps. Pixel-precise input
+//! never enters this runtime, so native trackpad and continuous wheel streams
+//! cannot be mixed with wheel ticks.
 
 mod worker;
 
-pub use worker::{ScrollInputHandle, ScrollRuntime};
+pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -58,6 +58,15 @@ impl WheelDelta {
             x: self.x * factor,
             y: self.y * factor,
         }
+    }
+
+    fn with_vertical_scale(self, factor: f64) -> Option<Self> {
+        let y = self.y * factor;
+        y.is_finite().then_some(Self { x: self.x, y })
+    }
+
+    fn post(self) {
+        openlogi_inject::post_scroll(self.into());
     }
 }
 
