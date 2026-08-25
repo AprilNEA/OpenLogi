@@ -40,8 +40,10 @@ direnv exec . cargo xtask ci      # when cargo is only inside devenv
 devenv tasks run openlogi:ci      # same as the command
 ```
 
-The runner sets the same env CI does (`RUSTFLAGS=-D warnings`). A rustc warning
-that host clippy `-D warnings` does not surface still fails CI.
+The runner sets CI's semantic compiler env (`RUSTFLAGS=-D warnings`). CI also
+sets `CARGO_INCREMENTAL=0` and wraps rustc with sccache; those only change how
+compiler outputs are produced and reused, not what the jobs validate. A rustc
+warning that host clippy `-D warnings` does not surface still fails CI.
 
 ## Job map (`ci.yml`)
 
@@ -61,7 +63,10 @@ that host clippy `-D warnings` does not surface still fails CI.
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`,
-`RUSTFLAGS=-D warnings`. There is no Windows test job — only `clippy (windows)`.
+`RUSTFLAGS=-D warnings`, and `RUSTC_WRAPPER=sccache`. `rust-cache` stores only
+Cargo registry/git inputs (`cache-targets: false`); sccache owns compiler
+outputs. PRs read the default branch's sccache objects but do not write their
+isolated merge-ref cache. There is no Windows test job — only `clippy (windows)`.
 
 ### MSRV trap
 

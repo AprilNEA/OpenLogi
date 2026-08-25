@@ -18,6 +18,10 @@ env:
   CARGO_INCREMENTAL: 0
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # Tag-scoped cache entries cannot warm the next release.
+  SCCACHE_GHA_RW_MODE: READ_ONLY
 
 jobs:
   # Build (and sign/notarize) every platform's installers. The build matrix
@@ -125,15 +129,20 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Match CI's RUSTFLAGS so the rust-cache env hash hits linux-stable-debug.
-      - name: Align rust-cache env with CI
+      # Match CI so Cargo inputs and sccache compiler objects are reusable.
+      - name: Align compiler inputs with CI
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.16.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: linux-stable-debug
-          # Tag publish is not a useful cache writer; restore CI deps only.
+          cache-targets: false
+          # Tag publish is not a useful cache writer; restore Cargo inputs only.
           save-if: false
 
       - uses: actions/download-artifact@v8
