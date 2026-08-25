@@ -28,6 +28,27 @@ pub enum ScrollReportingTarget {
     Diverted,
 }
 
+impl From<ScrollReportingTarget> for WheelEventTarget {
+    fn from(target: ScrollReportingTarget) -> Self {
+        match target {
+            ScrollReportingTarget::Native => Self::Native,
+            ScrollReportingTarget::Diverted => Self::Diverted,
+        }
+    }
+}
+
+impl TryFrom<WheelEventTarget> for ScrollReportingTarget {
+    type Error = WriteError;
+
+    fn try_from(target: WheelEventTarget) -> Result<Self, Self::Error> {
+        match target {
+            WheelEventTarget::Native => Ok(Self::Native),
+            WheelEventTarget::Diverted => Ok(Self::Diverted),
+            _ => Err(unsupported_read_response()),
+        }
+    }
+}
+
 /// Current HID++ `0x2121` wheel reporting mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollWheelMode {
@@ -39,6 +60,19 @@ pub struct ScrollWheelMode {
     pub target: ScrollReportingTarget,
 }
 
+impl TryFrom<HidppWheelMode> for ScrollWheelMode {
+    type Error = WriteError;
+
+    fn try_from(mode: HidppWheelMode) -> Result<Self, Self::Error> {
+        Ok(Self {
+            resolution: resolution_from_hidpp(mode.resolution)?,
+            inverted: mode.inverted,
+            target: mode.target.try_into()?,
+        })
+    }
+}
+
+#[cfg(test)]
 impl ScrollWheelMode {
     fn native(resolution: ScrollResolution, inverted: bool) -> Self {
         Self {
@@ -140,7 +174,9 @@ pub async fn set_scroll_wheel_mode_on(
 }
 
 /// Write the device's native vertical-scroll inversion flag while preserving
-/// its current resolution.
+/// its current resolution. Enabling inversion selects native HID reporting;
+/// disabling it preserves the current reporting target so an unrelated
+/// host-side consumer does not lose diverted wheel events.
 ///
 /// Returns [`WriteError::FeatureUnsupported`] when the device lacks `0x2121` or
 /// reports that native inversion is not supported.
@@ -158,7 +194,8 @@ pub async fn set_scroll_inversion(
     .await
 }
 
-/// Write native scroll inversion on an already-open [`SharedChannel`].
+/// Write scroll inversion on an already-open [`SharedChannel`], with the same
+/// reporting-target behavior as [`set_scroll_inversion`].
 pub async fn set_scroll_inversion_on(
     shared: &SharedChannel,
     inverted: bool,
@@ -197,13 +234,13 @@ async fn change_wheel_mode_on_channel(
     let current = read_mode(&feature).await?;
     let desired = desired_mode(current, resolution, inverted);
     if current == desired {
-        debug!(index, ?desired, "native wheel mode already set; skipping");
+        debug!(index, ?desired, "wheel mode already set; skipping");
         return Ok(current);
     }
 
     let written = feature
         .set_wheel_mode(
-            WheelEventTarget::Native,
+            desired.target.into(),
             resolution_to_hidpp(desired.resolution),
             desired.inverted,
         )
@@ -211,11 +248,11 @@ async fn change_wheel_mode_on_channel(
         .map_err(|error| {
             classify_hidpp_error(error, HidppOperation::WriteWheelMode, HiResWheelFeature::ID)
         })?;
-    validate_applied(mode_from_hidpp(written)?, desired)?;
+    validate_applied(written.try_into()?, desired)?;
 
     let read_back = read_mode(&feature).await?;
     validate_applied(read_back, desired)?;
-    debug!(index, ?read_back, "native wheel mode written and verified");
+    debug!(index, ?read_back, "wheel mode written and verified");
     Ok(read_back)
 }
 
@@ -229,7 +266,7 @@ async fn read_mode(feature: &HiResWheelFeature) -> Result<ScrollWheelMode, Write
     let mode = feature.get_wheel_mode().await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::ReadWheelMode, HiResWheelFeature::ID)
     })?;
-    mode_from_hidpp(mode)
+    mode.try_into()
 }
 
 fn desired_mode(
@@ -237,10 +274,19 @@ fn desired_mode(
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
 ) -> ScrollWheelMode {
-    ScrollWheelMode::native(
-        resolution.unwrap_or(current.resolution),
-        inverted.unwrap_or(current.inverted),
-    )
+    ScrollWheelMode {
+        resolution: resolution.unwrap_or(current.resolution),
+        inverted: inverted.unwrap_or(current.inverted),
+        // Native inversion has no effect on diverted reports. Enabling it or
+        // explicitly selecting a native resolution therefore takes ownership
+        // of the route; clearing inversion must not steal a route another
+        // host-side consumer is already handling.
+        target: if resolution.is_some() || inverted == Some(true) {
+            ScrollReportingTarget::Native
+        } else {
+            current.target
+        },
+    }
 }
 
 fn validate_applied(actual: ScrollWheelMode, desired: ScrollWheelMode) -> Result<(), WriteError> {
@@ -254,26 +300,10 @@ fn validate_applied(actual: ScrollWheelMode, desired: ScrollWheelMode) -> Result
     }
 }
 
-fn mode_from_hidpp(mode: HidppWheelMode) -> Result<ScrollWheelMode, WriteError> {
-    Ok(ScrollWheelMode {
-        resolution: resolution_from_hidpp(mode.resolution)?,
-        inverted: mode.inverted,
-        target: target_from_hidpp(mode.target)?,
-    })
-}
-
 fn resolution_from_hidpp(resolution: HidppWheelResolution) -> Result<ScrollResolution, WriteError> {
     Ok(match resolution {
         HidppWheelResolution::Low => ScrollResolution::Low,
         HidppWheelResolution::High => ScrollResolution::High,
-        _ => return Err(unsupported_read_response()),
-    })
-}
-
-fn target_from_hidpp(target: WheelEventTarget) -> Result<ScrollReportingTarget, WriteError> {
-    Ok(match target {
-        WheelEventTarget::Native => ScrollReportingTarget::Native,
-        WheelEventTarget::Diverted => ScrollReportingTarget::Diverted,
         _ => return Err(unsupported_read_response()),
     })
 }
@@ -307,12 +337,20 @@ mod tests {
             ScrollResolution::High
         );
         assert_eq!(
-            target_from_hidpp(WheelEventTarget::Native)?,
+            ScrollReportingTarget::try_from(WheelEventTarget::Native)?,
             ScrollReportingTarget::Native
         );
         assert_eq!(
-            target_from_hidpp(WheelEventTarget::Diverted)?,
+            ScrollReportingTarget::try_from(WheelEventTarget::Diverted)?,
             ScrollReportingTarget::Diverted
+        );
+        assert_eq!(
+            WheelEventTarget::from(ScrollReportingTarget::Native),
+            WheelEventTarget::Native
+        );
+        assert_eq!(
+            WheelEventTarget::from(ScrollReportingTarget::Diverted),
+            WheelEventTarget::Diverted
         );
         Ok(())
     }
@@ -341,6 +379,16 @@ mod tests {
             desired_mode(current, None, Some(true)),
             ScrollWheelMode::native(ScrollResolution::Low, true)
         );
+    }
+
+    #[test]
+    fn default_non_inverted_setting_preserves_diverted_reporting() {
+        let current = ScrollWheelMode {
+            resolution: ScrollResolution::High,
+            inverted: false,
+            target: ScrollReportingTarget::Diverted,
+        };
+        assert_eq!(desired_mode(current, None, Some(false)), current);
     }
 
     #[test]

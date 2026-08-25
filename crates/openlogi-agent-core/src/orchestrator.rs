@@ -15,13 +15,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::Action;
-use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
+use openlogi_core::binding::{Action, Binding};
+use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
-use openlogi_core::device_order::DeviceStableId;
+use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
     KEYBOARD_KEY_CIDS,
@@ -257,7 +257,7 @@ impl Orchestrator {
             return HookMaps::default();
         }
         HookMaps {
-            bindings: bindings_for(&self.config, key, app),
+            bindings: button_bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
         }
     }
@@ -278,7 +278,7 @@ impl Orchestrator {
             .devices
             .iter()
             .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
-        let bindings = bindings_for(
+        let bindings = button_bindings_for(
             &self.config,
             Some(&dev.config_key),
             self.current_app.as_deref(),
@@ -286,9 +286,10 @@ impl Orchestrator {
         let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
             .iter()
             .filter(|(_, button)| {
-                bindings
-                    .get(button)
-                    .is_some_and(|action| *action != Action::None)
+                bindings.get(button).is_some_and(|binding| {
+                    matches!(binding, Binding::LongPress(_))
+                        || binding.click_action() != Action::None
+                })
             })
             .copied()
             .collect();
@@ -428,7 +429,7 @@ impl Orchestrator {
             standalone: standalone.to_vec(),
         };
         self.publish_inventory();
-        let devices = build_devices(inventories, standalone);
+        let devices = build_devices(&self.config, inventories, standalone);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
@@ -500,11 +501,12 @@ impl Orchestrator {
             return;
         };
         let key = &dev.config_key;
+        let route_key = stable_id(dev).route_key();
+        let device = self.config.devices.get(key.as_str());
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
-        let dpi = self.config.dpi(key);
-        let smartshift = self
-            .config
-            .smartshift(key)
+        let dpi = device.and_then(|d| d.effective_dpi(&route_key));
+        let smartshift = device
+            .and_then(|d| d.effective_smartshift(&route_key))
             .map(openlogi_hid::SmartShiftStatus::from);
         if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
             crate::hardware::reapply_mouse_volatile_in_background(
@@ -515,8 +517,11 @@ impl Orchestrator {
                 smartshift,
             );
         }
-        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(self.shared.device(&route), &lighting);
+        if let Some(lighting) = device
+            .and_then(|d| d.effective_lighting(&route_key))
+            .filter(|l| l.enabled)
+        {
+            crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             crate::hardware::write_fn_lock_in_background(
@@ -848,13 +853,15 @@ fn configured_wheel_mode(
     let Some(capabilities) = dev.capabilities else {
         return (None, None);
     };
+    let route_key = stable_id(dev).route_key();
+    let device = config.devices.get(dev.config_key.as_str());
     let resolution = capabilities
         .hires_wheel
-        .then(|| config.scroll_resolution(&dev.config_key))
+        .then(|| device.and_then(|d| d.effective_scroll_resolution(&route_key)))
         .flatten();
     let inverted = capabilities
         .scroll_inversion
-        .then(|| config.invert_scroll(&dev.config_key));
+        .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     (resolution, inverted)
 }
 
@@ -862,7 +869,14 @@ fn configured_wheel_mode(
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
 /// model key is derived from it.
+///
+/// `config` is read, never written: [`Config::resolve_device_key`] needs it to
+/// answer where a device's settings actually live, which depends on what the
+/// persisted `links` index and the existing entries say. The agent never
+/// adopts a route — that is the GUI's job — so this call cannot change the
+/// answer for the next tick.
 fn build_devices(
+    config: &Config,
     inventories: &[DeviceInventory],
     standalone: &[StandaloneDevice],
 ) -> Vec<AgentDevice> {
@@ -879,7 +893,15 @@ fn build_devices(
                 model.serial_number.as_deref(),
                 model.unit_id,
             );
-            let Some(config_key) = stable_id.physical_key() else {
+            // An offline probe reports an all-zero unit id, which is not a
+            // physical identity — offer it only while the device is online,
+            // exactly as the GUI does, or every sleeping device would resolve
+            // to the same non-key.
+            let identity =
+                DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
+            let Some(config_key) =
+                config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
+            else {
                 continue;
             };
             devices.push(AgentDevice {
@@ -910,7 +932,10 @@ fn build_devices(
             device.serial_number.as_deref(),
             device.unit_id,
         );
-        let Some(config_key) = stable_id.physical_key() else {
+        let identity = DeviceIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
+        let Some(config_key) =
+            config.resolve_device_key(&stable_id, device.online.then_some(&identity))
+        else {
             continue;
         };
         devices.push(AgentDevice {

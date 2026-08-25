@@ -14,7 +14,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId, KeyCombo};
+use openlogi_core::binding::{Action, Binding, ButtonId, KeyCombo};
 use openlogi_hid::{CaptureChannel, ChannelRegistry};
 use tracing::{info, warn};
 
@@ -171,7 +171,7 @@ impl ButtonEventHandler {
     fn handle(&mut self, event: ButtonRuntimeEvent) {
         match event {
             ButtonRuntimeEvent::Started(press) => {
-                if let Some(action) = press.action() {
+                if let Some(action) = press.start_action() {
                     self.start_action(press.token(), action, press.device_key());
                 }
             }
@@ -275,9 +275,9 @@ impl ActionDispatcher {
     pub(crate) fn try_hook_button_down(
         &self,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.buttons.try_hook_down(button, action)
+        self.buttons.try_hook_down(button, binding)
     }
 
     /// Queue one OS-hook up edge without blocking the callback.
@@ -318,9 +318,9 @@ impl ActionDispatcher {
         &self,
         session: &HidppSessionId,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.buttons.try_hidpp_down(session, button, action)
+        self.buttons.try_hidpp_down(session, button, binding)
     }
 
     /// Queue one HID++ up edge for a specific capture session.
@@ -334,9 +334,9 @@ impl ActionDispatcher {
         &self,
         session: &HidppSessionId,
         button: ButtonId,
-        action: Option<&Action>,
+        binding: Option<&Binding>,
     ) {
-        self.buttons.try_hidpp_pulse(session, button, action);
+        self.buttons.try_hidpp_pulse(session, button, binding);
     }
 
     /// Cancel presses from a HID++ session that is stopping or has died.

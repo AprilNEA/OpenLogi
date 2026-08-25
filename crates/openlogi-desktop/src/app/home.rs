@@ -11,7 +11,7 @@ pub(super) use views::ordered_device_indices;
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, ElementId, Hsla, InteractiveElement,
+    Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
     canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
@@ -44,7 +44,8 @@ use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
-pub(super) fn home_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let device_count = AppState::try_read(cx).map_or(0, |state| state.devices().len());
     let current_mode = AppState::try_read(cx).map_or(DeviceViewMode::Grid, |state| {
         state.app_settings().device_view_mode
@@ -97,7 +98,7 @@ pub(crate) fn keyboard_glow(
         return None;
     }
     let lighting = state
-        .lighting_for(&record.config_key)
+        .lighting_for(&record.config_key, &record.route_key)
         .filter(|l| l.enabled)?;
     let geom = record.asset.as_ref()?.glow.clone()?;
     let (r, g, b) = lighting.color.components();
@@ -546,7 +547,8 @@ fn device_image(
             light_enabled,
             light_settings,
             pal,
-        );
+        )
+        .into_any_element();
     }
     if let Some(path) = record
         .asset
@@ -610,12 +612,11 @@ pub(super) fn connection_icon_path(
 /// user whose devices are about to appear. Swaps to the gallery, to
 /// [`device_empty_state`], or to [`scanning_unavailable_state`] the moment
 /// the agent reports where its enumeration landed.
-pub(super) fn device_scanning_state(pal: Palette) -> AnyElement {
-    loading_body(tr!("Scanning for devices…"), pal)
+pub(super) fn device_scanning_state(cx: &App) -> Div {
+    loading_body(tr!("Scanning for devices…"), cx)
         .flex_1()
         .w_full()
         .min_h_0()
-        .into_any_element()
 }
 
 /// Home body when the agent reports enumeration as broken
@@ -623,23 +624,23 @@ pub(super) fn device_scanning_state(pal: Palette) -> AnyElement {
 /// just by waiting, so showing a spinner (or claiming "no devices") would
 /// both be wrong. The agent keeps retrying and a recovery flows back in as a
 /// regular snapshot.
-pub(super) fn scanning_unavailable_state(pal: Palette) -> AnyElement {
+pub(super) fn scanning_unavailable_state(cx: &App) -> Div {
     notice_body(
         tr!("Device scanning is unavailable"),
         tr!("The background service couldn't scan for devices — check its log for details."),
-        pal,
+        cx,
     )
     .flex_1()
     .w_full()
     .min_h_0()
-    .into_any_element()
 }
 
 /// Body shown when the agent has completed an enumeration and found no
 /// devices. The polling keeps running and `AppView`'s `AppState` observer
 /// swaps the device UI back in the moment one appears, so this is purely a
 /// wait-and-pair placeholder.
-pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
+pub(super) fn device_empty_state(cx: &App) -> Div {
+    let pal = theme::palette(cx);
     v_flex()
         .flex_1()
         .w_full()
@@ -677,5 +678,4 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
         .child(div().mt_1().max_w(ContentWidth::Narrow.rems()).text_caption().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
-        .into_any_element()
 }

@@ -8,9 +8,11 @@
 //!
 //! - a gesture swipe through the gesture binding map,
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
-//! - thumb-wheel rotation through the [`ButtonId::ThumbwheelScrollUp`] /
-//!   [`ButtonId::ThumbwheelScrollDown`] bindings — either re-synthesised as
-//!   continuous, sensitivity-scaled scroll or accumulated into a custom action,
+//! - thumb-wheel rotation through the
+//!   [`ThumbwheelScrollUp`](openlogi_core::binding::ButtonId::ThumbwheelScrollUp) /
+//!   [`ThumbwheelScrollDown`](openlogi_core::binding::ButtonId::ThumbwheelScrollDown)
+//!   bindings — either re-synthesised as continuous, sensitivity-scaled scroll
+//!   or accumulated into a custom action,
 //!
 //! all via the common [`crate::runtime::ActionDispatcher`].
 //!
@@ -18,12 +20,13 @@
 //! the events arrive over HID++, and the bound action is synthesised the same
 //! way regardless.
 
+mod dispatch;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
@@ -31,23 +34,16 @@ use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_sessi
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
+use self::dispatch::{InputDispatcher, WheelConfiguration};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 use crate::runtime::scroll::ScrollInputHandle;
-use crate::runtime::{ActionDispatcher, HidppSessionId, PressToken};
+use crate::runtime::{ActionDispatcher, HidppSessionId};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
 /// It also paces the respawn of a session that ended on its own (see `manage`).
 const TARGET_POLL: Duration = Duration::from_secs(1);
-
-/// Idle gap after which a partly-accumulated *custom* wheel action is forgotten,
-/// so slow intermittent nudges don't eventually cross the threshold.
-const ACTION_DECAY: Duration = Duration::from_millis(300);
-
-/// Minimum gap between two fires of the same custom wheel action, so one
-/// deliberate flick triggers once instead of repeating across a fast spin.
-const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
 /// Output capabilities shared by every HID++ gesture capture session.
 #[derive(Clone)]
@@ -130,11 +126,13 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     }
 }
 
-/// Capture configuration that determines whether a session can stay armed.
+/// Capture and wheel-state configuration that determines whether a session can
+/// stay armed without leaking state across a binding epoch.
 #[derive(Clone, PartialEq)]
 struct SessionTarget {
     route: DeviceRoute,
     spec: CaptureSpec,
+    wheel: WheelConfiguration,
     rearm_generation: u64,
 }
 
@@ -143,6 +141,7 @@ impl SessionTarget {
         Self {
             route: plan.route.clone(),
             spec: spec_for(plan),
+            wheel: WheelConfiguration::for_plan(plan),
             rearm_generation: plan.rearm_generation,
         }
     }
@@ -172,32 +171,6 @@ struct SessionChannels {
     inputs: mpsc::UnboundedSender<CapturedEvent>,
     done: mpsc::UnboundedSender<SessionDone>,
     capture: CaptureChannel,
-}
-
-/// Correlates completed HID++ gesture semantics with the exact physical press
-/// token admitted by the shared button runtime. The runtime remains the sole
-/// authority on whether the token is still active.
-#[derive(Default)]
-struct GesturePresses {
-    tokens: HashMap<(HidppSessionId, ButtonId), PressToken>,
-}
-
-impl GesturePresses {
-    fn start(&mut self, session: &HidppSessionId, button: ButtonId, press: PressToken) {
-        self.tokens.insert((session.clone(), button), press);
-    }
-
-    fn get(&self, session: &HidppSessionId, button: ButtonId) -> Option<&PressToken> {
-        self.tokens.get(&(session.clone(), button))
-    }
-
-    fn end(&mut self, session: &HidppSessionId, button: ButtonId) {
-        self.tokens.remove(&(session.clone(), button));
-    }
-
-    fn cancel_session(&mut self, session: &HidppSessionId) {
-        self.tokens.retain(|(candidate, _), _| candidate != session);
-    }
 }
 
 /// What the manager should do with one session-completion report.
@@ -275,8 +248,7 @@ async fn manage(
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
-    let mut accumulators: HashMap<String, WheelAccumulators> = HashMap::new();
-    let mut gesture_presses = GesturePresses::default();
+    let mut input_dispatcher = InputDispatcher::new(Arc::clone(&capture_plans), outputs);
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -310,17 +282,9 @@ async fn manage(
                             .is_some_and(|plan| live.is_some_and(|session| session_matches_plan(session, plan)))
                     });
                 if current {
-                    dispatch(
-                        &event.session,
-                        event.input,
-                        &mut accumulators,
-                        &mut gesture_presses,
-                        &capture_plans,
-                        &outputs,
-                    );
+                    input_dispatcher.dispatch(&event.session, event.input);
                 } else {
-                    outputs.cancel_session(&event.session);
-                    gesture_presses.cancel_session(&event.session);
+                    input_dispatcher.cancel_session(&event.session);
                     debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
                 }
             }
@@ -341,12 +305,11 @@ async fn manage(
                 for (key, session) in &mut sessions {
                     let keep = want.get(key).is_some_and(|target| *target == session.target);
                     if !keep && let Some(stop) = session.stop.take() {
-                        outputs.cancel_session(&session.id);
-                        gesture_presses.cancel_session(&session.id);
+                        input_dispatcher.cancel_session(&session.id);
                         let _ = stop.send(());
                     }
                 }
-                accumulators.retain(|key, _| want.contains_key(key));
+                input_dispatcher.retain_devices(|key| want.contains_key(key));
                 for (key, target) in want {
                     if sessions.contains_key(&key) {
                         continue;
@@ -383,8 +346,7 @@ async fn manage(
                 // device can't hot-loop. A stale epoch (an already-superseded
                 // session) is a no-op.
                 if let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) {
-                    outputs.cancel_session(&done.session);
-                    gesture_presses.cancel_session(&done.session);
+                    input_dispatcher.cancel_session(&done.session);
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
                     }
@@ -445,239 +407,6 @@ fn spawn_session(
         id,
         target,
         stop: Some(stop_tx),
-    }
-}
-
-/// Per-direction wheel accumulators. The thumb wheel's two rotation directions
-/// bind to independent actions, so each keeps its own running total — sharing
-/// one would let a reversal cancel the other direction's progress.
-#[derive(Default)]
-struct WheelAccumulators {
-    up: WheelDirection,
-    down: WheelDirection,
-}
-
-/// Running state for one rotation direction.
-#[derive(Default)]
-struct WheelDirection {
-    /// Integer rotation-increment accumulator for a custom (non-scroll) action.
-    action: i32,
-    /// When the last rotation event for this direction arrived (decay clock).
-    last_event: Option<Instant>,
-    /// When this direction last fired its custom action (cooldown clock).
-    last_fired: Option<Instant>,
-}
-
-/// What advancing a direction's accumulator should produce.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum WheelOutput {
-    /// Below threshold / suppressed — emit nothing.
-    Idle,
-    /// Post a typed fractional scroll distance.
-    Scroll(ScrollDelta),
-    /// Fire the direction's bound custom action.
-    FireAction,
-}
-
-/// Route one captured input from `session` to its bound action (or
-/// re-synthesised scroll), using that device's own plan maps.
-fn dispatch(
-    session: &HidppSessionId,
-    input: CapturedInput,
-    accumulators: &mut HashMap<String, WheelAccumulators>,
-    gesture_presses: &mut GesturePresses,
-    capture_plans: &SharedCapturePlans,
-    outputs: &GestureOutputs,
-) {
-    let key = session.device_key();
-    let Ok(plans) = capture_plans.read() else {
-        return;
-    };
-    let Some(plan) = plans.iter().find(|plan| plan.config_key == key) else {
-        debug!(key, "input from a device with no capture plan — ignored");
-        return;
-    };
-    match input {
-        CapturedInput::Gesture(button, direction) => {
-            let Some(press) = gesture_presses.get(session, button) else {
-                debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
-                return;
-            };
-            if let Some(action) = plan
-                .gesture_bindings
-                .get(&button)
-                .and_then(|map| map.get(&direction))
-            {
-                debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                if !outputs.actions.try_dispatch_while_pressed(press, action) {
-                    debug!(key, %button, ?direction, "gesture press no longer active — ignored");
-                }
-            } else {
-                debug!(key, %button, ?direction, "gesture with no binding — ignored");
-            }
-        }
-        CapturedInput::ButtonDown(button) => {
-            // A raw-XY gesture source owns its click/swipe map; its physical
-            // lifecycle is still tracked, but it must not also fire the
-            // single-action projection on down.
-            let is_gesture = plan.gesture_bindings.contains_key(&button);
-            let action = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
-            if let Some(action) = action {
-                debug!(key, ?button, action = %action.label(), "HID++ button → action");
-            } else {
-                debug!(key, ?button, "HID++ button with no binding — ignored");
-            }
-            let press = outputs
-                .actions
-                .try_hidpp_button_down(session, button, action);
-            if is_gesture {
-                if let Some(press) = press {
-                    gesture_presses.start(session, button, press);
-                } else {
-                    gesture_presses.end(session, button);
-                }
-            }
-        }
-        CapturedInput::ButtonUp(button) => {
-            outputs.actions.try_hidpp_button_up(session, button);
-            gesture_presses.end(session, button);
-        }
-        CapturedInput::ButtonPulse(button) => {
-            let action = plan.bindings.get(&button);
-            if let Some(action) = action {
-                debug!(key, ?button, action = %action.label(), "HID++ button pulse → action");
-            } else {
-                debug!(key, ?button, "HID++ button pulse with no binding — ignored");
-            }
-            outputs
-                .actions
-                .dispatch_hidpp_button_pulse(session, button, action);
-        }
-        CapturedInput::Scroll {
-            increments,
-            resolution,
-        } => {
-            // Positive rotation is "up"; each direction has its own binding.
-            let up = increments >= 0;
-            let button = if up {
-                ButtonId::ThumbwheelScrollUp
-            } else {
-                ButtonId::ThumbwheelScrollDown
-            };
-            let action = plan
-                .bindings
-                .get(&button)
-                .cloned()
-                .unwrap_or_else(|| default_binding(button));
-            let sensitivity = plan.thumbwheel_sensitivity;
-            let wheels = accumulators.entry(key.to_owned()).or_default();
-            let dir = if up { &mut wheels.up } else { &mut wheels.down };
-            let magnitude = i32::from(increments).abs();
-            match advance(
-                dir,
-                &action,
-                magnitude,
-                ScrollScale {
-                    native_per_increment: resolution.native_per_increment(),
-                    sensitivity,
-                },
-                Instant::now(),
-            ) {
-                WheelOutput::Idle => {}
-                WheelOutput::Scroll(delta) => outputs.post_scroll(session, delta),
-                WheelOutput::FireAction => {
-                    debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                    outputs.actions.dispatch(&action, Some(key));
-                }
-            }
-        }
-    }
-}
-
-/// How far one rotation increment should scroll.
-#[derive(Debug, Clone, Copy)]
-struct ScrollScale {
-    /// Native scroll units one diverted increment is worth, from the wheel's
-    /// own `getThumbwheelInfo`. Diverting the wheel changes the unit it
-    /// reports in — an MX Master 4 goes from 20 ratchets per revolution to 120
-    /// increments — so without this the same physical motion scrolls six times
-    /// as far as it did natively, and the sensitivity slider's 1× is 1× of
-    /// nothing recognisable.
-    native_per_increment: f64,
-    /// The user's own multiplier, relative to that native amount.
-    sensitivity: ThumbwheelSensitivity,
-}
-
-impl ScrollScale {
-    /// Scroll units one increment contributes.
-    fn per_increment(self) -> f64 {
-        self.native_per_increment * self.sensitivity.scroll_multiplier()
-    }
-}
-
-/// Advance one direction's accumulator by `magnitude` rotation increments and
-/// decide what to emit. Pure given `now`, so the decay/cooldown/threshold logic
-/// is unit-testable without touching the OS.
-fn advance(
-    dir: &mut WheelDirection,
-    action: &Action,
-    magnitude: i32,
-    scale: ScrollScale,
-    now: Instant,
-) -> WheelOutput {
-    let sensitivity = scale.sensitivity;
-    match action {
-        // Suppressed: captured but produces nothing.
-        Action::None => WheelOutput::Idle,
-        // Continuous scroll, scaled from the wheel's diverted
-        // increments back to its native amount and then by the user's
-        // sensitivity. Direction comes from the action.
-        Action::ScrollUp
-        | Action::ScrollDown
-        | Action::HorizontalScrollRight
-        | Action::HorizontalScrollLeft => {
-            let distance = f64::from(magnitude) * scale.per_increment();
-            let delta = match action {
-                Action::ScrollUp => ScrollDelta::wheel_ticks(0.0, distance),
-                Action::ScrollDown => ScrollDelta::wheel_ticks(0.0, -distance),
-                Action::HorizontalScrollRight => ScrollDelta::wheel_ticks(distance, 0.0),
-                Action::HorizontalScrollLeft => ScrollDelta::wheel_ticks(-distance, 0.0),
-                _ => unreachable!("scroll actions are matched above"),
-            };
-            if distance == 0.0 {
-                WheelOutput::Idle
-            } else {
-                WheelOutput::Scroll(delta)
-            }
-        }
-        // Any other action: fire once per `action_threshold` increments, with
-        // decay (forget stale partial progress) and cooldown (one flick = one
-        // fire).
-        _ => {
-            if dir
-                .last_event
-                .is_some_and(|t| now.saturating_duration_since(t) > ACTION_DECAY)
-            {
-                dir.action = 0;
-            }
-            dir.last_event = Some(now);
-
-            if dir
-                .last_fired
-                .is_some_and(|t| now.saturating_duration_since(t) < ACTION_COOLDOWN)
-            {
-                return WheelOutput::Idle;
-            }
-
-            dir.action += magnitude;
-            if dir.action >= sensitivity.action_threshold() {
-                dir.action = 0;
-                dir.last_fired = Some(now);
-                WheelOutput::FireAction
-            } else {
-                WheelOutput::Idle
-            }
-        }
     }
 }
 

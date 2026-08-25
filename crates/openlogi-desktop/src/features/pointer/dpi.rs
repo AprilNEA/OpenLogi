@@ -196,7 +196,7 @@ impl Render for DpiPanel {
         // Highlight at most one chip: when several presets snap to the same
         // supported value as the current DPI, only the first is "active".
         let mut already_highlighted = false;
-        let preset_chips: Vec<AnyElement> = snapshot
+        let preset_chips: Vec<_> = snapshot
             .presets
             .iter()
             .enumerate()
@@ -359,7 +359,7 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> AnyElement {
+fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
     PresetChip::new(("dpi-preset-chip", idx))
         .selected(active)
@@ -409,11 +409,10 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> AnyElem
                     });
                 }),
         )
-        .into_any_element()
 }
 
 /// "+" chip that snapshots `AppState.dpi` as a new preset.
-fn add_preset_chip() -> AnyElement {
+fn add_preset_chip() -> impl IntoElement {
     Button::new("dpi-preset-add")
         .compact()
         .outline()
@@ -434,5 +433,4 @@ fn add_preset_chip() -> AnyElement {
                 }
             });
         })
-        .into_any_element()
 }

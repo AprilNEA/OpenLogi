@@ -332,6 +332,7 @@ _version: 1
 "Close-button haptics": "Haptikk for lukkeknapp"
 "Play a pulse when the cursor hovers a window's close button.": "Gi en puls når pekeren er over lukkeknappen i et vindu."
 "This device does not report haptic-feedback hardware.": "Denne enheten rapporterer ikke maskinvare for haptisk tilbakemelding."
+"This device supports wheel resolution on its other connection, but not this one.": "This device supports wheel resolution on its other connection, but not this one."
 "About": "Om"
 "Updates": "Oppdateringer"
 "Off by default — checking for updates is OpenLogi's only optional outbound network request.": "Off by default — checking for updates is OpenLogi's only optional outbound network request."

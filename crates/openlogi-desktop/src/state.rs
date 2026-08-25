@@ -234,6 +234,19 @@ impl AppState {
     ) -> Self {
         let mut config = ConfigState::new(config, config_persistence);
         let device_list = build_device_list(inventories, standalone, cache, &config, cameras);
+        // Fold each online device's route into its canonical entry before
+        // anything writes to the config — the first frame after a schema-5
+        // upgrade is the earliest moment this can happen, and the ordering
+        // against `persist_identities` matters for the same reason it does in
+        // `refresh_inventories`: identities keyed off a legacy `config_key`
+        // would leave a bare canonical entry beside the un-folded legacy one.
+        let adopted = config.edit(|config| inventory::adopt_routes(config, &device_list));
+        // Adoption re-keyed entries, so rebuild before reading the list again.
+        let device_list = if adopted {
+            build_device_list(inventories, standalone, cache, &config, cameras)
+        } else {
+            device_list
+        };
         // Record any device probed at launch so it survives the next cold start.
         let identities_changed =
             config.edit(|config| inventory::persist_identities(config, &device_list));
@@ -255,7 +268,15 @@ impl AppState {
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
         };
-        if identities_changed {
+        // Plain `persist_config`, not `persist_and_reload` as
+        // `refresh_inventories` uses for the same fold: there is no agent
+        // connection to reload yet this early in startup, and the
+        // unconditional `ReloadConfig` send at the end of this constructor
+        // (below) already covers both branches once `state` is fully built —
+        // sending it here too would just queue a second, redundant reload.
+        if adopted {
+            state.persist_config("adopt device route");
+        } else if identities_changed {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
@@ -299,11 +320,12 @@ impl AppState {
 
     fn restore_config_projections(&mut self) {
         self.restore_binding_projections();
-        if let Some(dpi) = self
-            .current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-            .and_then(|key| self.config.dpi(key))
-        {
+        if let Some(dpi) = self.current_record().and_then(|record| {
+            record
+                .persistent_config_key()
+                .and_then(|key| self.config.devices.get(key))
+                .and_then(|device| device.effective_dpi(&record.route_key))
+        }) {
             self.pointer.dpi = dpi;
         }
     }

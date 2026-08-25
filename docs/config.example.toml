@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 5
+schema_version = 6
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -33,6 +33,8 @@ Back = "BrowserBack"
 Forward = "BrowserForward"
 # Hold the chord for exactly as long as the physical button is held.
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
+# Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
+DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 # The thumb wheel's capacitive tap. Inert unless set here; the wheel also
 # reports taps from incidental thumb contact.
 Thumbwheel = "AppExpose"
@@ -77,6 +79,35 @@ fn_lock = false
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+
+# Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
+# `serial:<s>` — rather than by the route it was reached on, so its settings
+# follow it between its receiver and a cable instead of splitting into two
+# entries. `receiver:…` entries above are the pre-5 shape; they are folded onto
+# an identity key the first time the device is seen online with the GUI running.
+[devices."unit:6be9d300"]
+dpi = 1600
+
+# Every route this device has been seen on. The set of keys is also the index
+# that identifies the device while it is asleep and only the route is known,
+# which is why a route with nothing special about it is still written out as an
+# empty table.
+[devices."unit:6be9d300".links."receiver:aabbccdd:slot:3"]
+
+# Capabilities as measured on one link. A device can genuinely expose different
+# features per transport — a G502 LIGHTSPEED publishes hi-res wheel over its
+# receiver and not over USB — so this is recorded per link, not per device.
+[devices."unit:6be9d300".links."direct:046d:c08d".capabilities]
+buttons = true
+pointer = true
+lighting = false
+scroll_inversion = true
+hires_wheel = false
+
+# Settings deliberately made different on this link. Anything not overridden
+# here falls through to the device-level value above.
+[devices."unit:6be9d300".links."direct:046d:c08d".overrides]
+dpi = 800
 
 # Global function-key remapping, independent of a device.
 [keyboard.bindings]

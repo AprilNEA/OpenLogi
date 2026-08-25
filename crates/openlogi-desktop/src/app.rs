@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
-    Window, div, prelude::FluentBuilder as _, rgb,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -26,7 +26,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
 mod detail;
@@ -361,7 +361,8 @@ impl AppView {
         }))
     }
 
-    fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn accessibility_gate(cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
         v_flex()
             .size_full()
             .bg(pal.page)
@@ -428,7 +429,6 @@ impl AppView {
                         cx.notify();
                     })),
             )
-            .into_any_element()
     }
 }
 
@@ -450,7 +450,8 @@ fn request_accessibility(cx: &mut App) {
 /// server-side decorations and gpui falls back to client-side ones it doesn't
 /// paint — still gets a titlebar and window controls. On macOS the widget
 /// reserves the traffic-light space.
-fn app_title_bar(pal: Palette) -> impl IntoElement {
+fn app_title_bar(cx: &App) -> impl IntoElement {
+    let pal = theme::palette(cx);
     TitleBar::new().child(
         div()
             .flex_1()
@@ -490,7 +491,7 @@ impl Render for AppView {
             // error frames — so the chrome is present from the first frame on.
             // macOS / Windows keep their native titlebar.
             .when(cfg!(target_os = "linux"), |this| {
-                this.child(app_title_bar(pal))
+                this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);
 
@@ -502,7 +503,7 @@ impl Render for AppView {
         if let Some(issue) = config_issue {
             window.set_window_title("OpenLogi");
             return root
-                .child(status::config_issue_body(issue, pal))
+                .child(status::config_issue_body(issue, cx))
                 .into_any_element();
         }
 
@@ -519,17 +520,15 @@ impl Render for AppView {
         let status = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::connecting_body(pal)).into_any_element();
+                return root.child(status::connecting_body(cx)).into_any_element();
             }
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(pal)).into_any_element();
+                return root.child(status::unreachable_body(cx)).into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
-                return root
-                    .child(status::outdated_gui_body(pal))
-                    .into_any_element();
+                return root.child(status::outdated_gui_body(cx)).into_any_element();
             }
             AgentLink::Ready(status) => status,
         };
@@ -537,9 +536,7 @@ impl Render for AppView {
         let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return root
-                .child(Self::accessibility_gate(pal, cx))
-                .into_any_element();
+            return root.child(Self::accessibility_gate(cx)).into_any_element();
         }
 
         let has_device = AppState::try_global(cx)
@@ -594,7 +591,7 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(camera_target, cx));
             (
-                detail::detail_header(record.as_ref(), pal, cx).into_any_element(),
+                detail::detail_header(record.as_ref(), cx).into_any_element(),
                 detail::detail_content(
                     &detail::DetailPanels {
                         mouse_model: &self.mouse_model,
@@ -611,7 +608,6 @@ impl Render for AppView {
                     &self.app_catalog,
                     &tabs,
                     active,
-                    pal,
                     cx,
                 )
                 .into_any_element(),
@@ -620,22 +616,23 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(None, cx));
             (
-                home::home_header(pal, cx).into_any_element(),
+                home::home_header(cx).into_any_element(),
                 if has_device {
                     home::device_gallery(cx).into_any_element()
                 } else {
                     match status.inventory {
-                        InventoryHealth::Scanning => home::device_scanning_state(pal),
-                        InventoryHealth::Unavailable => home::scanning_unavailable_state(pal),
-                        InventoryHealth::Ready => home::device_empty_state(pal),
+                        InventoryHealth::Scanning => home::device_scanning_state(cx),
+                        InventoryHealth::Unavailable => home::scanning_unavailable_state(cx),
+                        InventoryHealth::Ready => home::device_empty_state(cx),
                     }
+                    .into_any_element()
                 },
             )
         };
 
         root.child(header_el)
             .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(pal)))
+            .when(!granted, |this| this.child(status::attention_footer(cx)))
             .into_any_element()
     }
 }
@@ -779,7 +776,9 @@ mod tests {
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {
             config_key: "test".to_string(),
+            canonical_key: None,
             persistent: true,
+            route_key: "test".to_string(),
             model_key: "test".to_string(),
             model_name: "Test".to_string(),
             display_name: "Test".to_string(),

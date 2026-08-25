@@ -12,8 +12,8 @@
 pub(super) use std::rc::Rc;
 
 pub(super) use gpui::{
-    AnyElement, App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
-    Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
+    App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
     StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
     rgb,
 };
@@ -443,31 +443,29 @@ impl Render for SettingsView {
                 self.vertical_scroll_sensitivity_slider.clone(),
                 self.thumbwheel_sensitivity_slider.clone(),
             ))
-            .page(updates::updates_page(self.updater.clone(), pal));
+            .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let settings = settings.page(permissions::permissions_page(pal, has_camera));
+        let settings = settings.page(permissions::permissions_page(has_camera));
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),
                 self.theme_filter,
                 self.theme_search.clone(),
                 self.language_select.clone(),
-                pal,
             ))
             .page(assets::assets_page(
                 view.clone(),
                 self.asset_source_select.clone(),
-                pal,
                 self.asset_cache_desc.clone(),
             ))
-            .page(about::about_page(view, self.copied, pal));
+            .page(about::about_page(view, self.copied));
         // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
         // builds, the full tap list and a live event monitor. Appended after
         // About so [`SettingsPage::index`] stays platform-independent.
         #[cfg(target_os = "macos")]
-        let settings = settings.page(diagnostics::diagnostics_page(pal));
+        let settings = settings.page(diagnostics::diagnostics_page());
 
         div()
             .size_full()

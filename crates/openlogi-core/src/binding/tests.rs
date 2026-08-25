@@ -187,6 +187,27 @@ fn binding_gesture_roundtrips() {
     assert_eq!(back[&ButtonId::GestureButton], Binding::Gesture(map));
 }
 
+#[test]
+fn binding_long_press_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("short = \"Copy\""));
+    assert!(toml.contains("long = \"MissionControl\""));
+    assert!(!toml.contains("LongPress"));
+}
+
+#[test]
+fn binding_long_press_requires_exact_short_and_long_fields() {
+    let missing_long = "[bindings.Back]\nshort = \"Copy\"";
+    assert!(toml::from_str::<BindingWrapper>(missing_long).is_err());
+
+    let unknown = "[bindings.Back]\nshort = \"Copy\"\nlong = \"Paste\"\nthreshold_ms = 900";
+    assert!(toml::from_str::<BindingWrapper>(unknown).is_err());
+}
+
 /// The untagged-routing safety guard. A TOML table keyed by ANY
 /// [`GestureDirection`] name must deserialize as [`Binding::Gesture`], never
 /// [`Binding::Single`]. If a future [`Action`] payload variant is ever named

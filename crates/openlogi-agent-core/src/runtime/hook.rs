@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hook::{
@@ -29,8 +29,8 @@ use crate::event_monitor::SharedEventMonitor;
 /// versa), and the common case reads one lock instead of two.
 #[derive(Default)]
 pub struct HookMaps {
-    /// Per-button single action — the single-action dispatch path.
-    pub bindings: BTreeMap<ButtonId, Action>,
+    /// Per-button immediate or threshold binding — the non-gesture dispatch path.
+    pub bindings: BTreeMap<ButtonId, Binding>,
     /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
     /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
@@ -284,23 +284,29 @@ fn handle_button(
         }
     }
 
-    let action = hooks
+    let binding = hooks
         .try_read()
         .ok()
         .and_then(|m| m.bindings.get(&id).cloned());
-    let Some(action) = action else {
+    let Some(binding) = binding else {
         return EventDisposition::PassThrough;
     };
-    if is_native_click(id, &action) {
+    if binding_is_native_click(id, &binding) {
         return EventDisposition::PassThrough;
     }
     if pressed {
-        info!(button = %id, action = %action.label(), "button → executing bound action");
-        let queued = dispatcher.try_hook_button_down(id, Some(&action)).is_some();
+        info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
+        let queued = dispatcher
+            .try_hook_button_down(id, Some(&binding))
+            .is_some();
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
     dispatcher.try_hook_button_up(id);
     FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
+}
+
+fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
+    !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
 }
 
 /// Press of a remapped single-action button: suppress when the action was
@@ -512,7 +518,7 @@ fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId,
     } else {
         return None;
     };
-    let action = maps.bindings.get(&button)?.clone();
+    let action = maps.bindings.get(&button)?.click_action();
     (action != default_binding(button)).then_some((button, action))
 }
 

@@ -3,8 +3,7 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::FluentBuilder as _,
+    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     IconName, Sizable as _,
@@ -102,13 +101,12 @@ pub(super) fn sidebar_action(
     icon: IconName,
     label: SharedString,
     handler: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> AnyElement {
+) -> impl IntoElement {
     control_button(id)
         .icon(icon)
         .label(label)
         .on_click(handler)
         .flex_1()
-        .into_any_element()
 }
 
 pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {

@@ -354,51 +354,43 @@ struct KeySlot {
 /// The two-pane row: keyboard photo + an optional side panel.
 #[derive(IntoElement)]
 struct InspectorRow {
-    keyboard: AnyElement,
-    panel: Option<AnyElement>,
+    keyboard: KeyboardPane,
+    panel: Option<gpui::Div>,
 }
 
 impl InspectorRow {
-    fn new(keyboard: impl IntoElement) -> Self {
+    fn new(keyboard: KeyboardPane) -> Self {
         Self {
-            keyboard: keyboard.into_any_element(),
+            keyboard,
             panel: None,
         }
     }
 
     #[must_use]
-    fn panel(mut self, panel: impl Into<Option<AnyElement>>) -> Self {
-        self.panel = panel.into();
+    fn panel(mut self, panel: Option<gpui::Div>) -> Self {
+        self.panel = panel;
         self
     }
 }
 
 impl RenderOnce for InspectorRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let Some(panel) = self.panel else {
-            return h_flex()
-                .w_full()
-                .justify_center()
-                .child(self.keyboard)
-                .into_any_element();
-        };
-
-        // The panel grows in from width 0 → PANEL_W over SLIDE_MS, easing in/out,
-        // always on the right as a stable inspector.
-        let animated_panel = div().overflow_hidden().child(panel).with_animation(
-            "panel-slide",
-            Animation::new(std::time::Duration::from_millis(SLIDE_MS)).with_easing(ease_in_out),
-            |element, delta| element.w(px(PANEL_W * delta)),
-        );
-
         h_flex()
             .w_full()
-            .gap_5()
             .items_center()
             .justify_center()
             .child(self.keyboard)
-            .child(animated_panel)
-            .into_any_element()
+            .when_some(self.panel, |row, panel| {
+                // The panel grows in from width 0 → PANEL_W over SLIDE_MS,
+                // easing in/out, always on the right as a stable inspector.
+                let animated_panel = div().overflow_hidden().child(panel).with_animation(
+                    "panel-slide",
+                    Animation::new(std::time::Duration::from_millis(SLIDE_MS))
+                        .with_easing(ease_in_out),
+                    |element, delta| element.w(px(PANEL_W * delta)),
+                );
+                row.gap_5().child(animated_panel)
+            })
     }
 }
 
@@ -487,7 +479,13 @@ impl RenderOnce for KeyboardPane {
                 let view_for_callouts = view_clone.clone();
                 self.slots.iter().cloned().map(move |slot| {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    key_callout(slot, count, highlighted, img_w, &view_for_callouts, &pal)
+                    KeyCallout {
+                        slot,
+                        count,
+                        highlighted,
+                        img_w,
+                        view: view_for_callouts.clone(),
+                    }
                 })
             })
             // Click-targets overlay, centered on each key's marker point.
@@ -507,102 +505,107 @@ impl RenderOnce for KeyboardPane {
 }
 
 /// One callout bubble in the band above the keyboard.
-fn key_callout(
+#[derive(IntoElement)]
+struct KeyCallout {
     slot: KeySlot,
     count: usize,
     highlighted: bool,
     img_w: f32,
-    view: &Entity<FunctionRowView>,
-    pal: &Palette,
-) -> AnyElement {
-    let idx = slot.idx;
-    let left = callout_left_px(idx, count, img_w, KEY_CALLOUT_W);
-    let top = callout_top_px(idx);
-    let view_hover = view.clone();
-    let view_click = view.clone();
-    let binding = slot.binding;
-    let binding_icon = slot.binding_icon;
+    view: Entity<FunctionRowView>,
+}
 
-    v_flex()
-        .id(("key-callout", idx))
-        .absolute()
-        .top(px(top))
-        .left(px(left))
-        .w(px(KEY_CALLOUT_W))
-        .h(px(KEY_CALLOUT_H))
-        .px_1()
-        .justify_center()
-        .items_center()
-        .gap(px(1.))
-        .rounded_md()
-        .border_1()
-        .border_color(if highlighted {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .bg(if highlighted {
-            theme::accent_tint()
-        } else {
-            pal.control
-        })
-        .cursor_pointer()
-        .hover(move |s| {
-            s.bg(if highlighted {
-                theme::accent_tint_hover()
+impl RenderOnce for KeyCallout {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let idx = self.slot.idx;
+        let left = callout_left_px(idx, self.count, self.img_w, KEY_CALLOUT_W);
+        let top = callout_top_px(idx);
+        let view_hover = self.view.clone();
+        let view_click = self.view;
+        let binding = self.slot.binding;
+        let binding_icon = self.slot.binding_icon;
+        let highlighted = self.highlighted;
+
+        v_flex()
+            .id(("key-callout", idx))
+            .absolute()
+            .top(px(top))
+            .left(px(left))
+            .w(px(KEY_CALLOUT_W))
+            .h(px(KEY_CALLOUT_H))
+            .px_1()
+            .justify_center()
+            .items_center()
+            .gap(px(1.))
+            .rounded_md()
+            .border_1()
+            .border_color(if highlighted {
+                rgb(ACCENT_BLUE).into()
             } else {
-                pal.control_hover
+                pal.border
             })
-        })
-        .child(
-            div()
-                .text_caption()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if highlighted {
-                    rgb(ACCENT_BLUE).into()
+            .bg(if highlighted {
+                theme::accent_tint()
+            } else {
+                pal.control
+            })
+            .cursor_pointer()
+            .hover(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
                 } else {
-                    pal.text_primary
+                    pal.control_hover
                 })
-                .child(slot.label),
-        )
-        .child(
-            h_flex()
-                .items_center()
-                .justify_center()
-                .gap(px(2.))
-                .max_w(px(KEY_CALLOUT_W - 8.))
-                .when_some(binding_icon, |row, icon| {
-                    row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
-                        if highlighted {
-                            rgb(ACCENT_BLUE).into()
-                        } else {
-                            pal.text_muted
-                        },
-                    ))
-                })
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_caption()
-                        .text_color(if highlighted {
-                            rgb(ACCENT_BLUE).into()
-                        } else {
-                            pal.text_muted
-                        })
-                        .child(binding),
-                ),
-        )
-        .on_hover(move |hovered, _window, cx| {
-            let next = (*hovered).then_some(idx);
-            view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
-        })
-        .on_click(move |_ev, _window, cx| {
-            view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
-        })
-        .into_any_element()
+            })
+            .child(
+                div()
+                    .text_caption()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if highlighted {
+                        rgb(ACCENT_BLUE).into()
+                    } else {
+                        pal.text_primary
+                    })
+                    .child(self.slot.label),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(2.))
+                    .max_w(px(KEY_CALLOUT_W - 8.))
+                    .when_some(binding_icon, |row, icon| {
+                        row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
+                            if highlighted {
+                                rgb(ACCENT_BLUE).into()
+                            } else {
+                                pal.text_muted
+                            },
+                        ))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_caption()
+                            .text_color(if highlighted {
+                                rgb(ACCENT_BLUE).into()
+                            } else {
+                                pal.text_muted
+                            })
+                            .child(binding),
+                    ),
+            )
+            .on_hover(move |hovered, _window, cx| {
+                let next = (*hovered).then_some(idx);
+                view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
+            })
+            .on_click(move |_ev, _window, cx| {
+                view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
+            })
+    }
 }
 
 /// One invisible click-target over a function key. Selecting it opens the
@@ -612,7 +615,7 @@ fn key_click_target(
     highlighted: bool,
     (img_w, img_h): (f32, f32),
     view: &Entity<FunctionRowView>,
-) -> AnyElement {
+) -> impl IntoElement {
     let idx = slot.idx;
     let x_frac = slot.x_frac;
     let y_frac = slot.y_frac;
@@ -662,7 +665,6 @@ fn key_click_target(
         .on_click(move |_ev, _window, cx| {
             view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
         })
-        .into_any_element()
 }
 
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
@@ -784,7 +786,7 @@ impl FunctionRowView {
         slots: &[KeySlot],
         view: &Entity<Self>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Div {
         let pal = theme::palette(cx);
         let slot = &slots[selected_idx];
         let trigger = slot.trigger.clone();
@@ -799,7 +801,6 @@ impl FunctionRowView {
                 self.workflow_draft.clone(),
                 view,
                 pal,
-                cx,
             );
         }
 
@@ -827,7 +828,6 @@ impl FunctionRowView {
             .child(title_header(&key_name, &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
-            .into_any_element()
     }
 }
 
@@ -854,9 +854,8 @@ fn panel_action_rows(
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
-) -> Vec<AnyElement> {
+) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
-    children.push(editor_section(tr!("Power User").to_string(), *pal));
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (
@@ -881,52 +880,55 @@ fn panel_action_rows(
         ),
     ];
 
-    for (idx, (kind, label, icon_path)) in power_user_actions.iter().enumerate() {
-        let kind = *kind;
-        let view = view.clone();
-        let selected = matches!(
-            (current, kind),
-            (Some(Action::TypeText(_)), PowerUserKind::TypeText)
-                | (
-                    Some(Action::RunAppleScript(_)),
-                    PowerUserKind::RunAppleScript
-                )
-                | (
-                    Some(Action::RunShellCommand(_)),
-                    PowerUserKind::RunShellCommand
-                )
-                | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
-        );
-        children.push(
-            MenuRow::new(format!("panel-power-{idx}"))
-                .selected(selected)
-                .role(Role::MenuItem)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
+    children.push(
+        v_flex()
+            .child(editor_section(tr!("Power User").to_string(), *pal))
+            .children(power_user_actions.iter().enumerate().map(
+                |(idx, (kind, label, icon_path))| {
+                    let kind = *kind;
+                    let view = view.clone();
+                    let selected = matches!(
+                        (current, kind),
+                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+                            | (
+                                Some(Action::RunAppleScript(_)),
+                                PowerUserKind::RunAppleScript
+                            )
+                            | (
+                                Some(Action::RunShellCommand(_)),
+                                PowerUserKind::RunShellCommand
+                            )
+                            | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
+                    );
+                    MenuRow::new(format!("panel-power-{idx}"))
+                        .selected(selected)
+                        .role(Role::MenuItem)
                         .child(
-                            svg()
-                                .path(*icon_path)
-                                .size_4()
-                                .flex_none()
-                                .text_color(pal.text_muted),
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path(*icon_path)
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(div().child((*label).to_string())),
                         )
-                        .child(div().child((*label).to_string())),
-                )
-                .when(selected, |s| {
-                    s.child(
-                        gpui_component::Icon::new(gpui_component::IconName::Check)
-                            .size_3()
-                            .text_color(rgb(ACCENT_BLUE)),
-                    )
-                })
-                .on_click(move |_ev, _window, cx| {
-                    view.update(cx, |v, vcx| v.open_editor(kind, vcx));
-                })
-                .into_any_element(),
-        );
-    }
+                        .when(selected, |s| {
+                            s.child(
+                                gpui_component::Icon::new(gpui_component::IconName::Check)
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
+                            )
+                        })
+                        .on_click(move |_ev, _window, cx| {
+                            view.update(cx, |v, vcx| v.open_editor(kind, vcx));
+                        })
+                },
+            )),
+    );
     children
 }
 

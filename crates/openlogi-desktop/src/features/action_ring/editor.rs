@@ -1,7 +1,7 @@
 //! Categorized action, shortcut, path, and icon editor for one ring slot.
 
 use gpui::{
-    AnyElement, Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
+    Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
@@ -82,7 +82,7 @@ pub(super) fn action_library(
                 })
                 .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
-                .children(action_rows(slot, current_action.as_ref(), pal)),
+                .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
         ))
 }
@@ -212,19 +212,22 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
         )
 }
 
-fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> Vec<AnyElement> {
+fn action_sections(
+    slot: ActionRingSlot,
+    current: Option<&Action>,
+    pal: Palette,
+) -> impl Iterator<Item = impl IntoElement> {
     let mut index = 0usize;
-    let mut rows = Vec::new();
-    for (category, actions) in ring_catalog() {
-        rows.push(editor_section(rust_i18n::t!(category.label()), pal));
-        for action in actions {
-            let selected = current == Some(&action);
-            let action_to_commit = action.clone();
-            let label = tr!(action.label());
-            let icon_path = action_icon_path(&action);
-            let row_index = index;
-            index += 1;
-            rows.push(
+    ring_catalog().into_iter().map(move |(category, actions)| {
+        v_flex()
+            .child(editor_section(rust_i18n::t!(category.label()), pal))
+            .children(actions.into_iter().map(|action| {
+                let selected = current == Some(&action);
+                let action_to_commit = action.clone();
+                let label = tr!(action.label());
+                let icon_path = action_icon_path(&action);
+                let row_index = index;
+                index += 1;
                 MenuRow::new(("ring-action", row_index))
                     .role(Role::MenuItem)
                     .aria_label(label.clone())
@@ -252,11 +255,8 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);
                     })
-                    .into_any_element(),
-            );
-        }
-    }
-    rows
+            }))
+    })
 }
 
 fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
