@@ -29,8 +29,10 @@ use tracing_subscriber::EnvFilter;
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
-use crate::ring::{RingView, ring_window_options};
-use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
+use crate::ring::{RingView, ring_windows};
+use crate::session::{
+    ClickAwaySession, claim_the_role, close_ring_windows, spawn_click_away_dismissal,
+};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -73,29 +75,34 @@ fn main() -> Result<()> {
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
-                    let options = ring_window_options(cx);
-                    let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    match cx.open_window(options, |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands))
-                    }) {
-                        Ok(handle) => {
-                            live_session.set(session_id);
-                            platform::configure_windows();
-                            cx.spawn(async move |cx| {
-                                cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                                if handle
-                                    .update(cx, |_, window, _| window.remove_window())
-                                    .is_ok()
-                                {
-                                    let _ = timeout_commands
-                                        .send(OverlayCommand::Cancel { session_id });
-                                }
-                            })
-                            .detach();
+                    // Wayland needs one window per display (see `ring_windows`),
+                    // so a ring is a set of windows, and one that fails to open
+                    // must not sink the others: the ring is showing as long as
+                    // any of them made it.
+                    let mut opened = false;
+                    for (options, placement) in ring_windows(cx) {
+                        let invocation = invocation.clone();
+                        let commands = commands.clone();
+                        match cx.open_window(options, |_, cx| {
+                            cx.new(|_| RingView::new(invocation, commands, placement))
+                        }) {
+                            Ok(_) => opened = true,
+                            Err(error) => warn!(%error, "could not open Actions Ring window"),
                         }
-                        Err(error) => warn!(%error, "could not open Actions Ring window"),
+                    }
+                    if opened {
+                        live_session.set(session_id);
+                        platform::configure_windows();
+                        cx.spawn(async move |cx| {
+                            cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                            if cx.update(|cx| close_ring_windows(cx, session_id)) {
+                                let _ =
+                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
+                            }
+                        })
+                        .detach();
                     }
                 });
             }
