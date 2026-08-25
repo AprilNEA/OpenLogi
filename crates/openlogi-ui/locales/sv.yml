@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 riktningar"
 "Middle": "Mittenknapp"
 "DPI Preset %{index}": "DPI-förinställning %{index}"
+"Hold %{chord}": "Håll %{chord}"
 "Gesture %{name}": "Gest %{name}"
 "Left Click": "Vänsterklick"
 "Right Click": "Högerklick"

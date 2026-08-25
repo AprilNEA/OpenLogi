@@ -90,7 +90,7 @@ struct PressId(u64);
 /// Capability used to run a gesture action only while its originating press
 /// remains active. Future timers and repeat workers can use the same token to
 /// reject work scheduled by a superseded press.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PressToken {
     id: PressId,
     key: PressKey,
@@ -116,6 +116,10 @@ pub(crate) struct ActivePress {
 }
 
 impl ActivePress {
+    pub(crate) fn token(&self) -> &PressToken {
+        &self.token
+    }
+
     pub(crate) fn button(&self) -> ButtonId {
         self.token.key.button
     }
@@ -399,7 +403,7 @@ pub(crate) struct ButtonRuntimeOwner {
 
 impl ButtonRuntimeOwner {
     pub(crate) fn spawn(
-        on_event: impl Fn(ButtonRuntimeEvent) + Send + 'static,
+        mut on_event: impl FnMut(ButtonRuntimeEvent) + Send + 'static,
     ) -> io::Result<Self> {
         let (events, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let (shutdown, shutdown_rx) = mpsc::channel();
@@ -412,7 +416,7 @@ impl ButtonRuntimeOwner {
         };
         let worker = thread::Builder::new()
             .name("openlogi-buttons".into())
-            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &on_event))?;
+            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &mut on_event))?;
         Ok(Self {
             input,
             shutdown,
@@ -462,7 +466,7 @@ fn run_worker(
     events: &mpsc::Receiver<ButtonCommand>,
     shutdown: &mpsc::Receiver<ShutdownRequest>,
     shared_generation: &AtomicU64,
-    emit: &impl Fn(ButtonRuntimeEvent),
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
     let mut state = ButtonState::default();
     let mut generation = shared_generation.load(Ordering::Acquire);
@@ -513,7 +517,11 @@ fn run_worker(
     }
 }
 
-fn process_input(state: &mut ButtonState, input: ButtonInput, emit: &impl Fn(ButtonRuntimeEvent)) {
+fn process_input(
+    state: &mut ButtonState,
+    input: ButtonInput,
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
+) {
     match input {
         ButtonInput::Down(press) => {
             if let Some(stale) = state.press(press.clone()) {
@@ -558,7 +566,7 @@ fn process_input(state: &mut ButtonState, input: ButtonInput, emit: &impl Fn(But
 fn emit_canceled(
     presses: Vec<ActivePress>,
     reason: CancelReason,
-    emit: &impl Fn(ButtonRuntimeEvent),
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
     for press in presses {
         emit(ButtonRuntimeEvent::Ended {

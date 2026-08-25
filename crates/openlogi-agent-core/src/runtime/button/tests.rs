@@ -237,16 +237,46 @@ fn worker_drops_input_queued_before_generation_invalidation() {
     let (_shutdown, shutdown) = mpsc::channel();
     let generation = AtomicU64::new(1);
     let (sent, received) = mpsc::channel();
-
-    run_worker(&queued, &shutdown, &generation, &|event| {
+    let mut emit = |event| {
         sent.send(event)
             .expect("test receiver should stay connected");
-    });
+    };
+
+    run_worker(&queued, &shutdown, &generation, &mut emit);
 
     assert!(
         received.try_recv().is_err(),
         "an old profile's queued down must not start a lifecycle"
     );
+}
+
+#[test]
+fn pulse_has_an_immediate_balanced_lifecycle() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::new("mouse-a", 7);
+    assert!(input.try_hidpp_pulse(
+        &session,
+        ButtonId::Back,
+        Some(&Action::HoldShortcut(
+            "Ctrl+Space".parse().expect("valid shortcut")
+        )),
+    ));
+
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("pulse must start before ending");
+    };
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("pulse must end immediately");
+    };
+    assert_eq!(press.token, started.token);
+    assert_eq!(reason, EndReason::Released);
+    assert!(owner.shutdown());
 }
 
 #[test]

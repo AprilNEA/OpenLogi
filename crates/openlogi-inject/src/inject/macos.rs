@@ -12,6 +12,8 @@ use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 
+use super::KeyPhase;
+
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
 const NX_KEYTYPE_SOUND_DOWN: i32 = 1;
@@ -31,7 +33,7 @@ pub(super) fn execute(action: &Action) {
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
         Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
-        Effect::Key(combo) => post_keycombo(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => post_keycombo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -226,24 +228,25 @@ fn tag_synthetic(ev: &CGEvent) {
     );
 }
 
-/// Post a key-down + key-up pair for `vk` with `flags` set.
-fn post_key(vk: u16, flags: CGEventFlags) {
+/// Post one keyboard edge for `vk` with `flags` set.
+fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
         return;
     };
-    let Ok(down) = CGEvent::new_keyboard_event(src.clone(), vk, true) else {
-        tracing::warn!("CGEvent::new_keyboard_event(down) failed");
+    let down = phase == KeyPhase::Down;
+    let Ok(event) = CGEvent::new_keyboard_event(src, vk, down) else {
+        tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
         return;
     };
-    down.set_flags(flags);
-    down.post(CGEventTapLocation::HID);
-    let Ok(up) = CGEvent::new_keyboard_event(src, vk, false) else {
-        tracing::warn!("CGEvent::new_keyboard_event(up) failed");
-        return;
-    };
-    up.set_flags(flags);
-    up.post(CGEventTapLocation::HID);
+    event.set_flags(flags);
+    event.post(CGEventTapLocation::HID);
+}
+
+/// Post a key-down + key-up pair for `vk` with `flags` set.
+fn post_key(vk: u16, flags: CGEventFlags) {
+    post_key_phase(vk, flags, KeyPhase::Down);
+    post_key_phase(vk, flags, KeyPhase::Up);
 }
 
 /// Type an arbitrary unicode string by emitting one key event per character,
@@ -269,6 +272,29 @@ fn post_unicode(text: &str) {
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
 fn post_keycombo(combo: &KeyCombo) {
+    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
+        post_key(vk, combo_flags(combo));
+    } else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no macOS mapping"
+        );
+    }
+}
+
+/// Emit one isolated edge of a held chord.
+pub(super) fn hold_combo(combo: &KeyCombo, phase: KeyPhase) {
+    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
+        post_key_phase(vk, combo_flags(combo), phase);
+    } else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "held shortcut usage has no macOS mapping — edge ignored"
+        );
+    }
+}
+
+fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if combo.has_command() {
         flags |= CGEventFlags::CGEventFlagCommand;
@@ -282,14 +308,7 @@ fn post_keycombo(combo: &KeyCombo) {
     if combo.has_option() {
         flags |= CGEventFlags::CGEventFlagAlternate;
     }
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
-        post_key(vk, flags);
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
-        );
-    }
+    flags
 }
 
 /// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.

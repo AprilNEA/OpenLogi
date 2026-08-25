@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 yön"
 "Middle": "Orta"
 "DPI Preset %{index}": "DPI Ön Ayarı %{index}"
+"Hold %{chord}": "%{chord} basılı tut"
 "Gesture %{name}": "%{name} hareketi"
 "Left Click": "Sol Tık"
 "Right Click": "Sağ Tık"

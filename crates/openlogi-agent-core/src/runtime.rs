@@ -8,11 +8,12 @@
 mod button;
 pub mod hook;
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Action, ButtonId, KeyCombo};
 use openlogi_hid::{CaptureChannel, ChannelRegistry};
 use tracing::{info, warn};
 
@@ -21,6 +22,44 @@ pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
+
+/// Output transition when an action starts within one physical press.
+#[derive(Debug, PartialEq, Eq)]
+enum HoldStart {
+    /// The action is instantaneous and belongs to ordinary dispatch.
+    NotHeld,
+    /// This press newly owns one held chord.
+    Started(KeyCombo),
+    /// The same press changed its held action; release the old chord first.
+    Replaced { old: KeyCombo, new: KeyCombo },
+}
+
+/// Held output owned by accepted press capabilities rather than by a capture
+/// backend. Because every [`PressToken`] has exactly one terminal event, this
+/// map gives release, cancellation, invalidation, and shutdown one path.
+#[derive(Default)]
+struct HeldShortcuts {
+    by_press: HashMap<PressToken, KeyCombo>,
+}
+
+impl HeldShortcuts {
+    fn start(&mut self, press: &PressToken, action: &Action) -> HoldStart {
+        let Some(combo) = action.held_combo() else {
+            return HoldStart::NotHeld;
+        };
+        match self.by_press.insert(press.clone(), combo.clone()) {
+            Some(old) => HoldStart::Replaced {
+                old,
+                new: combo.clone(),
+            },
+            None => HoldStart::Started(combo.clone()),
+        }
+    }
+
+    fn end(&mut self, press: &PressToken) -> Option<KeyCombo> {
+        self.by_press.remove(press)
+    }
+}
 
 #[derive(Clone)]
 struct ActionExecutor {
@@ -113,6 +152,52 @@ impl ActionExecutor {
     }
 }
 
+struct ButtonEventHandler {
+    executor: ActionExecutor,
+    held: HeldShortcuts,
+}
+
+impl ButtonEventHandler {
+    fn new(executor: ActionExecutor) -> Self {
+        Self {
+            executor,
+            held: HeldShortcuts::default(),
+        }
+    }
+
+    fn handle(&mut self, event: ButtonRuntimeEvent) {
+        match event {
+            ButtonRuntimeEvent::Started(press) => {
+                if let Some(action) = press.action() {
+                    self.start_action(press.token(), action, press.device_key());
+                }
+            }
+            ButtonRuntimeEvent::Triggered { press, action } => {
+                self.start_action(press.token(), &action, press.device_key());
+            }
+            ButtonRuntimeEvent::Ended { press, reason } => {
+                if let Some(combo) = self.held.end(press.token()) {
+                    openlogi_inject::release_hold(&combo);
+                }
+                if let EndReason::Canceled(reason) = reason {
+                    info!(button = %press.button(), ?reason, "button lifecycle canceled");
+                }
+            }
+        }
+    }
+
+    fn start_action(&mut self, press: &PressToken, action: &Action, device_key: Option<&str>) {
+        match self.held.start(press, action) {
+            HoldStart::NotHeld => self.executor.dispatch(action, device_key),
+            HoldStart::Started(combo) => openlogi_inject::press_hold(&combo),
+            HoldStart::Replaced { old, new } => {
+                openlogi_inject::release_hold(&old);
+                openlogi_inject::press_hold(&new);
+            }
+        }
+    }
+}
+
 /// Runtime dependencies shared by every action source: the OS hook, HID++
 /// controls, keyboard capture, and Actions Ring slot activation.
 #[derive(Clone)]
@@ -146,27 +231,8 @@ impl ActionRuntime {
             receiver_access,
             action_ring,
         };
-        let button_executor = executor.clone();
-        let buttons = ButtonRuntimeOwner::spawn(move |event| match event {
-            ButtonRuntimeEvent::Started(press) => {
-                if let Some(action) = press.action() {
-                    button_executor.dispatch(action, press.device_key());
-                }
-            }
-            ButtonRuntimeEvent::Triggered { press, action } => {
-                button_executor.dispatch(&action, press.device_key());
-            }
-            ButtonRuntimeEvent::Ended {
-                press,
-                reason: EndReason::Canceled(reason),
-            } => {
-                info!(button = %press.button(), ?reason, "button lifecycle canceled");
-            }
-            ButtonRuntimeEvent::Ended {
-                reason: EndReason::Released,
-                ..
-            } => {}
-        })?;
+        let mut button_handler = ButtonEventHandler::new(executor.clone());
+        let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
         let input = buttons.input();
         Ok(Self {
             dispatcher: ActionDispatcher {
@@ -295,4 +361,68 @@ fn browser_nav_debounce_ok(action: &Action) -> bool {
         *slot = Some(now);
     }
     fire
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hold(label: &str) -> Action {
+        Action::HoldShortcut(label.parse().expect("test shortcut must be valid"))
+    }
+
+    #[test]
+    fn held_output_is_owned_by_the_exact_press_until_its_terminal_event() {
+        let first = PressToken::hook_for_test(1, ButtonId::Back);
+        let second = PressToken::hook_for_test(2, ButtonId::Forward);
+        let mut held = HeldShortcuts::default();
+
+        assert_eq!(
+            held.start(&first, &hold("Ctrl+Space")),
+            HoldStart::Started("Ctrl+Space".parse().expect("valid shortcut"))
+        );
+        assert_eq!(
+            held.start(&second, &hold("Alt+F2")),
+            HoldStart::Started("Alt+F2".parse().expect("valid shortcut"))
+        );
+        assert_eq!(
+            held.end(&first),
+            Some("Ctrl+Space".parse().expect("valid shortcut"))
+        );
+        assert_eq!(held.end(&first), None, "a press releases at most once");
+        assert_eq!(
+            held.end(&second),
+            Some("Alt+F2".parse().expect("valid shortcut"))
+        );
+    }
+
+    #[test]
+    fn changing_a_hold_within_one_press_balances_the_previous_chord() {
+        let press = PressToken::hook_for_test(1, ButtonId::Back);
+        let mut held = HeldShortcuts::default();
+        let old: KeyCombo = "Ctrl+Space".parse().expect("valid shortcut");
+        let new: KeyCombo = "Alt+F2".parse().expect("valid shortcut");
+
+        assert_eq!(
+            held.start(&press, &Action::HoldShortcut(old.clone())),
+            HoldStart::Started(old.clone())
+        );
+        assert_eq!(
+            held.start(&press, &Action::HoldShortcut(new.clone())),
+            HoldStart::Replaced {
+                old,
+                new: new.clone(),
+            }
+        );
+        assert_eq!(held.end(&press), Some(new));
+    }
+
+    #[test]
+    fn instantaneous_actions_do_not_enter_held_state() {
+        let press = PressToken::hook_for_test(1, ButtonId::Back);
+        let mut held = HeldShortcuts::default();
+
+        assert_eq!(held.start(&press, &Action::Copy), HoldStart::NotHeld);
+        assert_eq!(held.end(&press), None);
+    }
 }

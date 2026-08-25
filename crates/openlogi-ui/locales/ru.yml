@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 направлений"
 "Middle": "Средняя"
 "DPI Preset %{index}": "Пресет DPI %{index}"
+"Hold %{chord}": "Удерживать %{chord}"
 "Gesture %{name}": "Жест %{name}"
 "Left Click": "Левый щелчок"
 "Right Click": "Правый щелчок"

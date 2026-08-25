@@ -58,7 +58,8 @@ pub use succession::Identity;
 /// v26: `AgentStatus::hid_open_failures` appended.
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
-pub const PROTOCOL_VERSION: u32 = 27;
+/// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

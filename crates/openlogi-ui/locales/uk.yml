@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 напрямків"
 "Middle": "Середня"
 "DPI Preset %{index}": "Пресет DPI %{index}"
+"Hold %{chord}": "Утримувати %{chord}"
 "Gesture %{name}": "Жест %{name}"
 "Left Click": "Клацання лівою"
 "Right Click": "Клацання правою"

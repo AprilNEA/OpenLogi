@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5방향"
 "Middle": "가운데 버튼"
 "DPI Preset %{index}": "DPI 프리셋 %{index}"
+"Hold %{chord}": "%{chord} 길게 누르기"
 "Gesture %{name}": "제스처 %{name}"
 "Left Click": "왼쪽 클릭"
 "Right Click": "오른쪽 클릭"

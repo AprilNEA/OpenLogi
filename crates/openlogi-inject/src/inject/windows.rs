@@ -14,6 +14,8 @@ use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 
+use super::KeyPhase;
+
 const WHEEL_DELTA: i32 = 120;
 
 const VK_D: u16 = 0x44;
@@ -50,7 +52,7 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
-        Effect::Key(combo) => post_custom_shortcut(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => post_custom_shortcut(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
@@ -256,6 +258,10 @@ fn post_custom_shortcut(combo: &KeyCombo) {
         return;
     };
 
+    post_key(vk, &combo_modifiers(combo));
+}
+
+fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
         modifiers.push(VK_CONTROL);
@@ -269,7 +275,37 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     if combo.has_option() {
         modifiers.push(VK_MENU);
     }
-    post_key(vk, &modifiers);
+    modifiers
+}
+
+/// Emit one isolated edge of a held chord in a single `SendInput` batch.
+pub(super) fn hold_combo(combo: &KeyCombo, phase: KeyPhase) {
+    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            chord = %combo.rendered_label(),
+            "held shortcut usage has no Windows mapping — edge ignored"
+        );
+        return;
+    };
+    let modifiers = combo_modifiers(combo);
+    let mut inputs = Vec::with_capacity(modifiers.len() + 1);
+    match phase {
+        KeyPhase::Down => {
+            inputs.extend(modifiers.iter().map(|modifier| key_input(*modifier, false)));
+            inputs.push(key_input(vk, false));
+        }
+        KeyPhase::Up => {
+            inputs.push(key_input(vk, true));
+            inputs.extend(
+                modifiers
+                    .iter()
+                    .rev()
+                    .map(|modifier| key_input(*modifier, true)),
+            );
+        }
+    }
+    send_inputs(&inputs);
 }
 
 fn send_inputs(inputs: &[INPUT]) {

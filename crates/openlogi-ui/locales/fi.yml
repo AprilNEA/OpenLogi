@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 suuntaa"
 "Middle": "Keskipainike"
 "DPI Preset %{index}": "DPI-esiasetus %{index}"
+"Hold %{chord}": "Pidä %{chord}"
 "Gesture %{name}": "Ele %{name}"
 "Left Click": "Vasen napsautus"
 "Right Click": "Oikea napsautus"

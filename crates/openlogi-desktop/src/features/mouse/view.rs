@@ -28,6 +28,7 @@ use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
+use crate::ui::action::localized_action_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 const SIDE_GAP: f32 = 24.;
@@ -769,16 +770,6 @@ fn binding_label_for_control(
                 }
             }
         }
-    }
-}
-
-pub(super) fn localized_action_label(action: &Action) -> gpui::SharedString {
-    match action {
-        Action::SetDpiPreset(index) => {
-            tr!("DPI Preset %{index}", index => (index + 1).to_string())
-        }
-        Action::CustomShortcut(combo) => combo.rendered_label().into(),
-        _ => tr!(action.label()),
     }
 }
 

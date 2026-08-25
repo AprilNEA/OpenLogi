@@ -29,6 +29,8 @@ scroll_resolution = "high"
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
 Forward = "BrowserForward"
+# Hold the chord for exactly as long as the physical button is held.
+MiddleClick = { HoldShortcut = "Ctrl+Space" }
 # The thumb wheel's capacitive tap. Inert unless set here; the wheel also
 # reports taps from incidental thumb contact.
 Thumbwheel = "AppExpose"

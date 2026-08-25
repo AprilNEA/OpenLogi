@@ -45,6 +45,7 @@ use crate::features::mouse::picker::{
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
@@ -666,8 +667,7 @@ fn key_click_target(
 
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
-        Some(Action::CustomShortcut(combo)) => combo.rendered_label().into(),
-        Some(a) => tr!(a.label()),
+        Some(action) => localized_action_label(action),
         None => tr!("Off"),
     }
 }

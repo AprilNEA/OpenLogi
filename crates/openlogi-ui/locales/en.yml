@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 directions"
 "Middle": "Middle"
 "DPI Preset %{index}": "DPI Preset %{index}"
+"Hold %{chord}": "Hold %{chord}"
 "Gesture %{name}": "Gesture %{name}"
 "Left Click": "Left Click"
 "Right Click": "Right Click"

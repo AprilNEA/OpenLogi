@@ -87,8 +87,14 @@ Payload actions use a one-key inline table:
 
 ```toml
 Back = { CustomShortcut = "Cmd+Shift+P" }
+Forward = { HoldShortcut = "Ctrl+Space" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
 ```
+
+`CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
+the chord down until the originating physical button is released, and also
+releases it if capture is interrupted, the binding becomes invalid, or the
+agent shuts down. Use it for push-to-talk and other hold-to-activate controls.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

@@ -58,6 +58,7 @@ mod tests {
             rust_i18n::t!("DPI Preset %{index}", index => "2"),
             "灵敏度预设 2"
         ); // parameterized action label
+        assert_eq!(rust_i18n::t!("Hold %{chord}", chord => "X"), "按住 X"); // held action label
         assert_eq!(rust_i18n::t!("Quit OpenLogi"), "退出 OpenLogi"); // menu-bar status item
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
         assert_eq!(rust_i18n::t!("Lighting"), "灯光"); // keyboard lighting tab
@@ -85,8 +86,9 @@ mod tests {
         );
 
         // Exhaustive: every non-parameterized device/action label has a `zh-CN`
-        // entry. Parameterized `Action`s (`SetDpiPreset`, `CustomShortcut`) are
-        // skipped here and checked explicitly above where needed.
+        // entry. Parameterized `Action`s (`SetDpiPreset`, `CustomShortcut`,
+        // `HoldShortcut`) are skipped here and checked explicitly above where
+        // needed.
         let covered = |label: &str| rust_i18n::t!(label) != label;
         for b in ButtonId::ALL {
             assert!(covered(b.label()), "no zh-CN for ButtonId::{b:?}");

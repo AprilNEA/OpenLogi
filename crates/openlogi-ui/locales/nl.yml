@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 richtingen"
 "Middle": "Middenknop"
 "DPI Preset %{index}": "DPI-voorinstelling %{index}"
+"Hold %{chord}": "%{chord} ingedrukt houden"
 "Gesture %{name}": "Gebaar %{name}"
 "Left Click": "Linkerklik"
 "Right Click": "Rechterklik"

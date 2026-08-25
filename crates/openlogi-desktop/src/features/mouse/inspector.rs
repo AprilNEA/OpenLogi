@@ -23,8 +23,9 @@ use super::picker::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
 };
 use super::thumbwheel::ThumbwheelPreset;
-use super::view::{MouseModelView, localized_action_label};
+use super::view::MouseModelView;
 use crate::state::AppState;
+use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 

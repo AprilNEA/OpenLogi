@@ -20,6 +20,7 @@ use openlogi_core::binding::{
 use super::action_icons::action_icon_path;
 use crate::features::mouse::picker::editor_section;
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -32,10 +33,9 @@ pub(super) fn action_library(
     pal: Palette,
 ) -> impl IntoElement {
     let current_action = current.map(ActionRingEntry::action).cloned();
-    let current_label = current_action.as_ref().map_or_else(
-        || tr!("Empty slot").to_string(),
-        |action| rust_i18n::t!(action.label()).into_owned(),
-    );
+    let current_label = current_action
+        .as_ref()
+        .map_or_else(|| tr!("Empty slot"), localized_action_label);
 
     v_flex()
         .flex_1()

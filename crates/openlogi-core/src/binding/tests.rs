@@ -33,10 +33,28 @@ fn catalog_excludes_custom_shortcut() {
     let catalog = Action::catalog();
     for action in &catalog {
         assert!(
-            !matches!(action, Action::CustomShortcut(_)),
-            "catalog must not contain CustomShortcut"
+            !matches!(action, Action::CustomShortcut(_) | Action::HoldShortcut(_)),
+            "catalog must not contain recorded shortcut actions"
         );
     }
+}
+
+#[test]
+fn hold_shortcut_has_distinct_lifecycle_semantics() {
+    let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
+    let held = Action::HoldShortcut(combo.clone());
+
+    assert_eq!(held.label(), "Hold Alt+Space");
+    assert_eq!(held.category(), Category::Editing);
+    assert_eq!(held.held_combo(), Some(&combo));
+    assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
+    assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+}
+
+#[test]
+fn hold_shortcut_roundtrips_toml() {
+    let action = Action::HoldShortcut("Alt+Space".parse().expect("valid shortcut failed"));
+    assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
@@ -264,6 +282,10 @@ fn persisted_action_variant_names_are_stable() {
             ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
                 .unwrap_or_else(|error| panic!("valid target failed: {error}")),
         ),
+        Action::HoldShortcut(
+            "F2".parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
     ]);
     let mut actual: Vec<String> = actions
         .into_iter()
@@ -293,6 +315,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",
         "LockScreen",
@@ -516,6 +539,13 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
         .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
     let custom_shortcut = Action::CustomShortcut(combo);
     assert_matches!(custom_shortcut.effect(), Effect::Key(_));
+
+    let hold_shortcut = Action::HoldShortcut(
+        "Ctrl+Space"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+    );
+    assert_matches!(hold_shortcut.effect(), Effect::HeldKey(_));
 
     let type_text = Action::TypeText("hi".into());
     assert_matches!(type_text.effect(), Effect::Text("hi"));

@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 個方向"
 "Middle": "中鍵"
 "DPI Preset %{index}": "靈敏度預設 %{index}"
+"Hold %{chord}": "按住 %{chord}"
 "Gesture %{name}": "手勢 %{name}"
 "Left Click": "左鍵按一下"
 "Right Click": "右鍵按一下"

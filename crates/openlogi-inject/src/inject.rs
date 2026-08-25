@@ -6,7 +6,7 @@
 //! of which translates an [`Action`] into the native event(s) — CGEvent/NSEvent
 //! on macOS, uinput/D-Bus on Linux, SendInput on Windows.
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, KeyCombo};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -16,6 +16,13 @@ mod linux;
 
 #[cfg(target_os = "windows")]
 mod windows;
+
+/// Which isolated edge of a held keyboard chord to synthesize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyPhase {
+    Down,
+    Up,
+}
 
 /// Synthesise the OS-level event for `action`.
 ///
@@ -77,6 +84,44 @@ pub fn execute(action: &Action) {
             tracing::warn!(
                 action = action.label(),
                 "execute unsupported on this platform"
+            );
+        }
+    }
+}
+
+/// Synthesise the down edge of `combo`, leaving its output held.
+///
+/// Every successful lifecycle start must be paired with [`release_hold`],
+/// including cancellation and shutdown paths. Prefer [`execute`] when the
+/// caller does not own a matching terminal event.
+pub fn press_hold(combo: &KeyCombo) {
+    hold_phase(combo, KeyPhase::Down);
+}
+
+/// Synthesise the up edge matching a prior [`press_hold`].
+///
+/// A redundant release is safe: platforms treat an up edge for an already-up
+/// key as a no-op, which lets cancellation paths release defensively.
+pub fn release_hold(combo: &KeyCombo) {
+    hold_phase(combo, KeyPhase::Up);
+}
+
+fn hold_phase(combo: &KeyCombo, phase: KeyPhase) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::hold_combo(combo, phase);
+        }
+        target_os = "linux" => {
+            linux::hold_combo(combo, phase);
+        }
+        target_os = "windows" => {
+            windows::hold_combo(combo, phase);
+        }
+        _ => {
+            tracing::warn!(
+                chord = %combo.rendered_label(),
+                ?phase,
+                "held shortcut output unsupported on this platform"
             );
         }
     }

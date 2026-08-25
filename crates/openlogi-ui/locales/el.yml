@@ -165,6 +165,7 @@ _version: 1
 "5 directions": "5 κατευθύνσεις"
 "Middle": "Μεσαίο"
 "DPI Preset %{index}": "Προεπιλογή DPI %{index}"
+"Hold %{chord}": "Κράτημα %{chord}"
 "Gesture %{name}": "Χειρονομία %{name}"
 "Left Click": "Αριστερό κλικ"
 "Right Click": "Δεξί κλικ"
