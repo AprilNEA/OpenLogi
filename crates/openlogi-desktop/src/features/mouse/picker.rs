@@ -221,3 +221,42 @@ pub(crate) fn editor_scroll_list(id: &'static str, rows: Vec<AnyElement>) -> imp
         .overflow_y_scroll()
         .children(rows)
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::AssetSource as _;
+    use openlogi_core::binding::ApplicationTarget;
+    use openlogi_ui::action_icons::ActionIcons;
+
+    use super::*;
+
+    /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler
+    /// catches a missing arm — but nothing checks that the path an arm names is
+    /// actually embedded, and an unembedded path renders as a blank slot with
+    /// no error anywhere. [`Action::catalog`] misses the variants below:
+    /// `ShowActionsRing` is `not_pickable` yet still drawn wherever it is
+    /// already bound, and the parameterised arms hold the only references to
+    /// the keyboard and terminal glyphs.
+    #[test]
+    fn every_reachable_action_icon_is_embedded() {
+        let uncatalogued = [
+            Action::ShowActionsRing,
+            Action::SetDpiPreset(0),
+            Action::CustomShortcut("Ctrl+A".parse().expect("Ctrl+A is a valid combo")),
+            Action::TypeText(String::new()),
+            Action::RunShellCommand(String::new()),
+            Action::RunAppleScript(String::new()),
+            Action::Workflow(Vec::new()),
+            Action::OpenApplication(
+                ApplicationTarget::new("/usr/bin/true", "true").expect("non-empty path"),
+            ),
+        ];
+        for action in Action::catalog().into_iter().chain(uncatalogued) {
+            let path = action_icon_path(&action);
+            assert!(
+                matches!(ActionIcons.load(path), Ok(Some(_))),
+                "{path}, bound to {action:?}, is not embedded"
+            );
+        }
+    }
+}
