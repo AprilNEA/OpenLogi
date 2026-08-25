@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfileBindings, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
@@ -102,6 +103,12 @@ pub enum Command {
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
+    ),
+    /// Read the active onboard profile's decoded button bindings — read-only,
+    /// G-series gaming mice only (see [`openlogi_core::device::Capabilities::onboard_profiles`]).
+    ReadOnboardProfileBindings(
+        DeviceRoute,
+        oneshot::Sender<Result<OnboardProfileBindings, WriteError>>,
     ),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -499,6 +506,11 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
+        Command::ReadOnboardProfileBindings(route, reply) => {
+            let _ = reply.send(rpc_result(
+                client.read_onboard_profile_bindings(ctx, route).await,
+            )?);
+        }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
             // is still a reload that did not happen — and the file on disk has
@@ -605,7 +617,7 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
 /// fire-and-forget so they have nothing to reply to.
 #[expect(
     clippy::match_same_arms,
-    reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
+    reason = "the read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
 fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command) {
     // Transient, not a permanent feature error: the agent is just restarting,
@@ -615,6 +627,9 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadOnboardProfileBindings(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{LightCommand, OnboardProfileBindings, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -183,6 +183,21 @@ pub async fn dump_onboard_profiles_info(
     route: &DeviceRoute,
 ) -> Result<OnboardProfilesInfo, WriteError> {
     device::dump_onboard_profiles_info(&*native_backend(), route).await
+}
+
+/// Read which onboard profile is currently active (via `0x8100`'s
+/// `GET_CURRENT_PROFILE`) of the device `route` reaches.
+pub async fn dump_onboard_current_profile(route: &DeviceRoute) -> Result<u8, WriteError> {
+    device::dump_onboard_current_profile(&*native_backend(), route).await
+}
+
+/// Read and decode the active onboard profile's button bindings of the
+/// device `route` reaches. See
+/// `openlogi_device::write::dump_onboard_profile_bindings`.
+pub async fn dump_onboard_profile_bindings(
+    route: &DeviceRoute,
+) -> Result<OnboardProfileBindings, WriteError> {
+    device::dump_onboard_profile_bindings(&*native_backend(), route).await
 }
 
 /// Read one onboard-memory sector (via `0x8100`'s `MEMORY_READ`) of the

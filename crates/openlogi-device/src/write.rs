@@ -24,14 +24,15 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard_profiles;
 mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, OnboardProfilesInfo, ReprogControlEntry,
-    dump_features, dump_firmware_entities, dump_onboard_profiles_info,
-    dump_onboard_profiles_sector, dump_reprog_controls, read_battery_raw,
-    write_onboard_profiles_sector,
+    dump_features, dump_firmware_entities, dump_onboard_current_profile,
+    dump_onboard_profiles_info, dump_onboard_profiles_sector, dump_reprog_controls,
+    read_battery_raw, write_onboard_profiles_sector,
 };
 pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
@@ -58,6 +59,7 @@ pub use litra::{
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
 };
+pub use onboard_profiles::{dump_onboard_profile_bindings, read_onboard_profile_bindings_on};
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,

@@ -56,6 +56,8 @@ use openlogi_hidpp_derive::Feature;
 
 use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
+/// HID++2.0 function id for `CMD_ONBOARD_PROFILES_GET_CURRENT_PROFILE`.
+const FUNCTION_GET_CURRENT_PROFILE: u8 = 4;
 /// HID++2.0 function id for `CMD_ONBOARD_PROFILES_MEMORY_READ` (libratbag
 /// `hidpp20.c`), reading 16 bytes of onboard memory at a time.
 const FUNCTION_MEMORY_READ: u8 = 5;
@@ -94,6 +96,19 @@ impl OnboardProfilesFeature {
             mechanical_layout: payload[9],
             various_info: payload[10],
         })
+    }
+
+    /// Calls function `4` (`CMD_ONBOARD_PROFILES_GET_CURRENT_PROFILE`) and
+    /// returns the active profile's index (matches
+    /// [`ProfileDirectoryEntry::address`] for the profile currently loaded).
+    /// `0` means no profile is active (onboard mode off / host-driven).
+    pub async fn get_current_profile(&self) -> Result<u8, Hidpp20Error> {
+        let payload = self
+            .endpoint
+            .call(FUNCTION_GET_CURRENT_PROFILE, [0; 3])
+            .await?
+            .extend_payload();
+        Ok(payload[1])
     }
 
     /// Reads `sector_size` bytes of onboard memory starting at `sector`,

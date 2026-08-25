@@ -59,6 +59,11 @@ pub async fn run(args: OnboardProfilesArgs) -> Result<()> {
     println!("  mechanical_layout:  {}", info.mechanical_layout);
     println!("  various_info:       {}", info.various_info);
 
+    let current_profile = openlogi_hid::dump_onboard_current_profile(&route)
+        .await
+        .context("dump HID++ 0x8100 current profile")?;
+    println!("  current_profile:    {current_profile}");
+
     if let Some(sector) = args.sector {
         let data = openlogi_hid::dump_onboard_profiles_sector(&route, sector, info.sector_size)
             .await
@@ -107,5 +112,15 @@ pub async fn run(args: OnboardProfilesArgs) -> Result<()> {
             }
         }
     }
+
+    let decoded = openlogi_hid::dump_onboard_profile_bindings(&route)
+        .await
+        .context("decode HID++ 0x8100 active-profile button bindings")?;
+    println!("  decoded active-profile bindings (via dump_onboard_profile_bindings):");
+    println!("    active_profile: {:?}", decoded.active_profile);
+    for binding in &decoded.bindings {
+        println!("    [{}] {}", binding.slot, binding.description);
+    }
+
     Ok(())
 }

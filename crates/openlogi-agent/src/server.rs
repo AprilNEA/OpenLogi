@@ -18,6 +18,7 @@ use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::OnboardProfileBindings;
 use openlogi_hid::{
     DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
     SmartShiftStatus, WriteError,
@@ -299,6 +300,19 @@ impl Agent for AgentServer {
 
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
+    }
+
+    async fn read_onboard_profile_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardProfileBindings, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::OnboardProfiles, |c| async move {
+                openlogi_hid::read_onboard_profile_bindings_on(&c).await
+            })
+            .await
     }
 }
 

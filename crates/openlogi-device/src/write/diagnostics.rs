@@ -170,6 +170,27 @@ pub async fn dump_onboard_profiles_info(
     .await
 }
 
+/// Diagnostic, read-only probe of which profile is currently active on the
+/// device via `0x8100`'s `GET_CURRENT_PROFILE`. `0` means no profile is
+/// active (onboard mode off / host-driven, e.g. under G Hub).
+pub async fn dump_onboard_current_profile(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<u8, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles.get_current_profile().await.map_err(|e| {
+            classify_hidpp_error(
+                e,
+                HidppOperation::OnboardProfiles,
+                OnboardProfilesFeature::ID,
+            )
+        })
+    })
+    .await
+}
+
 /// Diagnostic, read-only dump of one onboard-memory sector via `0x8100`'s
 /// `MEMORY_READ`. `sector_size` should come from a prior
 /// [`dump_onboard_profiles_info`] call. Sector `0x0000` is the profile
@@ -230,8 +251,9 @@ pub async fn write_onboard_profiles_sector(
 }
 
 /// Resolves `0x8100`'s feature index on `device_index` and returns it bound
-/// to a fresh [`Device`], shared by every `OnboardProfiles` diagnostic above.
-async fn open_onboard_profiles(
+/// to a fresh [`Device`], shared by every `OnboardProfiles` diagnostic above
+/// (and by the sibling `onboard_profiles` module's bindings decoder).
+pub(super) async fn open_onboard_profiles(
     channel: &Arc<HidppChannel>,
     index: u8,
 ) -> Result<Arc<OnboardProfilesFeature>, WriteError> {
