@@ -270,7 +270,7 @@ fn tab_body(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p(SCREEN_PAD)
+        .p(SCREEN_PAD.rems())
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
