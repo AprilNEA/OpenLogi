@@ -127,6 +127,27 @@ sudo pacman -U openlogi-*.pkg.tar.zst
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
 
+Each release also carries a Flatpak bundle, for `amd64` and `arm64`:
+
+```sh
+flatpak install --user ./openlogi-*.flatpak
+```
+
+It is a one-time install: there is no remote behind it, so `flatpak update` has
+nothing to check and a new version means downloading the next bundle.
+
+A Flatpak cannot write to `/etc`, so its udev rules go on the host separately.
+They ship inside the application, so this needs no extra download:
+
+```sh
+flatpak run --command=cat org.openlogi.OpenLogi /app/share/openlogi/udev/70-openlogi.rules | sudo tee /etc/udev/rules.d/70-openlogi.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Until that runs, no devices are detected at all. Nothing extra is needed for
+`/dev/uinput`: the rules create its node at boot with `static_node=uinput`, and
+opening it loads the module. The agent is launched by the application itself, so
+unlike the packages below there is no user service to enable.
+
 NixOS users can instead import the repository's module, which installs the
 package and udev rules and starts the agent with the graphical session:
 
