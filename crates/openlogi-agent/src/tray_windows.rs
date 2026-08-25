@@ -47,6 +47,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 /// Tray callback message the icon posts to the hidden window.
 const WM_TRAY: u32 = WM_APP + 1;
+/// Ask the tray thread to reconcile battery icons with [`DEVICE_TRAY`].
+const WM_SYNC_DEVICE_ICONS: u32 = WM_APP + 2;
 /// Menu command ids returned by `TrackPopupMenu`.
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
@@ -67,14 +69,13 @@ struct TrayDevice {
 struct DeviceTrayState {
     enabled: bool,
     devices: Option<Vec<TrayDevice>>,
-    icons: Vec<usize>,
 }
 
 static DEVICE_TRAY: Mutex<DeviceTrayState> = Mutex::new(DeviceTrayState {
     enabled: true,
     devices: None,
-    icons: Vec::new(),
 });
+static DEVICE_ICONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Show or remove the per-device battery icons immediately.
 pub fn set_device_icons_enabled(enabled: bool) {
@@ -85,12 +86,8 @@ pub fn set_device_icons_enabled(enabled: bool) {
         return;
     }
     state.enabled = enabled;
-    let hwnd = TRAY_HWND.load(Ordering::Relaxed);
-    if !hwnd.is_null() {
-        // SAFETY: the tray window lives until process exit; syncing adds or
-        // removes only icons registered under that window.
-        unsafe { sync_device_icons(hwnd, &mut state, false) };
-    }
+    drop(state);
+    queue_device_icon_sync();
 }
 
 /// Refresh the device battery text shown on hover and in the context menu.
@@ -107,17 +104,23 @@ pub fn update_devices(inventories: &[DeviceInventory]) {
         return;
     }
     state.devices = Some(devices);
+    drop(state);
+    queue_device_icon_sync();
+}
 
+fn queue_device_icon_sync() {
     let hwnd = TRAY_HWND.load(Ordering::Relaxed);
     if !hwnd.is_null() {
-        // SAFETY: the tray thread stores this window handle for the agent's
-        // lifetime, and Shell_NotifyIconW may modify an icon from any thread.
-        unsafe { sync_device_icons(hwnd, &mut state, false) };
-    }
-    drop(state);
-    if !hwnd.is_null() {
-        // SAFETY: same live window handle as above.
-        unsafe { update_tooltip(hwnd) };
+        // SAFETY: posting is asynchronous; the live tray window processes the
+        // shell calls on its own thread.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd,
+                WM_SYNC_DEVICE_ICONS,
+                0,
+                0,
+            );
+        }
     }
 }
 
@@ -302,6 +305,13 @@ unsafe extern "system" fn wnd_proc(
             unsafe { add_tray_icon(hwnd) };
             0
         }
+        WM_SYNC_DEVICE_ICONS => {
+            // SAFETY: this is the thread that owns the live tray window.
+            unsafe { sync_device_icons(hwnd, false) };
+            // SAFETY: this is the thread that owns the live tray window.
+            unsafe { update_tooltip(hwnd) };
+            0
+        }
         // SAFETY: handing the system back the message it just delivered,
         // unchanged: `hwnd` is live for the duration of the callback and
         // `wparam`/`lparam` are the payload win32 paired with `msg`, which is
@@ -330,9 +340,7 @@ unsafe fn add_tray_icon(hwnd: HWND) {
         if Shell_NotifyIconW(NIM_ADD, &raw const nid) == 0 {
             warn!("Shell_NotifyIconW(NIM_ADD) failed — no tray icon");
         }
-        if let Ok(mut state) = DEVICE_TRAY.lock() {
-            sync_device_icons(hwnd, &mut state, true);
-        }
+        sync_device_icons(hwnd, true);
     }
 }
 
@@ -340,14 +348,21 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     clippy::cast_possible_truncation,
     reason = "NOTIFYICONDATAW is a few hundred bytes"
 )]
-unsafe fn sync_device_icons(hwnd: HWND, state: &mut DeviceTrayState, force_add: bool) {
-    let devices = if state.enabled {
-        state.devices.clone().unwrap_or_default()
+unsafe fn sync_device_icons(hwnd: HWND, force_add: bool) {
+    let (enabled, devices) = match DEVICE_TRAY.lock() {
+        Ok(state) => (state.enabled, state.devices.clone()),
+        Err(_) => return,
+    };
+    let devices = if enabled {
+        devices.unwrap_or_default()
     } else {
         Vec::new()
     };
-    if state.icons.len() < devices.len() {
-        state.icons.resize(devices.len(), 0);
+    let Ok(mut icons) = DEVICE_ICONS.lock() else {
+        return;
+    };
+    if icons.len() < devices.len() {
+        icons.resize(devices.len(), 0);
     }
 
     for (index, device) in devices.iter().enumerate() {
@@ -372,7 +387,7 @@ unsafe fn sync_device_icons(hwnd: HWND, state: &mut DeviceTrayState, force_add: 
             nid.uCallbackMessage = WM_TRAY;
             nid.hIcon = icon;
             write_tip(&mut nid.szTip, &device.line);
-            let operation = if force_add || state.icons[index] == 0 {
+            let operation = if force_add || icons[index] == 0 {
                 NIM_ADD
             } else {
                 NIM_MODIFY
@@ -382,14 +397,14 @@ unsafe fn sync_device_icons(hwnd: HWND, state: &mut DeviceTrayState, force_add: 
                 warn!(id, "could not add or update a device battery tray icon");
                 continue;
             }
-            if state.icons[index] != 0 {
-                DestroyIcon(state.icons[index] as HICON);
+            if icons[index] != 0 {
+                DestroyIcon(icons[index] as HICON);
             }
-            state.icons[index] = icon as usize;
+            icons[index] = icon as usize;
         }
     }
 
-    for index in devices.len()..state.icons.len() {
+    for index in devices.len()..icons.len() {
         let Ok(id) = u32::try_from(index + 2) else {
             break;
         };
@@ -400,12 +415,12 @@ unsafe fn sync_device_icons(hwnd: HWND, state: &mut DeviceTrayState, force_add: 
             nid.hWnd = hwnd;
             nid.uID = id;
             Shell_NotifyIconW(NIM_DELETE, &raw const nid);
-            if state.icons[index] != 0 {
-                DestroyIcon(state.icons[index] as HICON);
+            if icons[index] != 0 {
+                DestroyIcon(icons[index] as HICON);
             }
         }
     }
-    state.icons.truncate(devices.len());
+    icons.truncate(devices.len());
 }
 
 unsafe fn battery_icon(percentage: u8, charging: bool) -> HICON {
