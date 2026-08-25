@@ -6,12 +6,12 @@
 //! of which translates an [`Action`] into the native event(s) — CGEvent/NSEvent
 //! on macOS, uinput/D-Bus on Linux, SendInput on Windows.
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::collections::HashMap;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, KeyCombo};
 
@@ -31,34 +31,68 @@ enum KeyPhase {
     Up,
 }
 
-/// One physical keyboard output shared by held chords on Linux and Windows.
+/// One physical keyboard output shared by held chords.
 ///
-/// Both logical Cmd and Ctrl map to [`Self::Control`] on these platforms, so
-/// ownership is counted after that alias is resolved.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+/// Logical Cmd and Ctrl are distinct on macOS. Cmd aliases Ctrl on Linux and
+/// Windows, so ownership is counted after that platform mapping is resolved.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum HeldKey {
+    #[cfg(target_os = "macos")]
+    Command,
     Control,
     Shift,
     Alt,
     Key(KeyboardUsage),
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct HoldTransition {
     up: Vec<HeldKey>,
     down: Vec<HeldKey>,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HeldModifiers(u8);
+
+#[cfg(target_os = "macos")]
+impl HeldModifiers {
+    fn set(&mut self, key: HeldKey, held: bool) {
+        let Some(mask) = Self::mask(key) else {
+            return;
+        };
+        if held {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
+    fn contains(self, key: HeldKey) -> bool {
+        Self::mask(key).is_some_and(|mask| self.0 & mask != 0)
+    }
+
+    fn mask(key: HeldKey) -> Option<u8> {
+        match key {
+            HeldKey::Command => Some(1 << 0),
+            HeldKey::Control => Some(1 << 1),
+            HeldKey::Shift => Some(1 << 2),
+            HeldKey::Alt => Some(1 << 3),
+            HeldKey::Key(_) => None,
+        }
+    }
+}
+
 /// Reference counts for physical keyboard outputs across active chords.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Default)]
 struct HeldOutput {
     owners: HashMap<HeldKey, usize>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl HeldOutput {
     fn transition(
         &mut self,
@@ -93,16 +127,39 @@ impl HeldOutput {
                 .collect(),
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn modifiers(&self) -> HeldModifiers {
+        let mut modifiers = HeldModifiers::default();
+        for key in [
+            HeldKey::Command,
+            HeldKey::Control,
+            HeldKey::Shift,
+            HeldKey::Alt,
+        ] {
+            modifiers.set(key, self.owners.contains_key(&key));
+        }
+        modifiers
+    }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
     LazyLock::new(|| Mutex::new(HeldOutput::default()));
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     let mut keys = Vec::with_capacity(4);
+    #[cfg(target_os = "macos")]
+    if combo.has_command() {
+        keys.push(HeldKey::Command);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     if combo.has_command() || combo.has_control() {
+        keys.push(HeldKey::Control);
+    }
+    #[cfg(target_os = "macos")]
+    if combo.has_control() {
         keys.push(HeldKey::Control);
     }
     if combo.has_shift() {
@@ -191,8 +248,9 @@ pub fn press_hold(combo: &KeyCombo) {
 
 /// Synthesise the up edge matching a prior [`press_hold`].
 ///
-/// A redundant release is safe: platforms treat an up edge for an already-up
-/// key as a no-op, which lets cancellation paths release defensively.
+/// Each successful [`press_hold`] must be released exactly once. The lifecycle
+/// owner provides that guarantee; duplicate releases would consume ownership
+/// retained for an overlapping chord.
 pub fn release_hold(combo: &KeyCombo) {
     hold_transition(Some(combo), None);
 }
@@ -205,12 +263,12 @@ pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
 fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {
-            if let Some(combo) = released {
-                macos::hold_combo(combo, KeyPhase::Up);
-            }
-            if let Some(combo) = pressed {
-                macos::hold_combo(combo, KeyPhase::Down);
-            }
+            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let modifiers = output.modifiers();
+            let transition = output.transition(released, pressed);
+            let modifiers = macos::hold_keys(&transition.up, KeyPhase::Up, modifiers);
+            let modifiers = macos::hold_keys(&transition.down, KeyPhase::Down, modifiers);
+            debug_assert_eq!(modifiers, output.modifiers());
         }
         target_os = "linux" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
@@ -349,18 +407,18 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use openlogi_core::binding::KeyCombo;
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     fn combo(label: &str) -> KeyCombo {
         label.parse().expect("test shortcut must be valid")
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn shared_control_stays_down_until_its_last_chord_ends() {
         let control_a = combo("Ctrl+A");
@@ -421,7 +479,62 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn command_and_control_are_distinct_physical_outputs() {
+        let command_a = combo("Cmd+A");
+        let control_b = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&command_a));
+        assert_eq!(
+            output.transition(None, Some(&control_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Command, HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shared_command_stays_down_until_its_last_chord_ends() {
+        let command_a = combo("Cmd+A");
+        let command_b = combo("Cmd+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&command_a));
+        assert_eq!(
+            output.transition(None, Some(&command_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(command_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_b), None),
+            HoldTransition {
+                up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn replacement_preserves_shared_physical_outputs() {
         let old = combo("Ctrl+A");

@@ -12,7 +12,7 @@ use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 
-use super::KeyPhase;
+use super::{HeldKey, HeldModifiers, KeyPhase};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -282,16 +282,72 @@ fn post_keycombo(combo: &KeyCombo) {
     }
 }
 
-/// Emit one isolated edge of a held chord.
-pub(super) fn hold_combo(combo: &KeyCombo, phase: KeyPhase) {
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
-        post_key_phase(vk, combo_flags(combo), phase);
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "held shortcut usage has no macOS mapping — edge ignored"
-        );
+/// Emit the physical-key edges whose shared ownership changed, preserving the
+/// aggregate synthetic modifier state on every event.
+pub(super) fn hold_keys(
+    keys: &[HeldKey],
+    phase: KeyPhase,
+    mut modifiers: HeldModifiers,
+) -> HeldModifiers {
+    match phase {
+        KeyPhase::Down => {
+            for &key in keys {
+                post_held_key(key, phase, &mut modifiers);
+            }
+        }
+        KeyPhase::Up => {
+            for &key in keys.iter().rev() {
+                post_held_key(key, phase, &mut modifiers);
+            }
+        }
     }
+    modifiers
+}
+
+fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
+    let Some((vk, flags)) = held_key_event(key, phase, modifiers) else {
+        if let HeldKey::Key(usage) = key {
+            tracing::warn!(
+                usage = usage.code(),
+                "held shortcut usage has no macOS mapping — edge ignored"
+            );
+        }
+        return;
+    };
+    post_key_phase(vk, flags, phase);
+}
+
+fn held_key_event(
+    key: HeldKey,
+    phase: KeyPhase,
+    modifiers: &mut HeldModifiers,
+) -> Option<(u16, CGEventFlags)> {
+    modifiers.set(key, phase == KeyPhase::Down);
+    let vk = match key {
+        HeldKey::Command => Some(0x37),
+        HeldKey::Shift => Some(0x38),
+        HeldKey::Alt => Some(0x3a),
+        HeldKey::Control => Some(0x3b),
+        HeldKey::Key(usage) => hid_usage_to_macos(usage.code()),
+    }?;
+    Some((vk, held_modifier_flags(*modifiers)))
+}
+
+fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    if modifiers.contains(HeldKey::Command) {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    if modifiers.contains(HeldKey::Shift) {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if modifiers.contains(HeldKey::Control) {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if modifiers.contains(HeldKey::Alt) {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    flags
 }
 
 fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
@@ -358,9 +414,11 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use core_graphics::event::CGEventFlags;
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, hid_usage_to_macos};
+    use super::{combo, held_key_event, hid_usage_to_macos};
+    use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
     #[test]
     fn hid_usages_map_to_macos_virtual_keys() {
@@ -396,6 +454,30 @@ mod tests {
                 "{shortcut:?} table entry has no macOS virtual-key mapping"
             );
         }
+    }
+
+    #[test]
+    fn held_edges_carry_the_aggregate_modifier_state() {
+        let mut modifiers = HeldModifiers::default();
+        let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers)
+            .expect("Command has a macOS virtual-key mapping");
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (_, flags) = held_key_event(HeldKey::Control, KeyPhase::Down, &mut modifiers)
+            .expect("Control has a macOS virtual-key mapping");
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+
+        let key = combo(Shortcut::Copy).key();
+        let (_, flags) = held_key_event(HeldKey::Key(key), KeyPhase::Up, &mut modifiers)
+            .expect("Copy's key has a macOS virtual-key mapping");
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+
+        let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Up, &mut modifiers)
+            .expect("Command has a macOS virtual-key mapping");
+        assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
     }
 }
 
