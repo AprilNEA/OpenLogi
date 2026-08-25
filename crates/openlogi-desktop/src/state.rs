@@ -56,6 +56,7 @@ use crate::state::devices::{build_device_list, pick_initial_device};
 mod agent;
 mod bindings;
 mod camera;
+mod close_button_haptics;
 mod device_key;
 mod device_ui;
 mod devices;

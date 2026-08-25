@@ -307,10 +307,11 @@ fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
     tab_body(ContentWidth::Medium, panel.clone())
 }
 
-/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card. The two compact panels
-/// share a responsive row that still fits the window's 720 px minimum width;
-/// the taller scrolling card gets a full-width row of its own beneath them.
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, the
+/// scroll-wheel preferences, and the close-button haptics toggle, each in a
+/// titled card. The two compact panels share a responsive row that still fits
+/// the window's 720 px minimum width; the taller scrolling card and the
+/// haptics card each get a full-width row of their own beneath them.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
@@ -348,7 +349,8 @@ fn pointer_tab(
                         .fill(),
                     )),
             )
-            .child(scrolling_card(pal, cx)),
+            .child(scrolling_card(pal, cx))
+            .child(close_button_haptics_card(pal, cx)),
     )
 }
 
@@ -497,6 +499,56 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
             });
         })
         .into_any_element()
+}
+
+/// Close-button haptics card: a single on/off toggle for the per-device
+/// hover-the-close-button pulse. Independent of the Actions Ring haptics
+/// toggle in [`crate::features::action_ring`] — that one gates the Actions
+/// Ring's own hover/activation feedback, this one gates a background OS
+/// cursor watch that runs whether or not the ring is even enabled.
+fn close_button_haptics_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (enabled, supported) = AppState::try_read(cx).map_or((false, false), |state| {
+        (
+            state.current_close_button_haptics(),
+            state.current_haptics_supported(),
+        )
+    });
+    let description = if supported {
+        tr!("Play a pulse when the cursor hovers a window's close button.")
+    } else {
+        tr!("This device does not report haptic-feedback hardware.")
+    };
+    PanelCard::new(
+        tr!("Close-button haptics"),
+        Icon::empty().path("action-icons/square-x.svg"),
+        h_flex()
+            .justify_between()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .min_w_0()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(description),
+            )
+            .child(
+                Toggle::new("close-button-haptics-toggle")
+                    .selected(enabled)
+                    .disabled(!supported)
+                    .label((!supported).then(|| tr!("Unavailable")))
+                    .on_change(|enabled, _window, cx| {
+                        AppState::update(cx, |state, cx| {
+                            let key = state.current_record().map(DeviceRecord::device_key);
+                            state.commit_close_button_haptics(*enabled);
+                            if let Some(key) = key {
+                                cx.emit(StateEvent::DeviceConfigChanged(key));
+                            }
+                        });
+                    }),
+            )
+            .into_any_element(),
+    )
 }
 
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled

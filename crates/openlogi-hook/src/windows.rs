@@ -19,12 +19,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
-    MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    GetWindowThreadProcessId, HC_ACTION, HTCLOSE, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED,
+    MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SMTO_ABORTIFHUNG,
+    SendMessageTimeoutW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WindowFromPoint, XBUTTON1, XBUTTON2,
 };
 
 use crate::{
@@ -174,6 +175,59 @@ impl HookBackend for Backend {
             y: f64::from(point.y),
         })
     }
+
+    fn cursor_is_over_close_button(position: CursorPosition) -> bool {
+        close_button_hit_test(position.x, position.y)
+    }
+}
+
+/// Best-effort non-client hit-test for whether `(x, y)` sits over a window's
+/// close button — the OS's own `WM_NCHITTEST` answer, not an accessibility
+/// tree walk, so it needs no permission and works against any standard Win32
+/// title bar regardless of which process owns the window.
+fn close_button_hit_test(x: f64, y: f64) -> bool {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "screen coordinates fit comfortably in i32"
+    )]
+    let point = POINT {
+        x: x as i32,
+        y: y as i32,
+    };
+    // SAFETY: `point` is passed by value; WindowFromPoint has no preconditions.
+    let hwnd = unsafe { WindowFromPoint(point) };
+    if hwnd.is_null() {
+        return false;
+    }
+
+    let mut result: usize = 0;
+    // SAFETY: `hwnd` is the live handle WindowFromPoint just returned;
+    // `&raw mut result` is a valid out-pointer for the duration of the call.
+    // `SMTO_ABORTIFHUNG` with a bounded timeout keeps a hung target window's
+    // process from blocking this watcher thread indefinitely — plain
+    // `SendMessageW` has no such bound.
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_NCHITTEST,
+            0,
+            nchittest_lparam(point.x, point.y),
+            SMTO_ABORTIFHUNG,
+            50,
+            &raw mut result,
+        )
+    };
+    sent != 0 && result == usize::try_from(HTCLOSE).unwrap_or(usize::MAX)
+}
+
+/// Pack `(x, y)` into the `lParam` shape `WM_NCHITTEST` expects
+/// (`MAKELPARAM(x, y)`: the low 16 bits of `x` in the low word, the low 16
+/// bits of `y` in the high word) — the same clamped-point space `WH_MOUSE_LL`
+/// already reports (see [`motion_delta`]'s doc comment above).
+fn nchittest_lparam(x: i32, y: i32) -> LPARAM {
+    let lo = x.cast_unsigned() & 0xFFFF;
+    let hi = y.cast_unsigned() & 0xFFFF;
+    ((hi << 16) | lo).cast_signed() as LPARAM
 }
 
 #[expect(
@@ -718,6 +772,33 @@ mod tests {
         assert!(
             delta_y > 0.0,
             "wheel-forward should scroll up, got {delta_y}"
+        );
+    }
+
+    /// A sign or byte-order bug here would hit-test the wrong screen point.
+    /// Known small values are easiest to eyeball-verify against Win32's
+    /// `MAKELPARAM(x, y)`: the low word holds `x`, the high word holds `y`.
+    #[test]
+    fn nchittest_lparam_packs_x_into_the_low_word_and_y_into_the_high_word() {
+        assert_eq!(nchittest_lparam(0, 0), 0);
+        assert_eq!(nchittest_lparam(42, 0), 42);
+        assert_eq!(nchittest_lparam(0, 1), 0x1_0000);
+        assert_eq!(nchittest_lparam(42, 7), 7 * 0x1_0000 + 42);
+    }
+
+    /// Negative screen coordinates (a point above/left of the primary
+    /// display's origin, common on a multi-monitor setup) must survive the
+    /// 16-bit word pack the same way `WH_MOUSE_LL`'s own `MSLLHOOKSTRUCT.pt`
+    /// does — a wrong mask or shift would silently hit-test a mirrored point.
+    #[test]
+    fn nchittest_lparam_preserves_negative_coordinates() {
+        assert_eq!(nchittest_lparam(-1, 0), 0xFFFF);
+        assert_eq!(nchittest_lparam(0, -1), -0x1_0000);
+        // The low and high words pack independently, so a two-coordinate
+        // pack must equal the sum of packing each coordinate alone.
+        assert_eq!(
+            nchittest_lparam(-10, -20),
+            nchittest_lparam(-10, 0) + nchittest_lparam(0, -20)
         );
     }
 }

@@ -362,6 +362,11 @@ trait HookBackend {
     fn cursor_position() -> Option<CursorPosition> {
         None
     }
+
+    /// See [`crate::cursor_is_over_close_button`].
+    fn cursor_is_over_close_button(_position: CursorPosition) -> bool {
+        false
+    }
 }
 
 /// The backend for a platform with no hook: every default, and a
@@ -521,6 +526,20 @@ pub fn frontmost_application() -> Option<ForegroundApp> {
 #[must_use]
 pub fn cursor_position() -> Option<CursorPosition> {
     Backend::cursor_position()
+}
+
+/// Whether `position` (in the OS's global screen coordinate space, as
+/// returned by [`cursor_position`]) sits over a window's close control — the
+/// red traffic-light dot on macOS, the titlebar `X` on Windows.
+///
+/// `false` on unsupported platforms (Linux — Wayland cannot answer this and
+/// X11 support is out of scope), and `false` whenever the platform's own
+/// hit-test mechanism fails for any reason (no Accessibility grant on macOS,
+/// no window under the point, a hung window on Windows, …) — this is a
+/// best-effort UI signal, not a permission or connectivity check.
+#[must_use]
+pub fn cursor_is_over_close_button(position: CursorPosition) -> bool {
+    Backend::cursor_is_over_close_button(position)
 }
 
 #[cfg(target_os = "macos")]

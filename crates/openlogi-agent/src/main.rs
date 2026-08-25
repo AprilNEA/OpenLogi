@@ -45,6 +45,7 @@ use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
 use openlogi_agent_core::watchers;
 use openlogi_core::config::Config;
+use openlogi_hid::HapticWaveform;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -223,6 +224,29 @@ fn start_hook(
     )
 }
 
+/// The agent's fixed-cadence polling watchers, bundled so `run` spawns them
+/// in one call instead of five separate `let mut … = …::spawn(…)` lines.
+struct PollWatchers {
+    inventory: tokio::sync::mpsc::UnboundedReceiver<watchers::inventory::InventoryEvent>,
+    camera: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    app: tokio::sync::mpsc::UnboundedReceiver<watchers::foreground_app::ForegroundUpdate>,
+    accessibility: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    input_monitoring: tokio::sync::mpsc::UnboundedReceiver<bool>,
+}
+
+fn spawn_poll_watchers(shared: &SharedRuntime) -> PollWatchers {
+    PollWatchers {
+        inventory: watchers::inventory::spawn_with_registry(
+            Duration::from_secs(2),
+            shared.channel_registry.clone(),
+        ),
+        camera: watchers::camera::spawn(Duration::from_secs(1)),
+        app: watchers::foreground_app::spawn(Duration::from_secs(1)),
+        accessibility: watchers::accessibility::spawn(Duration::from_millis(1200)),
+        input_monitoring: watchers::input_monitoring::spawn(Duration::from_millis(1200)),
+    }
+}
+
 async fn begin_action_ring(
     orchestrator: &Mutex<Orchestrator>,
     action_ring: &ActionRingManager,
@@ -387,6 +411,64 @@ async fn request_input_monitoring() {
     }
 }
 
+/// Owns the close-button-haptic watcher's lifecycle. Unlike the always-on
+/// watchers in [`PollWatchers`], the OS hit-test it wraps is only worth
+/// running while at least one connected device has it enabled, so this holds
+/// both the cheap in-memory interval that rechecks eligibility and the real
+/// (OS-hit-testing) watcher's receiver, started and dropped as eligibility
+/// changes.
+struct CloseButtonWatcher {
+    eligibility: tokio::time::Interval,
+    rx: Option<tokio::sync::mpsc::UnboundedReceiver<bool>>,
+}
+
+impl CloseButtonWatcher {
+    fn new() -> Self {
+        Self {
+            eligibility: tokio::time::interval(Duration::from_millis(500)),
+            rx: None,
+        }
+    }
+
+    /// Wait for the next eligibility recheck or hover-enter, whichever comes
+    /// first, and act on it. Callers just `.await` this in their select loop.
+    async fn tick(
+        &mut self,
+        orchestrator: &Mutex<Orchestrator>,
+        ring_haptics: &server::RingHapticPlayer,
+    ) {
+        tokio::select! {
+            _ = self.eligibility.tick() => {
+                let eligible = !orchestrator.lock().await.close_button_haptic_routes().is_empty();
+                match (&self.rx, eligible) {
+                    (None, true) => {
+                        self.rx = Some(watchers::close_button_haptics::spawn(Duration::from_millis(50)));
+                    }
+                    // Dropping the receiver is the whole "stop" — the `Poll`
+                    // thread exits on its own next time it finds nowhere to send.
+                    (Some(_), false) => self.rx = None,
+                    _ => {}
+                }
+            }
+            event = async {
+                match self.rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match event {
+                Some(true) => {
+                    let routes = orchestrator.lock().await.close_button_haptic_routes();
+                    ring_haptics.play_many(routes, HapticWaveform::SubtleCollision, "close-button-hover");
+                }
+                Some(false) => {}
+                // Watcher thread died (spawn failure or panic); the next
+                // eligibility tick respawns it if still needed.
+                None => self.rx = None,
+            }
+        }
+    }
+}
+
 /// Fold one inventory-watcher event into the orchestrator.
 async fn apply_inventory_event(
     event: watchers::inventory::InventoryEvent,
@@ -483,14 +565,9 @@ async fn run(
     // HID++ watchers need no Accessibility permission — start them up front.
     spawn_hidpp_watchers(&shared, actions.dispatcher.clone());
 
-    let mut inventory_rx = watchers::inventory::spawn_with_registry(
-        Duration::from_secs(2),
-        shared.channel_registry.clone(),
-    );
-    let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
-    let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
-    let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
-    let mut input_monitoring_rx = watchers::input_monitoring::spawn(Duration::from_millis(1200));
+    let mut poll = spawn_poll_watchers(&shared);
+
+    let mut close_button_watcher = CloseButtonWatcher::new();
 
     let (mut sigterm, mut sigint) = shutdown_signals();
 
@@ -519,7 +596,7 @@ async fn run(
     let mut camera_open = true;
     loop {
         tokio::select! {
-            event = inventory_rx.recv(), if inventory_open => if let Some(event) = event {
+            event = poll.inventory.recv(), if inventory_open => if let Some(event) = event {
                 apply_inventory_event(
                     event,
                     &orchestrator,
@@ -534,20 +611,20 @@ async fn run(
                 orchestrator.lock().await.mark_inventory_unavailable();
                 inventory_open = false;
             },
-            event = camera_rx.recv(), if camera_open => if let Some(active) = event {
+            event = poll.camera.recv(), if camera_open => if let Some(active) = event {
                 orchestrator.lock().await.set_camera_active(active);
             } else {
                 #[cfg(target_os = "macos")]
                 warn!("camera watcher channel closed — disabling camera automation updates");
                 camera_open = false;
             },
-            Some(app) = app_rx.recv() => {
+            Some(app) = poll.app.recv() => {
                 apply_foreground_update(app, &orchestrator, &actions.dispatcher).await;
             }
             Some(device_key) = actions.triggers.recv() => {
                 begin_action_ring(&orchestrator, &actions.ring, &ring_haptics, device_key.as_deref()).await;
             }
-            Some(granted) = accessibility_rx.recv() => {
+            Some(granted) = poll.accessibility.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
                     stop_hook(&mut hook, &actions.dispatcher);
@@ -572,9 +649,10 @@ async fn run(
             Some(()) = uninstalled.recv() => {
                 release_hook_and_exit(hook.take(), &mut actions.runtime, "the app was uninstalled")
             }
-            Some(granted) = input_monitoring_rx.recv() => {
+            Some(granted) = poll.input_monitoring.recv() => {
                 observable.set_input_monitoring_granted(granted);
             }
+            () = close_button_watcher.tick(&orchestrator, &ring_haptics) => {}
             else => break,
         }
     }

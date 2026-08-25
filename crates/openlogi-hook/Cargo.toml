@@ -35,8 +35,8 @@ core-foundation = { workspace = true }
 foreign-types-shared = "0.3"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
-objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement"] }
-objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber"] }
+objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement", "AXError"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [

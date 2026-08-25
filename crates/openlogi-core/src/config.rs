@@ -820,6 +820,24 @@ impl Config {
             .scroll_resolution = resolution;
     }
 
+    /// Whether `device_key` plays a haptic pulse when the cursor hovers a
+    /// window's close button. `false` for an unconfigured or absent device.
+    #[must_use]
+    pub fn close_button_haptics(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|d| d.close_button_haptics)
+    }
+
+    /// Set whether `device_key` plays the close-button haptic pulse. The
+    /// agent reads this on the next `ReloadConfig`.
+    pub fn set_close_button_haptics(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .close_button_haptics = enabled;
+    }
+
     /// Whether OpenLogi manages `device_key` at all (capture + volatile
     /// re-apply). Unconfigured devices are managed.
     #[must_use]
