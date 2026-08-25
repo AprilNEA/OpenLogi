@@ -707,7 +707,7 @@ impl Render for CameraControlsPanel {
             self.uid = None;
             self.sliders.clear();
             self.autos.clear();
-            return div().into_any_element();
+            return div();
         };
         self.ensure_built(&key, &uid, cx);
 
@@ -715,8 +715,7 @@ impl Render for CameraControlsPanel {
             return div()
                 .text_body()
                 .text_color(pal.text_muted)
-                .child(tr!("This camera exposes no adjustable image controls."))
-                .into_any_element();
+                .child(tr!("This camera exposes no adjustable image controls."));
         }
 
         let lens: Vec<usize> = section_indices(&self.sliders, true);
@@ -735,7 +734,7 @@ impl Render for CameraControlsPanel {
         for ix in image {
             panel = panel.child(control_row(self, ix, cx));
         }
-        panel.child(reset_button(cx)).into_any_element()
+        panel.child(reset_button(cx))
     }
 }
 

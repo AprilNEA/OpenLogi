@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage,
-    SharedString, Styled, Subscription, Task, Window, div, img, px,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage, SharedString,
+    Styled, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
@@ -170,37 +170,16 @@ impl Render for CameraPreview {
             }
         }
 
-        let surface: AnyElement = if let Some(image) = self.current_image.as_ref() {
-            img(image.clone())
-                .w(px(PREVIEW_W))
-                .h(px(PREVIEW_H))
-                .rounded_md()
-                .into_any_element()
-        } else if !openlogi_camera::capture_supported() {
-            note(
-                tr!("Live preview isn't available on this platform yet."),
-                pal,
-            )
-            .into_any_element()
-        } else if granted {
-            note(tr!("Starting preview…"), pal).into_any_element()
-        } else if matches!(
-            openlogi_camera::camera_authorization(),
-            CameraAuthorization::Undetermined
-        ) {
-            BaseButton::new("camera-request-access")
-                .accessibility_label(tr!("Click to enable camera access."))
-                .text_body()
-                .text_color(pal.text_muted)
-                .cursor_pointer()
-                .hover(|s| s.text_color(pal.text_primary))
-                .focus_visible(|s| s.text_color(pal.text_primary))
-                .child(tr!("Click to enable camera access."))
-                .on_click(|_, _, cx| crate::features::camera::request_camera_access(cx))
-                .into_any_element()
-        } else {
-            note(tr!("Enable Camera access in Settings to preview."), pal).into_any_element()
-        };
+        let image = self.current_image.clone();
+        let show_placeholder = image.is_none();
+        let capture_supported = !show_placeholder || openlogi_camera::capture_supported();
+        let authorization_undetermined = show_placeholder
+            && capture_supported
+            && !granted
+            && matches!(
+                openlogi_camera::camera_authorization(),
+                CameraAuthorization::Undetermined
+            );
 
         v_flex()
             .w(px(PREVIEW_W))
@@ -211,7 +190,46 @@ impl Render for CameraPreview {
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)
-            .child(surface)
+            .when_some(image, |surface, image| {
+                surface.child(img(image).w(px(PREVIEW_W)).h(px(PREVIEW_H)).rounded_md())
+            })
+            .when(show_placeholder && !capture_supported, |surface| {
+                surface.child(note(
+                    tr!("Live preview isn't available on this platform yet."),
+                    pal,
+                ))
+            })
+            .when(
+                show_placeholder && capture_supported && granted,
+                |surface| surface.child(note(tr!("Starting preview…"), pal)),
+            )
+            .when(
+                show_placeholder && capture_supported && !granted && authorization_undetermined,
+                |surface| {
+                    surface.child(
+                        BaseButton::new("camera-request-access")
+                            .accessibility_label(tr!("Click to enable camera access."))
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(pal.text_primary))
+                            .focus_visible(|s| s.text_color(pal.text_primary))
+                            .child(tr!("Click to enable camera access."))
+                            .on_click(|_, _, cx| {
+                                crate::features::camera::request_camera_access(cx);
+                            }),
+                    )
+                },
+            )
+            .when(
+                show_placeholder && capture_supported && !granted && !authorization_undetermined,
+                |surface| {
+                    surface.child(note(
+                        tr!("Enable Camera access in Settings to preview."),
+                        pal,
+                    ))
+                },
+            )
     }
 }
 
