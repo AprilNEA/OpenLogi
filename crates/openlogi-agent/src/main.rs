@@ -46,7 +46,7 @@ use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
 use openlogi_agent_core::watchers;
 use openlogi_core::config::Config;
-use openlogi_hid::HapticWaveform;
+use openlogi_hid::{DeviceRoute, HapticWaveform};
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -436,6 +436,13 @@ async fn request_input_monitoring() {
 struct CloseButtonWatcher {
     eligibility: tokio::time::Interval,
     rx: Option<tokio::sync::mpsc::UnboundedReceiver<bool>>,
+    /// Routes armed as of the last eligibility check, so a route that drops
+    /// out and comes back (device sleeps/reconnects while at least one other
+    /// eligible device keeps the watcher running) gets re-armed too — a power
+    /// transition can silently clear a device's firmware haptic state without
+    /// ever taking the whole route set empty, so gating arming on the
+    /// none-to-some transition alone would miss it.
+    armed_routes: Vec<DeviceRoute>,
 }
 
 impl CloseButtonWatcher {
@@ -443,6 +450,7 @@ impl CloseButtonWatcher {
         Self {
             eligibility: tokio::time::interval(Duration::from_millis(500)),
             rx: None,
+            armed_routes: Vec::new(),
         }
     }
 
@@ -455,8 +463,20 @@ impl CloseButtonWatcher {
     ) {
         tokio::select! {
             _ = self.eligibility.tick() => {
-                let eligible = !orchestrator.lock().await.close_button_haptic_routes().is_empty();
-                match (&self.rx, eligible) {
+                let routes = orchestrator.lock().await.close_button_haptic_routes();
+                // Re-assert firmware haptics for every route that wasn't
+                // eligible last check — first activation, a newly opted-in
+                // device, or a reconnect after a power transition that
+                // cleared the firmware's armed state.
+                let newly_eligible: Vec<DeviceRoute> = routes
+                    .iter()
+                    .filter(|route| !self.armed_routes.contains(route))
+                    .cloned()
+                    .collect();
+                ring_haptics.arm_many(newly_eligible);
+                let has_routes = !routes.is_empty();
+                self.armed_routes = routes;
+                match (&self.rx, has_routes) {
                     (None, true) => {
                         self.rx = Some(watchers::close_button_haptics::spawn(Duration::from_millis(50)));
                     }
