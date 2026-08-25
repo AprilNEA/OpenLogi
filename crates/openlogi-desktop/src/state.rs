@@ -20,7 +20,7 @@ use openlogi_core::binding::{
 use openlogi_core::config::{Config, ConfigFile, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
-use openlogi_ipc::ForegroundApps;
+use openlogi_ipc::{ForegroundApps, ShortcutRecording};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -82,6 +82,8 @@ pub(crate) enum StateEvent {
     AgentChanged,
     /// The foreground application or recent-application list changed.
     ForegroundChanged,
+    /// The agent-owned physical shortcut recorder changed phase.
+    ShortcutRecordingChanged,
     /// Cached diagnostics/event-monitor data changed.
     #[cfg_attr(
         not(all(target_os = "macos", debug_assertions)),
@@ -205,6 +207,9 @@ pub struct AppState {
     /// these identifiers are the only ones guaranteed to match what its matcher
     /// compares — see [`ForegroundApps`].
     foreground: ForegroundApps,
+    /// Agent-owned physical shortcut recording state, projected from the same
+    /// observable snapshot as the rest of the runtime state.
+    shortcut_recording: Option<ShortcutRecording>,
     /// The per-app profile the binding panels are editing, if not the device's
     /// global one. See [`EditingScope`].
     editing_scope: Option<EditingScope>,
@@ -366,6 +371,7 @@ impl AppState {
         let mut state = Self {
             current_device,
             foreground: ForegroundApps::default(),
+            shortcut_recording: None,
             editing_scope: None,
             camera_active: false,
             #[cfg(target_os = "macos")]

@@ -87,6 +87,11 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+    /// Session identity returned by a shortcut-recording start request, or a
+    /// local delivery failure. This acknowledgement reaches the UI before the
+    /// held observe request is polled again, so it establishes which streamed
+    /// session the pending binding owns.
+    ShortcutRecordingStartResult(Result<u64, ()>),
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
@@ -114,6 +119,9 @@ pub enum Command {
     StartPairing(ReceiverSelector),
     PairDevice([u8; 6]),
     CancelPairing,
+    /// Start or cancel the agent-owned passive physical shortcut recorder.
+    StartShortcutRecording,
+    CancelShortcutRecording,
     /// Drain the agent's live event-monitor buffer for the debug Diagnostics
     /// monitor. The first poll enables monitoring agent-side; the agent
     /// auto-disables it once polls stop.
@@ -221,11 +229,27 @@ async fn observe_loop(
             }
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             Woken::Command(Some(cmd)) => {
-                inflight = pending;
+                // Start/cancel publishes its recorder state before the RPC
+                // returns. Drop a long poll that may already contain the
+                // pre-command snapshot, then re-read the whole state after the
+                // acknowledgement; otherwise stale `None`/terminal state can
+                // overwrite the session the UI just acquired.
+                let resets_observation = matches!(
+                    &cmd,
+                    Command::StartShortcutRecording | Command::CancelShortcutRecording
+                );
+                if !resets_observation {
+                    inflight = pending;
+                }
                 if handle(&mut client, update_tx, cmd).await.is_err() {
                     client = None;
                     seen = 0;
                     connected_since = None;
+                } else if resets_observation {
+                    seen = 0;
+                    if let Some(client) = client.as_ref() {
+                        inflight = Some(observe(client, seen));
+                    }
                 }
             }
             Woken::Reconnect => match ensure(&mut client).await {
@@ -532,6 +556,22 @@ async fn handle(
         Command::CancelPairing => {
             pairing_command_result(update_tx, client.cancel_pairing(ctx).await)?;
         }
+        Command::StartShortcutRecording => match client.start_shortcut_recording(ctx).await {
+            Ok(0) => {
+                let _ = update_tx.send(GuiUpdate::ShortcutRecordingStartResult(Err(())));
+            }
+            Ok(session_id) => {
+                let _ = update_tx.send(GuiUpdate::ShortcutRecordingStartResult(Ok(session_id)));
+            }
+            Err(_) => {
+                let _ = update_tx.send(GuiUpdate::ShortcutRecordingStartResult(Err(())));
+                return Err(());
+            }
+        },
+        Command::CancelShortcutRecording => client
+            .cancel_shortcut_recording(ctx)
+            .await
+            .map_err(|_| ())?,
         #[cfg(all(target_os = "macos", debug_assertions))]
         Command::PollEventMonitor(reply) => {
             let _ = reply.send(rpc_result(client.poll_event_monitor(ctx).await)?);
@@ -638,7 +678,10 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
                 PairingFailure::AgentRestarted,
             ));
         }
-        Command::CancelPairing => {}
+        Command::StartShortcutRecording => {
+            let _ = update_tx.send(GuiUpdate::ShortcutRecordingStartResult(Err(())));
+        }
+        Command::CancelPairing | Command::CancelShortcutRecording => {}
         // Unlike the device commands above, a missed reload is not something a
         // later poll repairs on its own: the config file has already changed,
         // so the agent stays on the old one until another reload succeeds. Say
@@ -673,6 +716,18 @@ mod tests {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[test]
+    fn an_undeliverable_shortcut_recording_does_not_wait_forever() {
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+
+        reply_disconnected(&update_tx, Command::StartShortcutRecording);
+
+        assert!(matches!(
+            update_rx.try_recv(),
+            Ok(GuiUpdate::ShortcutRecordingStartResult(Err(())))
+        ));
     }
 
     #[cfg(target_os = "macos")]

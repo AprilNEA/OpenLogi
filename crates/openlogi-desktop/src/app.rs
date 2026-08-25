@@ -261,7 +261,8 @@ impl AppView {
                 // Child entities own these surfaces and subscribe directly.
                 StateEvent::SmartShiftChanged(_)
                 | StateEvent::CameraPermissionChanged
-                | StateEvent::DiagnosticsChanged => false,
+                | StateEvent::DiagnosticsChanged
+                | StateEvent::ShortcutRecordingChanged => false,
                 // App-wide settings render in their own window. The root only
                 // cares when a persistence/reload failure opens or closes its
                 // fail-closed configuration-error screen.
@@ -306,6 +307,7 @@ impl AppView {
     /// selection follow [`AppState::set_current_device`]) and switches the
     /// route to its detail screen.
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
+        self.cancel_shortcut_recording(cx);
         AppState::global(cx).update(cx, |state, cx| {
             if let Some(idx) = state
                 .device_list
@@ -335,8 +337,22 @@ impl AppView {
     /// Return to the device gallery. Leaves the active-device selection
     /// untouched — the route is purely presentational.
     fn go_home(&mut self, cx: &mut Context<Self>) {
+        self.cancel_shortcut_recording(cx);
         self.route = Route::Home;
         cx.notify();
+    }
+
+    fn set_active_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
+        if tab != DetailTab::Buttons {
+            self.cancel_shortcut_recording(cx);
+        }
+        self.active_tab = tab;
+        cx.notify();
+    }
+
+    fn cancel_shortcut_recording(&mut self, cx: &mut Context<Self>) {
+        self.mouse_model
+            .update(cx, |view, cx| view.cancel_pending_shortcut(cx));
     }
 
     /// Attach the window-level back-navigation listeners to `root`: a mouse
@@ -557,7 +573,8 @@ impl Render for AppView {
                 .and_then(AppState::current_record)
                 .is_some_and(|record| record.record_key() == *record_key),
         };
-        if !show_device {
+        if !show_device && !matches!(self.route, Route::Home) {
+            self.cancel_shortcut_recording(cx);
             self.route = Route::Home;
         }
 

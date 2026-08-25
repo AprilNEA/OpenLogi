@@ -14,6 +14,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_ipc::ShortcutRecordingPhase;
 
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
@@ -57,8 +58,28 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
+/// Binding destination captured when physical shortcut recording begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutBindingTarget {
+    Button(ButtonId),
+    Gesture(ButtonId, GestureDirection),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShortcutBindingContext {
+    device_key: String,
+    editing_app: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingShortcutBinding {
+    target: ShortcutBindingTarget,
+    context: ShortcutBindingContext,
+    previous_session_id: Option<u64>,
+    session_id: Option<u64>,
+}
+
 struct MouseWorkspaceData<'a> {
-    device_key: Option<&'a str>,
     asset: Option<&'a ResolvedAsset>,
     active: Option<MouseControlId>,
     bindings: &'a BTreeMap<ButtonId, Action>,
@@ -72,9 +93,6 @@ struct MouseWorkspaceData<'a> {
 impl<'a> MouseWorkspaceData<'a> {
     fn read(cx: &'a App) -> Option<Self> {
         AppState::try_read(cx).map(|state| Self {
-            device_key: state
-                .current_record()
-                .map(|record| record.config_key.as_str()),
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
@@ -102,7 +120,6 @@ impl<'a> MouseWorkspaceData<'a> {
         gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     ) -> Self {
         Self {
-            device_key: None,
             asset: None,
             active: None,
             bindings,
@@ -125,6 +142,7 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    pending_shortcut: Option<PendingShortcutBinding>,
     _state_obs: Subscription,
 }
 
@@ -140,11 +158,22 @@ impl MouseModelView {
         })
         .detach();
         let state = AppState::global(cx);
-        let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
+        let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
+            if matches!(event, StateEvent::ShortcutRecordingChanged) {
+                view.handle_shortcut_recording(cx);
+            } else if matches!(
+                event,
+                StateEvent::InventoryChanged
+                    | StateEvent::DeviceSelected(_)
+                    | StateEvent::BindingsChanged(_)
+            ) {
+                view.cancel_stale_shortcut(cx);
+            }
             let relevant = match event {
                 StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_)
-                | StateEvent::ForegroundChanged => true,
+                | StateEvent::ForegroundChanged
+                | StateEvent::ShortcutRecordingChanged => true,
                 StateEvent::BindingsChanged(key) | StateEvent::LightingChanged(key) => {
                     AppState::try_read(cx)
                         .and_then(AppState::current_record)
@@ -164,29 +193,38 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            pending_shortcut: None,
             _state_obs: state_obs,
         }
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
     /// `cx.notify()` to re-render.
-    pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
+    pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>, cx: &mut App) {
+        if self.gesture_active_dir != dir {
+            self.cancel_pending_shortcut(cx);
+        }
         self.gesture_active_dir = dir;
         self.action_picker_open = false;
     }
 
-    pub(super) fn toggle_action_picker(&mut self) {
+    pub(super) fn toggle_action_picker(&mut self, cx: &mut App) {
         self.action_picker_open = !self.action_picker_open;
+        if !self.action_picker_open {
+            self.cancel_pending_shortcut(cx);
+        }
     }
 
-    pub(super) fn close_action_picker(&mut self) {
+    pub(super) fn close_action_picker(&mut self, cx: &mut App) {
         self.action_picker_open = false;
+        self.cancel_pending_shortcut(cx);
     }
 
-    fn reset_for_device(&mut self, device_key: Option<&str>) {
+    fn reset_for_device(&mut self, device_key: Option<&str>, cx: &mut App) {
         if self.current_device_key.as_deref() == device_key {
             return;
         }
+        self.cancel_pending_shortcut(cx);
         self.current_device_key = device_key.map(str::to_string);
         self.hovered = None;
         self.selected = None;
@@ -194,13 +232,143 @@ impl MouseModelView {
         self.action_picker_open = false;
     }
 
-    fn select(&mut self, control: MouseControlId) {
+    fn select(&mut self, control: MouseControlId, cx: &mut App) {
         if self.selected != Some(control) {
+            self.cancel_pending_shortcut(cx);
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
         }
     }
+
+    pub(super) fn begin_shortcut_recording(&mut self, target: ShortcutBindingTarget, cx: &mut App) {
+        let Some(context) = shortcut_binding_context(cx) else {
+            return;
+        };
+        self.pending_shortcut = Some(PendingShortcutBinding {
+            target,
+            context,
+            previous_session_id: AppState::try_read(cx)
+                .and_then(AppState::shortcut_recording)
+                .map(|recording| recording.session_id),
+            session_id: None,
+        });
+        if let Some(state) = AppState::try_read(cx) {
+            state.start_shortcut_recording();
+        }
+    }
+
+    pub(super) fn shortcut_phase(
+        &self,
+        target: ShortcutBindingTarget,
+        cx: &App,
+    ) -> Option<ShortcutRecordingPhase> {
+        let pending = self
+            .pending_shortcut
+            .as_ref()
+            .filter(|pending| pending.target == target)?;
+        let Some(session_id) = pending.session_id else {
+            return Some(ShortcutRecordingPhase::Recording);
+        };
+        AppState::try_read(cx)
+            .and_then(AppState::shortcut_recording)
+            .filter(|recording| recording.session_id == session_id)
+            .map(|recording| recording.phase.clone())
+    }
+
+    pub(crate) fn cancel_pending_shortcut(&mut self, cx: &mut App) {
+        if self.pending_shortcut.take().is_some()
+            && let Some(state) = AppState::try_read(cx)
+        {
+            state.cancel_shortcut_recording();
+        }
+    }
+
+    fn cancel_stale_shortcut(&mut self, cx: &mut App) {
+        let stale = self.pending_shortcut.as_ref().is_some_and(|pending| {
+            shortcut_binding_context(cx).as_ref() != Some(&pending.context)
+                || !self.target_is_selected(pending.target)
+        });
+        if stale {
+            self.cancel_pending_shortcut(cx);
+        }
+    }
+
+    fn target_is_selected(&self, target: ShortcutBindingTarget) -> bool {
+        match target {
+            ShortcutBindingTarget::Button(button) => {
+                self.selected == Some(MouseControlId::Button(button))
+            }
+            ShortcutBindingTarget::Gesture(button, direction) => {
+                self.selected == Some(MouseControlId::Button(button))
+                    && self.gesture_active_dir == Some(direction)
+            }
+        }
+    }
+
+    fn handle_shortcut_recording(&mut self, cx: &mut App) {
+        self.cancel_stale_shortcut(cx);
+        let Some(pending) = self.pending_shortcut.as_mut() else {
+            return;
+        };
+        let recording = AppState::try_read(cx)
+            .and_then(AppState::shortcut_recording)
+            .cloned();
+        let Some(recording) = recording else {
+            if pending.session_id.is_some() {
+                self.pending_shortcut = None;
+            }
+            return;
+        };
+        match pending.session_id {
+            None if recording.session_id == 0
+                && recording.phase == ShortcutRecordingPhase::Unavailable =>
+            {
+                pending.session_id = Some(0);
+            }
+            None if Some(recording.session_id) != pending.previous_session_id
+                && recording.phase == ShortcutRecordingPhase::Recording =>
+            {
+                pending.session_id = Some(recording.session_id);
+            }
+            None => return,
+            // A snapshot captured before the start acknowledgement can still
+            // be delivered by another observer. Ignore older sessions; only a
+            // genuinely newer owner supersedes this pending destination.
+            Some(session_id) if recording.session_id < session_id => return,
+            Some(session_id) if recording.session_id > session_id => {
+                self.pending_shortcut = None;
+                return;
+            }
+            Some(_) => {}
+        }
+
+        let ShortcutRecordingPhase::Complete(combo) = recording.phase else {
+            return;
+        };
+        let target = pending.target;
+        self.pending_shortcut = None;
+        self.action_picker_open = false;
+        AppState::update_bindings(cx, |state| match target {
+            ShortcutBindingTarget::Button(button) => {
+                state.commit_binding(button, Action::CustomShortcut(combo));
+            }
+            ShortcutBindingTarget::Gesture(button, direction) => {
+                state.commit_gesture_binding(button, direction, Action::CustomShortcut(combo));
+            }
+        });
+        if let Some(state) = AppState::try_read(cx) {
+            state.cancel_shortcut_recording();
+        }
+    }
+}
+
+fn shortcut_binding_context(cx: &App) -> Option<ShortcutBindingContext> {
+    let state = AppState::try_read(cx)?;
+    Some(ShortcutBindingContext {
+        device_key: state.current_record()?.config_key.clone(),
+        editing_app: state.editing_app().map(str::to_string),
+    })
 }
 
 impl Focusable for MouseModelView {
@@ -227,9 +395,13 @@ fn set_control_hovered(
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let device_key = AppState::try_read(cx)
+            .and_then(AppState::current_record)
+            .map(|record| record.config_key.clone());
+        self.reset_for_device(device_key.as_deref(), cx);
+
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
-            device_key,
             asset,
             active,
             bindings,
@@ -240,8 +412,6 @@ impl Render for MouseModelView {
             overridden,
         } = MouseWorkspaceData::read(cx)
             .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
-
-        self.reset_for_device(device_key);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
@@ -712,7 +882,7 @@ impl RenderOnce for LabelTrigger {
             )
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
-                    this.select(btn);
+                    this.select(btn, cx);
                     cx.notify();
                 });
             })
@@ -897,7 +1067,7 @@ impl RenderOnce for HotspotTrigger {
             })
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
-                    this.select(btn);
+                    this.select(btn, cx);
                     cx.notify();
                 });
             })
@@ -910,7 +1080,13 @@ impl RenderOnce for HotspotTrigger {
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
+    use openlogi_core::binding::KeyCombo;
     use openlogi_core::config::Config;
+    use openlogi_core::device::{
+        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+        ReceiverInfo,
+    };
+    use openlogi_ipc::{ShortcutRecording, ShortcutRecordingPhase};
 
     use super::*;
     use crate::services::assets::AssetResolver;
@@ -935,6 +1111,70 @@ mod tests {
         });
     }
 
+    fn known_mouse_inventory() -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "MX Master 3S".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
+                codename: Some("MX Master 3S".to_string()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [0xa3, 0x93, 0xca, 0xe0],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            }],
+        }
+    }
+
+    fn install_known_mouse_state(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let cache = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::with_runtime(
+                    Config::ephemeral(),
+                    &[known_mouse_inventory()],
+                    &[],
+                    &cache,
+                    &[],
+                    ConfigPersistence::MemoryOnly,
+                    commands,
+                )
+            });
+            AppState::set_global(state, cx);
+        });
+    }
+
+    fn set_recording(cx: &mut App, session_id: u64, phase: ShortcutRecordingPhase) {
+        AppState::update(cx, |state, _| {
+            state.set_shortcut_recording(Some(ShortcutRecording { session_id, phase }));
+        });
+    }
+
+    fn publish_recording(cx: &mut App, session_id: u64, phase: ShortcutRecordingPhase) {
+        AppState::update(cx, |state, cx| {
+            state.set_shortcut_recording(Some(ShortcutRecording { session_id, phase }));
+            cx.emit(StateEvent::ShortcutRecordingChanged);
+        });
+    }
+
+    fn recorded_combo() -> KeyCombo {
+        "Cmd+Shift+P".parse().expect("valid test shortcut")
+    }
+
     #[gpui::test]
     fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
@@ -942,33 +1182,35 @@ mod tests {
         let (view, cx) = cx.add_window_view(MouseModelView::new);
         cx.run_until_parked();
 
-        view.update(cx, |view, cx| {
-            view.set_gesture_selected_dir(Some(GestureDirection::Up));
-            let gesture_maps = BTreeMap::from([(
-                ButtonId::MiddleClick,
-                BTreeMap::from([(
-                    GestureDirection::Click,
-                    default_binding(ButtonId::MiddleClick),
-                )]),
-            )]);
-            let bindings = BTreeMap::new();
-            let entity = cx.entity();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.set_gesture_selected_dir(Some(GestureDirection::Up), cx);
+                let gesture_maps = BTreeMap::from([(
+                    ButtonId::MiddleClick,
+                    BTreeMap::from([(
+                        GestureDirection::Click,
+                        default_binding(ButtonId::MiddleClick),
+                    )]),
+                )]);
+                let bindings = BTreeMap::new();
+                let entity = cx.entity();
 
-            binding_inspector(
-                BindingInspectorData {
-                    selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
-                    gesture_direction: Some(GestureDirection::Up),
-                    action_picker_open: false,
-                    bindings: &bindings,
-                    gesture_maps: &gesture_maps,
-                    editing_app: None,
-                    overridden: None,
-                },
-                &view.action_search,
-                &entity,
-                theme::palette(cx),
-                cx,
-            );
+                binding_inspector(
+                    BindingInspectorData {
+                        selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
+                        gesture_direction: Some(GestureDirection::Up),
+                        action_picker_open: false,
+                        bindings: &bindings,
+                        gesture_maps: &gesture_maps,
+                        editing_app: None,
+                        overridden: None,
+                    },
+                    &view.action_search,
+                    &entity,
+                    theme::palette(cx),
+                    cx,
+                );
+            });
         });
         cx.run_until_parked();
         drop(view);
@@ -983,13 +1225,216 @@ mod tests {
         let (view, cx) = cx.add_window_view(MouseModelView::new);
         cx.run_until_parked();
 
-        view.update(cx, |view, _| {
-            view.selected = Some(MouseControlId::Button(ButtonId::Back));
-            view.action_picker_open = true;
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.selected = Some(MouseControlId::Button(ButtonId::Back));
+                view.action_picker_open = true;
 
-            view.select(MouseControlId::Button(ButtonId::Forward));
+                view.select(MouseControlId::Button(ButtonId::Forward), cx);
 
-            assert!(!view.action_picker_open);
+                assert!(!view.action_picker_open);
+            });
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn completed_recording_commits_the_selected_button_shortcut(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_known_mouse_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::Back), cx);
+                view.begin_shortcut_recording(ShortcutBindingTarget::Button(ButtonId::Back), cx);
+            });
+            publish_recording(cx, 7, ShortcutRecordingPhase::Recording);
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            publish_recording(cx, 7, ShortcutRecordingPhase::Complete(recorded_combo()));
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx).and_then(|state| state.button_bindings.get(&ButtonId::Back)),
+                Some(&Action::CustomShortcut(recorded_combo()))
+            );
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn completed_recording_commits_the_selected_gesture_shortcut(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_known_mouse_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            AppState::update_bindings(cx, |state| {
+                state.commit_gesture_mode(ButtonId::MiddleClick, true);
+            });
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::MiddleClick), cx);
+                view.set_gesture_selected_dir(Some(GestureDirection::Up), cx);
+                view.begin_shortcut_recording(
+                    ShortcutBindingTarget::Gesture(ButtonId::MiddleClick, GestureDirection::Up),
+                    cx,
+                );
+            });
+            set_recording(cx, 8, ShortcutRecordingPhase::Recording);
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+            set_recording(cx, 8, ShortcutRecordingPhase::Complete(recorded_combo()));
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+
+            assert_eq!(
+                AppState::try_read(cx)
+                    .and_then(|state| state.gesture_bindings.get(&ButtonId::MiddleClick))
+                    .and_then(|bindings| bindings.get(&GestureDirection::Up)),
+                Some(&Action::CustomShortcut(recorded_combo()))
+            );
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_result_from_a_different_recording_session_is_ignored(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_known_mouse_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::Back), cx);
+                view.begin_shortcut_recording(ShortcutBindingTarget::Button(ButtonId::Back), cx);
+            });
+            set_recording(cx, 9, ShortcutRecordingPhase::Recording);
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+            set_recording(cx, 10, ShortcutRecordingPhase::Complete(recorded_combo()));
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+
+            assert!(view.read(cx).pending_shortcut.is_none());
+            assert!(!matches!(
+                AppState::try_read(cx).and_then(|state| state.button_bindings.get(&ButtonId::Back)),
+                Some(Action::CustomShortcut(_))
+            ));
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn an_older_snapshot_cannot_displace_the_acknowledged_session(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_known_mouse_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::Back), cx);
+                view.begin_shortcut_recording(ShortcutBindingTarget::Button(ButtonId::Back), cx);
+            });
+            set_recording(cx, 9, ShortcutRecordingPhase::Recording);
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+            set_recording(cx, 8, ShortcutRecordingPhase::Complete(recorded_combo()));
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+
+            assert_eq!(
+                view.read(cx)
+                    .pending_shortcut
+                    .as_ref()
+                    .and_then(|pending| pending.session_id),
+                Some(9)
+            );
+            assert!(!matches!(
+                AppState::try_read(cx).and_then(|state| state.button_bindings.get(&ButtonId::Back)),
+                Some(Action::CustomShortcut(_))
+            ));
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_terminal_result_that_predates_start_acknowledgement_is_ignored(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_known_mouse_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            set_recording(cx, 12, ShortcutRecordingPhase::Complete(recorded_combo()));
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::Back), cx);
+                view.begin_shortcut_recording(ShortcutBindingTarget::Button(ButtonId::Back), cx);
+                view.handle_shortcut_recording(cx);
+                assert_eq!(
+                    view.pending_shortcut
+                        .as_ref()
+                        .and_then(|pending| pending.session_id),
+                    None
+                );
+            });
+
+            set_recording(cx, 13, ShortcutRecordingPhase::Recording);
+            view.update(cx, |view, cx| {
+                view.handle_shortcut_recording(cx);
+                assert_eq!(
+                    view.pending_shortcut
+                        .as_ref()
+                        .and_then(|pending| pending.session_id),
+                    Some(13)
+                );
+            });
+            assert!(!matches!(
+                AppState::try_read(cx).and_then(|state| state.button_bindings.get(&ButtonId::Back)),
+                Some(Action::CustomShortcut(_))
+            ));
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn changing_profile_while_recording_prevents_a_stale_commit(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_known_mouse_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.select(MouseControlId::Button(ButtonId::Back), cx);
+                view.begin_shortcut_recording(ShortcutBindingTarget::Button(ButtonId::Back), cx);
+            });
+            set_recording(cx, 11, ShortcutRecordingPhase::Recording);
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+            AppState::update(cx, |state, _| {
+                state.set_editing_app(Some("com.apple.Safari".to_string()));
+            });
+            set_recording(cx, 11, ShortcutRecordingPhase::Complete(recorded_combo()));
+            view.update(cx, |view, cx| view.handle_shortcut_recording(cx));
+
+            assert!(view.read(cx).pending_shortcut.is_none());
+            assert!(!matches!(
+                AppState::try_read(cx).and_then(|state| state.button_bindings.get(&ButtonId::Back)),
+                Some(Action::CustomShortcut(_))
+            ));
         });
         drop(view);
         cx.update(|window, _| window.remove_window());

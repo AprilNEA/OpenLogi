@@ -250,8 +250,7 @@ fn detail_navigation(
                 )
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.active_tab = tab;
-                    cx.notify();
+                    this.set_active_tab(tab, cx);
                 }))
         }))
 }
