@@ -135,19 +135,24 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::ShowDesktop => show_desktop(),
         NativeAction::LaunchpadShow => launchpad(),
         // Lock screen = Cmd+Ctrl+Q. Layout-aware lookup with the QWERTY
-        // kVK_ANSI_Q fallback (see post_keycombo / issue #343).
+        // kVK_ANSI_Q fallback (see post_keycombo / issue #343). Neither Cmd
+        // nor Ctrl are UCKeyTranslate modifier bits, so there's no base to
+        // pass here.
         NativeAction::LockScreen => {
-            let (vk, extra) = resolve_or('q', 0x0C);
+            let (vk, extra) = resolve_or('q', 0x0C, false, false);
             post_key(vk, cmd | ctrl | extra);
         }
-        // Screenshot = Cmd+Shift+3, same fallback pattern.
+        // Screenshot = Cmd+Shift+3, same fallback pattern. Shift is already
+        // part of this shortcut's own flags, so it's a mandatory base for
+        // the lookup too (Greptile review on #948).
         NativeAction::Screenshot => {
-            let (vk, extra) = resolve_or('3', 0x14);
+            let (vk, extra) = resolve_or('3', 0x14, true, false);
             post_key(vk, cmd | shift | extra);
         }
-        // Capture region to clipboard = Cmd+Shift+Ctrl+4, same fallback pattern.
+        // Capture region to clipboard = Cmd+Shift+Ctrl+4, same fallback
+        // pattern and same Shift base as Screenshot.
         NativeAction::CaptureRegion => {
-            let (vk, extra) = resolve_or('4', 0x15);
+            let (vk, extra) = resolve_or('4', 0x15, true, false);
             post_key(vk, cmd | shift | ctrl | extra);
         }
         // Sleep has no CGEvent equivalent (the WindowServer ignores a
@@ -383,10 +388,19 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
 /// Resolve `ch` to the vk that currently produces it under the active
 /// keyboard layout, plus any extra Shift/Option flags needed to reach it
 /// (e.g. digits sitting behind Shift on AZERTY — issue #343 follow-up).
-/// Falls back to `(fallback_vk, no extra flags)`, matching the pre-#343
-/// positional behavior, when the layout lookup can't resolve one.
-fn resolve_or(ch: char, fallback_vk: u16) -> (u16, CGEventFlags) {
-    match resolve_char(ch) {
+/// `base_shift`/`base_option` are modifiers the caller already holds
+/// regardless (e.g. Screenshot's own Shift) — see
+/// [`keyboard_layout::resolve_char_with_base`] for why the lookup must
+/// treat those as mandatory rather than searching in isolation. Falls back
+/// to `(fallback_vk, no extra flags)`, matching the pre-#343 positional
+/// behavior, when the layout lookup can't resolve one.
+fn resolve_or(
+    ch: char,
+    fallback_vk: u16,
+    base_shift: bool,
+    base_option: bool,
+) -> (u16, CGEventFlags) {
+    match resolve_char_with_base(ch, base_shift, base_option) {
         Some(resolved) => {
             let mut extra = CGEventFlags::CGEventFlagNull;
             if resolved.needs_shift {
@@ -406,12 +420,22 @@ fn resolve_or(ch: char, fallback_vk: u16) -> (u16, CGEventFlags) {
 fn post_keycombo(combo: &KeyCombo) {
     let mut flags = combo_flags(combo);
     // Layout-aware lookup first (issue #343): resolve the vk that currently
-    // produces this character under the active layout, ORing in any extra
-    // Shift/Option needed to reach it. Falls back to the static positional
-    // table when the key isn't a single ASCII character (function/arrow/
-    // editing keys — unaffected by layout switches) or when TIS/UCKeyTranslate
-    // can't resolve one (e.g. no active console session).
-    let vk = match combo.key().ascii_char().and_then(resolve_char) {
+    // produces this character under the active layout, searching from the
+    // combo's own Shift/Option as a mandatory base — those are held
+    // throughout the real key press, so a vk found ignoring them may not
+    // reproduce this character once they're folded in (Greptile review on
+    // #948: e.g. Cmd+Option+1 posted on the isolated Shift layer for '1'
+    // becomes Option+Shift once the combo's own Option is added, which
+    // isn't guaranteed to still be '1'). ORs in any extra Shift/Option
+    // beyond that base needed to reach it. Falls back to the static
+    // positional table when the key isn't a single ASCII character
+    // (function/arrow/editing keys — unaffected by layout switches) or when
+    // TIS/UCKeyTranslate can't resolve one (e.g. no active console session).
+    let vk = match combo
+        .key()
+        .ascii_char()
+        .and_then(|ch| resolve_char_with_base(ch, combo.has_shift(), combo.has_option()))
+    {
         Some(resolved) => {
             if resolved.needs_shift {
                 flags |= CGEventFlags::CGEventFlagShift;
@@ -483,7 +507,9 @@ mod tests {
     use core_graphics::event::CGEventFlags;
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, held_key_event, hid_usage_to_macos, keyboard_layout::resolve_char};
+    use super::{
+        combo, held_key_event, hid_usage_to_macos, keyboard_layout::resolve_char_with_base,
+    };
     use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
     #[test]
@@ -509,7 +535,8 @@ mod tests {
     /// to reach on any real layout.
     #[test]
     fn resolve_char_resolves_a_common_letter() {
-        let resolved = resolve_char('a').expect("no key produces 'a' under the active layout");
+        let resolved = resolve_char_with_base('a', false, false)
+            .expect("no key produces 'a' under the active layout");
         assert!(!resolved.needs_shift);
         assert!(!resolved.needs_option);
     }
@@ -523,7 +550,7 @@ mod tests {
     /// standard macOS keyboard layout.
     #[test]
     fn resolve_char_returns_none_for_unmapped_characters() {
-        assert!(resolve_char('好').is_none());
+        assert!(resolve_char_with_base('好', false, false).is_none());
     }
 
     /// Regression test for the Greptile review on PR #948: the original
@@ -531,20 +558,21 @@ mod tests {
     /// sitting behind Shift or Option on the active layout (e.g. digits on
     /// AZERTY) fell through to the QWERTY-positional fallback — reproducing
     /// the exact bug #343 exists to fix, just for a narrower set of
-    /// characters. `resolve_char` must search the shifted/optioned layers
-    /// too. This can't be pinned to a specific vk without controlling the
-    /// test runner's active layout, but it proves the modifier search
+    /// characters. `resolve_char_with_base` must search the shifted/optioned
+    /// layers too. This can't be pinned to a specific vk without controlling
+    /// the test runner's active layout, but it proves the modifier search
     /// itself is wired up: translating the resolved vk back under the
     /// reported modifier state must reproduce the target character.
     #[test]
     fn resolve_char_finds_characters_needing_shift_or_option() {
         // '!' through ')' sit behind Shift on a "U.S." layout and behind no
         // modifier on some others — whichever this runner's layout does,
-        // resolve_char must find *a* key, proving the shifted/optioned
-        // search paths are reachable and correct, not just present in name.
+        // resolve_char_with_base must find *a* key, proving the
+        // shifted/optioned search paths are reachable and correct, not just
+        // present in name.
         for ch in ['!', '@', '#', '$', '%'] {
             assert!(
-                resolve_char(ch).is_some(),
+                resolve_char_with_base(ch, false, false).is_some(),
                 "no key on any modifier layer produces {ch:?}"
             );
         }
@@ -554,16 +582,45 @@ mod tests {
     /// XPC connection inside HIToolbox on first use; two threads racing that
     /// bootstrap crashes the whole process with `SIGABRT` deep inside
     /// `_xpc_connection_activate_if_needed` (reproduced locally before
-    /// `keyboard_layout::TIS_LOCK` was added). Hammer `resolve_char` from
-    /// many threads at once so a regression that drops the lock shows up as
-    /// a crashed test binary, not a quiet flake.
+    /// `keyboard_layout::TIS_LOCK` was added). Hammer `resolve_char_with_base`
+    /// from many threads at once so a regression that drops the lock shows up
+    /// as a crashed test binary, not a quiet flake.
     #[test]
     fn resolve_char_is_safe_under_concurrent_calls() {
         let handles: Vec<_> = (0..32)
-            .map(|_| std::thread::spawn(|| resolve_char('a').is_some()))
+            .map(|_| std::thread::spawn(|| resolve_char_with_base('a', false, false).is_some()))
             .collect();
         for handle in handles {
             assert!(handle.join().expect("thread panicked"));
+        }
+    }
+
+    /// Regression test for the Greptile review on PR #948: `post_keycombo`
+    /// and `resolve_or` used to resolve a character with `resolve_char`,
+    /// which always searches Shift/Option in isolation from any modifier
+    /// the caller already holds (a combo's own Option, or
+    /// Screenshot/CaptureRegion's own Shift) — so the vk it returned was
+    /// only proven to reproduce the character *without* that modifier, not
+    /// once it's folded in for the real key press. `resolve_char_with_base`
+    /// must always report the caller's base as part of `needs_shift`/
+    /// `needs_option` rather than silently drop it: every layer this
+    /// function probes now includes the base, so a result can never claim a
+    /// mandatory modifier wasn't needed.
+    #[test]
+    fn resolve_char_with_base_never_drops_a_mandatory_base_modifier() {
+        for ch in ['!', '@', '#', '$', '%', 'a'] {
+            if let Some(resolved) = resolve_char_with_base(ch, false, true) {
+                assert!(
+                    resolved.needs_option,
+                    "resolved {ch:?} without the mandatory base Option"
+                );
+            }
+            if let Some(resolved) = resolve_char_with_base(ch, true, true) {
+                assert!(
+                    resolved.needs_shift && resolved.needs_option,
+                    "resolved {ch:?} without both mandatory base modifiers"
+                );
+            }
         }
     }
 
@@ -1248,7 +1305,7 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
 }
 
 use dock::{app_expose, launchpad, mission_control, show_desktop};
-use keyboard_layout::resolve_char;
+use keyboard_layout::resolve_char_with_base;
 use symbolic_hotkey::{next_desktop, previous_desktop};
 
 use app_services::symbol as app_services_symbol;
@@ -1629,10 +1686,13 @@ mod keyboard_layout {
     /// A character's key press under the active keyboard layout: which
     /// physical key produces it, and whether Shift and/or Option must be
     /// held to select that character's layer (e.g. digits sit behind Shift
-    /// on AZERTY). The caller ORs these into whatever modifiers the shortcut
-    /// itself already wants — holding Shift/Option to reach a character is
-    /// no different from what a real key press on that layout requires, so
-    /// it never conflicts with the shortcut's own modifier intent.
+    /// on AZERTY) — inclusive of whatever base the caller already asked
+    /// [`resolve_char_with_base`] to hold. The caller ORs these into
+    /// whatever modifiers the shortcut itself already wants; because the
+    /// base is folded in before the layout search runs (not after), the
+    /// result is proven to actually reproduce the target character under
+    /// the combined modifier state the real key press uses, not just under
+    /// each modifier searched in isolation.
     pub(super) struct ResolvedKey {
         pub(super) vk: u16,
         pub(super) needs_shift: bool,
@@ -1640,11 +1700,25 @@ mod keyboard_layout {
     }
 
     /// Resolve `target` to the vk that currently produces it under the
-    /// active keyboard layout, trying the unshifted layer first, then
-    /// Shift, then Option, then Shift+Option. Returns `None` if it can't be
-    /// determined (no active layout/console session, or no key on any of
-    /// those layers produces this character).
-    pub(super) fn resolve_char(target: char) -> Option<ResolvedKey> {
+    /// active keyboard layout. `base_shift`/`base_option` name modifiers
+    /// the caller is already going to hold regardless of what this lookup
+    /// finds (e.g. a shortcut's own Option, or `post_keycombo`'s
+    /// `combo.has_option()`). Those are mandatory throughout the real key
+    /// press, so every layer probed here includes them — searching without
+    /// the base could return a vk that only reproduces `target` in the
+    /// base's absence, and once the base modifiers are folded in for the
+    /// actual `CGEvent`, the character reaching the target app can be
+    /// something else entirely (Greptile review on #948: Cmd+Option+1 with
+    /// '1' behind an isolated Shift search becomes Option+Shift once the
+    /// combo's own Option is added, which is not guaranteed to still
+    /// produce '1'). Returns `None` if it can't be determined (no active
+    /// layout/console session, or no key on any layer that still includes
+    /// the base produces this character).
+    pub(super) fn resolve_char_with_base(
+        target: char,
+        base_shift: bool,
+        base_option: bool,
+    ) -> Option<ResolvedKey> {
         let _guard = TIS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
         // SAFETY: TISCopyCurrentKeyboardLayoutInputSource follows the CF
@@ -1678,17 +1752,22 @@ mod keyboard_layout {
         // SAFETY: LMGetKbdType has no preconditions.
         let kbd_type = u32::from(unsafe { LMGetKbdType() });
 
-        for &(modifier_state, needs_shift, needs_option) in &[
+        // Every probed layer ORs the base in — base_shift/base_option are
+        // mandatory, not optional extras to search around.
+        let base_state =
+            (if base_shift { MOD_SHIFT } else { 0 }) | (if base_option { MOD_OPTION } else { 0 });
+        for &(extra_state, extra_shift, extra_option) in &[
             (0, false, false),
             (MOD_SHIFT, true, false),
             (MOD_OPTION, false, true),
             (MOD_SHIFT | MOD_OPTION, true, true),
         ] {
+            let modifier_state = base_state | extra_state;
             if let Some(vk) = find_vk(layout_ptr, kbd_type, modifier_state, target) {
                 return Some(ResolvedKey {
                     vk,
-                    needs_shift,
-                    needs_option,
+                    needs_shift: base_shift || extra_shift,
+                    needs_option: base_option || extra_option,
                 });
             }
         }
