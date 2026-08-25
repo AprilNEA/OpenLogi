@@ -31,7 +31,8 @@ use tracing::{debug, error, warn};
 
 use crate::{
     ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, ForegroundApp,
-    HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, TapLocation,
+    HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
+    TapLocation,
 };
 use watchdog::{
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, RearmBudget,
@@ -339,12 +340,23 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             })
         }
         CGEventType::ScrollWheel => {
-            // axis 1 = vertical scroll; axis 2 = horizontal scroll. Read the
-            // pixel-precise delta in preference to the coarse line delta (a hi-res
-            // wheel reports its motion in the pixel field with the line field at 0,
-            // so reading only the line field would look like "no scroll").
-            let dy = usable_scroll_delta(event, VERTICAL);
-            let dx = usable_scroll_delta(event, HORIZONTAL);
+            // axis 1 = vertical scroll; axis 2 = horizontal scroll. Continuous
+            // events carry pixel-precise distance; ordinary ratchets carry line
+            // deltas. Preserve that distinction instead of handing consumers an
+            // unlabelled number that cannot be safely interpolated.
+            let continuous =
+                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
+            let delta = if continuous {
+                ScrollDelta::pixels(
+                    precise_scroll_delta(event, HORIZONTAL),
+                    precise_scroll_delta(event, VERTICAL),
+                )
+            } else {
+                ScrollDelta::wheel_ticks(
+                    line_scroll_delta(event, HORIZONTAL),
+                    line_scroll_delta(event, VERTICAL),
+                )
+            };
             // Device identity is the reliable signal: a free-spinning Logitech
             // wheel sets the CGEvent phase, so phase alone misclassifies it as a
             // trackpad. Fall back to the phase heuristic only for a sender-less
@@ -355,13 +367,8 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             let sender = event_sender_id(event);
             let device_info = sender.map(sender_device_info);
             let from_trackpad = device_info.as_ref().map_or(phase, |info| info.is_trackpad);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "scroll deltas are small fractional values that fit comfortably in f32"
-            )]
             Some(MouseEvent::Scroll {
-                delta_x: dx as f32,
-                delta_y: dy as f32,
+                delta,
                 from_trackpad,
                 device: device_info.map(|info| info.event_device),
             })
@@ -426,15 +433,9 @@ const SCROLL_PHASE: CGEventField = 99; // kCGScrollWheelEventScrollPhase
 const SCROLL_COUNT: CGEventField = 100; // kCGScrollWheelEventScrollCount
 const MOMENTUM_PHASE: CGEventField = 123; // kCGScrollWheelEventMomentumPhase
 
-/// The scroll magnitude for `axis`, preferring the pixel-precise field, then the
-/// fixed-point, then the integer line — the order the reference tools use, so a
-/// hi-res wheel (which reports in the pixel field with the line field at 0) is
-/// not mistaken for "no scroll".
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "scroll line deltas are small integers, exact in f64"
-)]
-fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
+/// The pixel magnitude for continuous `axis`, preferring the point field and
+/// falling back to the fixed-point field used by older producers.
+fn precise_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     let point = event.get_double_value_field(axis.point);
     if point != 0.0 {
         return point;
@@ -443,6 +444,14 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     if fixed != 0.0 {
         return fixed;
     }
+    0.0
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "physical per-event line deltas are small integers, exactly represented by f64"
+)]
+fn line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     event.get_integer_value_field(axis.line) as f64
 }
 

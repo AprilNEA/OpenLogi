@@ -444,17 +444,15 @@ pub fn start(
                     dispatcher.cancel_hook_thread_buttons();
                     EventDisposition::PassThrough
                 }
-                MouseEvent::Scroll {
-                    delta_x, delta_y, ..
-                } => {
+                MouseEvent::Scroll { delta, .. } => {
                     #[cfg(not(target_os = "windows"))]
-                    let _ = (delta_x, delta_y);
+                    let _ = delta;
                     #[cfg(target_os = "windows")]
-                    if delta_y == 0.0
+                    if delta.y() == 0.0
                         && let Some((button, action)) = hooks
                             .try_read()
                             .ok()
-                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta_x))
+                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
                         if try_queue_action(&action_tx, action) {
@@ -490,7 +488,7 @@ pub fn start(
 /// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
 /// backward/down direction, so it maps to `ThumbwheelScrollDown`.
 #[cfg(any(target_os = "windows", test))]
-fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f32) -> Option<(ButtonId, Action)> {
+fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId, Action)> {
     let button = if delta_x > 0.0 {
         ButtonId::ThumbwheelScrollDown
     } else if delta_x < 0.0 {
