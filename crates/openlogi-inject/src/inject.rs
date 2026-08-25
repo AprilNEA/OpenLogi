@@ -374,6 +374,46 @@ pub fn post_scroll(delta: ScrollDelta) {
     }
 }
 
+/// Lifecycle phase of one synthetic smooth-scroll frame.
+///
+/// macOS forwards this state to the scroll-wheel event so applications see a
+/// balanced continuous gesture. Linux and Windows have no equivalent field;
+/// there the phase is retained by the runtime contract but only the frame's
+/// distance is injected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothScrollPhase {
+    /// First output frame of a new animation.
+    Began,
+    /// An intermediate output frame, including frames after retargeting.
+    Changed,
+    /// Final frame, carrying any correction needed to reach the exact target.
+    Ended,
+    /// The capture source ended before the animation reached its target.
+    Cancelled,
+}
+
+/// Synthesise one frame of a finite smooth-scroll animation.
+///
+/// On macOS wheel ticks become continuous pixel events at ten points per tick,
+/// matching the line/point relationship carried in native continuous events.
+/// Other platforms preserve fractional wheel ticks through their native
+/// high-resolution output. Non-finite distance is rejected at this I/O
+/// boundary; zero-distance terminal frames remain meaningful on macOS.
+pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
+    if !delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_smooth_scroll(delta, phase);
+        }
+        _ => {
+            let _ = phase;
+            post_scroll(delta);
+        }
+    }
+}
+
 /// Synthesise a scroll of `(delta_x, delta_y)` wheel lines at the current focus.
 ///
 /// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
