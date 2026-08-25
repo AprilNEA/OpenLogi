@@ -44,7 +44,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
-use openlogi_agent_core::watchers;
+use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -144,12 +144,12 @@ fn main() {
 }
 
 /// Start the HID++ background sessions that do not need Accessibility.
-fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
+fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
-        dispatcher.clone(),
+        GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
     );
     watchers::host_switch::spawn(
         shared.host_switch_links.clone(),
@@ -161,7 +161,7 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
         shared.keyboard_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
-        dispatcher,
+        inputs.dispatcher.clone(),
     );
 }
 
@@ -497,7 +497,7 @@ async fn run(
     ));
 
     // HID++ watchers need no Accessibility permission — start them up front.
-    spawn_hidpp_watchers(&shared, inputs.dispatcher.clone());
+    spawn_hidpp_watchers(&shared, &inputs);
 
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),

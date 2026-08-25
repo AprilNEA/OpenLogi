@@ -7,6 +7,10 @@ fn source() -> ScrollSource {
     ScrollSource::current_hook()
 }
 
+fn hidpp_source(device_key: &str, epoch: u64) -> ScrollSource {
+    ScrollSource::Hidpp(HidppSessionId::new(device_key, epoch))
+}
+
 fn wheel(x: f64, y: f64) -> WheelDelta {
     WheelDelta { x, y }
 }
@@ -221,4 +225,40 @@ fn cancellation_emits_one_terminal_phase_only_after_output_began() {
         Some(SmoothScrollPhase::Cancelled)
     );
     assert_delta(cumulative(&frames), wheel(0.15625, 0.0));
+}
+
+#[test]
+fn source_cancellation_does_not_interrupt_another_device() {
+    let base = Instant::now();
+    let first = hidpp_source("mouse-a", 1);
+    let second = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.impulse(first.clone(), wheel(1.0, 0.0), base, &mut |_| {});
+    engine.impulse(second.clone(), wheel(0.0, 1.0), base, &mut |_| {});
+    engine.advance_due(base + Duration::from_millis(25), &mut |frame| {
+        frames.push(frame);
+    });
+
+    engine.cancel_source(&first, &mut |frame| frames.push(frame));
+    assert!(!engine.active.contains_key(&first));
+    assert!(engine.active.contains_key(&second));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.phase == SmoothScrollPhase::Cancelled)
+            .count(),
+        1
+    );
+
+    engine.advance_due(base + ANIMATION_DURATION, &mut |frame| frames.push(frame));
+    assert!(engine.active.is_empty());
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.phase == SmoothScrollPhase::Ended)
+            .count(),
+        1,
+        "the other device completes normally"
+    );
 }

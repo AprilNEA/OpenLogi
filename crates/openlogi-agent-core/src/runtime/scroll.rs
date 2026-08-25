@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_inject::SmoothScrollPhase;
 
+use crate::runtime::HidppSessionId;
+
 /// Duration of every segment, including a segment restarted by retargeting.
 const ANIMATION_DURATION: Duration = Duration::from_millis(100);
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
@@ -99,10 +101,13 @@ impl ScrollFrame {
 }
 
 /// One physical producer. Linux runs one hook callback thread per grabbed
-/// mouse; macOS and Windows use one global callback thread.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// mouse; macOS and Windows use one global callback thread. HID++ capture
+/// sessions use their epoch-bearing identity so a restarted session cannot
+/// inherit motion from the one it replaced.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ScrollSource {
     OsHook(ThreadId),
+    Hidpp(HidppSessionId),
 }
 
 impl ScrollSource {
@@ -279,7 +284,8 @@ impl ScrollEngine {
         let due: Vec<ScrollSource> = self
             .active
             .iter()
-            .filter_map(|(source, motion)| (motion.next_frame <= at).then_some(*source))
+            .filter(|(_, motion)| motion.next_frame <= at)
+            .map(|(source, _)| source.clone())
             .collect();
         for source in due {
             let complete = self
@@ -294,6 +300,12 @@ impl ScrollEngine {
 
     fn next_deadline(&self) -> Option<Instant> {
         self.active.values().map(|motion| motion.next_frame).min()
+    }
+
+    fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
+        if let Some(motion) = self.active.remove(source) {
+            motion.cancel(emit);
+        }
     }
 
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {

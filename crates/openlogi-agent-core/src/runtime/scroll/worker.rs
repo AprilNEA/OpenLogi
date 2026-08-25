@@ -11,6 +11,7 @@ use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
 use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use crate::runtime::HidppSessionId;
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
 const INPUT_QUEUE_CAPACITY: usize = 128;
@@ -26,6 +27,7 @@ struct ScrollInput {
 
 enum ScrollCommand {
     Input(ScrollInput),
+    CancelSource(ScrollSource),
     Wake,
 }
 
@@ -33,10 +35,10 @@ struct ShutdownRequest {
     done: mpsc::SyncSender<()>,
 }
 
-/// Cloneable, non-owning capability for hook callbacks.
+/// Cloneable, non-owning capability for physical input producers.
 ///
-/// Submission is always non-blocking. `false` means the caller must pass the
-/// physical event through unchanged.
+/// Submission is always non-blocking. `false` asks each producer to use its
+/// source-appropriate direct-output fallback.
 #[derive(Clone)]
 pub struct ScrollInputHandle {
     commands: mpsc::SyncSender<ScrollCommand>,
@@ -50,7 +52,21 @@ impl ScrollInputHandle {
     ///
     /// Pixel input, zero/non-finite distance, a disabled preference, a full
     /// queue, or an unavailable worker are rejected so the callback fails open.
+    #[must_use]
     pub fn try_hook_scroll(&self, delta: ScrollDelta) -> bool {
+        self.try_scroll(ScrollSource::current_hook(), delta)
+    }
+
+    /// Queue one diverted thumb-wheel impulse from an active HID++ session.
+    ///
+    /// Rejection tells the already-diverted caller to inject the distance
+    /// directly; unlike an OS hook, there is no physical event to pass through.
+    #[must_use]
+    pub(crate) fn try_hidpp_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) -> bool {
+        self.try_scroll(ScrollSource::Hidpp(session.clone()), delta)
+    }
+
+    fn try_scroll(&self, source: ScrollSource, delta: ScrollDelta) -> bool {
         if !self.accepting.load(Ordering::Acquire) || !self.enabled.load(Ordering::Relaxed) {
             return false;
         }
@@ -59,18 +75,18 @@ impl ScrollInputHandle {
         };
         let input = ScrollInput {
             generation: self.generation.load(Ordering::Acquire),
-            source: ScrollSource::current_hook(),
+            source,
             impulse,
             at: Instant::now(),
         };
         match self.commands.try_send(ScrollCommand::Input(input)) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
-                warn!("smooth-scroll queue full — physical wheel event passed through");
+                warn!("smooth-scroll queue full — input rejected");
                 false
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                warn!("smooth-scroll worker unavailable — physical wheel event passed through");
+                warn!("smooth-scroll worker unavailable — input rejected");
                 false
             }
         }
@@ -78,6 +94,24 @@ impl ScrollInputHandle {
 
     /// Invalidate every accepted OS-hook animation without blocking.
     pub fn cancel_hooks(&self) {
+        self.cancel_all();
+    }
+
+    /// Cancel output belonging to one HID++ capture-session incarnation.
+    pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
+        let source = ScrollSource::Hidpp(session.clone());
+        match self.commands.try_send(ScrollCommand::CancelSource(source)) {
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                // A stale diverted session must not retain active output. The
+                // bounded queue cannot guarantee source-local cancellation
+                // here, so invalidate all accepted input as the safe fallback.
+                self.cancel_all();
+            }
+        }
+    }
+
+    fn cancel_all(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.wake();
     }
@@ -130,7 +164,7 @@ impl ScrollRuntime {
         })
     }
 
-    /// Clone the non-owning input capability for an OS hook.
+    /// Clone the non-owning input capability for physical input producers.
     #[must_use]
     pub fn input(&self) -> ScrollInputHandle {
         self.input.clone()
@@ -208,6 +242,7 @@ fn run_worker(
             {
                 engine.impulse(input.source, input.impulse, input.at, emit);
             }
+            Ok(ScrollCommand::CancelSource(source)) => engine.cancel_source(&source, emit),
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => engine.advance_due(Instant::now(), emit),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -247,6 +282,30 @@ mod tests {
         assert!(!input.try_hook_scroll(ScrollDelta::pixels(0.0, 1.0)));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         assert!(!input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+    }
+
+    #[test]
+    fn hidpp_cancellation_targets_its_session() {
+        let (input, receiver) = standalone_input(1, true);
+        let session = HidppSessionId::new("mouse-a", 7);
+        input.cancel_hidpp_session(&session);
+
+        let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
+            receiver.recv().expect("queued cancellation")
+        else {
+            panic!("expected HID++ source cancellation");
+        };
+        assert_eq!(cancelled, session);
+        assert_eq!(input.generation.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn full_queue_falls_back_to_global_cancellation() {
+        let (input, _receiver) = standalone_input(1, true);
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+
+        input.cancel_hidpp_session(&HidppSessionId::new("mouse-a", 7));
+        assert_eq!(input.generation.load(Ordering::Acquire), 1);
     }
 
     #[test]

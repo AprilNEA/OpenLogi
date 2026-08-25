@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
+use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
 use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
@@ -32,6 +33,7 @@ use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
+use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId, PressToken};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
@@ -47,6 +49,34 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// deliberate flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
+/// Output capabilities shared by every HID++ gesture capture session.
+#[derive(Clone)]
+pub struct GestureOutputs {
+    actions: ActionDispatcher,
+    scroll: ScrollInputHandle,
+}
+
+impl GestureOutputs {
+    /// Build gesture outputs backed by the shared action and scroll runtimes.
+    #[must_use]
+    pub fn new(actions: ActionDispatcher, scroll: ScrollInputHandle) -> Self {
+        Self { actions, scroll }
+    }
+
+    fn cancel_session(&self, session: &HidppSessionId) {
+        self.actions.cancel_hidpp_session(session);
+        self.scroll.cancel_hidpp_session(session);
+    }
+
+    fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
+        if !self.scroll.try_hidpp_scroll(session, delta) {
+            // HID++ diversion consumed the physical input already, so direct
+            // synthesis is this source's fail-open path.
+            openlogi_inject::post_scroll(delta);
+        }
+    }
+}
+
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
@@ -54,7 +84,7 @@ pub fn spawn(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    dispatcher: ActionDispatcher,
+    outputs: GestureOutputs,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -71,7 +101,7 @@ pub fn spawn(
             capture_plans,
             capture_channel,
             receiver_access,
-            dispatcher,
+            outputs,
         ));
     });
 }
@@ -240,7 +270,7 @@ async fn manage(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    dispatcher: ActionDispatcher,
+    outputs: GestureOutputs,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
@@ -286,10 +316,10 @@ async fn manage(
                         &mut accumulators,
                         &mut gesture_presses,
                         &capture_plans,
-                        &dispatcher,
+                        &outputs,
                     );
                 } else {
-                    dispatcher.cancel_hidpp_session(&event.session);
+                    outputs.cancel_session(&event.session);
                     gesture_presses.cancel_session(&event.session);
                     debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
                 }
@@ -311,7 +341,7 @@ async fn manage(
                 for (key, session) in &mut sessions {
                     let keep = want.get(key).is_some_and(|target| *target == session.target);
                     if !keep && let Some(stop) = session.stop.take() {
-                        dispatcher.cancel_hidpp_session(&session.id);
+                        outputs.cancel_session(&session.id);
                         gesture_presses.cancel_session(&session.id);
                         let _ = stop.send(());
                     }
@@ -353,7 +383,7 @@ async fn manage(
                 // device can't hot-loop. A stale epoch (an already-superseded
                 // session) is a no-op.
                 if let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) {
-                    dispatcher.cancel_hidpp_session(&done.session);
+                    outputs.cancel_session(&done.session);
                     gesture_presses.cancel_session(&done.session);
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
@@ -486,7 +516,7 @@ fn dispatch(
     accumulators: &mut HashMap<String, WheelAccumulators>,
     gesture_presses: &mut GesturePresses,
     capture_plans: &SharedCapturePlans,
-    dispatcher: &ActionDispatcher,
+    outputs: &GestureOutputs,
 ) {
     let key = session.device_key();
     let Ok(plans) = capture_plans.read() else {
@@ -508,7 +538,7 @@ fn dispatch(
                 .and_then(|map| map.get(&direction))
             {
                 debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                if !dispatcher.try_dispatch_while_pressed(press, action) {
+                if !outputs.actions.try_dispatch_while_pressed(press, action) {
                     debug!(key, %button, ?direction, "gesture press no longer active — ignored");
                 }
             } else {
@@ -526,7 +556,9 @@ fn dispatch(
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
-            let press = dispatcher.try_hidpp_button_down(session, button, action);
+            let press = outputs
+                .actions
+                .try_hidpp_button_down(session, button, action);
             if is_gesture {
                 if let Some(press) = press {
                     gesture_presses.start(session, button, press);
@@ -536,7 +568,7 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonUp(button) => {
-            dispatcher.try_hidpp_button_up(session, button);
+            outputs.actions.try_hidpp_button_up(session, button);
             gesture_presses.end(session, button);
         }
         CapturedInput::ButtonPulse(button) => {
@@ -546,7 +578,9 @@ fn dispatch(
             } else {
                 debug!(key, ?button, "HID++ button pulse with no binding — ignored");
             }
-            dispatcher.dispatch_hidpp_button_pulse(session, button, action);
+            outputs
+                .actions
+                .dispatch_hidpp_button_pulse(session, button, action);
         }
         CapturedInput::Scroll {
             increments,
@@ -580,11 +614,14 @@ fn dispatch(
             ) {
                 WheelOutput::Idle => {}
                 WheelOutput::Scroll { delta_x, delta_y } => {
-                    openlogi_inject::post_thumbwheel_scroll(delta_x, delta_y);
+                    outputs.post_scroll(
+                        session,
+                        ScrollDelta::wheel_ticks(f64::from(delta_x), f64::from(delta_y)),
+                    );
                 }
                 WheelOutput::FireAction => {
                     debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                    dispatcher.dispatch(&action, Some(key));
+                    outputs.actions.dispatch(&action, Some(key));
                 }
             }
         }
