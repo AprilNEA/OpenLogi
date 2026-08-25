@@ -2,7 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
@@ -37,7 +37,7 @@ use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
-    ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
+    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
 
 const CAMERA_PREVIEW_W: Rems = rems(32.125);
@@ -112,21 +112,21 @@ pub(super) fn detail_content(
         .is_some_and(|record| record.online);
     let content = match active {
         DetailTab::Buttons => {
-            buttons_tab(panels.mouse_model, profile_icons, app_catalog, pal, cx).into_any_element()
+            buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, pal, cx).into_any_element()
+            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
-        DetailTab::Light => light_tab(panels.light_panel, pal, cx).into_any_element(),
-        DetailTab::Device => device_tab(pal, cx).into_any_element(),
+        DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
+        DetailTab::Device => device_tab(cx).into_any_element(),
     };
-    let navigation = detail_navigation(tabs, active, pal, cx).into_any_element();
+    let navigation = detail_navigation(tabs, active, cx);
     v_flex()
         .flex_1()
         .min_h_0()
@@ -169,9 +169,9 @@ pub(super) fn detail_content(
 fn detail_navigation(
     tabs: &[DetailTab],
     active: DetailTab,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     v_flex()
         .w(px(DETAIL_RAIL_W))
         .h_full()
@@ -249,14 +249,13 @@ fn buttons_tab(
     mouse_model: &gpui::Entity<MouseModelView>,
     profile_icons: &ProfileIconCache,
     app_catalog: &gpui::Entity<AppCatalogPicker>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     v_flex()
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(pal, profile_icons, app_catalog, cx))
+        .children(profile_scope_bar(profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
 }
 
@@ -290,9 +289,9 @@ fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     tab_body(
         ContentWidth::Large,
         h_flex()
@@ -421,15 +420,11 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     PanelCard::new(
         tr!("Scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
-        v_flex()
-            .gap_4()
-            .child(inversion_row)
-            .child(resolution_row)
-            .into_any_element(),
+        v_flex().gap_4().child(inversion_row).child(resolution_row),
     )
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> AnyElement {
+fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -469,7 +464,6 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
                 }
             });
         })
-        .into_any_element()
 }
 
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
@@ -530,9 +524,9 @@ fn camera_tab(
 /// Standalone-light controls in a separate panel from HID++ keyboard RGB.
 fn light_tab(
     light_panel: &gpui::Entity<LightPanel>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let (asset, online, enabled, settings) = AppState::try_read(cx).map_or_else(
         || {
             (
@@ -574,7 +568,8 @@ fn light_tab(
 }
 
 /// Device tab: device details and configuration cards stacked.
-fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
+    let pal = theme::palette(cx);
     tab_body(
         ContentWidth::Small,
         v_flex()
@@ -709,8 +704,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         }
                     },
                 )),
-        )
-        .into_any_element();
+        );
 
     PanelCard::new(tr!("Configuration"), Icon::new(IconName::Folder), content)
 }

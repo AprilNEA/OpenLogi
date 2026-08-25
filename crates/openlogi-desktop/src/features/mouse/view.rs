@@ -29,7 +29,7 @@ use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
@@ -275,7 +275,7 @@ impl Render for MouseModelView {
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, pal, glow);
+        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, glow);
         let model = ModelRect {
             left: mouse_left,
             width: mouse_w,
@@ -324,21 +324,16 @@ impl Render for MouseModelView {
             pal,
             cx,
         );
-        workspace_layout(
-            canvas.into_any_element(),
-            profile_status,
-            inspector,
-            &self.focus_handle,
-        )
+        workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
     }
 }
 
 fn workspace_layout(
-    canvas: AnyElement,
-    profile_status: Option<AnyElement>,
-    inspector: AnyElement,
+    canvas: impl IntoElement,
+    profile_status: Option<gpui::Div>,
+    inspector: impl IntoElement,
     focus_handle: &FocusHandle,
-) -> AnyElement {
+) -> impl IntoElement {
     h_flex()
         .flex_1()
         .min_h_0()
@@ -367,7 +362,6 @@ fn workspace_layout(
                 ),
         )
         .child(inspector)
-        .into_any_element()
 }
 
 struct ModelLayout {
@@ -497,7 +491,6 @@ fn breathing_art(
     mouse_left: f32,
     mouse_w: f32,
     mouse_h: f32,
-    pal: Palette,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
 ) -> impl IntoElement {
     let device_art: AnyElement = match asset {
@@ -505,7 +498,11 @@ fn breathing_art(
             .w(px(mouse_w))
             .h(px(mouse_h))
             .into_any_element(),
-        None => silhouette(mouse_w, mouse_h, pal).into_any_element(),
+        None => Silhouette {
+            w: mouse_w,
+            h: mouse_h,
+        }
+        .into_any_element(),
     };
     div()
         .absolute()
@@ -566,7 +563,7 @@ fn label_control(
     model: ModelRect,
     selected: bool,
     view: &Entity<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let x = match label.side {
         Side::Left => model.left - SIDE_GAP - LABEL_W,
         Side::Right => model.left + model.width + SIDE_GAP,
@@ -587,7 +584,6 @@ fn label_control(
         .w(px(LABEL_W))
         .h(px(LABEL_H))
         .child(trigger)
-        .into_any_element()
 }
 
 struct BindingLabel {
@@ -780,45 +776,55 @@ fn binding_label_for_control(
 /// Its `rounded_*` values are illustration proportions — the body shell and the
 /// two drawn side buttons — not UI chrome, so they stay fixed rather than
 /// tracking the `Palette` radius tokens the way real cards and controls do.
-fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
-    div()
-        .absolute()
-        .inset_0()
-        .w(px(w))
-        .h(px(h))
-        .rounded_3xl()
-        .border_1()
-        .border_color(pal.text_muted)
-        .bg(pal.muted)
-        .child(
-            div()
-                .absolute()
-                .left(px(w / 2. - 14.))
-                .top(px(90.))
-                .w(px(28.))
-                .h(px(110.))
-                .rounded_md()
-                .bg(hsla(0., 0., 0.25, 1.0)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(w / 2.))
-                .top(px(20.))
-                .w(px(1.))
-                .h(px(240.))
-                .bg(pal.border),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(8.))
-                .top(px(210.))
-                .w(px(34.))
-                .h(px(150.))
-                .rounded_md()
-                .bg(hsla(0., 0., 0.25, 1.0)),
-        )
+#[derive(IntoElement)]
+struct Silhouette {
+    w: f32,
+    h: f32,
+}
+
+impl RenderOnce for Silhouette {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self { w, h } = self;
+        let pal = theme::palette(cx);
+        div()
+            .absolute()
+            .inset_0()
+            .w(px(w))
+            .h(px(h))
+            .rounded_3xl()
+            .border_1()
+            .border_color(pal.text_muted)
+            .bg(pal.muted)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(w / 2. - 14.))
+                    .top(px(90.))
+                    .w(px(28.))
+                    .h(px(110.))
+                    .rounded_md()
+                    .bg(hsla(0., 0., 0.25, 1.0)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(w / 2.))
+                    .top(px(20.))
+                    .w(px(1.))
+                    .h(px(240.))
+                    .bg(pal.border),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(8.))
+                    .top(px(210.))
+                    .w(px(34.))
+                    .h(px(150.))
+                    .rounded_md()
+                    .bg(hsla(0., 0., 0.25, 1.0)),
+            )
+    }
 }
 
 fn hotspot_control(
@@ -828,7 +834,7 @@ fn hotspot_control(
     active: Option<MouseControlId>,
     selected: bool,
     view: &Entity<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let view = view.clone();
     let trigger = HotspotTrigger {
         id: ("hotspot-trigger", idx).into(),
@@ -844,7 +850,6 @@ fn hotspot_control(
         .w(px(hotspot.w))
         .h(px(hotspot.h))
         .child(trigger)
-        .into_any_element()
 }
 
 #[derive(IntoElement)]

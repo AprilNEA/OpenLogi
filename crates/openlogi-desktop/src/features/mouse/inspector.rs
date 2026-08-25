@@ -62,14 +62,16 @@ pub(super) fn binding_inspector(
             data.editing_app,
             data.overridden.map_or(0, BTreeMap::len),
             pal,
-        ),
+        )
+        .into_any_element(),
         Some(MouseControlId::ThumbwheelRotation) => thumbwheel_inspector(
             data.bindings,
             data.editing_app,
             data.overridden,
             picker,
             pal,
-        ),
+        )
+        .into_any_element(),
         Some(MouseControlId::Button(button)) => button_inspector(button, &data, picker, pal, cx),
     };
 
@@ -93,7 +95,7 @@ pub(super) fn binding_inspector(
         .into_any_element()
 }
 
-fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> AnyElement {
+fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> impl IntoElement {
     let summary = match (app, override_count) {
         (Some(app), 0) => tr!(
             "No overrides yet. Select a button to customize for %{app}.",
@@ -114,7 +116,6 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> An
         .gap_3()
         .child(inspector_heading(tr!("Button inspector"), None, pal))
         .child(div().text_body().text_color(pal.text_muted).child(summary))
-        .into_any_element()
 }
 
 fn button_inspector(
@@ -345,7 +346,7 @@ fn gesture_directions(
     button: ButtonId,
     view: &Entity<MouseModelView>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     v_flex()
         .gap_1()
         .child(editor_section(tr!("Direction"), pal))
@@ -391,7 +392,6 @@ fn gesture_directions(
                         })
                 }),
         )
-        .into_any_element()
 }
 
 fn thumbwheel_inspector(
@@ -504,7 +504,7 @@ fn inspector_heading(
     title: gpui::SharedString,
     status: Option<gpui::SharedString>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     v_flex()
         .gap_1()
         .child(div().text_heading().child(title))
@@ -514,14 +514,13 @@ fn inspector_heading(
                 .text_color(pal.text_muted)
                 .child(status)
         }))
-        .into_any_element()
 }
 
 fn current_action_card(
     action: &Action,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     selection_card(
         "inspector-current-action",
         tr!("Current action"),
@@ -532,7 +531,7 @@ fn current_action_card(
     )
 }
 
-fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> AnyElement {
+fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
         tr!("Current action"),
@@ -550,7 +549,7 @@ fn selection_card(
     value: gpui::SharedString,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     let toggle = picker.view.clone();
     let search = picker.search.clone();
     let opening = !picker.open;
@@ -615,7 +614,6 @@ fn selection_card(
                 cx.notify();
             });
         })
-        .into_any_element()
 }
 
 fn action_library(
@@ -625,7 +623,7 @@ fn action_library(
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> impl IntoElement {
     let query = action_search.read(cx).value();
     let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
     v_flex()
@@ -647,7 +645,6 @@ fn action_library(
                 })
                 .children(rows),
         )
-        .into_any_element()
 }
 
 fn gesture_action(
