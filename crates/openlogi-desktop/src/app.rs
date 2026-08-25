@@ -273,6 +273,7 @@ impl AppView {
                 // language switch already refreshes every window, and the root
                 // caches no localized text.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::DisableKeysChanged(_)
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
