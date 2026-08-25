@@ -305,11 +305,14 @@ jobs:
           # The installer, Windows binaries, and Linux packages get the same
           # minisign treatment as the DMGs: manual verification today, and the
           # future auto-updaters need detached signatures for every artifact.
-          # nullglob: the zip/msi/deb/rpm sets are best-effort per arch leg, so
-          # the globs may match nothing; the DMGs are guaranteed by the publish
-          # gate.
+          # The Flatpak bundle is attached to the release and copied to R2 like
+          # the rest, so leaving it unsigned would make it the one installer a
+          # user cannot verify.
+          # nullglob: the zip/msi/deb/rpm/flatpak sets are best-effort per arch
+          # leg, so the globs may match nothing; the DMGs are guaranteed by the
+          # publish gate.
           shopt -s nullglob
-          artifacts=(dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst)
+          artifacts=(dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.flatpak)
           if [ -f dist/install.sh ]; then
             artifacts=(dist/install.sh "${artifacts[@]}")
           fi
