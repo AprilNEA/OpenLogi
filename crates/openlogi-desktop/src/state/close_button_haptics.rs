@@ -50,7 +50,8 @@ impl AppState {
             debug!("no persistent device key — close-button haptics change ignored");
             return;
         };
-        self.config.set_close_button_haptics(&key, enabled);
+        self.config
+            .edit(|config| config.set_close_button_haptics(&key, enabled));
         self.persist_and_reload("close-button haptics");
     }
 }
