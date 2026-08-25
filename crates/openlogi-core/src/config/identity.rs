@@ -276,6 +276,10 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
+    // The user-assigned alias. Without this a legacy entry carrying a name
+    // folded into a canonical entry with none would drop it silently — the
+    // one field here a user typed by hand, so the loss is the most visible.
+    fold_option_field!(custom_name);
 
     if device.identity.is_none() {
         device.identity = legacy.identity;
@@ -612,6 +616,64 @@ mod tests {
             identity: DeviceIdentity::Unit([0; 4]),
         };
         assert_eq!(config.resolve_device_key(&anonymous, None), None);
+    }
+
+    #[test]
+    fn folding_takes_a_custom_name_the_canonical_entry_lacks() {
+        // The alias is the one field in an entry the user typed by hand. A
+        // legacy entry carrying it must not lose it to a canonical entry that
+        // was created by, say, a first DPI write and never named.
+        let mut config = Config::default();
+        let legacy = DeviceConfig {
+            custom_name: Some("Desk mouse".to_string()),
+            ..DeviceConfig::default()
+        };
+        config
+            .devices
+            .insert("receiver:82839805:slot:1".to_string(), legacy);
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+
+        assert_eq!(
+            config.devices["unit:6be9d300"].custom_name.as_deref(),
+            Some("Desk mouse"),
+            "the user's alias survives the fold"
+        );
+    }
+
+    #[test]
+    fn folding_keeps_the_canonical_custom_name_when_both_are_named() {
+        // Two names cannot be merged and there is no per-link slot for one, so
+        // the canonical entry wins. `fold` logs the loss rather than dropping
+        // it silently; this pins which of the two survives.
+        let mut config = Config::default();
+        let legacy = DeviceConfig {
+            custom_name: Some("Old name".to_string()),
+            ..DeviceConfig::default()
+        };
+        let canonical_entry = DeviceConfig {
+            custom_name: Some("Current name".to_string()),
+            ..DeviceConfig::default()
+        };
+        config
+            .devices
+            .insert("receiver:82839805:slot:1".to_string(), legacy);
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), canonical_entry);
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+
+        assert_eq!(
+            config.devices["unit:6be9d300"].custom_name.as_deref(),
+            Some("Current name"),
+            "the canonical alias wins a genuine conflict"
+        );
     }
 
     #[test]
