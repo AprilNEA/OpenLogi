@@ -79,3 +79,11 @@ pub use write::{
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };
+
+/// Scripted transport helpers for tests in higher layers.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    pub use crate::channel::scripted::{publish_scripted_channel, scripted_shared_channel};
+    pub use crate::replay::ReplayChannelHandle as ScriptedRawHidHandle;
+}

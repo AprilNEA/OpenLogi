@@ -403,7 +403,7 @@ impl ReplayRawHidChannel {
         Self::build_scripted(responder, None)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_dynamic_responder(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
     ) -> (Self, ReplayChannelHandle) {
@@ -418,7 +418,7 @@ impl ReplayRawHidChannel {
         Self::build_scripted(responder, Some(fails))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn build_scripted(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
         fails: Option<fn(&[u8]) -> bool>,
