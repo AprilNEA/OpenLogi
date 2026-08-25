@@ -24,7 +24,6 @@ pub(super) fn appearance_page(
     filter: ThemeFilter,
     theme_search: Entity<InputState>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
-    pal: Palette,
 ) -> SettingPage {
     // Titled groups so the sidebar shows them as sub-items (gpui-component
     // renders a page's groups as nested sidebar entries once there's more than
@@ -34,7 +33,7 @@ pub(super) fn appearance_page(
         .item(
             SettingItem::new(
                 tr!("Appearance mode"),
-                SettingField::render(move |_, _, cx| mode_segment(pal, cx)),
+                SettingField::render(move |_, _, cx| mode_segment(cx)),
             )
             .layout(Axis::Vertical)
             .description(tr!(
@@ -45,7 +44,7 @@ pub(super) fn appearance_page(
             SettingItem::new(
                 tr!("Color theme"),
                 SettingField::render(move |_, _, cx| {
-                    theme_picker(&view, &theme_search, filter, pal, cx)
+                    theme_picker(&view, &theme_search, filter, cx)
                 }),
             )
             .layout(Axis::Vertical),
@@ -57,7 +56,7 @@ pub(super) fn appearance_page(
         theme_group = theme_group.item(
             SettingItem::new(
                 tr!("App icon"),
-                SettingField::render(move |_, _, cx| icon_picker(pal, cx)),
+                SettingField::render(move |_, _, cx| icon_picker(cx)),
             )
             .layout(Axis::Vertical)
             .description(tr!(
@@ -136,7 +135,8 @@ fn set_scale(cx: &mut App, scale: UiScale) {
 
 /// The Light / Dark / Follow-system appearance picker — three macOS-style
 /// preview thumbnails, each with a radio + label, mirroring System Settings.
-fn mode_segment(pal: Palette, cx: &App) -> gpui::Div {
+fn mode_segment(cx: &App) -> gpui::Div {
+    let pal = theme::palette(cx);
     let current = appearance_of(cx);
     let accent = cx.theme().primary;
     h_flex().gap_4().items_start().children([
@@ -242,7 +242,8 @@ fn mode_card(
 /// The app-icon picker: one card per icon, each showing a render of the
 /// compiled icon rather than its artwork, so the choice looks like what macOS
 /// will draw.
-fn icon_picker(pal: Palette, cx: &App) -> gpui::Div {
+fn icon_picker(cx: &App) -> gpui::Div {
+    let pal = theme::palette(cx);
     let current =
         AppState::try_read(cx).map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
     let accent = cx.theme().primary;
@@ -434,9 +435,9 @@ fn theme_picker(
     view: &Entity<SettingsView>,
     theme_search: &Entity<InputState>,
     filter: ThemeFilter,
-    pal: Palette,
     cx: &App,
 ) -> gpui::Div {
+    let pal = theme::palette(cx);
     let active = cx.theme().theme_name().clone();
     let query = theme_search.read(cx).value().trim().to_lowercase();
     // Collect just the preview colours per theme (small + `Copy`), so the 1.8 KB

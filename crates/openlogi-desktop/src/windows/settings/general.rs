@@ -1,9 +1,9 @@
 //! General settings page.
 
 use super::{
-    AnyElement, App, AppState, Entity, FluentBuilder, IconName, IntoElement, ParentElement,
-    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
-    ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    App, AppState, Entity, FluentBuilder, IconName, ParentElement, SettingField, SettingGroup,
+    SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled, ThumbwheelSensitivity,
+    VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
@@ -116,7 +116,7 @@ pub(super) fn general_page(
         .group(group)
 }
 
-fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
+fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
     sensitivity_field(
         slider,
@@ -126,7 +126,7 @@ fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> A
     )
 }
 
-fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
+fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = VerticalScrollSensitivity::from_rounded(slider.read(cx).value().start());
     sensitivity_field(
         slider,
@@ -141,7 +141,7 @@ fn sensitivity_field(
     value: String,
     is_default: bool,
     cx: &mut App,
-) -> AnyElement {
+) -> gpui::Div {
     let pal = theme::palette(cx);
     v_flex()
         .flex_shrink_0()
@@ -168,5 +168,4 @@ fn sensitivity_field(
                     .child(format!("({})", rust_i18n::t!("Default"))),
             )
         })
-        .into_any_element()
 }

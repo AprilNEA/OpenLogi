@@ -6,9 +6,8 @@
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, Role, StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px,
-    rgb,
+    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -117,7 +116,7 @@ impl Render for LightingPanel {
                 .update(cx, |slider, cx| slider.set_value(value, window, cx));
         }
 
-        let swatches: Vec<AnyElement> = PALETTE
+        let swatches: Vec<_> = PALETTE
             .iter()
             .map(|&color| swatch(color, &lighting, pal))
             .collect();
@@ -174,7 +173,7 @@ impl Render for LightingPanel {
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
-fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
+fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
     let selected = current.enabled && current.color == color;
     BaseButton::new(("light-swatch", color.packed()))
         .role(Role::RadioButton)
@@ -209,7 +208,6 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
                 }
             });
         })
-        .into_any_element()
 }
 
 /// Snap a raw slider read to a 0–100 brightness percent.

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use appcatalog::{Application, ApplicationIdentity, IdentityKind};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, RenderImage, Role, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    Anchor, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    RenderImage, RenderOnce, Role, StatefulInteractiveElement as _, Styled, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, div, img, prelude::FluentBuilder as _, px,
     uniform_list,
 };
@@ -297,12 +297,11 @@ fn preferred_identity_kind(runtime: Option<IdentityKind>) -> IdentityKind {
 
 /// A direct profile switcher. The foreground app may change which profile is
 /// active, but never changes which profile this editor has open.
-pub fn profile_scope_bar(
-    pal: Palette,
+pub(crate) fn profile_scope_bar(
     icons: &ProfileIconCache,
     catalog: &Entity<AppCatalogPicker>,
     cx: &mut App,
-) -> Option<AnyElement> {
+) -> Option<ProfileScopeBar> {
     let state = AppState::try_read(cx)?;
     if !state.current_device_is_persistent() {
         return None;
@@ -370,23 +369,48 @@ pub fn profile_scope_bar(
     let loading = matches!(catalog.read(cx).load, CatalogLoad::Loading);
     let failed = matches!(catalog.read(cx).load, CatalogLoad::Failed);
 
-    Some(profile_scope_content(
-        editing_app.as_deref(),
-        &profiles,
-        AddAppChoices {
+    Some(ProfileScopeBar {
+        editing_app,
+        profiles,
+        choices: AddAppChoices {
             recent: available_recent,
             applications: available_catalog,
             loading,
             failed,
         },
-        catalog,
-        icons,
-        pal,
-    ))
+        catalog: catalog.clone(),
+        icons: icons.clone(),
+    })
+}
+
+/// The profile selector owns the complete profile-switching toolbar and its
+/// add/remove menus, including their theme resolution.
+#[derive(IntoElement)]
+pub(crate) struct ProfileScopeBar {
+    editing_app: Option<String>,
+    profiles: Vec<ProfileChoice>,
+    choices: AddAppChoices,
+    catalog: Entity<AppCatalogPicker>,
+    icons: ProfileIconCache,
+}
+
+impl RenderOnce for ProfileScopeBar {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        profile_scope_content(
+            self.editing_app.as_deref(),
+            &self.profiles,
+            self.choices,
+            self.catalog,
+            self.icons,
+            pal,
+        )
+    }
 }
 
 /// Profile inheritance and active-app context shown above the device canvas.
-pub(crate) fn profile_canvas_status(pal: Palette, cx: &App) -> Option<AnyElement> {
+pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
+    let pal = theme::palette(cx);
     let state = AppState::try_read(cx)?;
     if !state.current_device_is_persistent() {
         return None;
@@ -417,8 +441,7 @@ pub(crate) fn profile_canvas_status(pal: Palette, cx: &App) -> Option<AnyElement
                 div()
                     .flex_none()
                     .child(tr!("Active: %{profile}", profile => active)),
-            )
-            .into_any_element(),
+            ),
     )
 }
 
@@ -426,10 +449,10 @@ fn profile_scope_content(
     editing_app: Option<&str>,
     profiles: &[ProfileChoice],
     choices: AddAppChoices,
-    catalog: &Entity<AppCatalogPicker>,
-    icons: &ProfileIconCache,
+    catalog: Entity<AppCatalogPicker>,
+    icons: ProfileIconCache,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement + use<> {
     let default_selected = editing_app.is_none();
     let selected_profile = editing_app
         .and_then(|app| profiles.iter().find(|profile| profile.app == app))
@@ -501,23 +524,17 @@ fn profile_scope_content(
                 )
                 .children(profile_tabs),
         )
-        .child(add_app_popover(
-            choices,
-            catalog.clone(),
-            icons.clone(),
-            pal,
-        ))
+        .child(add_app_popover(choices, catalog, icons, pal))
         .when_some(
             selected_profile.filter(|profile| profile.persisted),
             |row, profile| row.child(profile_options_popover(profile, pal)),
         )
-        .into_any_element()
 }
 
 fn profile_tab(
     id: impl Into<gpui::ElementId>,
     label: impl Into<gpui::SharedString>,
-    leading: Option<AnyElement>,
+    leading: Option<gpui::Div>,
     selected: bool,
     pal: Palette,
 ) -> BaseButton {
@@ -556,21 +573,19 @@ fn profile_tab(
         .child(label)
 }
 
-fn application_mark(icon: AppIconState, name: &str, edge: f32, pal: Palette) -> AnyElement {
+fn application_mark(icon: AppIconState, name: &str, edge: f32, pal: Palette) -> gpui::Div {
     let slot = h_flex()
         .size(px(edge))
         .flex_none()
         .items_center()
         .justify_center();
     match icon {
-        AppIconState::Ready(icon) => img(icon).size(px(edge)).flex_none().into_any_element(),
-        AppIconState::Loading => slot
-            .child(
-                Spinner::new()
-                    .with_size(px(edge * 0.6))
-                    .color(pal.text_muted),
-            )
-            .into_any_element(),
+        AppIconState::Ready(icon) => slot.child(img(icon).size(px(edge)).flex_none()),
+        AppIconState::Loading => slot.child(
+            Spinner::new()
+                .with_size(px(edge * 0.6))
+                .color(pal.text_muted),
+        ),
         AppIconState::Missing => {
             let initial = name
                 .chars()
@@ -587,7 +602,6 @@ fn application_mark(icon: AppIconState, name: &str, edge: f32, pal: Palette) -> 
                 })
                 .text_color(pal.text_muted)
                 .child(initial)
-                .into_any_element()
         }
     }
 }
@@ -618,7 +632,7 @@ fn add_app_popover(
     catalog: Entity<AppCatalogPicker>,
     icons: ProfileIconCache,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     let catalog_on_open = catalog.clone();
     Popover::new("add-app-popover")
         .anchor(Anchor::TopRight)
@@ -637,7 +651,6 @@ fn add_app_popover(
             }
         })
         .content(move |_state, _window, cx| add_app_content(&choices, &catalog, &icons, pal, cx))
-        .into_any_element()
 }
 
 fn add_app_content(
@@ -900,7 +913,7 @@ fn application_list_height(rows: usize) -> f32 {
     }
 }
 
-fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
+fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> impl IntoElement {
     Popover::new("profile-options-popover")
         .anchor(Anchor::TopRight)
         // `compact_panel` is the surface here too; see `add_app_popover`.
@@ -936,7 +949,6 @@ fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
                         }),
                 )
         })
-        .into_any_element()
 }
 
 fn open_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {

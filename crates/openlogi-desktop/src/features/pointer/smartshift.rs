@@ -12,6 +12,7 @@
 //! the current value through the agent when selection/inventory lifecycle
 //! events make a device active; this view only consumes the resulting cache.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
     SharedString, Styled, Subscription, Window, div, px, rgb,
@@ -175,9 +176,9 @@ impl SmartShiftPanel {
         &mut self,
         status: SmartShiftStatus,
         window: &mut Window,
-        pal: Palette,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
         let mode = status.mode;
         let permanent = status.auto_disengage.is_permanent();
         let ratchet = matches!(mode, SmartShiftMode::Ratchet);
@@ -215,7 +216,6 @@ impl SmartShiftPanel {
                             mode: SmartShiftMode::Free,
                             ..status
                         },
-                        pal,
                     ))
                     .child(mode_pill(
                         tr!("Ratchet"),
@@ -229,7 +229,6 @@ impl SmartShiftPanel {
                             auto_disengage: SmartShiftAutoDisengage::Threshold(committed),
                             ..status
                         },
-                        pal,
                     )),
             );
 
@@ -252,16 +251,15 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
-            .child(if sensitivity_enabled {
-                Slider::new(&self.threshold).horizontal().into_any_element()
-            } else {
-                disabled_track(pal)
+            .when(sensitivity_enabled, |row| {
+                row.child(Slider::new(&self.threshold).horizontal())
             })
+            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
             .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Higher keeps the ratchet engaged longer before free-spin."
             )));
 
-        let wheel_row = self.wheel_sensitivity_row(window, pal, cx);
+        let wheel_row = self.wheel_sensitivity_row(window, cx);
 
         let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
@@ -272,7 +270,6 @@ impl SmartShiftPanel {
             .child(sensitivity_row)
             .child(permanent_row)
             .child(wheel_row)
-            .into_any_element()
     }
 }
 
@@ -280,12 +277,8 @@ impl SmartShiftPanel {
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
-    fn wheel_sensitivity_row(
-        &mut self,
-        window: &mut Window,
-        pal: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
         let committed = AppState::try_read(cx)
             .and_then(|state| {
                 state
@@ -314,12 +307,7 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
-            .child(
-                Slider::new(&self.wheel_sensitivity)
-                    .horizontal()
-                    .into_any_element(),
-            )
-            .into_any_element()
+            .child(Slider::new(&self.wheel_sensitivity).horizontal())
     }
 }
 
@@ -341,7 +329,7 @@ impl Render for SmartShiftPanel {
 
         let show_write_status = matches!(status, SmartShiftLoad::Ready(_));
         let content: AnyElement = match status {
-            SmartShiftLoad::Ready(s) => self.ready_body(*s, window, pal, cx),
+            SmartShiftLoad::Ready(s) => self.ready_body(*s, window, cx).into_any_element(),
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
                 status_line(tr!("Device offline — SmartShift unavailable."), pal).into_any_element()
             }
@@ -446,12 +434,7 @@ fn permanent_row(
 
 /// One wheel-mode pill. Clicking it writes `target` while preserving the
 /// device's current threshold + torque.
-fn mode_pill(
-    label: SharedString,
-    selected: bool,
-    status: SmartShiftStatus,
-    _pal: Palette,
-) -> AnyElement {
+fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> impl IntoElement {
     let id = match status.mode {
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
@@ -463,17 +446,11 @@ fn mode_pill(
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);
         })
-        .into_any_element()
 }
 
 /// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> AnyElement {
-    div()
-        .w_full()
-        .h(px(6.))
-        .rounded_full()
-        .bg(pal.border)
-        .into_any_element()
+fn disabled_track(pal: Palette) -> gpui::Div {
+    div().w_full().h(px(6.)).rounded_full().bg(pal.border)
 }
 
 /// Round + clamp a raw slider read into the friendly threshold range.

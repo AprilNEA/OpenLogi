@@ -115,7 +115,7 @@ impl Carousel {
     /// reaches the first card) once they overflow. Prev/next arrows hug the
     /// screen edges; each card's click and selected styling come from
     /// `render_item`.
-    fn render_row(self, window: &mut Window, cx: &mut App) -> AnyElement {
+    fn render_row(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             card_w,
@@ -125,81 +125,79 @@ impl Carousel {
             gap,
             on_select,
         } = self;
-        let Some(render_item) = render_item.filter(|_| len > 0) else {
-            return div().into_any_element();
-        };
-        let selected = selected.min(len - 1);
-        let multi = len > 1;
+        v_flex().when_some(render_item.filter(|_| len > 0), |this, render_item| {
+            let selected = selected.min(len - 1);
+            let multi = len > 1;
 
-        let scroll_state = window.use_keyed_state((id.clone(), "scroll"), cx, |_, _| {
-            (usize::MAX, ScrollHandle::new())
-        });
-        let previous = scroll_state.read(cx).0;
-        let scroll_handle = scroll_state.read(cx).1.clone();
-        if previous != selected {
-            scroll_handle.scroll_to_item(selected + 1);
-            scroll_state.update(cx, |state, _| state.0 = selected);
-        }
-
-        let mut items = Vec::with_capacity(len);
-        for i in 0..len {
-            items.push(
-                div()
-                    .w(card_w)
-                    .flex_shrink_0()
-                    .child(render_item(i, i == selected, window, cx))
-                    .into_any_element(),
-            );
-        }
-
-        // Flexible edge spacers centre short rows without putting overflowing
-        // cards at a negative, unreachable offset. They are immediate children,
-        // so the scroll handle targets cards at `selected + 1`.
-        let edge_spacer = rems((ROW_PAD.0 - gap.0).max(0.));
-        let row = h_flex()
-            .id((id.clone(), "row"))
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_x_scroll()
-            .track_scroll(&scroll_handle)
-            .items_center()
-            .gap(gap)
-            .py_4()
-            .child(div().flex_1().min_w(edge_spacer))
-            .children(items)
-            .child(div().flex_1().min_w(edge_spacer));
-
-        // Prev/next arrows hug the left and right edges, flanking the row.
-        let stage = h_flex()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .px_4()
-            .when(multi, |this| {
-                this.child(arrow(
-                    (id.clone(), "previous").into(),
-                    IconName::ChevronLeft,
-                    selected.saturating_sub(1),
-                    selected == 0,
-                    Size::Large,
-                    on_select.clone(),
-                ))
-            })
-            .child(row)
-            .when(multi, |this| {
-                this.child(arrow(
-                    (id.clone(), "next").into(),
-                    IconName::ChevronRight,
-                    (selected + 1).min(len - 1),
-                    selected + 1 >= len,
-                    Size::Large,
-                    on_select.clone(),
-                ))
+            let scroll_state = window.use_keyed_state((id.clone(), "scroll"), cx, |_, _| {
+                (usize::MAX, ScrollHandle::new())
             });
+            let previous = scroll_state.read(cx).0;
+            let scroll_handle = scroll_state.read(cx).1.clone();
+            if previous != selected {
+                scroll_handle.scroll_to_item(selected + 1);
+                scroll_state.update(cx, |state, _| state.0 = selected);
+            }
 
-        v_flex().size_full().pb_6().child(stage).into_any_element()
+            let mut items = Vec::with_capacity(len);
+            for i in 0..len {
+                items.push(div().w(card_w).flex_shrink_0().child(render_item(
+                    i,
+                    i == selected,
+                    window,
+                    cx,
+                )));
+            }
+
+            // Flexible edge spacers centre short rows without putting overflowing
+            // cards at a negative, unreachable offset. They are immediate children,
+            // so the scroll handle targets cards at `selected + 1`.
+            let edge_spacer = rems((ROW_PAD.0 - gap.0).max(0.));
+            let row = h_flex()
+                .id((id.clone(), "row"))
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_x_scroll()
+                .track_scroll(&scroll_handle)
+                .items_center()
+                .gap(gap)
+                .py_4()
+                .child(div().flex_1().min_w(edge_spacer))
+                .children(items)
+                .child(div().flex_1().min_w(edge_spacer));
+
+            // Prev/next arrows hug the left and right edges, flanking the row.
+            let stage = h_flex()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .px_4()
+                .when(multi, |this| {
+                    this.child(arrow(
+                        (id.clone(), "previous").into(),
+                        IconName::ChevronLeft,
+                        selected.saturating_sub(1),
+                        selected == 0,
+                        Size::Large,
+                        on_select.clone(),
+                    ))
+                })
+                .child(row)
+                .when(multi, |this| {
+                    this.child(arrow(
+                        (id.clone(), "next").into(),
+                        IconName::ChevronRight,
+                        (selected + 1).min(len - 1),
+                        selected + 1 >= len,
+                        Size::Large,
+                        on_select.clone(),
+                    ))
+                });
+
+            this.size_full().pb_6().child(stage)
+        })
     }
 }
 
