@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
@@ -59,7 +59,8 @@ pub use succession::Identity;
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
-pub const PROTOCOL_VERSION: u32 = 28;
+/// v29: agent-owned physical shortcut recording state and commands appended.
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -136,6 +137,10 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// The physical shortcut recorder the settings UI currently owns, if any.
+    /// The agent owns capture, so this state crosses IPC rather than installing
+    /// a second hook in the GUI process.
+    pub shortcut_recording: Option<ShortcutRecording>,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -412,6 +417,38 @@ pub enum ActionRingCommandError {
     SlotEmpty,
 }
 
+/// One agent-owned physical shortcut recording session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutRecording {
+    /// Monotonic identity within this agent run. A UI uses it to reject a result
+    /// from a session superseded while its view was changing targets.
+    pub session_id: u64,
+    /// Current state of the recorder.
+    pub phase: ShortcutRecordingPhase,
+}
+
+/// Observable phase of a [`ShortcutRecording`].
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShortcutRecordingPhase {
+    /// Waiting for one ordinary physical key while tracking modifiers.
+    Recording,
+    /// A modifier was already held when recording began; all momentary
+    /// modifiers must be released before a complete chord can be trusted.
+    WaitingForRelease,
+    /// Recording completed with a portable, injectable shortcut.
+    Complete(KeyCombo),
+    /// The physical key has no supported USB-HID representation. Recording
+    /// remains active so the user can try another key.
+    UnsupportedKey,
+    /// Capture was interrupted or its abandoned UI lease expired; the user may
+    /// start again.
+    Interrupted,
+    /// The agent could not install the passive keyboard listener.
+    Unavailable,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -533,4 +570,8 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Start (or replace) the agent-owned passive physical shortcut recorder.
+    async fn start_shortcut_recording() -> u64;
+    /// Cancel the current shortcut recording session, if any.
+    async fn cancel_shortcut_recording();
 }

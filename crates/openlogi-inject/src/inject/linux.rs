@@ -256,12 +256,20 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
     KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
     KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
+    // Numpad
+    KeyCode::KEY_NUMLOCK, KeyCode::KEY_KPSLASH, KeyCode::KEY_KPASTERISK,
+    KeyCode::KEY_KPMINUS, KeyCode::KEY_KPPLUS, KeyCode::KEY_KPENTER,
+    KeyCode::KEY_KP0, KeyCode::KEY_KP1, KeyCode::KEY_KP2, KeyCode::KEY_KP3,
+    KeyCode::KEY_KP4, KeyCode::KEY_KP5, KeyCode::KEY_KP6, KeyCode::KEY_KP7,
+    KeyCode::KEY_KP8, KeyCode::KEY_KP9, KeyCode::KEY_KPDOT, KeyCode::KEY_KPEQUAL,
     // Modifiers (KEY_LEFTMETA used by the LockScreen Super+L fallback)
     KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
     // Function keys
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
     KeyCode::KEY_F5,  KeyCode::KEY_F6,  KeyCode::KEY_F7,  KeyCode::KEY_F8,
     KeyCode::KEY_F9,  KeyCode::KEY_F10, KeyCode::KEY_F11, KeyCode::KEY_F12,
+    KeyCode::KEY_F13, KeyCode::KEY_F14, KeyCode::KEY_F15, KeyCode::KEY_F16,
+    KeyCode::KEY_F17, KeyCode::KEY_F18, KeyCode::KEY_F19, KeyCode::KEY_F20,
     // System
     KeyCode::KEY_SYSRQ,
     // Multimedia
@@ -427,6 +435,10 @@ fn held_keycode(key: HeldKey) -> Option<KeyCode> {
 }
 
 /// Map a platform-neutral USB HID keyboard usage to evdev.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exhaustive USB-HID to evdev table is clearer as one auditable match"
+)]
 fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
     const LETTERS: [KeyCode; 26] = [
         KeyCode::KEY_A,
@@ -520,6 +532,24 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         0x50 => Some(KeyCode::KEY_LEFT),
         0x51 => Some(KeyCode::KEY_DOWN),
         0x52 => Some(KeyCode::KEY_UP),
+        0x53 => Some(KeyCode::KEY_NUMLOCK),
+        0x54 => Some(KeyCode::KEY_KPSLASH),
+        0x55 => Some(KeyCode::KEY_KPASTERISK),
+        0x56 => Some(KeyCode::KEY_KPMINUS),
+        0x57 => Some(KeyCode::KEY_KPPLUS),
+        0x58 => Some(KeyCode::KEY_KPENTER),
+        0x59 => Some(KeyCode::KEY_KP1),
+        0x5a => Some(KeyCode::KEY_KP2),
+        0x5b => Some(KeyCode::KEY_KP3),
+        0x5c => Some(KeyCode::KEY_KP4),
+        0x5d => Some(KeyCode::KEY_KP5),
+        0x5e => Some(KeyCode::KEY_KP6),
+        0x5f => Some(KeyCode::KEY_KP7),
+        0x60 => Some(KeyCode::KEY_KP8),
+        0x61 => Some(KeyCode::KEY_KP9),
+        0x62 => Some(KeyCode::KEY_KP0),
+        0x63 => Some(KeyCode::KEY_KPDOT),
+        0x67 => Some(KeyCode::KEY_KPEQUAL),
         _ => None,
     }
 }
@@ -646,9 +676,12 @@ fn try_mpris_command(command: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use evdev::KeyCode;
-    use openlogi_core::binding::{KeyCombo, Shortcut};
+    use openlogi_core::binding::{KeyCombo, KeyboardUsage, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use super::{
+        KEY_CAPABILITIES, combo, hid_usage_to_linux, key_ev, key_phase_events,
+        modifiers_to_keycodes, syn,
+    };
     use crate::inject::KeyPhase;
 
     #[test]
@@ -694,8 +727,25 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x04), Some(KeyCode::KEY_A));
         assert_eq!(hid_usage_to_linux(0x50), Some(KeyCode::KEY_LEFT));
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
+        assert_eq!(hid_usage_to_linux(0x58), Some(KeyCode::KEY_KPENTER));
+        assert_eq!(hid_usage_to_linux(0x62), Some(KeyCode::KEY_KP0));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
         assert_eq!(hid_usage_to_linux(0xff), None);
+    }
+
+    #[test]
+    fn every_portable_usage_is_mapped_and_enabled_on_the_virtual_device() {
+        for raw in u8::MIN..=u8::MAX {
+            if KeyboardUsage::try_from(raw).is_err() {
+                continue;
+            }
+            let key = hid_usage_to_linux(raw)
+                .unwrap_or_else(|| panic!("portable usage {raw:#04x} has no Linux mapping"));
+            assert!(
+                KEY_CAPABILITIES.contains(&key),
+                "Linux uinput does not advertise {key:?} for usage {raw:#04x}"
+            );
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an

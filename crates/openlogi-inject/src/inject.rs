@@ -375,7 +375,7 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x27 => Some(u16::from(b'0')),
         0x3a..=0x45 => Some(0x70 + u16::from(usage - 0x3a)),
         0x68..=0x6f => Some(0x7c + u16::from(usage - 0x68)),
-        0x28 => Some(0x0d),
+        0x28 | 0x58 => Some(0x0d),
         0x29 => Some(0x1b),
         0x2a => Some(0x08),
         0x2b => Some(0x09),
@@ -400,6 +400,15 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x50 => Some(0x25),
         0x51 => Some(0x28),
         0x52 => Some(0x26),
+        0x53 => Some(0x90),
+        0x54 => Some(0x6f),
+        0x55 => Some(0x6a),
+        0x56 => Some(0x6d),
+        0x57 => Some(0x6b),
+        0x59..=0x61 => Some(0x61 + u16::from(usage - 0x59)),
+        0x62 => Some(0x60),
+        0x63 => Some(0x6e),
+        0x67 => Some(0x92),
         _ => None,
     }
 }
@@ -408,6 +417,7 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use openlogi_core::binding::KeyCombo;
+    use openlogi_core::binding::KeyboardUsage;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
@@ -561,6 +571,22 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
+        assert_eq!(hid_usage_to_windows(0x58), Some(0x0d)); // Numpad Enter
+        assert_eq!(hid_usage_to_windows(0x62), Some(0x60)); // Numpad 0
         assert_eq!(hid_usage_to_windows(0xff), None);
+    }
+
+    #[test]
+    fn every_portable_usage_has_a_windows_virtual_key() {
+        use super::hid_usage_to_windows;
+
+        for raw in u8::MIN..=u8::MAX {
+            if KeyboardUsage::try_from(raw).is_ok() {
+                assert!(
+                    hid_usage_to_windows(raw).is_some(),
+                    "portable usage {raw:#04x} has no Windows mapping"
+                );
+            }
+        }
     }
 }

@@ -63,6 +63,16 @@ impl KeyboardUsage {
             0x50 => "Left".to_string(),
             0x51 => "Down".to_string(),
             0x52 => "Up".to_string(),
+            0x53 => "NumLock".to_string(),
+            0x54 => "NumpadDivide".to_string(),
+            0x55 => "NumpadMultiply".to_string(),
+            0x56 => "NumpadSubtract".to_string(),
+            0x57 => "NumpadAdd".to_string(),
+            0x58 => "NumpadEnter".to_string(),
+            0x59..=0x61 => format!("Numpad{}", code - 0x59 + 1),
+            0x62 => "Numpad0".to_string(),
+            0x63 => "NumpadDecimal".to_string(),
+            0x67 => "NumpadEqual".to_string(),
             0x68..=0x6f => format!("F{}", code - 0x68 + 13),
             _ => format!("Usage 0x{code:02X}"),
         }
@@ -81,7 +91,11 @@ pub struct KeyboardUsageError(pub u8);
 const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     if matches!(
         value,
-        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x45 | 0x4a..=0x52 | 0x68..=0x6f
+        0x04..=0x31
+            | 0x33..=0x38
+            | 0x3a..=0x45
+            | 0x4a..=0x63
+            | 0x67..=0x6f
     ) {
         Ok(())
     } else {
@@ -161,6 +175,59 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
+    /// Start a platform-neutral chord for `key` with no modifiers.
+    ///
+    /// The modifier builder methods can then project a recorded aggregate
+    /// modifier snapshot without round-tripping through the text parser.
+    #[must_use]
+    pub const fn new(key: KeyboardUsage) -> Self {
+        Self { modifiers: 0, key }
+    }
+
+    /// Set whether the chord includes Command/Meta.
+    #[must_use]
+    pub const fn with_command(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.modifiers |= MOD_COMMAND;
+        } else {
+            self.modifiers &= !MOD_COMMAND;
+        }
+        self
+    }
+
+    /// Set whether the chord includes Shift.
+    #[must_use]
+    pub const fn with_shift(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.modifiers |= MOD_SHIFT;
+        } else {
+            self.modifiers &= !MOD_SHIFT;
+        }
+        self
+    }
+
+    /// Set whether the chord includes Control.
+    #[must_use]
+    pub const fn with_control(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.modifiers |= MOD_CONTROL;
+        } else {
+            self.modifiers &= !MOD_CONTROL;
+        }
+        self
+    }
+
+    /// Set whether the chord includes Option/Alt.
+    #[must_use]
+    pub const fn with_option(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.modifiers |= MOD_OPTION;
+        } else {
+            self.modifiers &= !MOD_OPTION;
+        }
+        self
+    }
+
     /// USB HID keyboard usage for the ordinary key.
     #[must_use]
     pub const fn key(&self) -> KeyboardUsage {
@@ -320,6 +387,24 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             "left" => 0x50,
             "down" => 0x51,
             "up" => 0x52,
+            "numlock" => 0x53,
+            "numpaddivide" | "keypaddivide" => 0x54,
+            "numpadmultiply" | "keypadmultiply" => 0x55,
+            "numpadsubtract" | "keypadsubtract" => 0x56,
+            "numpadadd" | "keypadadd" => 0x57,
+            "numpadenter" | "keypadenter" => 0x58,
+            "numpad1" | "keypad1" => 0x59,
+            "numpad2" | "keypad2" => 0x5a,
+            "numpad3" | "keypad3" => 0x5b,
+            "numpad4" | "keypad4" => 0x5c,
+            "numpad5" | "keypad5" => 0x5d,
+            "numpad6" | "keypad6" => 0x5e,
+            "numpad7" | "keypad7" => 0x5f,
+            "numpad8" | "keypad8" => 0x60,
+            "numpad9" | "keypad9" => 0x61,
+            "numpad0" | "keypad0" => 0x62,
+            "numpaddecimal" | "keypaddecimal" => 0x63,
+            "numpadequal" | "keypadequal" => 0x67,
             _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
         }
     };
@@ -354,6 +439,36 @@ mod tests {
         let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
         assert_eq!(combo.key().code(), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
+    }
+
+    #[test]
+    fn builds_a_recorded_chord_without_text_parsing() {
+        let combo = KeyCombo::new(KeyboardUsage::try_from(0x13).expect("P is supported"))
+            .with_command(true)
+            .with_shift(true)
+            .with_control(false)
+            .with_option(false);
+
+        assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
+    }
+
+    #[test]
+    fn keypad_keys_keep_their_physical_identity_and_round_trip() {
+        let combo = "Ctrl+NumpadEnter"
+            .parse::<KeyCombo>()
+            .expect("keypad Enter is supported");
+        assert_eq!(combo.key().code(), 0x58);
+        assert_eq!(combo.rendered_label(), "Ctrl+NumpadEnter");
+        assert_eq!(
+            combo.rendered_label().parse::<KeyCombo>(),
+            Ok(combo.clone())
+        );
+
+        let zero = "Keypad0"
+            .parse::<KeyCombo>()
+            .expect("keypad alias is supported");
+        assert_eq!(zero.key().code(), 0x62);
+        assert_eq!(zero.rendered_label(), "Numpad0");
     }
 
     #[test]

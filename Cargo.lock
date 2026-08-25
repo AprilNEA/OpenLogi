@@ -1317,6 +1317,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "controls"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c664477c1e883d094cbf15a47105d914f8fb739fde07620f1dc897f93e427d2"
+dependencies = [
+ "inputs",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3722,6 +3731,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "inputs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b9245b5fd350587621da112fbaf85aacaf662c99524e879df1ba6819c92bd67"
+dependencies = [
+ "core-foundation 0.10.0",
+ "core-graphics 0.25.0",
+ "evdev",
+ "foreign-types-shared",
+ "libc",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5260,7 +5285,9 @@ dependencies = [
 name = "openlogi-agent-core"
 version = "0.7.10"
 dependencies = [
+ "controls",
  "futures-lite",
+ "inputs",
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",

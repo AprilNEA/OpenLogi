@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo, KeyboardUsage};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -47,7 +47,8 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ConfigReloadError, ForegroundApps, FoundDevice, Identity,
     InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, ShortcutRecording,
+    ShortcutRecordingPhase,
 };
 use succession::{Compat, Run};
 
@@ -101,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 28);
+    assert_eq!(PROTOCOL_VERSION, 29);
 }
 
 #[test]
@@ -188,6 +189,8 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(&AgentRequest::StartShortcutRecording {}, "19");
+    assert_wire(&AgentRequest::CancelShortcutRecording {}, "1a");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -301,15 +304,39 @@ fn agent_snapshot() {
         // Pinned on its own in `foreground_apps` below, like the inventory and
         // pairing fields.
         foreground: ForegroundApps::default(),
+        shortcut_recording: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
+}
+
+#[test]
+fn shortcut_recording_phases() {
+    let recording = |phase| ShortcutRecording {
+        session_id: 42,
+        phase,
+    };
+    assert_wire(&recording(ShortcutRecordingPhase::Recording), "2a00");
+    assert_wire(
+        &recording(ShortcutRecordingPhase::WaitingForRelease),
+        "2a01",
+    );
+    let key = KeyboardUsage::try_from(0x13).expect("P is a supported HID usage");
+    assert_wire(
+        &recording(ShortcutRecordingPhase::Complete(
+            KeyCombo::new(key).with_command(true).with_shift(true),
+        )),
+        "2a020313",
+    );
+    assert_wire(&recording(ShortcutRecordingPhase::UnsupportedKey), "2a03");
+    assert_wire(&recording(ShortcutRecordingPhase::Interrupted), "2a04");
+    assert_wire(&recording(ShortcutRecordingPhase::Unavailable), "2a05");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

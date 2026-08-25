@@ -408,6 +408,24 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
         0x50 => Some(0x7b),
         0x51 => Some(0x7d),
         0x52 => Some(0x7e),
+        0x53 => Some(0x47),
+        0x54 => Some(0x4b),
+        0x55 => Some(0x43),
+        0x56 => Some(0x4e),
+        0x57 => Some(0x45),
+        0x58 => Some(0x4c),
+        0x59 => Some(0x53),
+        0x5a => Some(0x54),
+        0x5b => Some(0x55),
+        0x5c => Some(0x56),
+        0x5d => Some(0x57),
+        0x5e => Some(0x58),
+        0x5f => Some(0x59),
+        0x60 => Some(0x5b),
+        0x61 => Some(0x5c),
+        0x62 => Some(0x52),
+        0x63 => Some(0x41),
+        0x67 => Some(0x51),
         _ => None,
     }
 }
@@ -415,7 +433,7 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use core_graphics::event::CGEventFlags;
-    use openlogi_core::binding::Shortcut;
+    use openlogi_core::binding::{KeyboardUsage, Shortcut};
 
     use super::{combo, held_key_event, hid_usage_to_macos};
     use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
@@ -426,8 +444,22 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0x13), Some(0x23));
         assert_eq!(hid_usage_to_macos(0x50), Some(0x7b));
         assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
+        assert_eq!(hid_usage_to_macos(0x58), Some(0x4c));
+        assert_eq!(hid_usage_to_macos(0x62), Some(0x52));
         assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
         assert_eq!(hid_usage_to_macos(0xff), None);
+    }
+
+    #[test]
+    fn every_portable_usage_has_a_macos_virtual_key() {
+        for raw in u8::MIN..=u8::MAX {
+            if KeyboardUsage::try_from(raw).is_ok() {
+                assert!(
+                    hid_usage_to_macos(raw).is_some(),
+                    "portable usage {raw:#04x} has no macOS mapping"
+                );
+            }
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
