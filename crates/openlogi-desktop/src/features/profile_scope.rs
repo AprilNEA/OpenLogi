@@ -582,6 +582,9 @@ fn add_app_popover(
     let catalog_on_open = catalog.clone();
     Popover::new("add-app-popover")
         .anchor(Anchor::TopRight)
+        // `compact_panel` is the surface; the popover chrome would wrap it in
+        // a second padded, differently-rounded box.
+        .appearance(false)
         .trigger(
             Button::new("add-app-profile")
                 .outline()
@@ -810,6 +813,8 @@ fn application_list_height(rows: usize) -> f32 {
 fn profile_options_popover(profile: ProfileChoice, pal: Palette) -> AnyElement {
     Popover::new("profile-options-popover")
         .anchor(Anchor::TopRight)
+        // `compact_panel` is the surface here too; see `add_app_popover`.
+        .appearance(false)
         .trigger(
             Button::new("profile-options")
                 .ghost()
