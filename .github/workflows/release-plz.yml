@@ -25,7 +25,7 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -61,7 +61,7 @@ jobs:
       # release-plz skips release=false app crates; git-cliff covers the whole repo.
       - name: Find current release PR
         id: open_release_pr
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -95,7 +95,7 @@ jobs:
         run: cargo build -p xtask
       - name: Check out release PR
         if: steps.open_release_pr.outputs.branch != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.open_release_pr.outputs.branch }}
           fetch-depth: 0
@@ -125,7 +125,7 @@ jobs:
       # OpenLogi's whole-repo changelog is the release PR body.
       - name: Replace release PR body with changelog
         if: steps.open_release_pr.outputs.number != ''
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_PR_NUMBER: ${{ steps.open_release_pr.outputs.number }}
         with:
@@ -166,7 +166,7 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false

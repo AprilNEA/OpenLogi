@@ -49,15 +49,15 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.11.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -66,7 +66,7 @@ jobs:
       - name: Load Codex release-notes credentials from 1Password
         id: release_notes_config
         continue-on-error: true
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -125,7 +125,7 @@ jobs:
       contents: write
     steps:
       # Needed to build & run the xtask manifest generator below.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -211,7 +211,7 @@ jobs:
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -350,7 +350,7 @@ jobs:
     steps:
       # The token-minting action below is a local action, so the repo must be
       # on disk before it can run.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Mint homebrew-tap token (GitHub App)
         id: tap_token
