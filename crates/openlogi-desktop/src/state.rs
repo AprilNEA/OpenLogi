@@ -24,7 +24,7 @@ pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DisableKeysLoad, DpiStatus, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,11 +46,13 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
+pub(crate) use disable_keys::DisableKeysPersistenceStatus;
 use light::LightingState;
 use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
 use crate::services::device_reads::DeviceReads;
+use crate::services::disable_keys_reads::DisableKeysReads;
 use crate::state::config::ConfigState;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
@@ -63,6 +65,7 @@ mod device_key;
 mod device_runtime;
 mod device_store;
 mod devices;
+mod disable_keys;
 mod dpi;
 mod inventory;
 mod light;
@@ -103,6 +106,8 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// Disable Keys data, write, or persistence recovery changed.
+    DisableKeysChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -170,6 +175,10 @@ pub struct AppState {
     action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
+    /// Dedicated generation-fenced Disable Keys read owner.
+    disable_keys_reads: DisableKeysReads,
+    /// Monotonic identity for Disable Keys write/reload transactions.
+    next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
     lighting: LightingState,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
@@ -215,6 +224,7 @@ impl AppState {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
+            state.load_current_disable_keys(cx);
         });
     }
 
@@ -269,6 +279,8 @@ impl AppState {
             bindings,
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
+            disable_keys_reads: DisableKeysReads::default(),
+            next_disable_keys_request_id: 0,
             lighting: LightingState::default(),
             ipc_commands,
             #[cfg(target_os = "macos")]
@@ -286,7 +298,9 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            state.send_ipc(crate::services::ipc::Command::ReloadConfig(
+                crate::services::ipc::ConfigReloadContext::General,
+            ));
         }
         state
     }
@@ -309,7 +323,9 @@ impl AppState {
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            self.send_ipc(crate::services::ipc::Command::ReloadConfig(
+                crate::services::ipc::ConfigReloadContext::General,
+            ));
             true
         } else {
             false
@@ -358,6 +374,9 @@ impl AppState {
 
     pub(crate) fn device_reads_mut(&mut self) -> &mut DeviceReads {
         &mut self.pointer.reads
+    }
+    pub(crate) fn disable_keys_reads_mut(&mut self) -> &mut DisableKeysReads {
+        &mut self.disable_keys_reads
     }
     /// Config schema version and the number of devices with saved configuration.
     #[must_use]

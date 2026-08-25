@@ -275,14 +275,32 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::DisableKeysWriteResult { context, result } => {
+                cx.update(|cx| {
+                    let event_key = context.key.clone();
+                    AppState::update(cx, |state, cx| {
+                        if state.apply_disable_keys_write_result(context, result) {
+                            cx.emit(StateEvent::DisableKeysChanged(event_key));
+                        }
+                    });
+                });
+            }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
-            ipc::GuiUpdate::ConfigReloadResult(result) => {
+            ipc::GuiUpdate::ConfigReloadResult { context, result } => {
                 cx.update(|cx| {
-                    AppState::update(cx, |state, cx| {
-                        if state.apply_config_reload_result(result) {
-                            cx.emit(StateEvent::SettingsChanged);
+                    AppState::update(cx, |state, cx| match context {
+                        ipc::ConfigReloadContext::General => {
+                            if state.apply_config_reload_result(result) {
+                                cx.emit(StateEvent::SettingsChanged);
+                            }
+                        }
+                        ipc::ConfigReloadContext::DisableKeys(context) => {
+                            let event_key = context.key.clone();
+                            if state.apply_disable_keys_reload_result(context, result) {
+                                cx.emit(StateEvent::DisableKeysChanged(event_key));
+                            }
                         }
                     });
                 });

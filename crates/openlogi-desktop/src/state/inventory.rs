@@ -153,6 +153,16 @@ impl AppState {
             })
             .map(DeviceRecord::device_key)
             .collect();
+        let disable_keys_invalidated: Vec<DeviceKey> = merged_list
+            .iter()
+            .filter(|new| {
+                self.devices.records.iter().any(|old| {
+                    old.config_key == new.config_key
+                        && (old.route != new.route || old.online != new.online)
+                })
+            })
+            .map(DeviceRecord::device_key)
+            .collect();
 
         self.devices.replace(merged_list, new_index);
         for key in &rerouted {
@@ -160,6 +170,9 @@ impl AppState {
             if let Some(entry) = self.devices.runtime.get_mut(key) {
                 entry.smartshift.reset();
             }
+        }
+        for key in &disable_keys_invalidated {
+            self.invalidate_disable_keys(key);
         }
         let present: HashSet<_> = self
             .devices
@@ -169,6 +182,8 @@ impl AppState {
             .collect();
         self.pointer
             .reads
+            .retain_present(|key| present.contains(key));
+        self.disable_keys_reads
             .retain_present(|key| present.contains(key));
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -374,6 +389,9 @@ impl AppState {
                 Some(Load::Failed(_))
             ) {
                 self.retry_smartshift(&key);
+            }
+            if matches!(self.disable_keys_reads.load(&key), Load::Failed(_)) {
+                self.disable_keys_reads.retry(&key);
             }
         }
         // The pointer editor value follows the active device; adopt the newly

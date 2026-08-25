@@ -1,5 +1,6 @@
 //! Consolidated per-device runtime-state row.
 
+use super::disable_keys::DisableKeysDeviceState;
 use super::light::LightDeviceState;
 use super::smartshift::SmartShiftDeviceState;
 
@@ -19,4 +20,5 @@ pub(super) struct DeviceRuntimeState {
     pub(super) inventory_misses: u8,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
+    pub(super) disable_keys: DisableKeysDeviceState,
 }
