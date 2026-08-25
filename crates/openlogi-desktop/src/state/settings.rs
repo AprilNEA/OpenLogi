@@ -266,6 +266,24 @@ impl AppState {
             .edit(|config| config.app_settings.vertical_scroll_sensitivity = sensitivity);
         self.persist_and_reload("vertical scroll sensitivity");
     }
+    /// Toggle vertical mouse-wheel acceleration and persist it.
+    pub fn set_vertical_acceleration_enabled(&mut self, enabled: bool) {
+        if self.config.app_settings.vertical_acceleration_enabled == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.vertical_acceleration_enabled = enabled);
+        self.persist_and_reload("vertical acceleration enabled");
+    }
+    /// Toggle horizontal mouse-wheel acceleration and persist it.
+    pub fn set_horizontal_acceleration_enabled(&mut self, enabled: bool) {
+        if self.config.app_settings.horizontal_acceleration_enabled == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.horizontal_acceleration_enabled = enabled);
+        self.persist_and_reload("horizontal acceleration enabled");
+    }
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
         if self.config.app_settings.auto_download_assets == enabled {
             return;

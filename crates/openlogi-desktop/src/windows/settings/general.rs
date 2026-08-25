@@ -44,6 +44,46 @@ pub(super) fn general_page(
         )
         .item(
             SettingItem::new(
+                tr!("Vertical Scroll Acceleration"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx)
+                            .is_some_and(|s| s.app_settings().vertical_acceleration_enabled)
+                    },
+                    |enabled, cx| {
+                        AppState::update(cx, move |state, cx| {
+                            state.set_vertical_acceleration_enabled(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
+                        });
+                    },
+                ),
+            )
+            .description(tr!(
+                "Progressively increases vertical scroll distance during fast wheel movement."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Horizontal Scroll Acceleration"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx)
+                            .is_some_and(|s| s.app_settings().horizontal_acceleration_enabled)
+                    },
+                    |enabled, cx| {
+                        AppState::update(cx, move |state, cx| {
+                            state.set_horizontal_acceleration_enabled(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
+                        });
+                    },
+                ),
+            )
+            .description(tr!(
+                "Progressively increases horizontal scroll distance during fast wheel movement."
+            )),
+        )
+        .item(
+            SettingItem::new(
                 tr!("Thumb Wheel Sensitivity"),
                 SettingField::render(move |_, _, cx| {
                     thumbwheel_sensitivity_field(&thumbwheel_sensitivity_slider, cx)
