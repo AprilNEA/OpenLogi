@@ -64,8 +64,8 @@ pub enum CapturedInput {
     Gesture(ButtonId, GestureDirection),
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
-    /// Thumb-wheel rotation to re-synthesise as horizontal scroll. Emitted
-    /// while the wheel is diverted (click bound, rotation rebound, or
+    /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
+    /// Emitted while the wheel is diverted (click bound, rotation rebound, or
     /// sensitivity changed).
     Scroll {
         /// Rotation in the wheel's diverted increments.
