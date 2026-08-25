@@ -414,21 +414,6 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     }
 }
 
-/// Synthesise a scroll of `(delta_x, delta_y)` wheel lines at the current focus.
-///
-/// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
-/// wheel's scrolling after the wheel has been diverted over HID++. The caller
-/// maps physical rotation onto the configured horizontal or vertical axis and
-/// scales it from diverted increments back to native wheel lines.
-///
-/// No-op (logs nothing) on platforms without a supported injection mechanism.
-pub fn post_thumbwheel_scroll(delta_x: i32, delta_y: i32) {
-    post_scroll(ScrollDelta::wheel_ticks(
-        f64::from(delta_x),
-        f64::from(delta_y),
-    ));
-}
-
 /// Return the `/dev/input/eventN` node for the action-injector uinput device,
 /// initialising it if needed.
 ///

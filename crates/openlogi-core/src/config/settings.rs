@@ -321,8 +321,8 @@ impl ThumbwheelSensitivity {
 
     /// Continuous-scroll speed multiplier relative to [`Self::DEFAULT`].
     #[must_use]
-    pub fn scroll_multiplier(self) -> f32 {
-        f32::from(self) / f32::from(Self::DEFAULT)
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
     }
 
     /// Rotation increments required to fire a discrete thumb-wheel action.
