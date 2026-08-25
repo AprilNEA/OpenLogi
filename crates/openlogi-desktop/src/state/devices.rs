@@ -16,9 +16,9 @@ use super::device_key::DeviceKey;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
-/// the physical config key (for bindings/DPI persistence), a display name, the
-/// resolved asset (PNG + metadata, or `None` for the synthetic fallback),
-/// and the [`DeviceRoute`] HID++ writes / capture target.
+/// its settings and runtime identities, display name, resolved asset (PNG +
+/// metadata, or `None` for the synthetic fallback), and the [`DeviceRoute`]
+/// HID++ writes / capture target.
 ///
 /// The `kind` / `slot` / `online` / `battery` fields mirror the source
 /// [`PairedDevice`](openlogi_core::device::PairedDevice) so the gallery can
@@ -27,11 +27,12 @@ use crate::services::assets::{AssetResolver, ResolvedAsset};
 /// [`super::AppState::current_device`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
-    /// Route-derived key used for runtime state and, when [`Self::persistent`]
-    /// is true, persisted settings.
+    /// Key used for persisted hardware settings. A serial-less camera uses a
+    /// model-scoped key here, so use [`Self::record_key`] when one user-facing
+    /// record must be distinguished from another.
     pub config_key: String,
-    /// Whether `config_key` identifies one physical device and may be written
-    /// to configuration. False for a direct/routeless all-zero unit identity.
+    /// Whether `config_key` is safe to write to configuration. False for a
+    /// direct/routeless all-zero unit identity.
     pub(crate) persistent: bool,
     /// Stable model key used only for asset/model lookup and diagnostics.
     pub model_key: String,
@@ -75,8 +76,7 @@ impl DeviceRecord {
         DeviceKey::from(self.config_key.as_str())
     }
 
-    /// Return the configuration key only when it identifies one physical
-    /// device and is therefore safe to persist.
+    /// Return the configuration key only when it is safe to persist settings.
     pub(super) fn persistent_config_key(&self) -> Option<&str> {
         self.persistent.then_some(self.config_key.as_str())
     }
@@ -86,7 +86,7 @@ impl DeviceRecord {
         self.persistent
     }
 
-    /// Key used to reconcile this record across inventory snapshots.
+    /// Key used to reconcile this live source across inventory snapshots.
     ///
     /// HID++ devices use [`Self::config_key`]. Cameras may share a model-scoped
     /// config key (two serial-less units of the same model), so they reconcile
@@ -96,6 +96,24 @@ impl DeviceRecord {
             && let Some(id) = self.capture_id.as_deref().filter(|s| !s.is_empty())
         {
             return format!("cam-live:{id}");
+        }
+        self.config_key.clone()
+    }
+
+    /// Key for user-facing state such as selection, routing, and aliases.
+    ///
+    /// A camera with a USB serial uses its port-stable settings key. Serial-less
+    /// same-model cameras have no unique hardware settings key, so their
+    /// user-facing state follows the OS capture id instead of conflating both
+    /// live records.
+    pub(crate) fn record_key(&self) -> String {
+        if self.kind == DeviceKind::Camera
+            && self
+                .serial_number
+                .as_deref()
+                .is_none_or(|serial| serial.trim().is_empty())
+        {
+            return self.inventory_key();
         }
         self.config_key.clone()
     }
@@ -209,7 +227,7 @@ pub(super) fn build_device_list(
     // (AVFoundation on macOS) rather than the receiver inventory. The caller
     // enumerates them off the UI thread — discovery is too slow for the render
     // path — so this assembly stays pure; the merge in
-    // `super::AppState::refresh_inventories` reconciles them by config_key.
+    // `super::AppState::refresh_inventories` reconciles them by inventory key.
     for camera in cameras {
         list.push(camera_record(camera, cache));
     }
@@ -220,10 +238,11 @@ pub(super) fn build_device_list(
 
 fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
     for record in list {
-        if let Some(name) = record
-            .persistent_config_key()
-            .and_then(|key| config.device_custom_name(key))
-        {
+        if !record.is_persistent() {
+            continue;
+        }
+        let key = record.record_key();
+        if let Some(name) = config.device_custom_name(&key) {
             record.display_name = name.to_string();
         }
     }
@@ -1143,6 +1162,7 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].kind, DeviceKind::Camera);
         assert_eq!(list[0].config_key, "camera:046d:0893:serial:abc123");
+        assert_eq!(list[0].record_key(), list[0].config_key);
         assert_eq!(list[0].capture_id.as_deref(), Some("0x1123000046d0893"));
         assert_eq!(list[0].serial_number.as_deref(), Some("ABC123"));
         assert_eq!(list[0].display_name, "Logitech StreamCam");
@@ -1189,13 +1209,15 @@ mod tests {
         let a = build_device_list(&[], &[], &cache, &Config::default(), &[port_a]);
         let b = build_device_list(&[], &[], &cache, &Config::default(), &[port_b]);
         assert_eq!(a[0].config_key, b[0].config_key);
+        assert_eq!(a[0].record_key(), b[0].record_key());
         assert_ne!(a[0].capture_id, b[0].capture_id);
     }
 
     #[test]
     fn two_serial_less_same_model_cameras_stay_distinct() {
-        // Settings share the model key (no USB serial to go on); inventory
-        // identity uses capture_id so both still appear in the list.
+        // Hardware settings share the model key (no USB serial to go on), but
+        // inventory and user-facing identity use capture_id so both remain
+        // independently selectable and nameable.
         let a = Camera {
             name: "Logitech StreamCam".to_string(),
             unique_id: "0x1123000046d0893".to_string(),
@@ -1215,6 +1237,7 @@ mod tests {
         assert_eq!(list[0].config_key, list[1].config_key);
         assert_eq!(list[0].config_key, "camera:046d:0893");
         assert_ne!(list[0].inventory_key(), list[1].inventory_key());
+        assert_ne!(list[0].record_key(), list[1].record_key());
         assert_ne!(list[0].capture_id, list[1].capture_id);
     }
 }

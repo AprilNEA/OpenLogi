@@ -159,7 +159,7 @@ fn device_card(
     light_settings: LightSettings,
     pal: Palette,
 ) -> BaseButton {
-    BaseButton::new(format!("device-card-{}", record.config_key))
+    BaseButton::new(format!("device-card-{}", record.record_key()))
         .w_full()
         .flex()
         .flex_col()
@@ -270,14 +270,14 @@ fn device_identity_subtitle(record: &DeviceRecord) -> SharedString {
 }
 
 fn rename_device_button(record: &DeviceRecord, pal: Palette) -> Button {
-    let config_key = record.config_key.clone();
+    let record_key = record.record_key();
     let custom_name = if record.display_name == record.model_name {
         String::new()
     } else {
         record.display_name.clone()
     };
     let model_name = record.model_name.clone();
-    Button::new(SharedString::from(format!("rename-device-{config_key}")))
+    Button::new(SharedString::from(format!("rename-device-{record_key}")))
         .ghost()
         .xsmall()
         .text_color(pal.text_muted)
@@ -288,7 +288,7 @@ fn rename_device_button(record: &DeviceRecord, pal: Palette) -> Button {
             open_rename_dialog(
                 window,
                 cx,
-                config_key.clone(),
+                record_key.clone(),
                 custom_name.clone(),
                 model_name.clone(),
             );
@@ -298,7 +298,7 @@ fn rename_device_button(record: &DeviceRecord, pal: Palette) -> Button {
 fn open_rename_dialog(
     window: &mut Window,
     cx: &mut App,
-    config_key: String,
+    record_key: String,
     custom_name: String,
     model_name: String,
 ) {
@@ -328,11 +328,11 @@ fn open_rename_dialog(
             )
             .on_ok({
                 let input = input.clone();
-                let config_key = config_key.clone();
+                let record_key = record_key.clone();
                 move |_, _, cx| {
                     let custom_name = input.read(cx).value().to_string();
                     AppState::update(cx, |state, cx| {
-                        state.set_device_custom_name(&config_key, &custom_name);
+                        state.set_device_custom_name(&record_key, &custom_name);
                         cx.notify();
                     });
                     cx.refresh_windows();

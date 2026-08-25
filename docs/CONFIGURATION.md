@@ -49,6 +49,11 @@ optional physical device key.
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
 other generated keys. Do not substitute a model id such as `2b042`.
 
+A camera without a USB serial has no unique port-stable identity. Its
+`custom_name` key therefore follows the OS capture id so two same-model cameras
+remain distinguishable; moving it to another USB port may require naming it
+again.
+
 Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,

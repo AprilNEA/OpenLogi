@@ -30,9 +30,9 @@ use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
-    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, UiScale, WheelMode, DeviceViewMode,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
+    Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, UiScale, WheelMode,
 };
 
 use crate::binding::{
@@ -102,9 +102,10 @@ pub struct Config {
         allow(dead_code, reason = "only the `fs` half suppresses a save")
     )]
     ephemeral: bool,
-    /// Per-device state, keyed by the stable physical-device identifier
-    /// (e.g. `"receiver:abc123:slot:2"`) so two identical models never share
-    /// an entry.
+    /// Per-device state, normally keyed by the stable physical-device
+    /// identifier (e.g. `"receiver:abc123:slot:2"`). A serial-less camera's
+    /// custom name instead uses its OS capture id so same-model cameras remain
+    /// distinguishable.
     #[serde(default)]
     pub devices: BTreeMap<String, DeviceConfig>,
     /// Keyboard remappings, independent of device. The function-key remapper

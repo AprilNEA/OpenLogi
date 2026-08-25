@@ -21,7 +21,7 @@ use super::{
 };
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
@@ -159,7 +159,7 @@ fn device_list(cx: &mut Context<AppView>) -> AnyElement {
         .child(
             v_flex()
                 .w_full()
-                .max_w(px(theme::CONTENT_W_XL))
+                .max_w(ContentWidth::ExtraLarge.rems())
                 .gap_2()
                 .children(rows),
         )
@@ -233,7 +233,7 @@ fn device_card_element(
 ) -> BaseButton {
     let record = &state.device_list[idx];
     let active = idx == active_idx;
-    let key = record.config_key.clone();
+    let record_key = record.record_key();
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
@@ -257,7 +257,9 @@ fn device_card_element(
     .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
     .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
     .on_click(move |_, _, cx| {
-        view.update(cx, |this, cx| this.open_device(key.clone(), cx));
+        view.update(cx, |this, cx| {
+            this.open_device(record_key.clone(), cx);
+        });
     })
 }
 
@@ -275,9 +277,9 @@ fn device_list_row(
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
-    let key = record.config_key.clone();
+    let record_key = record.record_key();
 
-    BaseButton::new(format!("device-list-row-{}", record.config_key))
+    BaseButton::new(format!("device-list-row-{record_key}"))
         .w_full()
         .min_h(px(96.))
         .flex()
@@ -356,7 +358,9 @@ fn device_list_row(
         .hover(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
         .focus_visible(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
         .on_click(move |_, _, cx| {
-            view.update(cx, |this, cx| this.open_device(key.clone(), cx));
+            view.update(cx, |this, cx| {
+                this.open_device(record_key.clone(), cx);
+            });
         })
         .into_any_element()
 }

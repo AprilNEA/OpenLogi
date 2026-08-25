@@ -48,17 +48,18 @@ pub(crate) use widgets::battery_charging_no_reading;
 /// which subtree [`AppView::render`] builds. It is deliberately *not* in
 /// [`AppState`]: the route is pure UI presentation, whereas
 /// [`AppState::current_device`] is functional (it drives the hook bindings,
-/// DPI, and persisted selection). The detail route is keyed by `config_key`
-/// rather than an index so a hot-plug that reorders or drops the device list
-/// can't silently swap the user onto a different device's settings — render
-/// validates the key against the live selection and pops back to [`Route::Home`]
-/// when it no longer matches.
+/// DPI, and persisted selection). The detail route is keyed by the record's
+/// user-facing identity rather than an index so a hot-plug that reorders
+/// or drops the device list can't silently swap the user onto another device —
+/// including a same-model camera that shares its settings key. Render validates
+/// the key against the live selection and pops back to [`Route::Home`] when it
+/// no longer matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Route {
     /// The device gallery.
     Home,
-    /// A single device's settings, identified by its stable config key.
-    Device { config_key: String },
+    /// A single device's settings, identified by its user-facing record key.
+    Device { record_key: String },
 }
 
 /// The active section of the device-detail screen. Backs the detail `TabBar`;
@@ -304,12 +305,12 @@ impl AppView {
     /// functionally active device too (hook bindings, DPI, and the persisted
     /// selection follow [`AppState::set_current_device`]) and switches the
     /// route to its detail screen.
-    fn open_device(&mut self, config_key: String, cx: &mut Context<Self>) {
+    fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
         AppState::global(cx).update(cx, |state, cx| {
             if let Some(idx) = state
                 .device_list
                 .iter()
-                .position(|r| r.config_key == config_key)
+                .position(|record| record.record_key() == record_key)
             {
                 let changed = state.current_device != idx;
                 state.set_current_device(idx);
@@ -321,7 +322,7 @@ impl AppView {
             }
         });
         AppState::load_current_device_reads(cx);
-        self.route = Route::Device { config_key };
+        self.route = Route::Device { record_key };
         // Land on the device's first relevant tab — Buttons for a mouse,
         // Lighting for a wired keyboard, Device for everything else.
         self.active_tab = AppState::try_global(cx)
@@ -550,13 +551,10 @@ impl Render for AppView {
         // gallery rather than render a different device under the same screen.
         let show_device = match &self.route {
             Route::Home => false,
-            Route::Device { config_key } => {
-                AppState::try_global(cx)
-                    .map(|state| state.read(cx))
-                    .and_then(AppState::current_record)
-                    .map(|r| r.config_key.as_str())
-                    == Some(config_key.as_str())
-            }
+            Route::Device { record_key } => AppState::try_global(cx)
+                .map(|state| state.read(cx))
+                .and_then(AppState::current_record)
+                .is_some_and(|record| record.record_key() == *record_key),
         };
         if !show_device {
             self.route = Route::Home;
