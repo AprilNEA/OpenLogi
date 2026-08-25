@@ -124,7 +124,7 @@ jobs:
     env:
       OPENLOGI_BUNDLE_ASSETS: ${{ vars.OPENLOGI_BUNDLE_ASSETS }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -166,7 +166,7 @@ jobs:
       - name: Load release secrets from 1Password
         id: load_secrets
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -183,7 +183,7 @@ jobs:
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
 
       - name: Cache Homebrew downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -356,7 +356,7 @@ jobs:
     # can't access a protected environment at all, then build fine).
     environment: ${{ inputs.sign && 'release' || '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -382,7 +382,7 @@ jobs:
       - name: Load Azure signing config from 1Password
         id: azure_config
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -428,7 +428,7 @@ jobs:
         # Pinned to an immutable commit (matching the Crowdin workflow): this step runs
         # with the 1Password service-account token during signed release
         # builds, so a repointed mutable tag must not be able to swap the code.
-        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -607,7 +607,7 @@ jobs:
     environment: ${{ inputs.sign && 'release' || '' }}
     steps:
       # Needed for packaging/windows/OpenLogi.wxs.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The portable zip from this arch's windows leg, containing the
       # already-signed OpenLogi.exe, openlogi-agent.exe, openlogi-overlay.exe,
@@ -631,7 +631,7 @@ jobs:
       - name: Load Azure signing config from 1Password
         id: azure_config
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -790,7 +790,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
