@@ -81,10 +81,20 @@ pub fn plan_for_device(
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|action| {
-                // The panel's default is ShowActionsRing, which must be
-                // diverted to open the ring. Action::None means "leave native
-                // firmware haptics alone", so treat None as the only non-divert.
-                if *button == ButtonId::HapticPanel {
+                // A gesture source has no OS-visible native path — the hook
+                // never sees its CID — so "equals the default" cannot mean
+                // "leave it native" the way it does for a standard button.
+                // Skipping the divert there leaves the *firmware's* behavior
+                // in place instead of the bound action, which is how a gesture
+                // button bound to its own default action (Mission Control) ran
+                // the mouse's built-in app switcher instead. Action::None is
+                // the one binding that does ask for the firmware's behavior
+                // (native haptics on the panel), so it stays the sole
+                // non-divert.
+                if GESTURE_SOURCE_BUTTONS
+                    .iter()
+                    .any(|&(_, source)| source == *button)
+                {
                     *action != Action::None
                 } else {
                     *action != default_binding(*button)
@@ -257,6 +267,60 @@ mod tests {
     }
 
     #[test]
+    fn single_bound_gesture_button_is_diverted_even_at_its_default_action() {
+        // A gesture source's CID never reaches the OS hook, so there is no
+        // native path a skipped divert could fall back to — only the mouse's
+        // own firmware behavior, which is not what the binding says. The
+        // gesture button's single default happens to be MissionControl, and
+        // comparing against that default left the button undiverted: the
+        // firmware's app switcher ran instead of Mission Control.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b023",
+            ButtonId::GestureButton,
+            Binding::Single(Action::MissionControl),
+        );
+
+        let plan = plan_for_device(&cfg, "2b023", route(), None, 0);
+        assert!(
+            plan.divert_buttons
+                .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            "a single-bound gesture button must be diverted whatever the action, or the binding \
+             can never fire: {:?}",
+            plan.divert_buttons
+        );
+    }
+
+    #[test]
+    fn gesture_source_bound_to_none_keeps_its_firmware_behavior() {
+        // Action::None is the one binding that genuinely asks for the
+        // firmware's own behavior, so it must stay the sole non-divert for
+        // both gesture sources — otherwise "Do Nothing" would swallow the
+        // press instead of leaving the hardware alone.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Single(Action::None),
+        );
+        cfg.set_binding(
+            "2b042",
+            ButtonId::HapticPanel,
+            Binding::Single(Action::None),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID || cid == HAPTIC_PANEL_CID),
+            "an Action::None gesture source must keep its firmware behavior: {:?}",
+            plan.divert_buttons
+        );
+    }
+
+    #[test]
     fn haptic_panel_default_is_diverted_for_actions_ring() {
         // Default binding is ShowActionsRing — the panel has no native OS path
         // and must be HID++-diverted so the ring can open.
@@ -337,19 +401,25 @@ mod tests {
     }
 
     #[test]
-    fn gestures_off_default_gesture_button_stays_native() {
-        // With gestures off and no explicit binding, the gesture button keeps
-        // its native HID behavior — same contract as the standard buttons.
+    fn gestures_off_gesture_button_is_diverted_for_its_demoted_action() {
+        // Turning gestures off demotes the button to a single action — with no
+        // stored Click that is its `default_binding`, Mission Control. This
+        // used to assert the opposite ("stays native — same contract as the
+        // standard buttons"), but that analogy does not hold: a standard
+        // button's default action *is* what its firmware sends, while a
+        // gesture source's is not, and its CID never reaches the OS hook. So
+        // "native" here meant the mouse's built-in app switcher while the GUI
+        // showed Mission Control. Divert, so the shown action is the one that
+        // fires.
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
         assert!(
-            !plan
-                .divert_buttons
-                .iter()
-                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
-            "an unbound gesture button must not be captured"
+            plan.divert_buttons
+                .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            "a gestures-off button must deliver its demoted action, not the firmware's: {:?}",
+            plan.divert_buttons
         );
     }
 }
