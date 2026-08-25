@@ -16,7 +16,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceInventory, ReceiverInfo};
+use openlogi_core::device::{
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, ReceiverInfo,
+};
 
 /// Stable per-device identity for alert bookkeeping: the receiver's USB
 /// identity plus the device's pairing slot.
@@ -148,7 +150,10 @@ impl BatteryAlerts {
 
 /// Reading at or below which a discharging device is worth interrupting the
 /// user about.
-const LOW_PERCENTAGE: u8 = 20;
+///
+/// The same threshold the GUI device card and the tray glyph warn at — an
+/// alert for a device neither of them is flagging would look like a bug.
+const LOW_PERCENTAGE: u8 = BatteryInfo::ATTENTION_PERCENTAGE;
 
 /// Reading at or below which it is worth interrupting them a second time.
 const CRITICAL_PERCENTAGE: u8 = 10;

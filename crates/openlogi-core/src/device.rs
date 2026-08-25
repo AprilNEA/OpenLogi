@@ -229,6 +229,35 @@ pub struct BatteryInfo {
     pub status: BatteryStatus,
 }
 
+impl BatteryInfo {
+    /// The percentage at or below which a discharging battery is worth
+    /// warning about.
+    ///
+    /// Deliberately a percentage rather than [`BatteryLevel::Low`]: the
+    /// firmware bucket is family-specific and, on the families we've measured,
+    /// arrives well after a user would want the hint.
+    pub const ATTENTION_PERCENTAGE: u8 = 20;
+
+    /// Whether this battery should draw the user's attention.
+    ///
+    /// Every surface that warns about a battery calls this — the GUI device
+    /// card, its menu rows, and the Windows tray glyph — so that they cannot
+    /// disagree about which device is worth worrying about. They previously
+    /// each carried their own copy of the rule, and drifted apart the first
+    /// time one of them was redesigned.
+    ///
+    /// False while charging or full: a battery on its way up is not a problem
+    /// however little charge it currently holds.
+    #[must_use]
+    pub const fn needs_attention(&self) -> bool {
+        self.percentage <= Self::ATTENTION_PERCENTAGE
+            && !matches!(
+                self.status,
+                BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
+            )
+    }
+}
+
 /// Identity of an enumerated receiver — no paired-device state (that lives
 /// in [`DeviceInventory::paired`]). For a direct (Bluetooth/wired) device,
 /// a synthetic entry mirroring the device's own HID identity fills this role.
@@ -721,6 +750,22 @@ mod tests {
         device.kind = DeviceKind::Mouse;
         device.slot = 4;
         assert_eq!(device.display_name(), "Mouse (slot 4)");
+    }
+
+    /// The attention threshold is inclusive, and charging exempts a battery
+    /// from it however low the reading is.
+    #[test]
+    fn a_low_discharging_battery_needs_attention() {
+        let battery = |percentage, status| BatteryInfo {
+            percentage,
+            level: BatteryLevel::Low,
+            status,
+        };
+
+        assert!(battery(20, BatteryStatus::Discharging).needs_attention());
+        assert!(!battery(21, BatteryStatus::Discharging).needs_attention());
+        assert!(!battery(20, BatteryStatus::Charging).needs_attention());
+        assert!(!battery(1, BatteryStatus::Full).needs_attention());
     }
 
     /// A minimal online device; each test overrides only what it asserts on.

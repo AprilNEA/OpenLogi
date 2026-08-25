@@ -16,7 +16,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use openlogi_core::config::TrayIconStyle;
-use openlogi_core::device::{BatteryStatus, DeviceInventory};
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory};
 
 /// What the notification-area icon should currently be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,11 +29,12 @@ pub enum TrayIcon {
 
 /// Which Lucide battery glyph the tray should draw.
 ///
-/// Deliberately the same six states, chosen by the same rule, as the GUI's
-/// device cards (`openlogi-desktop/src/app/home.rs::battery_icon`): charge state
-/// first, then the firmware's discrete level. Percentages are not consulted —
-/// a device can report a sane level next to a junk percentage, and the level
-/// is already what the low-battery alert triggers on.
+/// Charge state first, then how much charge is left. Whether a reading is low
+/// enough to worry about is [`BatteryInfo::needs_attention`], the same call the
+/// GUI device card and the low-battery alert make, so the three surfaces cannot
+/// disagree about which device is in trouble. Above that line the tray is free
+/// to be finer-grained than the card's single "fine" tone, and draws the
+/// firmware's own bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatteryGlyph {
     /// On power.
@@ -159,22 +160,36 @@ pub fn state_for(inventories: &[DeviceInventory]) -> Option<BatteryGlyph> {
 
 /// The glyph for one battery reading.
 ///
-/// Mirrors `openlogi-desktop/src/app/home.rs::battery_icon` exactly, so the tray
-/// and the device card never disagree about a device.
-fn glyph_for(battery: &openlogi_core::device::BatteryInfo) -> BatteryGlyph {
-    use openlogi_core::device::BatteryLevel;
-
+/// The warning states are decided by the same rules the GUI device card uses —
+/// [`BatteryLevel::Critical`] for the urgent one, [`BatteryInfo::needs_attention`]
+/// for the merely low one — so the tray and the card never disagree about
+/// whether a device is in trouble.
+fn glyph_for(battery: &BatteryInfo) -> BatteryGlyph {
     match battery.status {
         BatteryStatus::Charging | BatteryStatus::ChargingSlow => BatteryGlyph::Charging,
         BatteryStatus::Full => BatteryGlyph::Full,
         BatteryStatus::Error => BatteryGlyph::Warning,
-        BatteryStatus::Discharging | BatteryStatus::Unknown => match battery.level {
-            BatteryLevel::Critical => BatteryGlyph::Warning,
-            BatteryLevel::Low => BatteryGlyph::Low,
-            BatteryLevel::Good => BatteryGlyph::Medium,
-            BatteryLevel::Full => BatteryGlyph::Full,
-            BatteryLevel::Unknown => BatteryGlyph::Unknown,
-        },
+        BatteryStatus::Discharging | BatteryStatus::Unknown => {
+            if battery.level == BatteryLevel::Critical {
+                BatteryGlyph::Warning
+            } else if battery.needs_attention() {
+                BatteryGlyph::Low
+            } else {
+                match battery.level {
+                    BatteryLevel::Full => BatteryGlyph::Full,
+                    BatteryLevel::Unknown => BatteryGlyph::Unknown,
+                    // A firmware `Low` this far up the scale is the `0x1000`
+                    // and `0x1001` bucket being eager — it calls everything
+                    // from 20 % to 49 % `Low`. Above the attention threshold
+                    // that is a comfortable charge, and the alert declines to
+                    // fire on it for the same reason. `Critical` cannot reach
+                    // here at all.
+                    BatteryLevel::Critical | BatteryLevel::Low | BatteryLevel::Good => {
+                        BatteryGlyph::Medium
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -218,68 +233,127 @@ mod tests {
 
     #[test]
     fn the_glyph_mirrors_the_gui_device_card_mapping() {
-        // The same table as `openlogi-desktop/src/app/home.rs::battery_icon`. If
-        // that mapping changes this test should fail and be updated with it —
-        // the tray and the device card showing different icons for one device
-        // is exactly the drift this guards against.
+        // The card's rule, from `openlogi-desktop/src/ui/battery.rs`: the
+        // firmware's `Critical` is the urgent state, `needs_attention` is the
+        // low one, and everything else is fine. The tray subdivides "fine"
+        // into three glyphs the card has no equivalent for, but it must not
+        // call a device low that the card calls fine — or the reverse. That
+        // is the drift this guards against.
         let cases = [
             (
                 BatteryStatus::Charging,
                 BatteryLevel::Low,
+                15,
                 BatteryGlyph::Charging,
             ),
             (
                 BatteryStatus::ChargingSlow,
                 BatteryLevel::Critical,
+                5,
                 BatteryGlyph::Charging,
             ),
             (
                 BatteryStatus::Full,
                 BatteryLevel::Unknown,
+                100,
                 BatteryGlyph::Full,
             ),
             (
                 BatteryStatus::Error,
                 BatteryLevel::Good,
+                60,
                 BatteryGlyph::Warning,
             ),
             (
                 BatteryStatus::Discharging,
                 BatteryLevel::Critical,
+                8,
                 BatteryGlyph::Warning,
             ),
             (
                 BatteryStatus::Discharging,
                 BatteryLevel::Low,
+                15,
+                BatteryGlyph::Low,
+            ),
+            // The `0x1000` bucket calls 20-49 % `Low`; above the attention
+            // threshold the card draws that as fine, so the tray does too.
+            (
+                BatteryStatus::Discharging,
+                BatteryLevel::Low,
+                35,
+                BatteryGlyph::Medium,
+            ),
+            // And the converse: a comfortable bucket does not outrank a
+            // reading the card is already warning about.
+            (
+                BatteryStatus::Discharging,
+                BatteryLevel::Good,
+                12,
                 BatteryGlyph::Low,
             ),
             (
                 BatteryStatus::Discharging,
                 BatteryLevel::Good,
+                60,
                 BatteryGlyph::Medium,
             ),
             (
                 BatteryStatus::Discharging,
                 BatteryLevel::Full,
+                95,
                 BatteryGlyph::Full,
             ),
             (
                 BatteryStatus::Discharging,
                 BatteryLevel::Unknown,
+                60,
                 BatteryGlyph::Unknown,
+            ),
+            (
+                BatteryStatus::Discharging,
+                BatteryLevel::Unknown,
+                12,
+                BatteryGlyph::Low,
             ),
             (
                 BatteryStatus::Unknown,
                 BatteryLevel::Good,
+                60,
                 BatteryGlyph::Medium,
             ),
         ];
-        for (status, level, expected) in cases {
-            let inv = inventory(&[(1, 50, level, status)]);
+        for (status, level, percentage, expected) in cases {
+            let inv = inventory(&[(1, percentage, level, status)]);
             assert_eq!(
                 state_for(&inv),
                 Some(expected),
-                "{status:?} + {level:?} should map to {expected:?}"
+                "{status:?} + {level:?} at {percentage}% should map to {expected:?}"
+            );
+        }
+    }
+
+    /// The tray's low state and the card's are the same predicate, not two
+    /// tables that happen to agree today.
+    #[test]
+    fn the_low_glyph_tracks_the_shared_attention_threshold() {
+        for percentage in 0..=100u8 {
+            let battery = BatteryInfo {
+                percentage,
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Discharging,
+            };
+            let inv = inventory(&[(
+                1,
+                percentage,
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+            )]);
+            let low = state_for(&inv) == Some(BatteryGlyph::Low);
+            assert_eq!(
+                low,
+                battery.needs_attention(),
+                "{percentage}% must draw the low glyph exactly when the card warns"
             );
         }
     }
@@ -306,12 +380,12 @@ mod tests {
     #[test]
     fn ties_break_on_inventory_order() {
         let inv = inventory(&[
-            (1, 20, BatteryLevel::Low, BatteryStatus::Discharging),
+            (1, 20, BatteryLevel::Critical, BatteryStatus::Discharging),
             (2, 20, BatteryLevel::Good, BatteryStatus::Discharging),
         ]);
         assert_eq!(
             state_for(&inv),
-            Some(BatteryGlyph::Low),
+            Some(BatteryGlyph::Warning),
             "the first device at the tied percentage wins"
         );
     }
