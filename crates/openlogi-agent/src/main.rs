@@ -130,7 +130,10 @@ fn main() {
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
         {
-            tray_windows::spawn(config.app_settings.show_in_menu_bar);
+            tray_windows::spawn(
+                config.app_settings.show_in_menu_bar,
+                config.app_settings.show_device_battery_icons,
+            );
             // Native resume notifications feed the same seam the macOS
             // workspace observer does: the core replays volatile settings
             // when the flag is set.
@@ -415,6 +418,8 @@ async fn apply_inventory_event(
             standalone,
             hid_open_failures,
         } => {
+            #[cfg(target_os = "windows")]
+            crate::tray_windows::update_devices(&inventories);
             let mut orchestrator = orchestrator.lock().await;
             // The portable watcher catches long sleeps from a polling gap.
             // Native notifications (macOS workspace wakes, Windows

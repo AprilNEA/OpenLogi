@@ -112,6 +112,8 @@ impl Agent for AgentServer {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
+                #[cfg(target_os = "windows")]
+                let show_device_battery_icons = config.app_settings.show_device_battery_icons;
                 self.orchestrator.lock().await.reload_config(config);
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
@@ -121,6 +123,8 @@ impl Agent for AgentServer {
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_icon(app_icon);
+                #[cfg(target_os = "windows")]
+                crate::tray_windows::set_device_icons_enabled(show_device_battery_icons);
                 Ok(())
             }
             Err(error) => {

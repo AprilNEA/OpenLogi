@@ -133,6 +133,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "Manter o ícone do OpenLogi na barra de menus. Quando desativado, permanece no Dock."
 "Show in the notification area": "Mostrar na área de notificação"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "Mantém o ícone do OpenLogi na área de notificação da barra de tarefas. Entra em vigor na próxima vez que o agente em segundo plano iniciar."
+"Show device battery icons": "Show device battery icons"
+"Show a separate notification-area battery icon for each connected device.": "Show a separate notification-area battery icon for each connected device."
 "Assets": "Recursos"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"

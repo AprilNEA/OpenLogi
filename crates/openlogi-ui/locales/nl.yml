@@ -133,6 +133,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "Houd het OpenLogi-pictogram in de menubalk. Indien uit, blijft het in het Dock."
 "Show in the notification area": "Weergeven in het systeemvak"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "Houdt het OpenLogi-pictogram in het systeemvak van de taakbalk. Wordt van kracht wanneer de achtergrondagent opnieuw start."
+"Show device battery icons": "Show device battery icons"
+"Show a separate notification-area battery icon for each connected device.": "Show a separate notification-area battery icon for each connected device."
 "Assets": "Bronnen"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"
