@@ -62,11 +62,13 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
-CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`,
-`RUSTFLAGS=-D warnings`, and `RUSTC_WRAPPER=sccache`. `rust-cache` stores only
-Cargo registry/git inputs (`cache-targets: false`); sccache owns compiler
-outputs. PRs read the default branch's sccache objects but do not write their
-isolated merge-ref cache. There is no Windows test job — only `clippy (windows)`.
+CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
+`RUSTFLAGS=-D warnings`. Compilation jobs also set `RUSTC_WRAPPER=sccache`;
+`cargo-deny` clears it because metadata probes rustc without compiling and the
+job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/git
+inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
+default branch's sccache objects but do not write their isolated merge-ref cache.
+There is no Windows test job — only `clippy (windows)`.
 
 ### MSRV trap
 
