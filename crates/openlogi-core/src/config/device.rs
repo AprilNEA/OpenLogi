@@ -174,8 +174,9 @@ pub struct DeviceConfig {
     /// [`DeviceStableId::route_key`]: crate::device_order::DeviceStableId::route_key
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub links: BTreeMap<String, LinkConfig>,
-    /// Every rebindable button's binding: a single [`Action`], or — for a
-    /// button in gesture mode — a [`Binding::Gesture`] per-direction map.
+    /// Every rebindable button's binding: a single [`Action`], an independent
+    /// short/long action pair, or — for a button in gesture mode — a
+    /// [`Binding::Gesture`] per-direction map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<ButtonId, Binding>,
     /// Direction maps of buttons whose gesture mode is currently OFF, keyed by

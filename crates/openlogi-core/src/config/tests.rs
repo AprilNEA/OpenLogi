@@ -18,6 +18,12 @@ fn canonical_configuration_example_parses() {
     let body = include_str!("../../../../docs/config.example.toml");
     let config: Config = toml::from_str(body).expect("documented config must parse");
     assert_eq!(config.schema_version, SCHEMA_VERSION);
+    let bindings = config.bindings_for("receiver:aabbccdd:slot:1");
+    let Some(Binding::LongPress(long_press)) = bindings.get(&ButtonId::DpiToggle) else {
+        panic!("documented long-press binding should keep its shape");
+    };
+    assert_eq!(long_press.short(), &Action::ShowDesktop);
+    assert_eq!(long_press.long(), &Action::MissionControl);
 }
 
 #[test]
@@ -1155,7 +1161,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivty = 14\n",
+        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivty = 14\n",
     )
     .expect("write typo");
     assert_matches!(
@@ -1165,7 +1171,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
 
     fs::write(
         &path,
-        r#"schema_version = 5
+        r#"schema_version = 6
 [devices.mouse.identity]
 display_name = "Mouse"
 kind = "mouse"
@@ -1180,7 +1186,7 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 
     fs::write(
         &path,
-        "schema_version = 5\n[devices.mouse]\ngesture_owner = \"Off\"\n",
+        "schema_version = 6\n[devices.mouse]\ngesture_owner = \"Off\"\n",
     )
     .expect("write obsolete field");
     assert_matches!(
@@ -1192,15 +1198,15 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 #[test]
 fn persisted_numeric_contracts_reject_unsafe_values() {
     for body in [
-        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 0\n",
-        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = 101\n",
-        "schema_version = 5\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
-        "schema_version = 5\n[app_settings]\nvertical_scroll_sensitivity = 0\n",
-        "schema_version = 5\n[app_settings]\nvertical_scroll_sensitivity = 101\n",
-        "schema_version = 5\n[app_settings]\nvertical_scroll_sensitivity = -2147483648\n",
-        "schema_version = 5\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
-        "schema_version = 5\n[devices.mouse]\ndpi = 65536\n",
-        "schema_version = 5\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
+        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivity = 0\n",
+        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivity = 101\n",
+        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
+        "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = 0\n",
+        "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = 101\n",
+        "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = -2147483648\n",
+        "schema_version = 6\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
+        "schema_version = 6\n[devices.mouse]\ndpi = 65536\n",
+        "schema_version = 6\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
     ] {
         assert!(toml::from_str::<Config>(body).is_err(), "accepted: {body}");
     }
@@ -1212,7 +1218,7 @@ fn tracked_save_preserves_comments_and_rejects_concurrent_edits() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "# keep this comment\nschema_version = 5\nselected_device = \"one\" # and this one\n",
+        "# keep this comment\nschema_version = 6\nselected_device = \"one\" # and this one\n",
     )
     .expect("write");
     let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load tracked");

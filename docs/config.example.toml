@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 5
+schema_version = 6
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -33,6 +33,8 @@ Back = "BrowserBack"
 Forward = "BrowserForward"
 # Hold the chord for exactly as long as the physical button is held.
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
+# Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
+DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 # The thumb wheel's capacitive tap. Inert unless set here; the wheel also
 # reports taps from incidental thumb contact.
 Thumbwheel = "AppExpose"

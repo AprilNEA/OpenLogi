@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::Action;
-use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
+use openlogi_core::binding::{Action, Binding};
+use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
@@ -257,7 +257,7 @@ impl Orchestrator {
             return HookMaps::default();
         }
         HookMaps {
-            bindings: bindings_for(&self.config, key, app),
+            bindings: button_bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
         }
     }
@@ -278,7 +278,7 @@ impl Orchestrator {
             .devices
             .iter()
             .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
-        let bindings = bindings_for(
+        let bindings = button_bindings_for(
             &self.config,
             Some(&dev.config_key),
             self.current_app.as_deref(),
@@ -286,9 +286,10 @@ impl Orchestrator {
         let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
             .iter()
             .filter(|(_, button)| {
-                bindings
-                    .get(button)
-                    .is_some_and(|action| *action != Action::None)
+                bindings.get(button).is_some_and(|binding| {
+                    matches!(binding, Binding::LongPress(_))
+                        || binding.click_action() != Action::None
+                })
             })
             .copied()
             .collect();

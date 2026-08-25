@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
     CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute,
     run_keyboard_capture_session_with_registry,
@@ -40,8 +40,8 @@ pub struct KeyboardSpec {
     pub route: DeviceRoute,
     /// `0x1b04` control ID → button, for exactly the bound keys.
     pub wanted: BTreeMap<u16, ButtonId>,
-    /// Effective per-key single-action map (per-app overlay applied).
-    pub bindings: BTreeMap<ButtonId, Action>,
+    /// Effective per-key immediate or threshold map (per-app overlay applied).
+    pub bindings: BTreeMap<ButtonId, Binding>,
 }
 
 /// Shared keyboard-capture spec, `None` when no online keyboard has bound
@@ -126,13 +126,13 @@ fn dispatch_input(
 ) {
     match input {
         CapturedInput::ButtonDown(button) => {
-            let action = spec.bindings.get(&button);
-            if let Some(action) = action {
-                info!(button = %button, action = %action.label(), "keyboard key → executing bound action");
+            let binding = spec.bindings.get(&button);
+            if let Some(binding) = binding {
+                info!(button = %button, action = %binding.click_action().label(), "keyboard key → handling binding");
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }
-            dispatcher.try_hidpp_button_down(session, button, action);
+            dispatcher.try_hidpp_button_down(session, button, binding);
         }
         CapturedInput::ButtonUp(button) => {
             dispatcher.try_hidpp_button_up(session, button);

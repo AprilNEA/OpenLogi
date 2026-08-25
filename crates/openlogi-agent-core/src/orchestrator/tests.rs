@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -870,9 +870,11 @@ fn config_reload_clears_override_when_camera_mode_changes() {
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
     orch.shared.capture_plans.read().ok().and_then(|plans| {
-        plans
-            .first()
-            .and_then(|plan| plan.bindings.get(&ButtonId::Back).cloned())
+        plans.first().and_then(|plan| {
+            plan.bindings
+                .get(&ButtonId::Back)
+                .map(Binding::click_action)
+        })
     })
 }
 

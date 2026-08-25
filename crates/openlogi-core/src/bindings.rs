@@ -15,34 +15,48 @@ use crate::config::Config;
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
 /// [`default_binding`].
 ///
-/// This is the map the OS hook and the HID++ button-press path consume, so a
-/// `Binding::Gesture` is projected to its `click_action()` — a gesture-mode
-/// button's per-direction swipes are dispatched via the separate
-/// [`hidpp_gesture_maps_for`] / [`oshook_gestures_for`] maps, not here.
+/// This projection is for one-shot consumers such as thumb-wheel rotation and
+/// the GUI. Lifecycle-aware button paths use [`button_bindings_for`] so a long
+/// press keeps both actions. `Binding::Gesture` is projected to its
+/// `click_action()`; per-direction swipes are dispatched via the separate
+/// [`hidpp_gesture_maps_for`] / [`oshook_gestures_for`] maps.
 #[must_use]
 pub fn bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, Action> {
+    button_bindings_for(config, config_key, app_bundle)
+        .into_iter()
+        .map(|(button, binding)| (button, binding.click_action()))
+        .collect()
+}
+
+/// Effective binding shapes for lifecycle-aware button consumers.
+///
+/// Unlike [`bindings_for`], this preserves threshold-based long presses. A
+/// sparse gesture map receives only its missing `Click` default so it keeps its
+/// gesture identity while retaining the same plain-click fallback.
+#[must_use]
+pub fn button_bindings_for(
+    config: &Config,
+    config_key: Option<&str>,
+    app_bundle: Option<&str>,
+) -> BTreeMap<ButtonId, Binding> {
     let stored = config_key
         .map(|key| config.effective_bindings(key, app_bundle))
         .unwrap_or_default();
-    let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::ALL
+    let mut bindings: BTreeMap<ButtonId, Binding> = ButtonId::ALL
         .iter()
         .copied()
-        .map(|b| (b, default_binding(b)))
+        .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
-    for (k, binding) in stored {
-        // A gesture binding with no explicit `Click` has no opinion on the
-        // plain-press action, so leave the button's default seed in place rather
-        // than clobbering it with the `Action::None` that `click_action()` would
-        // project. (An explicit `Single(Action::None)` — a user-disabled button —
-        // still overrides, as it should.)
-        if binding.is_gesture() && binding.direction_action(GestureDirection::Click).is_none() {
-            continue;
+    for (button, mut binding) in stored {
+        if let Binding::Gesture(map) = &mut binding {
+            map.entry(GestureDirection::Click)
+                .or_insert_with(|| default_binding(button));
         }
-        bindings.insert(k, binding.click_action());
+        bindings.insert(button, binding);
     }
     bindings
 }
@@ -76,7 +90,7 @@ pub fn hidpp_gesture_maps_for(
             binding.fill_gesture_defaults();
             match binding {
                 Binding::Gesture(map) => Some((button, map)),
-                Binding::Single(_) => None,
+                Binding::Single(_) | Binding::LongPress(_) => None,
             }
         })
         .collect()
@@ -120,14 +134,14 @@ pub fn oshook_gestures_for(
         .filter(|(id, _)| id.is_os_hook_button())
         .filter_map(|(id, binding)| match binding {
             Binding::Gesture(map) => Some((id, map)),
-            Binding::Single(_) => None,
+            Binding::Single(_) | Binding::LongPress(_) => None,
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::binding::default_gesture_binding;
+    use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
 
@@ -147,6 +161,18 @@ mod tests {
             Some(&default_binding(ButtonId::GestureButton)),
             "a Click-less gesture must keep the default click, not None"
         );
+    }
+
+    #[test]
+    fn lifecycle_projection_preserves_long_press_while_action_projection_uses_short() {
+        let mut cfg = Config::default();
+        let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::Paste));
+        cfg.set_binding("2b042", ButtonId::Back, binding.clone());
+
+        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(lifecycle.get(&ButtonId::Back), Some(&binding));
+        let actions = bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(actions.get(&ButtonId::Back), Some(&Action::Copy));
     }
 
     #[test]

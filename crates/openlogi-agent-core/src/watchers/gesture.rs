@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId, default_binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
@@ -521,15 +521,15 @@ fn dispatch(
             // lifecycle is still tracked, but it must not also fire the
             // single-action projection on down.
             let is_gesture = plan.gesture_bindings.contains_key(&button);
-            let action = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
-            if let Some(action) = action {
-                debug!(key, ?button, action = %action.label(), "HID++ button → action");
+            let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+            if let Some(binding) = binding {
+                debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
             let press = outputs
                 .actions
-                .try_hidpp_button_down(session, button, action);
+                .try_hidpp_button_down(session, button, binding);
             if is_gesture {
                 if let Some(press) = press {
                     gesture_presses.start(session, button, press);
@@ -543,15 +543,15 @@ fn dispatch(
             gesture_presses.end(session, button);
         }
         CapturedInput::ButtonPulse(button) => {
-            let action = plan.bindings.get(&button);
-            if let Some(action) = action {
-                debug!(key, ?button, action = %action.label(), "HID++ button pulse → action");
+            let binding = plan.bindings.get(&button);
+            if let Some(binding) = binding {
+                debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
             } else {
                 debug!(key, ?button, "HID++ button pulse with no binding — ignored");
             }
             outputs
                 .actions
-                .dispatch_hidpp_button_pulse(session, button, action);
+                .dispatch_hidpp_button_pulse(session, button, binding);
         }
         CapturedInput::Scroll {
             increments,
@@ -567,8 +567,7 @@ fn dispatch(
             let action = plan
                 .bindings
                 .get(&button)
-                .cloned()
-                .unwrap_or_else(|| default_binding(button));
+                .map_or_else(|| default_binding(button), Binding::click_action);
             let sensitivity = plan.thumbwheel_sensitivity;
             let wheels = accumulators.entry(key.to_owned()).or_default();
             let dir = if up { &mut wheels.up } else { &mut wheels.down };
