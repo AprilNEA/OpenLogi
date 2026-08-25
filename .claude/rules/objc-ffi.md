@@ -28,7 +28,6 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
-| `openlogi-desktop/src/platform/app_icon.rs` | `NSWorkspace` lookup and `NSBitmapImageRep` PNG encoding of installed application icons for per-app profiles |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
@@ -43,7 +42,11 @@ Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the
 external [`disclaim`](https://crates.io/crates/disclaim) crate — `posix_spawn` +
 the private `responsibility_spawnattrs_setdisclaim`, not ObjC.
 `openlogi-desktop/src/services/ipc.rs`'s `spawn_agent` uses it; there is no
-in-tree FFI for it.
+in-tree FFI for it. Likewise, installed-application discovery and icon
+rendering for per-app profiles live in the external
+[`appcatalog`](https://crates.io/crates/appcatalog) crate (`NSWorkspace` +
+`NSBitmapImageRep` there, not here); `openlogi-desktop/src/platform/app_icon.rs`
+only wraps its PNG bytes into a `gpui::Image`.
 
 The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
 carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s

@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
+use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
 use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
@@ -32,6 +33,7 @@ use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
+use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId, PressToken};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
@@ -47,6 +49,34 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// deliberate flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
+/// Output capabilities shared by every HID++ gesture capture session.
+#[derive(Clone)]
+pub struct GestureOutputs {
+    actions: ActionDispatcher,
+    scroll: ScrollInputHandle,
+}
+
+impl GestureOutputs {
+    /// Build gesture outputs backed by the shared action and scroll runtimes.
+    #[must_use]
+    pub fn new(actions: ActionDispatcher, scroll: ScrollInputHandle) -> Self {
+        Self { actions, scroll }
+    }
+
+    fn cancel_session(&self, session: &HidppSessionId) {
+        self.actions.cancel_hidpp_session(session);
+        self.scroll.cancel_hidpp_session(session);
+    }
+
+    fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
+        if !self.scroll.try_hidpp_scroll(session, delta) {
+            // HID++ diversion consumed the physical input already, so direct
+            // synthesis is this source's fail-open path.
+            openlogi_inject::post_scroll(delta);
+        }
+    }
+}
+
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
@@ -54,7 +84,7 @@ pub fn spawn(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    dispatcher: ActionDispatcher,
+    outputs: GestureOutputs,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -71,7 +101,7 @@ pub fn spawn(
             capture_plans,
             capture_channel,
             receiver_access,
-            dispatcher,
+            outputs,
         ));
     });
 }
@@ -240,7 +270,7 @@ async fn manage(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    dispatcher: ActionDispatcher,
+    outputs: GestureOutputs,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
@@ -286,10 +316,10 @@ async fn manage(
                         &mut accumulators,
                         &mut gesture_presses,
                         &capture_plans,
-                        &dispatcher,
+                        &outputs,
                     );
                 } else {
-                    dispatcher.cancel_hidpp_session(&event.session);
+                    outputs.cancel_session(&event.session);
                     gesture_presses.cancel_session(&event.session);
                     debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
                 }
@@ -311,7 +341,7 @@ async fn manage(
                 for (key, session) in &mut sessions {
                     let keep = want.get(key).is_some_and(|target| *target == session.target);
                     if !keep && let Some(stop) = session.stop.take() {
-                        dispatcher.cancel_hidpp_session(&session.id);
+                        outputs.cancel_session(&session.id);
                         gesture_presses.cancel_session(&session.id);
                         let _ = stop.send(());
                     }
@@ -353,7 +383,7 @@ async fn manage(
                 // device can't hot-loop. A stale epoch (an already-superseded
                 // session) is a no-op.
                 if let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) {
-                    dispatcher.cancel_hidpp_session(&done.session);
+                    outputs.cancel_session(&done.session);
                     gesture_presses.cancel_session(&done.session);
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
@@ -430,10 +460,6 @@ struct WheelAccumulators {
 /// Running state for one rotation direction.
 #[derive(Default)]
 struct WheelDirection {
-    /// Fractional line accumulator for continuous scroll.
-    scroll: f32,
-    /// Scroll binding whose fractional progress is currently retained.
-    scroll_binding: Option<ScrollBinding>,
     /// Integer rotation-increment accumulator for a custom (non-scroll) action.
     action: i32,
     /// When the last rotation event for this direction arrived (decay clock).
@@ -442,38 +468,13 @@ struct WheelDirection {
     last_fired: Option<Instant>,
 }
 
-/// Identity of a continuous scroll binding.
-///
-/// A direction's effective binding can change with configuration or the
-/// foreground application. Retained fractional progress belongs to the
-/// binding that earned it and must not leak into another axis or sign.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ScrollBinding {
-    Up,
-    Down,
-    Right,
-    Left,
-}
-
-impl ScrollBinding {
-    fn from_action(action: &Action) -> Option<Self> {
-        match action {
-            Action::ScrollUp => Some(Self::Up),
-            Action::ScrollDown => Some(Self::Down),
-            Action::HorizontalScrollRight => Some(Self::Right),
-            Action::HorizontalScrollLeft => Some(Self::Left),
-            _ => None,
-        }
-    }
-}
-
 /// What advancing a direction's accumulator should produce.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum WheelOutput {
     /// Below threshold / suppressed — emit nothing.
     Idle,
-    /// Post signed horizontal and vertical scroll lines.
-    Scroll { delta_x: i32, delta_y: i32 },
+    /// Post a typed fractional scroll distance.
+    Scroll(ScrollDelta),
     /// Fire the direction's bound custom action.
     FireAction,
 }
@@ -486,7 +487,7 @@ fn dispatch(
     accumulators: &mut HashMap<String, WheelAccumulators>,
     gesture_presses: &mut GesturePresses,
     capture_plans: &SharedCapturePlans,
-    dispatcher: &ActionDispatcher,
+    outputs: &GestureOutputs,
 ) {
     let key = session.device_key();
     let Ok(plans) = capture_plans.read() else {
@@ -508,7 +509,7 @@ fn dispatch(
                 .and_then(|map| map.get(&direction))
             {
                 debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                if !dispatcher.try_dispatch_while_pressed(press, action) {
+                if !outputs.actions.try_dispatch_while_pressed(press, action) {
                     debug!(key, %button, ?direction, "gesture press no longer active — ignored");
                 }
             } else {
@@ -526,7 +527,9 @@ fn dispatch(
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
-            let press = dispatcher.try_hidpp_button_down(session, button, action);
+            let press = outputs
+                .actions
+                .try_hidpp_button_down(session, button, action);
             if is_gesture {
                 if let Some(press) = press {
                     gesture_presses.start(session, button, press);
@@ -536,7 +539,7 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonUp(button) => {
-            dispatcher.try_hidpp_button_up(session, button);
+            outputs.actions.try_hidpp_button_up(session, button);
             gesture_presses.end(session, button);
         }
         CapturedInput::ButtonPulse(button) => {
@@ -546,7 +549,9 @@ fn dispatch(
             } else {
                 debug!(key, ?button, "HID++ button pulse with no binding — ignored");
             }
-            dispatcher.dispatch_hidpp_button_pulse(session, button, action);
+            outputs
+                .actions
+                .dispatch_hidpp_button_pulse(session, button, action);
         }
         CapturedInput::Scroll {
             increments,
@@ -579,12 +584,10 @@ fn dispatch(
                 Instant::now(),
             ) {
                 WheelOutput::Idle => {}
-                WheelOutput::Scroll { delta_x, delta_y } => {
-                    openlogi_inject::post_thumbwheel_scroll(delta_x, delta_y);
-                }
+                WheelOutput::Scroll(delta) => outputs.post_scroll(session, delta),
                 WheelOutput::FireAction => {
                     debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                    dispatcher.dispatch(&action, Some(key));
+                    outputs.actions.dispatch(&action, Some(key));
                 }
             }
         }
@@ -600,14 +603,14 @@ struct ScrollScale {
     /// increments — so without this the same physical motion scrolls six times
     /// as far as it did natively, and the sensitivity slider's 1× is 1× of
     /// nothing recognisable.
-    native_per_increment: f32,
+    native_per_increment: f64,
     /// The user's own multiplier, relative to that native amount.
     sensitivity: ThumbwheelSensitivity,
 }
 
 impl ScrollScale {
     /// Scroll units one increment contributes.
-    fn per_increment(self) -> f32 {
+    fn per_increment(self) -> f64 {
         self.native_per_increment * self.sensitivity.scroll_multiplier()
     }
 }
@@ -615,12 +618,6 @@ impl ScrollScale {
 /// Advance one direction's accumulator by `magnitude` rotation increments and
 /// decide what to emit. Pure given `now`, so the decay/cooldown/threshold logic
 /// is unit-testable without touching the OS.
-#[expect(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    reason = "magnitude/sensitivity are small integers and `lines` is a trunc'd \
-              whole number — both well within f32/i32 range"
-)]
 fn advance(
     dir: &mut WheelDirection,
     action: &Action,
@@ -629,11 +626,6 @@ fn advance(
     now: Instant,
 ) -> WheelOutput {
     let sensitivity = scale.sensitivity;
-    let scroll_binding = ScrollBinding::from_action(action);
-    if dir.scroll_binding != scroll_binding {
-        dir.scroll = 0.0;
-        dir.scroll_binding = scroll_binding;
-    }
     match action {
         // Suppressed: captured but produces nothing.
         Action::None => WheelOutput::Idle,
@@ -644,32 +636,18 @@ fn advance(
         | Action::ScrollDown
         | Action::HorizontalScrollRight
         | Action::HorizontalScrollLeft => {
-            dir.scroll += magnitude as f32 * scale.per_increment();
-            let lines = dir.scroll.trunc();
-            if lines >= 1.0 {
-                dir.scroll -= lines;
-                let lines = lines as i32;
-                match action {
-                    Action::ScrollUp => WheelOutput::Scroll {
-                        delta_x: 0,
-                        delta_y: lines,
-                    },
-                    Action::ScrollDown => WheelOutput::Scroll {
-                        delta_x: 0,
-                        delta_y: -lines,
-                    },
-                    Action::HorizontalScrollRight => WheelOutput::Scroll {
-                        delta_x: lines,
-                        delta_y: 0,
-                    },
-                    Action::HorizontalScrollLeft => WheelOutput::Scroll {
-                        delta_x: -lines,
-                        delta_y: 0,
-                    },
-                    _ => unreachable!("scroll actions are matched above"),
-                }
-            } else {
+            let distance = f64::from(magnitude) * scale.per_increment();
+            let delta = match action {
+                Action::ScrollUp => ScrollDelta::wheel_ticks(0.0, distance),
+                Action::ScrollDown => ScrollDelta::wheel_ticks(0.0, -distance),
+                Action::HorizontalScrollRight => ScrollDelta::wheel_ticks(distance, 0.0),
+                Action::HorizontalScrollLeft => ScrollDelta::wheel_ticks(-distance, 0.0),
+                _ => unreachable!("scroll actions are matched above"),
+            };
+            if distance == 0.0 {
                 WheelOutput::Idle
+            } else {
+                WheelOutput::Scroll(delta)
             }
         }
         // Any other action: fire once per `action_threshold` increments, with

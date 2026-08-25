@@ -1470,3 +1470,88 @@ fn inventory_with_battery(unit_id: [u8; 4], percentage: u8) -> DeviceInventory {
     });
     inventory
 }
+
+/// One offline placeholder seeded from a persisted identity — the shape a
+/// sleeping Bluetooth mouse leaves behind after a restart.
+fn state_with_an_offline_identity(persistence: ConfigPersistence) -> AppState {
+    let mut config = Config::ephemeral();
+    config.set_device_identity(
+        "2b034",
+        DeviceIdentity {
+            display_name: "MX Anywhere 3S".to_string(),
+            kind: DeviceKind::Mouse,
+            capabilities: Capabilities::presumed_from_kind(DeviceKind::Mouse),
+            light_capabilities: None,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 0,
+                serial_number: None,
+                unit_id: [0; 4],
+                transports: DeviceTransports::default(),
+                model_ids: [0xb034, 0, 0],
+                extended_model_id: 2,
+            }),
+            codename: Some("MX Anywhere 3S".to_string()),
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    AppState::with_runtime(
+        config,
+        &[],
+        &[],
+        &AssetResolver::new(),
+        &[],
+        persistence,
+        commands,
+    )
+}
+
+/// Forgetting an offline device removes both its placeholder card and its
+/// persisted entry, so no later inventory refresh can reseed it.
+#[test]
+fn forgetting_an_offline_device_drops_its_card_and_config_entry() {
+    let mut state = state_with_an_offline_identity(ConfigPersistence::MemoryOnly);
+    assert_eq!(state.devices().len(), 1);
+    let record_key = state.devices()[0].record_key();
+
+    assert!(state.forget_device(&record_key));
+
+    assert!(state.devices().is_empty());
+    assert!(
+        state
+            .config
+            .edit(|config| config.device_identity("2b034").is_none()),
+        "the persisted entry must go with the card"
+    );
+}
+
+/// A live device refuses deletion — the next snapshot would simply
+/// re-register it.
+#[test]
+fn a_live_device_refuses_to_be_forgotten() {
+    let mut state = state_with_a_known_mouse();
+    let record_key = state.devices()[0].record_key();
+
+    assert!(!state.forget_device(&record_key));
+    assert_eq!(state.devices().len(), 1);
+}
+
+/// A save that cannot land keeps the card: the config store restores the
+/// persisted revision and `forget_device` reports the failure, instead of the
+/// card vanishing until the next refresh resurrects it.
+#[test]
+fn a_failed_save_keeps_the_forgotten_device() {
+    let mut state = state_with_an_offline_identity(ConfigPersistence::ReadOnly("read-only".into()));
+    let record_key = state.devices()[0].record_key();
+
+    assert!(!state.forget_device(&record_key));
+
+    assert_eq!(state.devices().len(), 1, "the card must stay");
+    assert!(
+        state
+            .config
+            .edit(|config| config.device_identity("2b034").is_some()),
+        "the persisted entry must survive the failed save"
+    );
+}

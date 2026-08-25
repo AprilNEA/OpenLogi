@@ -66,43 +66,58 @@ pub fn preview(icon: AppIcon) -> Option<PathBuf> {
 
 /// Resolve the installed application's icon for a per-app profile identifier.
 ///
-/// macOS profile identifiers are bundle identifiers, so Launch Services can
-/// find the installed bundle and AppKit can return the same icon Finder uses.
-/// Other identifier namespaces have no equivalent portable lookup yet.
+/// macOS profile identifiers are bundle identifiers, which [`appcatalog`]
+/// resolves through Launch Services into a small straight-alpha RGBA
+/// rendition of the icon Finder shows; it is wrapped as a ready-to-paint
+/// texture with no encode or decode in between. The lookup does blocking
+/// platform work — callers run it on the background executor, never on the
+/// render path. Other identifier namespaces have no icon backend yet.
 #[must_use]
-#[cfg_attr(
-    target_os = "macos",
-    expect(
-        unsafe_code,
-        reason = "AppKit marks PNG encoding unsafe only because its properties dictionary is untyped"
-    )
-)]
-pub fn application_icon(identifier: &str) -> Option<Arc<gpui::Image>> {
+pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
     #[cfg(target_os = "macos")]
     {
-        use gpui::{Image, ImageFormat};
-        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
-        use objc2_foundation::{NSDictionary, NSString};
+        use appcatalog::{ApplicationIdentity, IdentityKind};
 
-        let workspace = NSWorkspace::sharedWorkspace();
-        let identifier = NSString::from_str(identifier);
-        let application = workspace.URLForApplicationWithBundleIdentifier(&identifier)?;
-        let path = application.path()?;
-        let icon = workspace.iconForFile(&path);
-        let tiff = icon.TIFFRepresentation()?;
-        let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
-        let properties = NSDictionary::new();
-        // SAFETY: PNG encoding accepts an empty image-property dictionary.
-        let png = unsafe {
-            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)?
+        /// Pixel edge of the fetched rendition: comfortably above the 18 pt
+        /// display size at 2× scale, far below the 1024 px source renditions.
+        const ICON_EDGE: u32 = 64;
+
+        let identity = ApplicationIdentity::new(IdentityKind::MacBundleIdentifier, identifier);
+        let icon = match appcatalog::application_icon(&identity, ICON_EDGE) {
+            Ok(icon) => icon?,
+            Err(error) => {
+                warn!(%identifier, %error, "could not render the application icon");
+                return None;
+            }
         };
-        (!png.is_empty()).then(|| Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec())))
+        render_image_from_rgba(icon.width(), icon.height(), icon.into_rgba())
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = identifier;
         None
     }
+}
+
+/// Wrap straight-alpha RGBA pixels as a gpui texture.
+///
+/// [`gpui::RenderImage`] frames hold BGRA — the mirror of what gpui's own
+/// image decoding produces — so the red and blue channels swap in place and
+/// the buffer is consumed whole.
+#[cfg(target_os = "macos")]
+fn render_image_from_rgba(
+    width: u32,
+    height: u32,
+    mut rgba: Vec<u8>,
+) -> Option<Arc<gpui::RenderImage>> {
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    for pixel in pixels {
+        pixel.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
+    Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+        buffer,
+    )])))
 }
 
 /// Resolve `file` inside the bundle's icon directory, if it is there.

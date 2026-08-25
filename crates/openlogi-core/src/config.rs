@@ -618,6 +618,12 @@ impl Config {
             .identity = Some(identity.without_unit_identifiers());
     }
 
+    /// Drop everything recorded for `device_key` — identity, custom name, and
+    /// per-device settings. Returns whether an entry existed.
+    pub fn remove_device(&mut self, device_key: &str) -> bool {
+        self.devices.remove(device_key).is_some()
+    }
+
     /// The user-assigned name for `device_key`, if one is configured.
     #[must_use]
     pub fn device_custom_name(&self, device_key: &str) -> Option<&str> {

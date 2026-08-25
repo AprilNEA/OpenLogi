@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_inject::SmoothScrollPhase;
 
+use crate::runtime::HidppSessionId;
+
 /// Duration of every segment, including a segment restarted by retargeting.
 const ANIMATION_DURATION: Duration = Duration::from_millis(100);
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
@@ -99,10 +101,13 @@ impl ScrollFrame {
 }
 
 /// One physical producer. Linux runs one hook callback thread per grabbed
-/// mouse; macOS and Windows use one global callback thread.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// mouse; macOS and Windows use one global callback thread. HID++ capture
+/// sessions use their epoch-bearing identity so a restarted session cannot
+/// inherit motion from the one it replaced.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ScrollSource {
     OsHook(ThreadId),
+    Hidpp(HidppSessionId),
 }
 
 impl ScrollSource {
@@ -136,13 +141,11 @@ impl MotionSegment {
 }
 
 /// A source exists in the state map only while it has a non-zero remaining
-/// target. `output_started` records whether a macOS `Began` phase needs to be
-/// emitted before its terminal phase.
+/// target.
 struct ActiveMotion {
     segment: MotionSegment,
     emitted: WheelDelta,
     next_frame: Instant,
-    output_started: bool,
 }
 
 impl ActiveMotion {
@@ -155,95 +158,121 @@ impl ActiveMotion {
             },
             emitted: WheelDelta::ZERO,
             next_frame: at + FRAME_INTERVAL,
-            output_started: false,
         }
     }
 
     /// Evaluate the old segment at the impulse timestamp, then restart toward
-    /// the cumulative target. Returns `false` when opposing input exactly
-    /// consumes the remaining target and this motion is finished immediately.
-    fn retarget(
-        &mut self,
-        impulse: WheelDelta,
-        at: Instant,
-        emit: &mut impl FnMut(ScrollFrame),
-    ) -> bool {
+    /// the cumulative target.
+    fn retarget(&mut self, impulse: WheelDelta, at: Instant) -> MotionUpdate {
         let position = self.segment.position_at(at);
         let target = self.segment.target.plus(impulse);
+        let delta = self.delta_to(position);
         if target == position {
-            self.finish_at(position, emit);
-            return false;
+            return MotionUpdate::Finished(delta);
         }
 
-        self.emit_progress(position, emit);
         self.segment = MotionSegment {
             from: position,
             target,
             started_at: at,
         };
         self.next_frame = at + FRAME_INTERVAL;
-        true
+        MotionUpdate::Active(delta)
     }
 
-    /// Emit the position at `at`. Returns whether the segment is complete.
-    fn advance(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) -> bool {
+    /// Evaluate the position at `at` and report whether the source remains
+    /// active after this update.
+    fn advance(&mut self, at: Instant) -> MotionUpdate {
         let complete = self.segment.is_complete_at(at);
         let position = self.segment.position_at(at);
+        let delta = self.delta_to(position);
         if complete {
-            self.finish_at(position, emit);
+            MotionUpdate::Finished(delta)
         } else {
-            self.emit_progress(position, emit);
             while self.next_frame <= at {
                 self.next_frame += FRAME_INTERVAL;
             }
             self.next_frame = self.next_frame.min(self.segment.ends_at());
+            MotionUpdate::Active(delta)
         }
-        complete
     }
 
-    fn emit_progress(&mut self, position: WheelDelta, emit: &mut impl FnMut(ScrollFrame)) {
+    fn delta_to(&mut self, position: WheelDelta) -> WheelDelta {
         let delta = position.minus(self.emitted);
+        self.emitted = position;
+        delta
+    }
+}
+
+/// Result of evaluating one source-local motion.
+#[derive(Clone, Copy)]
+enum MotionUpdate {
+    Active(WheelDelta),
+    Finished(WheelDelta),
+}
+
+impl MotionUpdate {
+    fn is_finished(&self) -> bool {
+        matches!(self, Self::Finished(_))
+    }
+}
+
+/// The one phase stream visible to the foreground application. Source-local
+/// motions may overlap, but Core Graphics has no source identity with which to
+/// pair multiple synthetic gestures; all distances therefore share this single
+/// balanced lifecycle.
+#[derive(Default)]
+enum OutputStream {
+    #[default]
+    Idle,
+    Active,
+}
+
+impl OutputStream {
+    fn progress(&mut self, delta: WheelDelta, emit: &mut impl FnMut(ScrollFrame)) {
         if delta.is_zero() {
             return;
         }
-        let phase = if self.output_started {
-            SmoothScrollPhase::Changed
-        } else {
-            self.output_started = true;
-            SmoothScrollPhase::Began
+        let phase = match self {
+            Self::Idle => {
+                *self = Self::Active;
+                SmoothScrollPhase::Began
+            }
+            Self::Active => SmoothScrollPhase::Changed,
         };
-        self.emitted = position;
         emit(ScrollFrame::new(delta, phase));
     }
 
-    fn finish_at(&mut self, position: WheelDelta, emit: &mut impl FnMut(ScrollFrame)) {
-        let delta = position.minus(self.emitted);
-        if self.output_started {
-            self.emitted = position;
-            emit(ScrollFrame::new(delta, SmoothScrollPhase::Ended));
-        } else if !delta.is_zero() {
-            self.emitted = position;
-            self.output_started = true;
-            emit(ScrollFrame::new(delta, SmoothScrollPhase::Began));
-            emit(ScrollFrame::new(WheelDelta::ZERO, SmoothScrollPhase::Ended));
+    fn finish(&mut self, delta: WheelDelta, emit: &mut impl FnMut(ScrollFrame)) {
+        match self {
+            Self::Idle if !delta.is_zero() => {
+                emit(ScrollFrame::new(delta, SmoothScrollPhase::Began));
+                emit(ScrollFrame::new(WheelDelta::ZERO, SmoothScrollPhase::Ended));
+            }
+            Self::Active => emit(ScrollFrame::new(delta, SmoothScrollPhase::Ended)),
+            Self::Idle => {}
         }
+        *self = Self::Idle;
     }
 
-    fn cancel(self, emit: &mut impl FnMut(ScrollFrame)) {
-        if self.output_started {
+    fn cancel(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
+        if matches!(self, Self::Active) {
             emit(ScrollFrame::new(
                 WheelDelta::ZERO,
                 SmoothScrollPhase::Cancelled,
             ));
         }
+        *self = Self::Idle;
     }
 }
 
 /// Pure per-source state machine. Absence from the map represents idle, so an
-/// idle source cannot accidentally retain a target or scheduled deadline.
+/// idle source cannot accidentally retain a target or scheduled deadline. All
+/// source-local distances feed one application-visible [`OutputStream`].
 #[derive(Default)]
 struct ScrollEngine {
     active: HashMap<ScrollSource, ActiveMotion>,
+    output: OutputStream,
 }
 
 impl ScrollEngine {
@@ -260,18 +289,25 @@ impl ScrollEngine {
             .is_some_and(|motion| motion.segment.is_complete_at(at))
             && let Some(mut completed) = self.active.remove(&source)
         {
-            completed.advance(at, emit);
+            let update = completed.advance(at);
+            self.emit_update(update, emit);
         }
 
-        match self.active.entry(source) {
+        let update = match self.active.entry(source) {
             Entry::Occupied(mut entry) => {
-                if !entry.get_mut().retarget(impulse, at, emit) {
+                let update = entry.get_mut().retarget(impulse, at);
+                if update.is_finished() {
                     entry.remove();
                 }
+                Some(update)
             }
             Entry::Vacant(entry) => {
                 entry.insert(ActiveMotion::new(impulse, at));
+                None
             }
+        };
+        if let Some(update) = update {
+            self.emit_update(update, emit);
         }
     }
 
@@ -279,16 +315,21 @@ impl ScrollEngine {
         let due: Vec<ScrollSource> = self
             .active
             .iter()
-            .filter_map(|(source, motion)| (motion.next_frame <= at).then_some(*source))
+            .filter(|(_, motion)| motion.next_frame <= at)
+            .map(|(source, _)| source.clone())
             .collect();
         for source in due {
-            let complete = self
+            let Some(update) = self
                 .active
                 .get_mut(&source)
-                .is_some_and(|motion| motion.advance(at, emit));
-            if complete {
+                .map(|motion| motion.advance(at))
+            else {
+                continue;
+            };
+            if update.is_finished() {
                 self.active.remove(&source);
             }
+            self.emit_update(update, emit);
         }
     }
 
@@ -296,9 +337,25 @@ impl ScrollEngine {
         self.active.values().map(|motion| motion.next_frame).min()
     }
 
+    fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
+        if self.active.remove(source).is_some() && self.active.is_empty() {
+            self.output.cancel(emit);
+        }
+    }
+
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
-        for (_, motion) in self.active.drain() {
-            motion.cancel(emit);
+        self.active.clear();
+        self.output.cancel(emit);
+    }
+
+    fn emit_update(&mut self, update: MotionUpdate, emit: &mut impl FnMut(ScrollFrame)) {
+        match update {
+            MotionUpdate::Finished(delta) if self.active.is_empty() => {
+                self.output.finish(delta, emit);
+            }
+            MotionUpdate::Active(delta) | MotionUpdate::Finished(delta) => {
+                self.output.progress(delta, emit);
+            }
         }
     }
 }

@@ -1,9 +1,10 @@
 use super::*;
 use openlogi_hid::thumbwheel::WheelResolution;
 
-/// The resolutions traced off an MX Master 4 over Bolt: 20 ratchets per
-/// revolution natively, 120 increments per revolution diverted.
-const TRACED: WheelResolution = WheelResolution {
+/// Resolution metadata observed from an MX Master 4 over Bolt: 20 ratchets per
+/// revolution natively, 120 increments per revolution diverted. The event
+/// sequences below are synthetic algorithm fixtures, not hardware captures.
+const MX_MASTER_4_REPORTED_RESOLUTION: WheelResolution = WheelResolution {
     native_res: 20,
     diverted_res: 120,
 };
@@ -17,9 +18,24 @@ fn unscaled(sensitivity: ThumbwheelSensitivity) -> ScrollScale {
     }
 }
 
+fn assert_distance(actual: f64, expected: f64) {
+    const EPSILON: f64 = 1.0e-12;
+    assert!(
+        (actual - expected).abs() < EPSILON,
+        "{actual} != {expected}"
+    );
+}
+
+fn scroll_delta(output: WheelOutput) -> ScrollDelta {
+    let WheelOutput::Scroll(delta) = output else {
+        panic!("expected fractional scroll output");
+    };
+    delta
+}
+
 #[test]
 fn multiplier_is_unity_at_default_sensitivity() {
-    assert!((ThumbwheelSensitivity::DEFAULT.scroll_multiplier() - 1.0).abs() < f32::EPSILON);
+    assert!((ThumbwheelSensitivity::DEFAULT.scroll_multiplier() - 1.0).abs() < f64::EPSILON);
     assert!(ThumbwheelSensitivity::from_rounded(28.0).scroll_multiplier() > 1.9);
     assert!(ThumbwheelSensitivity::MIN.scroll_multiplier() < 0.1);
 }
@@ -49,52 +65,59 @@ fn action_threshold_drops_with_sensitivity_and_floors_at_one() {
 #[test]
 fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
     let scale = ScrollScale {
-        native_per_increment: TRACED.native_per_increment(),
+        native_per_increment: MX_MASTER_4_REPORTED_RESOLUTION.native_per_increment(),
         sensitivity: ThumbwheelSensitivity::DEFAULT,
     };
     let mut dir = WheelDirection::default();
     let now = Instant::now();
-    let mut lines = 0;
+    let mut distance = 0.0;
     for _ in 0..120 {
-        if let WheelOutput::Scroll { delta_x, .. } =
-            advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
-        {
-            lines += delta_x;
-        }
+        distance += scroll_delta(advance(
+            &mut dir,
+            &Action::HorizontalScrollRight,
+            1,
+            scale,
+            now,
+        ))
+        .x();
     }
-    assert_eq!(lines, 20, "one revolution is 20 native scroll units");
+    assert_distance(distance, 20.0);
 }
 
 /// The sensitivity slider stays a multiplier *of that native amount*.
 #[test]
 fn sensitivity_multiplies_the_native_amount() {
     let scale = ScrollScale {
-        native_per_increment: TRACED.native_per_increment(),
+        native_per_increment: MX_MASTER_4_REPORTED_RESOLUTION.native_per_increment(),
         sensitivity: ThumbwheelSensitivity::from_rounded(28.0), // 2x
     };
     let mut dir = WheelDirection::default();
     let now = Instant::now();
-    let mut lines = 0;
+    let mut distance = 0.0;
     for _ in 0..120 {
-        if let WheelOutput::Scroll { delta_x, .. } =
-            advance(&mut dir, &Action::HorizontalScrollRight, 1, scale, now)
-        {
-            lines += delta_x;
-        }
+        distance += scroll_delta(advance(
+            &mut dir,
+            &Action::HorizontalScrollRight,
+            1,
+            scale,
+            now,
+        ))
+        .x();
     }
-    assert_eq!(lines, 40, "2x sensitivity doubles the native 20");
+    assert_distance(distance, 40.0);
 }
 
 #[test]
 fn an_unreported_resolution_leaves_increments_unscaled() {
-    assert!((WheelResolution::UNKNOWN.native_per_increment() - 1.0).abs() < f32::EPSILON);
+    assert!((WheelResolution::UNKNOWN.native_per_increment() - 1.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn scroll_accumulates_fractionally_at_sub_unity_sensitivity() {
+fn sub_tick_distance_is_emitted_without_integer_accumulation() {
     let mut dir = WheelDirection::default();
     let now = Instant::now();
-    // multiplier 0.5: two increments make one whole line.
+    // A 0.5× increment remains one typed half-tick all the way to the smooth
+    // runtime or the platform injector.
     let half = ThumbwheelSensitivity::from_rounded(7.0);
     assert_eq!(
         advance(
@@ -104,128 +127,52 @@ fn scroll_accumulates_fractionally_at_sub_unity_sensitivity() {
             unscaled(half),
             now
         ),
-        WheelOutput::Idle
-    );
-    assert_eq!(
-        advance(
-            &mut dir,
-            &Action::HorizontalScrollRight,
-            1,
-            unscaled(half),
-            now
-        ),
-        WheelOutput::Scroll {
-            delta_x: 1,
-            delta_y: 0,
-        }
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(0.5, 0.0))
     );
 }
 
 #[test]
-fn scroll_left_emits_negative_lines() {
+fn scroll_actions_encode_axis_and_sign_in_the_typed_delta() {
     let mut dir = WheelDirection::default();
     let now = Instant::now();
-    assert_eq!(
-        advance(
-            &mut dir,
-            &Action::HorizontalScrollLeft,
-            1,
-            unscaled(ThumbwheelSensitivity::DEFAULT),
-            now
-        ),
-        WheelOutput::Scroll {
-            delta_x: -1,
-            delta_y: 0,
-        }
-    );
-}
-
-#[test]
-fn vertical_scroll_actions_emit_on_the_vertical_axis() {
-    let now = Instant::now();
-    let mut up = WheelDirection::default();
-    let mut down = WheelDirection::default();
     let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
-
     assert_eq!(
-        advance(&mut up, &Action::ScrollUp, 1, scale, now),
-        WheelOutput::Scroll {
-            delta_x: 0,
-            delta_y: 1,
-        }
+        advance(&mut dir, &Action::HorizontalScrollLeft, 1, scale, now),
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(-1.0, 0.0))
     );
     assert_eq!(
-        advance(&mut down, &Action::ScrollDown, 1, scale, now),
-        WheelOutput::Scroll {
-            delta_x: 0,
-            delta_y: -1,
-        }
+        advance(&mut dir, &Action::ScrollDown, 1, scale, now),
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(0.0, -1.0))
     );
 }
 
 #[test]
-fn binding_changes_do_not_reuse_fractional_scroll_progress() {
+fn binding_changes_have_no_hidden_fractional_progress_to_reassign() {
     let mut dir = WheelDirection::default();
     let now = Instant::now();
     let half = unscaled(ThumbwheelSensitivity::from_rounded(7.0));
 
     assert_eq!(
         advance(&mut dir, &Action::HorizontalScrollRight, 1, half, now),
-        WheelOutput::Idle
-    );
-    // The half-line earned horizontally must not complete a vertical line
-    // after a live binding or application-context change.
-    assert_eq!(
-        advance(&mut dir, &Action::ScrollUp, 1, half, now),
-        WheelOutput::Idle
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(0.5, 0.0))
     );
     assert_eq!(
         advance(&mut dir, &Action::ScrollUp, 1, half, now),
-        WheelOutput::Scroll {
-            delta_x: 0,
-            delta_y: 1,
-        }
+        WheelOutput::Scroll(ScrollDelta::wheel_ticks(0.0, 0.5))
     );
 }
 
 #[test]
-fn directions_accumulate_independently() {
-    let mut up = WheelDirection::default();
-    let mut down = WheelDirection::default();
-    let now = Instant::now();
-    let half = ThumbwheelSensitivity::from_rounded(7.0);
+fn zero_magnitude_emits_nothing() {
     assert_eq!(
         advance(
-            &mut up,
+            &mut WheelDirection::default(),
             &Action::HorizontalScrollRight,
-            1,
-            unscaled(half),
-            now
+            0,
+            unscaled(ThumbwheelSensitivity::DEFAULT),
+            Instant::now(),
         ),
         WheelOutput::Idle
-    );
-    assert_eq!(
-        advance(
-            &mut down,
-            &Action::HorizontalScrollLeft,
-            1,
-            unscaled(half),
-            now
-        ),
-        WheelOutput::Idle
-    );
-    assert_eq!(
-        advance(
-            &mut up,
-            &Action::HorizontalScrollRight,
-            1,
-            unscaled(half),
-            now
-        ),
-        WheelOutput::Scroll {
-            delta_x: 1,
-            delta_y: 0,
-        }
     );
 }
 
