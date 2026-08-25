@@ -4,7 +4,9 @@
 //! the protocol-neutral generated visual and never borrow another model's
 //! image or diffuser geometry.
 
-use gpui::{AnyElement, BoxShadow, IntoElement, ParentElement, Styled, div, hsla, img, point, px};
+use gpui::{
+    BoxShadow, ParentElement, Styled, div, hsla, img, point, prelude::FluentBuilder as _, px,
+};
 use gpui_component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
@@ -18,14 +20,14 @@ pub(crate) fn gallery(
     enabled: bool,
     settings: LightSettings,
     pal: Palette,
-) -> AnyElement {
-    if let Some(asset) = asset {
-        visual_container()
-            .child(product_image(asset, 210., 180., online))
-            .into_any_element()
-    } else {
-        generated_visual(210., 180., online, enabled, settings, pal).into_any_element()
-    }
+) -> gpui::Div {
+    visual_container()
+        .when_some(asset, |container, asset| {
+            container.child(product_image(asset, 210., 180., online))
+        })
+        .when(asset.is_none(), |container| {
+            container.child(generated_visual(210., 180., online, enabled, settings, pal))
+        })
 }
 
 /// Render a standalone light as the large hero in its detail view.
@@ -36,11 +38,6 @@ pub(crate) fn detail(
     settings: LightSettings,
     pal: Palette,
 ) -> gpui::Div {
-    let content = if let Some(asset) = asset {
-        product_image(asset, 536., 460., online)
-    } else {
-        generated_visual(536., 460., online, enabled, settings, pal)
-    };
     visual_container()
         .flex_1()
         .min_w(px(440.))
@@ -50,7 +47,12 @@ pub(crate) fn detail(
         .border_color(pal.border)
         .bg(pal.panel)
         .overflow_hidden()
-        .child(content)
+        .when_some(asset, |container, asset| {
+            container.child(product_image(asset, 536., 460., online))
+        })
+        .when(asset.is_none(), |container| {
+            container.child(generated_visual(536., 460., online, enabled, settings, pal))
+        })
 }
 
 fn product_image(asset: &ResolvedAsset, width: f32, height: f32, online: bool) -> gpui::Div {
