@@ -266,6 +266,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Keys => "action-icons/keyboard.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
+        DetailTab::Profiles => "action-icons/list-checks.svg",
         DetailTab::Camera => "action-icons/camera.svg",
         DetailTab::Device => "action-icons/settings.svg",
     }

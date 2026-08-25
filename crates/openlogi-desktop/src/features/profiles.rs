@@ -1,8 +1,8 @@
 //! Onboard-profile controls for devices with HID++ feature `0x8100`.
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, div,
+    AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Window, div,
 };
 use gpui_component::{Selectable as _, button::Button, h_flex, v_flex};
 use openlogi_core::hid::{OnboardProfilesInfo, ProfileEntry, ProfilesMode};
@@ -128,11 +128,10 @@ impl Render for ProfilesPanel {
                 retry_profiles_closure(key),
             )
             .into_any_element(),
-            ProfilesLoad::Unsupported(_) => status_line(
-                tr!("This device has no onboard profile memory."),
-                pal,
-            )
-            .into_any_element(),
+            ProfilesLoad::Unsupported(_) => {
+                status_line(tr!("This device has no onboard profile memory."), pal)
+                    .into_any_element()
+            }
         };
 
         v_flex().gap_3().w_full().child(content)

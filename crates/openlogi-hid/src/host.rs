@@ -56,9 +56,7 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
 }
 
 /// Read the onboard-profile state of the device `route` reaches.
-pub async fn get_onboard_profiles(
-    route: &DeviceRoute,
-) -> Result<OnboardProfilesInfo, WriteError> {
+pub async fn get_onboard_profiles(route: &DeviceRoute) -> Result<OnboardProfilesInfo, WriteError> {
     device::get_onboard_profiles(&*native_backend(), route).await
 }
 

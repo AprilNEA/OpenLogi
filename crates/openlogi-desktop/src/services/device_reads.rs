@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{
-    DeviceRoute, DpiInfo, OnboardProfilesInfo, SmartShiftStatus, WriteError,
-};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, OnboardProfilesInfo, SmartShiftStatus, WriteError};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
@@ -158,10 +156,7 @@ impl DeviceReads {
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
             let load = project_load(query_state.read(cx), profiles_error_is_permanent);
-            if state
-                .reads
-                .update_profiles(&observed_key, generation, load)
-            {
+            if state.reads.update_profiles(&observed_key, generation, load) {
                 cx.emit(StateEvent::ProfilesChanged(observed_key.clone()));
             }
         });
@@ -477,12 +472,7 @@ impl DeviceReads {
         true
     }
 
-    fn update_profiles(
-        &mut self,
-        key: &DeviceKey,
-        generation: u64,
-        load: ProfilesLoad,
-    ) -> bool {
+    fn update_profiles(&mut self, key: &DeviceKey, generation: u64, load: ProfilesLoad) -> bool {
         let Some(read) = self
             .profiles
             .get_mut(key)
@@ -712,6 +702,16 @@ mod tests {
                     feature_hex: 0x2111,
                 },
                 smartshift_error_is_permanent,
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            attempt_count(
+                WriteError::FeatureUnsupported {
+                    feature_hex: 0x8100,
+                },
+                profiles_error_is_permanent,
             )
             .await,
             1

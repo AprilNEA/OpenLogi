@@ -11,6 +11,11 @@ impl AppState {
     pub(super) fn load_current_profiles(&mut self, cx: &mut Context<Self>) {
         let Some((key, route)) = self
             .current_record()
+            .filter(|record| {
+                record
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.onboard_profiles)
+            })
             .and_then(|record| Some((record.device_key(), record.route.clone()?)))
         else {
             return;
@@ -22,9 +27,10 @@ impl AppState {
     /// Onboard-profile status for the active device.
     #[must_use]
     pub fn current_profiles_status(&self) -> ProfilesLoad {
-        self.current_record().map_or(ProfilesLoad::Unknown, |record| {
-            self.reads.profiles_status(&record.device_key())
-        })
+        self.current_record()
+            .map_or(ProfilesLoad::Unknown, |record| {
+                self.reads.profiles_status(&record.device_key())
+            })
     }
 
     /// Retry an exhausted onboard-profile read.
@@ -40,13 +46,11 @@ impl AppState {
     }
 
     /// Persist and apply an onboard-profile selection for the active device.
-    pub(crate) fn update_onboard_profiles(
-        cx: &mut App,
-        mode: ProfilesMode,
-        profile: Option<u16>,
-    ) {
+    pub(crate) fn update_onboard_profiles(cx: &mut App, mode: ProfilesMode, profile: Option<u16>) {
         Self::update(cx, |state, cx| {
-            let key = state.current_record().map(|record| record.device_key());
+            let key = state
+                .current_record()
+                .map(super::devices::DeviceRecord::device_key);
             state.commit_onboard_profiles(mode, profile);
             if let Some(key) = key {
                 cx.emit(StateEvent::ProfilesChanged(key));

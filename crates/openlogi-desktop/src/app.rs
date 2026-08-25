@@ -266,6 +266,7 @@ impl AppView {
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::ProfilesChanged(_)
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged => false,
                 // App-wide settings render in their own window. The root only
