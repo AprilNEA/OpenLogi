@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, OnboardProfilesInfo, SmartShiftStatus, WriteError};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
@@ -13,11 +13,14 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::Command;
-use crate::state::{AppState, DeviceKey, DpiStatus, Load, SmartShiftLoad, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DpiStatus, Load, ProfilesLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
+const PROFILES: &str = "profiles";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -49,6 +52,7 @@ pub(crate) struct DeviceReads {
     next_generation: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
+    profiles: BTreeMap<DeviceKey, DeviceRead<OnboardProfilesInfo>>,
 }
 
 impl DeviceReads {
@@ -97,6 +101,66 @@ impl DeviceReads {
             }
         });
         self.dpi.insert(
+            key,
+            DeviceRead {
+                route,
+                generation,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Start the onboard-profile query unless the same device route is already subscribed.
+    pub(crate) fn ensure_profiles(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .profiles
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_profiles(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let generation = self.take_generation();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| Command::ReadOnboardProfiles(route, reply),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !profiles_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(PROFILES, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), profiles_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), profiles_error_is_permanent);
+            if state.reads.update_profiles(&observed_key, generation, load) {
+                cx.emit(StateEvent::ProfilesChanged(observed_key.clone()));
+            }
+        });
+        self.profiles.insert(
             key,
             DeviceRead {
                 route,
@@ -231,6 +295,18 @@ impl DeviceReads {
         self.smartshift.get(key).map(|read| &read.load)
     }
 
+    #[must_use]
+    pub(crate) fn profiles_status(&self, key: &DeviceKey) -> ProfilesLoad {
+        self.profiles
+            .get(key)
+            .map_or(Load::Unknown, |read| read.load.clone())
+    }
+
+    #[must_use]
+    pub(crate) fn profiles_load(&self, key: &DeviceKey) -> Option<&ProfilesLoad> {
+        self.profiles.get(key).map(|read| &read.load)
+    }
+
     /// Retry an exhausted DPI query without changing its registered fetcher.
     pub(crate) fn retry_dpi(&mut self, key: &DeviceKey) {
         let Some(read) = self.dpi.get_mut(key) else {
@@ -253,6 +329,17 @@ impl DeviceReads {
         read.query.revalidate();
     }
 
+    /// Retry or confirm an onboard-profile query.
+    pub(crate) fn retry_profiles(&mut self, key: &DeviceKey) {
+        let Some(read) = self.profiles.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
     /// Publish a SmartShift write optimistically into swr and the view model.
     pub(crate) fn set_smartshift_ready(&mut self, key: &DeviceKey, status: SmartShiftStatus) {
         let value = Arc::new(status);
@@ -267,10 +354,25 @@ impl DeviceReads {
         }
     }
 
+    /// Publish an onboard-profile write optimistically into swr and the view model.
+    pub(crate) fn set_profiles_ready(&mut self, key: &DeviceKey, info: OnboardProfilesInfo) {
+        let value = Arc::new(info);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<OnboardProfilesInfo>, WriteError>(
+                query_key(PROFILES, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.profiles.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
     /// Forget both feature queries for a device and fence their old flights.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
+        self.remove_profiles(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -287,12 +389,20 @@ impl DeviceReads {
         }
     }
 
+    pub(crate) fn remove_profiles(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.profiles.remove(key) {
+            drop(read);
+            self.clear::<OnboardProfilesInfo>(PROFILES, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
             .dpi
             .keys()
             .chain(self.smartshift.keys())
+            .chain(self.profiles.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -361,6 +471,21 @@ impl DeviceReads {
         read.load = load;
         true
     }
+
+    fn update_profiles(&mut self, key: &DeviceKey, generation: u64, load: ProfilesLoad) -> bool {
+        let Some(read) = self
+            .profiles
+            .get_mut(key)
+            .filter(|read| read.generation == generation)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
 }
 
 fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
@@ -412,6 +537,10 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn profiles_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
@@ -573,6 +702,16 @@ mod tests {
                     feature_hex: 0x2111,
                 },
                 smartshift_error_is_permanent,
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            attempt_count(
+                WriteError::FeatureUnsupported {
+                    feature_hex: 0x8100,
+                },
+                profiles_error_is_permanent,
             )
             .await,
             1

@@ -29,11 +29,12 @@ pub use openlogi_device::{backend, inventory, pairing, session, write};
 pub use hidpp::feature::FeatureType;
 pub use hidpp::feature::device_information::DeviceEntityType;
 pub use host::{
-    apply_litra, channel_pool, dump_features, dump_firmware_entities, dump_reprog_controls,
-    enumerate, enumerate_standalone, get_backlight, get_dpi, get_dpi_info, get_scroll_wheel_mode,
-    get_smartshift_status, list_pairing_receivers, play_haptic, read_battery_raw,
-    set_backlight_enabled, set_dpi, set_fn_lock, set_keyboard_color, set_keyboard_color_with,
-    set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_smartshift,
-    set_smartshift_sensitivity, toggle_smartshift, watch_hotplug,
+    apply_litra, apply_profiles_config, channel_pool, dump_features, dump_firmware_entities,
+    dump_reprog_controls, enumerate, enumerate_standalone, get_backlight, get_dpi, get_dpi_info,
+    get_onboard_profiles, get_scroll_wheel_mode, get_smartshift_status, list_pairing_receivers,
+    play_haptic, read_battery_raw, set_active_profile, set_backlight_enabled, set_dpi, set_fn_lock,
+    set_keyboard_color, set_keyboard_color_with, set_profiles_mode, set_scroll_inversion,
+    set_scroll_resolution, set_scroll_wheel_mode, set_smartshift, set_smartshift_sensitivity,
+    toggle_smartshift, watch_hotplug,
 };
 pub use probe_cache::FileProbeCacheStore;

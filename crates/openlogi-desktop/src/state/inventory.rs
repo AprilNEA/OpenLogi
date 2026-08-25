@@ -290,6 +290,9 @@ impl AppState {
             if matches!(self.reads.smartshift_load(&key), Some(Load::Failed(_))) {
                 self.retry_smartshift(&key);
             }
+            if matches!(self.reads.profiles_load(&key), Some(Load::Failed(_))) {
+                self.retry_profiles(&key);
+            }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
         // device's known DPI so the panel doesn't keep showing the previous

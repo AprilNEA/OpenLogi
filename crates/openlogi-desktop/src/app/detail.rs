@@ -1,5 +1,5 @@
 //! The device-detail screen: the header (back + name + section tabs), and the
-//! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
+//! section bodies (Buttons, Keys, Pointer, Lighting, Profiles, Camera, Device).
 
 use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
@@ -36,6 +36,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profile_scope::{ProfileIconCache, profile_scope_bar};
+use crate::features::profiles::ProfilesPanel;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -116,6 +117,7 @@ pub(super) struct DetailPanels<'a> {
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
+    pub profiles_panel: &'a gpui::Entity<ProfilesPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
@@ -145,6 +147,7 @@ pub(super) fn detail_content(
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, pal, cx).into_any_element()
         }
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
+        DetailTab::Profiles => profiles_tab(panels.profiles_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
@@ -263,6 +266,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Keys => "action-icons/keyboard.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
+        DetailTab::Profiles => "action-icons/list-checks.svg",
         DetailTab::Camera => "action-icons/camera.svg",
         DetailTab::Device => "action-icons/settings.svg",
     }
@@ -506,6 +510,18 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
             tr!("Lighting"),
             Icon::new(IconName::Palette),
             lighting_panel.clone().into_any_element(),
+        ),
+    )
+}
+
+/// Onboard-profile source and active-profile controls.
+fn profiles_tab(profiles_panel: &gpui::Entity<ProfilesPanel>) -> impl IntoElement {
+    tab_body(
+        ContentWidth::Small,
+        PanelCard::new(
+            tr!("Profiles"),
+            Icon::empty().path("action-icons/list-checks.svg"),
+            profiles_panel.clone().into_any_element(),
         ),
     )
 }

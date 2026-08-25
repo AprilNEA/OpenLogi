@@ -72,8 +72,29 @@ Common device fields are:
   in `bindings`
 - `action_ring`: default and complete per-application eight-slot layouts
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
+- `onboard_profiles` for gaming mice with HID++ onboard profile memory
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `identity` and `disabled_gestures`, which are application-managed metadata
+
+### Onboard profiles
+
+Gaming mice with HID++ `0x8100` onboard profile memory can run either from
+OpenLogi's host settings or from a profile stored in the device's flash. The
+setting uses the device's physical config key:
+
+```toml
+[devices."receiver:aabbccdd:slot:1".onboard_profiles]
+mode = "onboard"
+profile = 2
+```
+
+Set `mode = "host"` to let OpenLogi drive the mouse. In onboard mode, `profile`
+is the flash sector to activate; omit it to keep the currently active profile.
+The GUI only offers enabled user sectors and never selects factory ROM sectors.
+
+Omit the entire `onboard_profiles` table to leave the device's current mode
+unmanaged. Once configured, OpenLogi re-applies the selected mode after every
+reconnect or wake because host mode is volatile.
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,

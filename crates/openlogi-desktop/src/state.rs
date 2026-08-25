@@ -28,7 +28,7 @@ pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiStatus, ProfilesLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +64,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod profiles;
 mod scroll;
 mod settings;
 mod smartshift;
@@ -98,6 +99,8 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// Onboard-profile data changed.
+    ProfilesChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -252,7 +255,7 @@ pub struct AppState {
     /// Sorted (`BTreeMap`) for stable render order in the function-row view.
     pub keyboard_bindings: BTreeMap<KeyTrigger, Action>,
     pub dpi: Dpi,
-    /// SWR-backed DPI and SmartShift reads keyed by [`DeviceKey`]. HID++ reads
+    /// SWR-backed DPI, SmartShift, and onboard-profile reads keyed by [`DeviceKey`]. HID++ reads
     /// must not block device switching or rendering; feature modules project
     /// this service into synchronous [`Load`] values for their render paths.
     pub(crate) reads: DeviceReads,
@@ -325,12 +328,13 @@ impl AppState {
         Self::global(cx).update(cx, update)
     }
 
-    /// Start any pending DPI/SmartShift read for the selected device. Called
+    /// Start pending device reads for the selected device. Called
     /// after inventory or selection changes; render paths only consume caches.
     pub(crate) fn load_current_device_reads(cx: &mut App) {
         Self::update(cx, |state, cx| {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
+            state.load_current_profiles(cx);
             state.confirm_current_smartshift(cx);
         });
     }

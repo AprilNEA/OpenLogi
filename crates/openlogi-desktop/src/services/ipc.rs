@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfilesInfo, ProfilesMode, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
@@ -102,6 +103,11 @@ pub enum Command {
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
+    ),
+    SetOnboardProfiles(DeviceRoute, ProfilesMode, Option<u16>),
+    ReadOnboardProfiles(
+        DeviceRoute,
+        oneshot::Sender<Result<OnboardProfilesInfo, WriteError>>,
     ),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -499,6 +505,12 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
+        Command::SetOnboardProfiles(route, mode, profile) => {
+            log_apply(client.set_onboard_profiles(ctx, route, mode, profile).await)?;
+        }
+        Command::ReadOnboardProfiles(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_onboard_profiles(ctx, route).await)?);
+        }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
             // is still a reload that did not happen — and the file on disk has
@@ -615,6 +627,9 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadOnboardProfiles(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

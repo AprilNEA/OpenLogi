@@ -14,6 +14,22 @@ fn write_and_read(config: &Config) -> Config {
 }
 
 #[test]
+fn onboard_profiles_round_trip_and_can_return_to_unmanaged() {
+    let mut config = Config::default();
+    assert_eq!(config.onboard_profiles("mouse"), None);
+
+    let profiles = OnboardProfiles::Onboard { profile: Some(2) };
+    config.set_onboard_profiles("mouse", Some(profiles));
+    let restored = write_and_read(&config);
+    assert_eq!(restored.onboard_profiles("mouse"), Some(profiles));
+    assert_eq!(restored.onboard_profiles("other"), None);
+
+    config.set_onboard_profiles("mouse", None);
+    let restored = write_and_read(&config);
+    assert_eq!(restored.onboard_profiles("mouse"), None);
+}
+
+#[test]
 fn canonical_configuration_example_parses() {
     let body = include_str!("../../../../docs/config.example.toml");
     let config: Config = toml::from_str(body).expect("documented config must parse");
@@ -527,6 +543,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            onboard_profiles: false,
         },
         light_capabilities: None,
         driver_id: None,
