@@ -17,7 +17,7 @@ use route::DeviceRoute;
 pub(crate) mod pool;
 pub(crate) mod registry;
 pub(crate) mod route;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod scripted;
 
 pub use pool::ChannelPool;
