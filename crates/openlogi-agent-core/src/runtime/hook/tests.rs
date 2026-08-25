@@ -144,6 +144,15 @@ fn fail_open_press_pairs_release() {
 }
 
 #[test]
+fn rejected_key_edges_fail_open() {
+    assert_eq!(queued_event_disposition(true), EventDisposition::Suppress);
+    assert_eq!(
+        queued_event_disposition(false),
+        EventDisposition::PassThrough
+    );
+}
+
+#[test]
 fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
     let maps = HookMaps {
         bindings: BTreeMap::from([

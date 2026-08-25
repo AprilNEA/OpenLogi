@@ -321,6 +321,16 @@ fn remapped_release_disposition(
     }
 }
 
+/// Suppress only input accepted by an off-thread runtime. Rejected input must
+/// fail open so the hook never swallows an edge it could not dispatch.
+fn queued_event_disposition(queued: bool) -> EventDisposition {
+    if queued {
+        EventDisposition::Suppress
+    } else {
+        EventDisposition::PassThrough
+    }
+}
+
 /// Feed an in-progress gesture hold; always pass motion through so the cursor moves.
 fn handle_moved(
     delta_x: i32,
@@ -359,8 +369,7 @@ fn handle_key(
     if !pressed {
         return HELD_KEYS.with_borrow_mut(|keys| {
             if keys.remove(&keycode) {
-                dispatcher.try_hook_key_up(keycode);
-                EventDisposition::Suppress
+                queued_event_disposition(dispatcher.try_hook_key_up(keycode))
             } else {
                 EventDisposition::PassThrough
             }
@@ -393,11 +402,7 @@ fn handle_key(
     } else {
         try_queue_action(action_tx, action)
     };
-    if queued {
-        EventDisposition::Suppress
-    } else {
-        EventDisposition::PassThrough
-    }
+    queued_event_disposition(queued)
 }
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
