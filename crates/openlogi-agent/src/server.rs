@@ -546,13 +546,29 @@ impl RingHapticPlayer {
     /// the next buzz. See [`Self::arm`] for the single-route case this
     /// generalizes (used by the Actions Ring's one active device); the
     /// close-button hover feature arms every opted-in connected device the
-    /// same way, once per eligibility change rather than once per hover.
+    /// same way, on activation and on a periodic re-check rather than once
+    /// per hover.
+    ///
+    /// Merges into whatever the worker hasn't drained yet rather than
+    /// replacing it: an Actions Ring session opening and the close-button
+    /// watcher's periodic re-arm can both queue a request before the worker
+    /// wakes, and overwriting would silently drop one route set's arming —
+    /// its next buzz would be accepted without producing a pulse.
     pub fn arm_many(&self, routes: Vec<DeviceRoute>) {
         if routes.is_empty() {
             return;
         }
         if let Ok(mut pending) = self.pending_arm.lock() {
-            *pending = Some(routes);
+            match pending.as_mut() {
+                Some(queued) => {
+                    let new_routes: Vec<_> = routes
+                        .into_iter()
+                        .filter(|route| !queued.contains(route))
+                        .collect();
+                    queued.extend(new_routes);
+                }
+                None => *pending = Some(routes),
+            }
         }
         let _ = self.tx.send(None);
     }
@@ -621,7 +637,7 @@ pub async fn run(server: AgentServer) {
 #[cfg(test)]
 mod tests {
     use super::{ARM_BUDGET, Budget, PLAY_BUDGET, RingHapticPlayer};
-    use openlogi_hid::HapticWaveform;
+    use openlogi_hid::{DeviceRoute, HapticWaveform};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -639,6 +655,62 @@ mod tests {
         player.play_many(Vec::new(), HapticWaveform::SubtleCollision, "test");
 
         assert!(!rx.has_changed().unwrap_or(true));
+    }
+
+    fn route(slot: u8) -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: "AA00".to_string(),
+            slot,
+        }
+    }
+
+    /// An Actions Ring session opening and the close-button watcher's
+    /// periodic re-arm can both queue a request before the worker drains
+    /// `pending_arm`; a second `arm_many` must add to that queue rather than
+    /// replace it, or one route set's arming is silently dropped and its
+    /// next buzz plays without producing a pulse.
+    #[test]
+    fn arm_many_merges_with_an_already_queued_request_instead_of_replacing_it() {
+        let (tx, _rx) = tokio::sync::watch::channel(None);
+        let player = RingHapticPlayer {
+            tx,
+            pending_arm: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        player.arm_many(vec![route(1)]);
+        player.arm_many(vec![route(2)]);
+
+        let pending = player
+            .pending_arm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("both arm_many calls queued a non-empty route list");
+        assert_eq!(pending, vec![route(1), route(2)]);
+    }
+
+    /// The same route queued twice (e.g. the immediate activation arm and
+    /// the periodic re-arm racing) must not duplicate in the pending set —
+    /// harmless for arming itself, but unbounded growth on a long-running
+    /// watcher is still a bug worth refusing.
+    #[test]
+    fn arm_many_does_not_duplicate_an_already_queued_route() {
+        let (tx, _rx) = tokio::sync::watch::channel(None);
+        let player = RingHapticPlayer {
+            tx,
+            pending_arm: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        player.arm_many(vec![route(1)]);
+        player.arm_many(vec![route(1)]);
+
+        let pending = player
+            .pending_arm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("arm_many queued a non-empty route list");
+        assert_eq!(pending, vec![route(1)]);
     }
 
     /// Attempts share one allowance, so the second gets what the first left —

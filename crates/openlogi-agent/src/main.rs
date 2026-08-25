@@ -46,7 +46,7 @@ use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
-use openlogi_hid::{DeviceRoute, HapticWaveform};
+use openlogi_hid::HapticWaveform;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -435,27 +435,31 @@ async fn request_input_monitoring() {
 /// changes.
 struct CloseButtonWatcher {
     eligibility: tokio::time::Interval,
+    /// Periodically re-asserts firmware arming for every currently eligible
+    /// route, not just newly eligible ones. A system wake or other power
+    /// transition can clear a device's firmware haptic state (see
+    /// `arm_firmware_haptics`) without ever dropping that device out of the
+    /// eligible set — the orchestrator's online tracking doesn't necessarily
+    /// notice a HID++ link blip the way it notices a full reconnect — so
+    /// gating arming on set-membership changes alone can leave a route
+    /// silently disarmed indefinitely. Re-arming is a cheap HID++ read when
+    /// the device is already armed, so a blanket periodic sweep costs little.
+    rearm: tokio::time::Interval,
     rx: Option<tokio::sync::mpsc::UnboundedReceiver<bool>>,
-    /// Routes armed as of the last eligibility check, so a route that drops
-    /// out and comes back (device sleeps/reconnects while at least one other
-    /// eligible device keeps the watcher running) gets re-armed too — a power
-    /// transition can silently clear a device's firmware haptic state without
-    /// ever taking the whole route set empty, so gating arming on the
-    /// none-to-some transition alone would miss it.
-    armed_routes: Vec<DeviceRoute>,
 }
 
 impl CloseButtonWatcher {
     fn new() -> Self {
         Self {
             eligibility: tokio::time::interval(Duration::from_millis(500)),
+            rearm: tokio::time::interval(Duration::from_secs(120)),
             rx: None,
-            armed_routes: Vec::new(),
         }
     }
 
-    /// Wait for the next eligibility recheck or hover-enter, whichever comes
-    /// first, and act on it. Callers just `.await` this in their select loop.
+    /// Wait for the next eligibility recheck, periodic re-arm, or
+    /// hover-enter, whichever comes first, and act on it. Callers just
+    /// `.await` this in their select loop.
     async fn tick(
         &mut self,
         orchestrator: &Mutex<Orchestrator>,
@@ -464,20 +468,12 @@ impl CloseButtonWatcher {
         tokio::select! {
             _ = self.eligibility.tick() => {
                 let routes = orchestrator.lock().await.close_button_haptic_routes();
-                // Re-assert firmware haptics for every route that wasn't
-                // eligible last check — first activation, a newly opted-in
-                // device, or a reconnect after a power transition that
-                // cleared the firmware's armed state.
-                let newly_eligible: Vec<DeviceRoute> = routes
-                    .iter()
-                    .filter(|route| !self.armed_routes.contains(route))
-                    .cloned()
-                    .collect();
-                ring_haptics.arm_many(newly_eligible);
-                let has_routes = !routes.is_empty();
-                self.armed_routes = routes;
-                match (&self.rx, has_routes) {
+                match (&self.rx, !routes.is_empty()) {
                     (None, true) => {
+                        // First activation: arm immediately so the very
+                        // first hover after opting in produces feedback
+                        // instead of waiting for the next periodic re-arm.
+                        ring_haptics.arm_many(routes);
                         self.rx = Some(watchers::close_button_haptics::spawn(Duration::from_millis(50)));
                     }
                     // Dropping the receiver is the whole "stop" — the `Poll`
@@ -485,6 +481,10 @@ impl CloseButtonWatcher {
                     (Some(_), false) => self.rx = None,
                     _ => {}
                 }
+            }
+            _ = self.rearm.tick() => {
+                let routes = orchestrator.lock().await.close_button_haptic_routes();
+                ring_haptics.arm_many(routes);
             }
             event = async {
                 match self.rx.as_mut() {
