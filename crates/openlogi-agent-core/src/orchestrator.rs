@@ -11,7 +11,7 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
@@ -74,6 +74,9 @@ pub struct SharedRuntime {
     /// Function-key remapper bindings (keycode+modifiers → action). Not
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
     pub keyboard_bindings: crate::runtime::hook::SharedKeyboardBindings,
+    /// Live smooth-scroll preference read by the OS-hook callback without
+    /// taking the orchestrator/config lock.
+    pub smooth_scroll_enabled: Arc<AtomicBool>,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
     /// One capture plan per online device — what to divert and how to
     /// dispatch, keyed by the device the events arrive on. Carries each
@@ -193,6 +196,7 @@ impl Orchestrator {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
+            smooth_scroll_enabled: Arc::new(AtomicBool::new(config.app_settings.smooth_scroll)),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
@@ -750,6 +754,9 @@ impl Orchestrator {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.config = config;
+        self.shared
+            .smooth_scroll_enabled
+            .store(self.config.app_settings.smooth_scroll, Ordering::Relaxed);
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self

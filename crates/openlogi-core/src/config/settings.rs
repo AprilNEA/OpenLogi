@@ -190,6 +190,13 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
+    /// Whether ordinary mouse-wheel input is replaced with a finite smooth
+    /// scroll animation. **Off by default**: while enabled the OS hook
+    /// suppresses eligible physical wheel events only after its non-blocking
+    /// scroll worker accepts them. Trackpad and other continuous pixel input
+    /// remains native.
+    #[serde(default)]
+    pub smooth_scroll: bool,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -359,6 +366,7 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             capture_mouse_events: true,
+            smooth_scroll: false,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
