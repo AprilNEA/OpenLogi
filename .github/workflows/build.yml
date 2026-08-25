@@ -31,6 +31,9 @@ on:
       linux_result:
         description: Result of the Linux packages build job.
         value: ${{ jobs.results.outputs.linux }}
+      linux_flatpak_result:
+        description: Result of the Linux Flatpak bundle build job.
+        value: ${{ jobs.results.outputs.linux_flatpak }}
   # PR builds are opt-in: add the `needs: build` label to produce unsigned
   # installers for testing. `closed` / unlabel cancel an in-flight run via
   # concurrency (jobs below no-op on those actions).
@@ -875,6 +878,126 @@ jobs:
           name: OpenLogi-linux-packages-${{ matrix.arch }}
           path: dist/*
 
+  # The same tree the .deb/.rpm are cut from, packaged as a single-file Flatpak
+  # bundle for the distributions where neither is native. Separate from
+  # linux-packages rather than folded into it: this build compiles the whole
+  # workspace again inside the Flatpak SDK, where the runner's rust-cache cannot
+  # reach, so pairing them would tie a thirty-minute job to an hour-long one and
+  # lose the .deb when the Flatpak leg failed.
+  linux-flatpak:
+    name: Linux Flatpak (${{ matrix.arch }})
+    needs: should-build
+    if: ${{ needs.should-build.outputs.run == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    # Measured at ~10 minutes cold on ubuntu-latest, so this is a bound on a
+    # hang rather than an estimate — sized like linux-packages' 30 above, with
+    # room for the arm runner being slower.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # Native builds, like the packages above: the bundle is labelled with this
+      # arch, so a mismatched runner would ship a wrongly-named file.
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          case "$(uname -m)" in
+            x86_64) got=amd64 ;;
+            aarch64) got=arm64 ;;
+            *) echo "unexpected machine $(uname -m)" >&2; exit 1 ;;
+          esac
+          test "$got" = "$EXPECTED_ARCH"
+
+      - name: Install flatpak and the runtime
+        env:
+          RUNTIME_VERSION: "25.08"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # llvm20 because openlogi-camera pulls v4l2-sys-mit, whose build
+          # script runs bindgen and dlopens libclang; the base SDK ships none.
+          flatpak install --user -y --noninteractive flathub \
+            "org.freedesktop.Platform//${RUNTIME_VERSION}" \
+            "org.freedesktop.Sdk//${RUNTIME_VERSION}" \
+            "org.freedesktop.Sdk.Extension.llvm20//${RUNTIME_VERSION}"
+
+      # AppStream is what software centres read, and a stale <release> would
+      # advertise a version the bundle is not. Both values come from the tree
+      # being built rather than from an input, so the label cannot drift from
+      # the binaries the way a version passed by hand can.
+      - name: Stamp the AppStream release
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          # The commit's own date, not today's: a rebuild of an old tag must
+          # not claim to have been released the day it was rebuilt.
+          released="$(git log -1 --format=%cs)"
+          echo "stamping ${version} (${released})"
+          python3 - "$version" "$released" <<'PY'
+          import re, sys
+          version, released = sys.argv[1], sys.argv[2]
+          path = "packaging/linux/flatpak/org.openlogi.OpenLogi.metainfo.xml"
+          text = open(path, encoding="utf-8").read()
+          text, n = re.subn(
+              r'<release version="[^"]*" date="[^"]*"/>',
+              f'<release version="{version}" date="{released}"/>',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("no <release> element to stamp in " + path)
+          open(path, "w", encoding="utf-8").write(text)
+          PY
+          grep '<release ' packaging/linux/flatpak/org.openlogi.OpenLogi.metainfo.xml
+
+      - name: Build the bundle
+        env:
+          PKG_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # --disable-rofiles-fuse: the copy-on-write mount flatpak-builder
+          # prefers needs a FUSE mount the runner will not always grant, and
+          # failing that way looks like a build error rather than an
+          # environment one. The build is a throwaway tree here, so the
+          # protection it provides buys nothing.
+          flatpak-builder --user --disable-rofiles-fuse --force-clean \
+            --repo=repo --default-branch=stable \
+            build packaging/linux/flatpak/org.openlogi.OpenLogi.yml
+
+          mkdir -p dist
+          ref_name="${GITHUB_REF_NAME:-dev}"
+          ref_name="${ref_name//\//-}"
+          # --runtime-repo so installing the bundle knows where to get the
+          # runtime it needs; without it the install fails on a machine that
+          # does not already have the freedesktop platform.
+          flatpak build-bundle \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            repo "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.flatpak" \
+            org.openlogi.OpenLogi stable
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenLogi-linux-flatpak-${{ matrix.arch }}
+          path: dist/*
+          # Already a compressed OSTree stream; zipping it again buys nothing.
+          compression-level: 0
+
   # Single owner of the GitHub Release. softprops/action-gh-release@v3 creates the
   # release as a draft, uploads every asset to that (mutable) draft, then publishes
   # it as its final step — so the release only becomes immutable once all DMGs and
@@ -889,13 +1012,14 @@ jobs:
   results:
     name: Build results
     if: ${{ always() }}
-    needs: [should-build, macos, windows, windows-msi, linux-packages]
+    needs: [should-build, macos, windows, windows-msi, linux-packages, linux-flatpak]
     runs-on: ubuntu-latest
     outputs:
       macos: ${{ needs.macos.result }}
       windows: ${{ needs.windows.result }}
       windows_msi: ${{ needs['windows-msi'].result }}
       linux: ${{ needs['linux-packages'].result }}
+      linux_flatpak: ${{ needs['linux-flatpak'].result }}
     steps:
       - name: Summarize
         run: |
@@ -903,3 +1027,4 @@ jobs:
           echo "windows=${{ needs.windows.result }}"
           echo "windows-msi=${{ needs['windows-msi'].result }}"
           echo "linux-packages=${{ needs['linux-packages'].result }}"
+          echo "linux-flatpak=${{ needs['linux-flatpak'].result }}"
