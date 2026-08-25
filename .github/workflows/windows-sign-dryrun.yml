@@ -59,7 +59,7 @@ jobs:
 
       - name: Load Azure signing config from 1Password
         id: azure_config
-        uses: 1password/load-secrets-action@v5
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
