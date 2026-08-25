@@ -255,6 +255,64 @@ impl AppState {
             .edit(|config| config.app_settings.smooth_scroll = enabled);
         self.persist_and_reload("smooth scroll");
     }
+    /// Set vertical acceleration strength factor (0.2 to 2.0).
+    pub fn set_vertical_acceleration(&mut self, factor: f64) {
+        let factor = factor.clamp(0.2, 2.0);
+        if (self.config.app_settings.vertical_acceleration - factor).abs() < f64::EPSILON {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.vertical_acceleration = factor);
+        self.persist_and_reload("vertical acceleration factor");
+    }
+    /// Set vertical acceleration max gain (1.0 to 3.0).
+    pub fn set_vertical_max_gain(&mut self, max_gain: f64) {
+        let max_gain = max_gain.clamp(1.0, 3.0);
+        if (self.config.app_settings.vertical_max_gain - max_gain).abs() < f64::EPSILON {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.vertical_max_gain = max_gain);
+        self.persist_and_reload("vertical max gain");
+    }
+    /// Reset vertical acceleration parameters to default (enabled=true, factor=1.0, max_gain=2.5).
+    pub fn reset_vertical_acceleration_preferences(&mut self) {
+        self.config.edit(|config| {
+            config.app_settings.vertical_acceleration_enabled = true;
+            config.app_settings.vertical_acceleration = 1.0;
+            config.app_settings.vertical_max_gain = 2.5;
+        });
+        self.persist_and_reload("reset vertical acceleration");
+    }
+    /// Set horizontal acceleration strength factor (0.2 to 2.0).
+    pub fn set_horizontal_acceleration(&mut self, factor: f64) {
+        let factor = factor.clamp(0.2, 2.0);
+        if (self.config.app_settings.horizontal_acceleration - factor).abs() < f64::EPSILON {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.horizontal_acceleration = factor);
+        self.persist_and_reload("horizontal acceleration factor");
+    }
+    /// Set horizontal acceleration max gain (1.0 to 3.0).
+    pub fn set_horizontal_max_gain(&mut self, max_gain: f64) {
+        let max_gain = max_gain.clamp(1.0, 3.0);
+        if (self.config.app_settings.horizontal_max_gain - max_gain).abs() < f64::EPSILON {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.horizontal_max_gain = max_gain);
+        self.persist_and_reload("horizontal max gain");
+    }
+    /// Reset horizontal acceleration parameters to default (enabled=false, factor=1.0, max_gain=2.0).
+    pub fn reset_horizontal_acceleration_preferences(&mut self) {
+        self.config.edit(|config| {
+            config.app_settings.horizontal_acceleration_enabled = false;
+            config.app_settings.horizontal_acceleration = 1.0;
+            config.app_settings.horizontal_max_gain = 2.0;
+        });
+        self.persist_and_reload("reset horizontal acceleration");
+    }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. No-op
     /// when unchanged; disk failures restore the persisted value.
@@ -265,24 +323,6 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.vertical_scroll_sensitivity = sensitivity);
         self.persist_and_reload("vertical scroll sensitivity");
-    }
-    /// Toggle vertical mouse-wheel acceleration and persist it.
-    pub fn set_vertical_acceleration_enabled(&mut self, enabled: bool) {
-        if self.config.app_settings.vertical_acceleration_enabled == enabled {
-            return;
-        }
-        self.config
-            .edit(|config| config.app_settings.vertical_acceleration_enabled = enabled);
-        self.persist_and_reload("vertical acceleration enabled");
-    }
-    /// Toggle horizontal mouse-wheel acceleration and persist it.
-    pub fn set_horizontal_acceleration_enabled(&mut self, enabled: bool) {
-        if self.config.app_settings.horizontal_acceleration_enabled == enabled {
-            return;
-        }
-        self.config
-            .edit(|config| config.app_settings.horizontal_acceleration_enabled = enabled);
-        self.persist_and_reload("horizontal acceleration enabled");
     }
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
         if self.config.app_settings.auto_download_assets == enabled {

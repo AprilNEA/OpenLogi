@@ -88,6 +88,63 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 }
 
 #[test]
+fn scroll_acceleration_settings_persist_clamp_and_reset() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    // Initial defaults
+    assert!(state.app_settings().vertical_acceleration_enabled);
+    assert_eq!(state.app_settings().vertical_acceleration, 1.0);
+    assert_eq!(state.app_settings().vertical_max_gain, 2.5);
+    assert!(!state.app_settings().horizontal_acceleration_enabled);
+    assert_eq!(state.app_settings().horizontal_acceleration, 1.0);
+    assert_eq!(state.app_settings().horizontal_max_gain, 2.0);
+
+    // Setters with bounds clamping
+    state.set_vertical_acceleration(1.5);
+    assert_eq!(state.app_settings().vertical_acceleration, 1.5);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+
+    state.set_vertical_acceleration(5.0); // Out of bounds -> clamps to 2.0
+    assert_eq!(state.app_settings().vertical_acceleration, 2.0);
+
+    state.set_vertical_max_gain(2.8);
+    assert_eq!(state.app_settings().vertical_max_gain, 2.8);
+
+    state.set_horizontal_acceleration_enabled(true);
+    assert!(state.app_settings().horizontal_acceleration_enabled);
+
+    state.set_horizontal_acceleration(0.5);
+    assert_eq!(state.app_settings().horizontal_acceleration, 0.5);
+
+    state.set_horizontal_max_gain(0.5); // Out of bounds -> clamps to 1.0
+    assert_eq!(state.app_settings().horizontal_max_gain, 1.0);
+
+    // Resets
+    state.reset_vertical_acceleration_preferences();
+    assert!(state.app_settings().vertical_acceleration_enabled);
+    assert_eq!(state.app_settings().vertical_acceleration, 1.0);
+    assert_eq!(state.app_settings().vertical_max_gain, 2.5);
+
+    state.reset_horizontal_acceleration_preferences();
+    assert!(!state.app_settings().horizontal_acceleration_enabled);
+    assert_eq!(state.app_settings().horizontal_acceleration, 1.0);
+    assert_eq!(state.app_settings().horizontal_max_gain, 2.0);
+}
+
+#[test]
 fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
     let cache = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

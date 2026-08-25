@@ -8,15 +8,8 @@ use std::time::{Duration, Instant};
 /// Time without wheel input after which acceleration state decays/resets.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Wheel rate threshold (in ticks/second) below which scrolling is considered
-/// slow/deliberate and receives no acceleration (gain = 1.0).
-const REFERENCE_RATE: f64 = 4.0;
-
 /// Smoothing factor for exponential moving average of estimated wheel rate.
 const ALPHA: f64 = 0.4;
-
-/// Scaling denominator for the smooth monotonic gain curve.
-const CURVE_SCALE: f64 = 8.0;
 
 /// Stateful acceleration tracker for a single scroll axis.
 #[derive(Debug, Default, Clone)]
@@ -97,15 +90,11 @@ impl AxisAcceleration {
         self.last_direction = dir;
         self.last_event_time = Some(at);
 
-        let excess_speed = (self.estimated_rate - REFERENCE_RATE).max(0.0);
-        if excess_speed == 0.0 {
-            return 1.0;
-        }
-
-        let curve = excess_speed / (excess_speed + CURVE_SCALE);
-        let gain = 1.0 + (max_gain - 1.0) * curve * acceleration_factor;
-
-        gain.clamp(1.0, max_gain)
+        openlogi_core::scroll::compute_acceleration_gain(
+            self.estimated_rate,
+            acceleration_factor,
+            max_gain,
+        )
     }
 }
 

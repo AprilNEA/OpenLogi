@@ -119,6 +119,10 @@ pub struct SettingsView {
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity_slider: Entity<SliderState>,
     vertical_scroll_sensitivity_slider: Entity<SliderState>,
+    vertical_accel_strength_slider: Entity<SliderState>,
+    vertical_accel_max_gain_slider: Entity<SliderState>,
+    horizontal_accel_strength_slider: Entity<SliderState>,
+    horizontal_accel_max_gain_slider: Entity<SliderState>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -194,6 +198,10 @@ impl SettingsView {
         let thumbwheel_sensitivity_slider = Self::thumbwheel_sensitivity_slider(window, cx);
         let vertical_scroll_sensitivity_slider =
             Self::vertical_scroll_sensitivity_slider(window, cx);
+        let vertical_accel_strength_slider = Self::vertical_accel_strength_slider(window, cx);
+        let vertical_accel_max_gain_slider = Self::vertical_accel_max_gain_slider(window, cx);
+        let horizontal_accel_strength_slider = Self::horizontal_accel_strength_slider(window, cx);
+        let horizontal_accel_max_gain_slider = Self::horizontal_accel_max_gain_slider(window, cx);
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -241,6 +249,10 @@ impl SettingsView {
             asset_source_select,
             thumbwheel_sensitivity_slider,
             vertical_scroll_sensitivity_slider,
+            vertical_accel_strength_slider,
+            vertical_accel_max_gain_slider,
+            horizontal_accel_strength_slider,
+            horizontal_accel_max_gain_slider,
             updater,
             updater_obs,
             copied: false,
@@ -265,6 +277,74 @@ impl SettingsView {
                 .default_value(f32::from(current))
         });
         cx.subscribe_in(&slider, window, Self::on_thumbwheel_sensitivity_slider)
+            .detach();
+        slider
+    }
+
+    fn vertical_accel_strength_slider(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let current = AppState::try_read(cx)
+            .map_or(1.0, |state| state.app_settings().vertical_acceleration);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(20.0)
+                .max(200.0)
+                .default_value((current * 100.0) as f32)
+        });
+        cx.subscribe_in(&slider, window, Self::on_vertical_accel_strength_slider)
+            .detach();
+        slider
+    }
+
+    fn vertical_accel_max_gain_slider(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let current = AppState::try_read(cx)
+            .map_or(2.5, |state| state.app_settings().vertical_max_gain);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(1.0)
+                .max(3.0)
+                .default_value(current as f32)
+        });
+        cx.subscribe_in(&slider, window, Self::on_vertical_accel_max_gain_slider)
+            .detach();
+        slider
+    }
+
+    fn horizontal_accel_strength_slider(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let current = AppState::try_read(cx)
+            .map_or(1.0, |state| state.app_settings().horizontal_acceleration);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(20.0)
+                .max(200.0)
+                .default_value((current * 100.0) as f32)
+        });
+        cx.subscribe_in(&slider, window, Self::on_horizontal_accel_strength_slider)
+            .detach();
+        slider
+    }
+
+    fn horizontal_accel_max_gain_slider(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        let current = AppState::try_read(cx)
+            .map_or(2.0, |state| state.app_settings().horizontal_max_gain);
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(1.0)
+                .max(3.0)
+                .default_value(current as f32)
+        });
+        cx.subscribe_in(&slider, window, Self::on_horizontal_accel_max_gain_slider)
             .detach();
         slider
     }
@@ -307,6 +387,94 @@ impl SettingsView {
                 cx.emit(StateEvent::SettingsChanged);
             });
         }
+        cx.notify();
+    }
+
+    #[expect(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_vertical_accel_strength_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let val = match event {
+            SliderEvent::Change(v) | SliderEvent::Release(v) => v.start(),
+        };
+        let factor = (f64::from(val) / 100.0).clamp(0.2, 2.0);
+        AppState::update(cx, |state, cx| {
+            state.set_vertical_acceleration(factor);
+            cx.emit(StateEvent::SettingsChanged);
+        });
+        cx.notify();
+    }
+
+    #[expect(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_vertical_accel_max_gain_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let val = match event {
+            SliderEvent::Change(v) | SliderEvent::Release(v) => v.start(),
+        };
+        let max_gain = f64::from(val).clamp(1.0, 3.0);
+        AppState::update(cx, |state, cx| {
+            state.set_vertical_max_gain(max_gain);
+            cx.emit(StateEvent::SettingsChanged);
+        });
+        cx.notify();
+    }
+
+    #[expect(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_horizontal_accel_strength_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let val = match event {
+            SliderEvent::Change(v) | SliderEvent::Release(v) => v.start(),
+        };
+        let factor = (f64::from(val) / 100.0).clamp(0.2, 2.0);
+        AppState::update(cx, |state, cx| {
+            state.set_horizontal_acceleration(factor);
+            cx.emit(StateEvent::SettingsChanged);
+        });
+        cx.notify();
+    }
+
+    #[expect(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_horizontal_accel_max_gain_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let val = match event {
+            SliderEvent::Change(v) | SliderEvent::Release(v) => v.start(),
+        };
+        let max_gain = f64::from(val).clamp(1.0, 3.0);
+        AppState::update(cx, |state, cx| {
+            state.set_horizontal_max_gain(max_gain);
+            cx.emit(StateEvent::SettingsChanged);
+        });
         cx.notify();
     }
 
@@ -441,6 +609,10 @@ impl Render for SettingsView {
             })
             .page(general::general_page(
                 self.vertical_scroll_sensitivity_slider.clone(),
+                self.vertical_accel_strength_slider.clone(),
+                self.vertical_accel_max_gain_slider.clone(),
+                self.horizontal_accel_strength_slider.clone(),
+                self.horizontal_accel_max_gain_slider.clone(),
                 self.thumbwheel_sensitivity_slider.clone(),
             ))
             .page(updates::updates_page(self.updater.clone()));
