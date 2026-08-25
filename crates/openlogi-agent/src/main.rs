@@ -18,6 +18,7 @@
 mod binary_watch;
 mod launch_agent;
 mod logging;
+mod notify;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "windows")]
@@ -28,6 +29,8 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
+mod tray_battery;
+mod tray_glyph;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 
@@ -39,6 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::battery_alert::BatteryAlerts;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
@@ -46,6 +50,7 @@ use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime, hook};
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
+use openlogi_core::device::BatteryLevel;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -144,6 +149,57 @@ fn main() {
 }
 
 /// Start the HID++ background sessions that do not need Accessibility.
+/// Feed the tray's battery surfaces from a fresh inventory snapshot.
+///
+/// Split out of `run`'s select loop so that loop stays readable — and because
+/// the three surfaces have genuinely different cadences: the rows are a cheap
+/// unconditional write the tray reads only when its menu opens, the glyph
+/// wakes the tray thread but only when its rendered state changed, and the
+/// alerts are a pure fold that fires at most once per level crossing.
+///
+/// Both settings are read from the live config rather than latched at startup,
+/// so an IPC `reload_config` takes effect on the next tick with no restart.
+fn update_tray_battery(
+    orchestrator: &Orchestrator,
+    inventories: &[openlogi_core::device::DeviceInventory],
+    battery_alerts: &mut BatteryAlerts,
+) {
+    if let Some(tooltip) = tray_battery::publish(inventories) {
+        #[cfg(target_os = "windows")]
+        tray_windows::request_tooltip(tooltip);
+        #[cfg(not(target_os = "windows"))]
+        let _ = tooltip;
+    }
+
+    // Published unconditionally, style included: the shell keeps whatever icon
+    // it was last handed, so simply not sending updates while the battery
+    // style is off would strand a stale glyph on screen. `publish` filters
+    // repeats, so this stays a no-op on the overwhelming majority of ticks.
+    if let Some(icon) = tray_glyph::publish(orchestrator.tray_icon_style(), inventories) {
+        #[cfg(target_os = "windows")]
+        tray_windows::request_icon(icon);
+        #[cfg(not(target_os = "windows"))]
+        let _ = icon;
+    }
+
+    if !orchestrator.battery_alerts() {
+        return;
+    }
+    for alert in battery_alerts.evaluate(inventories) {
+        let severity = match alert.level {
+            BatteryLevel::Critical => "critical",
+            _ => "low",
+        };
+        notify::notify(
+            "OpenLogi",
+            &format!(
+                "{} battery {severity} — {}% remaining",
+                alert.name, alert.percentage
+            ),
+        );
+    }
+}
+
 fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
@@ -366,6 +422,20 @@ fn stop_hook(hook: &mut Option<Hook>, inputs: &InputServices) {
     inputs.scroll_input.cancel_hooks();
 }
 
+/// Reconcile the agent's launch-at-login autostart (clearing the legacy GUI
+/// LaunchAgent with it) and prompt for the permissions the hook needs, before
+/// `config` moves into the orchestrator.
+///
+/// Returns the hook kill-switch, which the select loop reads again later.
+/// Startup-only on purpose (like `show_in_menu_bar`): flipping it requires an
+/// agent restart, which the config docs state.
+fn reconcile_startup(config: &Config) -> bool {
+    launch_agent::reconcile(config.app_settings.launch_at_login);
+    let capture_mouse_events = config.app_settings.capture_mouse_events;
+    prompt_missing_accessibility(capture_mouse_events);
+    capture_mouse_events
+}
+
 /// Prompt for Accessibility when the enabled mouse hook needs it.
 fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
@@ -408,6 +478,7 @@ async fn apply_inventory_event(
     event: watchers::inventory::InventoryEvent,
     orchestrator: &Mutex<Orchestrator>,
     #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: &AtomicBool,
+    battery_alerts: &mut BatteryAlerts,
 ) {
     match event {
         watchers::inventory::InventoryEvent::Snapshot {
@@ -426,6 +497,7 @@ async fn apply_inventory_event(
                 orchestrator.reapply_volatile_on_next_refresh();
             }
             orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+            update_tray_battery(&orchestrator, &inventories, battery_alerts);
         }
         watchers::inventory::InventoryEvent::Unavailable => {
             orchestrator.lock().await.mark_inventory_unavailable();
@@ -455,16 +527,7 @@ async fn run(
     #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
     mut uninstalled: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
-    // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
-    // LaunchAgent, before `config` moves into the orchestrator.
-    launch_agent::reconcile(config.app_settings.launch_at_login);
-
-    // Read the hook kill-switch before `config` moves into the orchestrator.
-    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
-    // an agent restart, which the config docs state.
-    let capture_mouse_events = config.app_settings.capture_mouse_events;
-
-    prompt_missing_accessibility(capture_mouse_events);
+    let capture_mouse_events = reconcile_startup(&config);
     #[cfg(target_os = "macos")]
     request_input_monitoring().await;
 
@@ -533,6 +596,9 @@ async fn run(
     // select stops polling a permanently-ready closed receiver.
     let mut inventory_open = true;
     let mut camera_open = true;
+    // Alert bookkeeping lives with the loop that drives it; nothing else in
+    // the agent needs to see which devices have already warned.
+    let mut battery_alerts = BatteryAlerts::default();
     loop {
         tokio::select! {
             event = inventory_rx.recv(), if inventory_open => if let Some(event) = event {
@@ -541,6 +607,7 @@ async fn run(
                     &orchestrator,
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     &resume_pending,
+                    &mut battery_alerts,
                 )
                 .await;
             } else {

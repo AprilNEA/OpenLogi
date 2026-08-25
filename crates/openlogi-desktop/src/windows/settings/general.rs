@@ -5,6 +5,9 @@ use super::{
     SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled, ThumbwheelSensitivity,
     VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
+#[cfg(target_os = "windows")]
+use openlogi_core::config::TrayIconStyle;
+
 use crate::ui::theme::Typography as _;
 
 pub(super) fn general_page(
@@ -110,6 +113,11 @@ pub(super) fn general_page(
         }),
     );
 
+    // Battery surfaces on the tray icon. Windows-only for now; the macOS
+    // menu-bar item gains the same controls when it learns to render them.
+    #[cfg(target_os = "windows")]
+    let group = with_battery_items(group);
+
     SettingPage::new(tr!("General"))
         .icon(IconName::Settings)
         .resettable(false)
@@ -168,4 +176,59 @@ fn sensitivity_field(
                     .child(format!("({})", rust_i18n::t!("Default"))),
             )
         })
+}
+
+/// The tray-battery switches, split out of [`general_page`] to keep that
+/// function inside the workspace's line budget.
+///
+/// Windows-only in this milestone: these controls drive surfaces only the
+/// Windows tray renders today, and shipping a switch that does nothing on
+/// macOS would be worse than shipping no switch.
+#[cfg(target_os = "windows")]
+fn with_battery_items(group: SettingGroup) -> SettingGroup {
+    group
+        .item(
+            SettingItem::new(
+                tr!("Low battery alerts"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx).is_some_and(|s| s.app_settings().battery_alerts)
+                    },
+                    |enabled, cx| {
+                        AppState::update(cx, move |state, cx| {
+                            state.set_battery_alerts(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
+                        });
+                    },
+                ),
+            )
+            .description(tr!(
+                "Notify once when a device's battery runs low, and again if it goes critical. Requires the notification-area icon above."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Show battery on the tray icon"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx).is_some_and(|s| {
+                            s.app_settings().tray_icon_style == TrayIconStyle::Battery
+                        })
+                    },
+                    |enabled, cx| {
+                        AppState::update(cx, move |state, cx| {
+                            state.set_tray_icon_style(if enabled {
+                                TrayIconStyle::Battery
+                            } else {
+                                TrayIconStyle::Brand
+                            });
+                            cx.emit(StateEvent::SettingsChanged);
+                        });
+                    },
+                ),
+            )
+            .description(tr!(
+                "Replace the OpenLogi mark with a battery indicator for whichever connected device has the least charge."
+            )),
+        )
 }

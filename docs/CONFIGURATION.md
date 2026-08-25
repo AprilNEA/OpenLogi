@@ -41,6 +41,19 @@ optional physical device key.
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
+- `battery_alerts` (default `true`): notify once when a device's battery crosses
+  into the firmware's low level, and again if it reaches critical. The alert
+  re-arms when the device charges or recovers, so one drain produces at most two
+  notifications. Read live — changing it takes effect without restarting the
+  agent. Requires `show_in_menu_bar = true`: on Windows the notification is
+  attached to the notification-area icon, so hiding the icon silences it. The
+  "already alerted" state is held in memory, so restarting the agent re-arms
+  every device.
+- `tray_icon_style` (`brand` or `battery`, default `brand`): what the menu-bar /
+  notification-area icon draws. `battery` replaces the OpenLogi mark with a
+  charge indicator for the connected device with the *lowest* battery; the tray
+  menu lists every device either way. Read live. Windows only at present;
+  ignored on Linux, which has no tray.
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input
