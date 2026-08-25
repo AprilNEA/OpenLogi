@@ -265,12 +265,15 @@ jobs:
           # The Windows binaries and Linux packages get the same minisign
           # treatment as the DMGs: manual verification today, and the future
           # auto-updaters need the detached signatures to exist for every
-          # shipped version.
-          # nullglob: the zip/msi/deb/rpm sets are best-effort per arch leg, so
-          # the globs may match nothing; the DMGs are guaranteed by the publish
-          # gate.
+          # shipped version. The Flatpak bundle is in that set for the same
+          # reason — it is attached to the release and copied to R2 like the
+          # rest, so leaving it unsigned would make it the one installer a user
+          # cannot verify.
+          # nullglob: the zip/msi/deb/rpm/flatpak sets are best-effort per arch
+          # leg, so the globs may match nothing; the DMGs are guaranteed by the
+          # publish gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.flatpak; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
