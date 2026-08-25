@@ -1,7 +1,7 @@
 //! Permissions settings page (macOS / Linux).
 
 #[cfg(target_os = "macos")]
-use super::{AnyElement, App, AppState, InteractiveElement, Permission};
+use super::{App, AppState, InteractiveElement, Permission};
 use super::{IconName, Palette, SettingPage};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
@@ -21,7 +21,7 @@ use openlogi_permissions as permissions;
         reason = "`has_camera` only gates a macOS/Linux row; elsewhere the page is empty"
     )
 )]
-pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
+pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
     let page = SettingPage::new(tr!("Permissions"))
         .icon(IconName::Info)
         .resettable(false);
@@ -47,16 +47,14 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
                         None => PermissionStatus::Unknown,
                     }
                 },
-                pal,
             ))
-            .item(input_monitoring_item(pal))
+            .item(input_monitoring_item())
             .item(permission_item(
                 "perm-bluetooth",
                 tr!("Bluetooth"),
                 tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
                 Permission::Bluetooth,
                 |_| permissions::bluetooth(),
-                pal,
             ));
         // Camera access is only worth asking for once a Logitech webcam is
         // actually connected — it then appears on the main page, and granting
@@ -70,7 +68,6 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
                 ),
                 Permission::Camera,
                 |_| permissions::camera(),
-                pal,
             ));
         }
         page.group(group)
@@ -85,7 +82,8 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
         // when everything is already working.
         SettingItem::new(
             tr!("Input device access"),
-            SettingField::render(move |_, _, _| {
+            SettingField::render(move |_, _, cx| {
+                let pal = theme::palette(cx);
                 let status = permissions::input_device_access();
                 let field = gpui_component::v_flex()
                     .gap_1()
@@ -116,7 +114,7 @@ pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
 }
 
 #[cfg(target_os = "macos")]
-fn input_monitoring_item(pal: Palette) -> SettingItem {
+fn input_monitoring_item() -> SettingItem {
     SettingItem::new(
                 tr!("Input Monitoring"),
                 SettingField::render(move |_, _, cx| {
@@ -139,8 +137,9 @@ fn input_monitoring_item(pal: Palette) -> SettingItem {
                         "perm-input-monitoring",
                         badge,
                         Permission::InputMonitoring,
-                        pal,
+                        cx,
                     ));
+                    let pal = theme::palette(cx);
                     if stalled {
                         field.child(div().text_caption().text_color(pal.text_muted).child(
                             tr!(
@@ -164,11 +163,10 @@ fn permission_item(
     description: SharedString,
     permission: Permission,
     status: impl Fn(&App) -> PermissionStatus + 'static,
-    pal: Palette,
 ) -> SettingItem {
     SettingItem::new(
         title,
-        SettingField::render(move |_, _, cx| permission_field(id, status(cx), permission, pal)),
+        SettingField::render(move |_, _, cx| permission_field(id, status(cx), permission, cx)),
     )
     .description(description)
 }
@@ -201,16 +199,22 @@ fn permission_field(
     id: &'static str,
     status: PermissionStatus,
     permission: Permission,
-    pal: Palette,
+    cx: &App,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     // "Not determined" means never requested — Bluetooth deliberately never is
     // (BLE mice go through IOHIDManager) — so don't label it "Unknown".
     let never_requested = matches!(status, PermissionStatus::Unknown)
         && matches!(permission, Permission::Bluetooth | Permission::Camera);
-    let status_el: AnyElement = if never_requested {
-        badge(tr!("Not requested"), theme::STATUS_OFFLINE, pal).into_any_element()
+    let status_el = if never_requested {
+        badge(tr!("Not requested"), theme::STATUS_OFFLINE, pal)
     } else {
-        status_badge(status, pal).into_any_element()
+        let (label, color) = match status {
+            PermissionStatus::Granted => (tr!("Granted"), theme::STATUS_CONNECTED),
+            PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
+            PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
+        };
+        badge(label, color, pal)
     };
     let prompts_here = never_requested && matches!(permission, Permission::Camera);
     let action_label = if prompts_here {

@@ -181,8 +181,9 @@ impl Render for CameraPreview {
                 tr!("Live preview isn't available on this platform yet."),
                 pal,
             )
+            .into_any_element()
         } else if granted {
-            note(tr!("Starting preview…"), pal)
+            note(tr!("Starting preview…"), pal).into_any_element()
         } else if matches!(
             openlogi_camera::camera_authorization(),
             CameraAuthorization::Undetermined
@@ -198,7 +199,7 @@ impl Render for CameraPreview {
                 .on_click(|_, _, cx| crate::features::camera::request_camera_access(cx))
                 .into_any_element()
         } else {
-            note(tr!("Enable Camera access in Settings to preview."), pal)
+            note(tr!("Enable Camera access in Settings to preview."), pal).into_any_element()
         };
 
         v_flex()
@@ -221,10 +222,9 @@ fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
 }
 
-fn note(text: impl Into<SharedString>, pal: Palette) -> AnyElement {
+fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
     div()
         .text_body()
         .text_color(pal.text_muted)
         .child(text.into())
-        .into_any_element()
 }

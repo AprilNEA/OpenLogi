@@ -2,7 +2,7 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and an attention bar shown only when action is required.
 
-use gpui::{AnyElement, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
+use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -12,7 +12,7 @@ use gpui_component::{
 };
 
 use crate::app::menu::OpenConfigFolder;
-use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, FOOTER_H, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
@@ -22,7 +22,8 @@ use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 /// bounded: the connecting frame downgrades to the static
 /// [`unreachable_body`] when no snapshot arrives, and the scanning state ends
 /// with the agent reporting `Ready` or `Unavailable`.
-pub(super) fn loading_body(caption: SharedString, pal: Palette) -> Div {
+pub(super) fn loading_body(caption: SharedString, cx: &App) -> Div {
+    let pal = theme::palette(cx);
     v_flex()
         .items_center()
         .justify_center()
@@ -36,7 +37,8 @@ pub(super) fn loading_body(caption: SharedString, pal: Palette) -> Div {
 /// no animation: these frames can stay up indefinitely, and an infinite
 /// animation would pin the render loop for as long as they do (the same
 /// reasoning as the status dot's fixed glow).
-pub(super) fn notice_body(headline: SharedString, caption: SharedString, pal: Palette) -> Div {
+pub(super) fn notice_body(headline: SharedString, caption: SharedString, cx: &App) -> Div {
+    let pal = theme::palette(cx);
     v_flex()
         .items_center()
         .justify_center()
@@ -63,34 +65,31 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, pal: Pa
 /// neutral: no chrome, no claims about permissions or devices. If the agent
 /// stays unreachable, the IPC client downgrades the link and
 /// [`unreachable_body`] replaces this frame.
-pub(super) fn connecting_body(pal: Palette) -> AnyElement {
-    loading_body(tr!("Connecting to the background service…"), pal)
-        .size_full()
-        .into_any_element()
+pub(super) fn connecting_body(cx: &App) -> Div {
+    loading_body(tr!("Connecting to the background service…"), cx).size_full()
 }
 
 /// Whole-window frame once the agent has been unreachable well past startup:
 /// the spinner would be a lie at this point. Polling (and the spawn retry)
 /// keeps running underneath, and the first snapshot swaps the real UI back in.
-pub(super) fn unreachable_body(pal: Palette) -> AnyElement {
+pub(super) fn unreachable_body(cx: &App) -> Div {
     notice_body(
         tr!("Can't reach the background service"),
         tr!("OpenLogi keeps retrying — if this persists, try reinstalling the app."),
-        pal,
+        cx,
     )
     .size_full()
-    .into_any_element()
 }
 
 /// Whole-window frame when the *agent* answered with a newer IPC protocol
 /// than this process speaks: the app bundle was updated while this window
 /// stayed open, and only a relaunch loads the new GUI. Without this frame the
 /// window would keep showing live-looking but frozen state.
-pub(super) fn outdated_gui_body(pal: Palette) -> AnyElement {
+pub(super) fn outdated_gui_body(cx: &App) -> Div {
     notice_body(
         tr!("OpenLogi was updated"),
         tr!("This window is from the previous version — relaunch to finish the update."),
-        pal,
+        cx,
     )
     .size_full()
     .child(
@@ -99,12 +98,11 @@ pub(super) fn outdated_gui_body(pal: Palette) -> AnyElement {
             .label(tr!("Relaunch OpenLogi"))
             .on_click(|_, _, cx| cx.restart()),
     )
-    .into_any_element()
 }
 
 /// Fail-closed frame for config load/save/conflict/reload failures.
-pub(super) fn config_issue_body(message: SharedString, pal: Palette) -> AnyElement {
-    notice_body(tr!("Configuration"), message, pal)
+pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
+    notice_body(tr!("Configuration"), message, cx)
         .size_full()
         .child(
             h_flex()
@@ -121,13 +119,13 @@ pub(super) fn config_issue_body(message: SharedString, pal: Palette) -> AnyEleme
                         .on_click(|_, _, cx| cx.restart()),
                 ),
         )
-        .into_any_element()
 }
 
 /// Contextual attention bar. Normal operation has no footer; this row appears
 /// only after the user dismissed the permission gate while Accessibility is
 /// still unavailable.
-pub(super) fn attention_footer(pal: Palette) -> impl IntoElement {
+pub(super) fn attention_footer(cx: &App) -> impl IntoElement {
+    let pal = theme::palette(cx);
     h_flex()
         .h(px(FOOTER_H))
         .flex_shrink_0()

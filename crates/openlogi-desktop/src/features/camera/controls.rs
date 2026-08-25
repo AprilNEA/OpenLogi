@@ -12,8 +12,8 @@
 //! a single batched device-open.
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
+    App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
@@ -727,15 +727,15 @@ impl Render for CameraControlsPanel {
             panel = panel.child(section_label(tr!("Lens"), pal).mt_1());
         }
         for ix in lens {
-            panel = panel.child(control_row(self, ix, cx, pal));
+            panel = panel.child(control_row(self, ix, cx));
         }
         if !image.is_empty() && self.sliders.len() != image.len() {
             panel = panel.child(section_label(tr!("Image"), pal).mt_1());
         }
         for ix in image {
-            panel = panel.child(control_row(self, ix, cx, pal));
+            panel = panel.child(control_row(self, ix, cx));
         }
-        panel.child(reset_button(pal, cx)).into_any_element()
+        panel.child(reset_button(cx)).into_any_element()
     }
 }
 
@@ -756,7 +756,7 @@ fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usize> {
 }
 
 /// The one-click profile chips: built-ins, saved customs, then Save.
-fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
+fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
     let state = AppState::try_read(cx);
     let active = state.and_then(|s| s.camera_active_profile(key));
     let customs: Vec<String> = state
@@ -798,7 +798,7 @@ fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> AnyElement 
             },
         )),
     );
-    row.into_any_element()
+    row
 }
 
 /// One compact control line: label · slider · live value (· Auto chip when the
@@ -807,8 +807,8 @@ fn control_row(
     panel: &CameraControlsPanel,
     ix: usize,
     cx: &Context<CameraControlsPanel>,
-    pal: Palette,
-) -> AnyElement {
+) -> gpui::Stateful<gpui::Div> {
+    let pal = theme::palette(cx);
     let slider = &panel.sliders[ix];
     if slider.control == CameraControl::PowerLineFrequency
         && [1, 2, 3]
@@ -911,7 +911,7 @@ fn control_row(
     }
     row = row.child(auto_cell);
 
-    row.into_any_element()
+    row
 }
 
 fn frequency_row(
@@ -919,7 +919,7 @@ fn frequency_row(
     ix: usize,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
     let current = from_slider(slider.state.read(cx).value().start());
     let mut choices = h_flex().flex_1().justify_end().gap_1();
@@ -991,7 +991,6 @@ fn frequency_row(
                 .child(slider.label.clone()),
         )
         .child(choices)
-        .into_any_element()
 }
 
 fn binary_control_row(
@@ -999,7 +998,7 @@ fn binary_control_row(
     ix: usize,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
     let on = from_slider(slider.state.read(cx).value().start()) != 0;
     let accent = rgb(ACCENT_BLUE);
@@ -1056,32 +1055,28 @@ fn binary_control_row(
                     );
                 })),
         )
-        .into_any_element()
 }
 
-fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
-    h_flex()
-        .w_full()
-        .justify_end()
-        .child(
-            BaseButton::new("camera-controls-reset")
-                .accessibility_label(tr!("Reset to defaults"))
-                .px_2p5()
-                .py_0p5()
-                .rounded_md()
-                .border_1()
-                .border_color(pal.border)
-                .bg(pal.control)
-                .hover(|s| s.bg(pal.control_hover))
-                .focus_visible(|s| s.bg(pal.control_hover))
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("Reset to defaults"))
-                .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
-                    panel.reset(window, cx);
-                })),
-        )
-        .into_any_element()
+fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
+    let pal = theme::palette(cx);
+    h_flex().w_full().justify_end().child(
+        BaseButton::new("camera-controls-reset")
+            .accessibility_label(tr!("Reset to defaults"))
+            .px_2p5()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .bg(pal.control)
+            .hover(|s| s.bg(pal.control_hover))
+            .focus_visible(|s| s.bg(pal.control_hover))
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!("Reset to defaults"))
+            .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
+                panel.reset(window, cx);
+            })),
+    )
 }
 
 fn chip_hover_fill(selected: bool, pal: Palette) -> gpui::Hsla {
