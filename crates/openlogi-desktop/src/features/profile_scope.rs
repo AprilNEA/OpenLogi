@@ -409,7 +409,8 @@ impl RenderOnce for ProfileScopeBar {
 }
 
 /// Profile inheritance and active-app context shown above the device canvas.
-pub(crate) fn profile_canvas_status(pal: Palette, cx: &App) -> Option<gpui::Div> {
+pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
+    let pal = theme::palette(cx);
     let state = AppState::try_read(cx)?;
     if !state.current_device_is_persistent() {
         return None;

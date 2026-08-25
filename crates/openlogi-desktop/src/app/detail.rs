@@ -51,9 +51,9 @@ const POINTER_CARD_MIN_W: Rems = rems(20.75);
 /// the device name and status here.
 pub(super) fn detail_header(
     record: Option<&DeviceRecord>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
     let online = record.map(|r| r.online);
     let battery = record
@@ -104,9 +104,9 @@ pub(super) fn detail_content(
     app_catalog: &gpui::Entity<AppCatalogPicker>,
     tabs: &[DetailTab],
     active: DetailTab,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);

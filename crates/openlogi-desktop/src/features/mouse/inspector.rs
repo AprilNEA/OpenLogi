@@ -23,7 +23,7 @@ use super::view::MouseModelView;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_button, control_input};
-use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -49,9 +49,9 @@ pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     action_search: &Entity<InputState>,
     view: &Entity<MouseModelView>,
-    pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
+    let pal = theme::palette(cx);
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,

@@ -269,8 +269,7 @@ impl Render for MouseModelView {
         let highlight = self.hovered.or(active);
         let view = cx.entity();
         let hovered = self.hovered;
-        let pal = theme::palette(cx);
-        let profile_status = profile_canvas_status(pal, cx);
+        let profile_status = profile_canvas_status(cx);
 
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
@@ -321,7 +320,6 @@ impl Render for MouseModelView {
             },
             &self.action_search,
             &view,
-            pal,
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
@@ -973,7 +971,6 @@ mod tests {
                 },
                 &view.action_search,
                 &entity,
-                theme::palette(cx),
                 cx,
             );
         });

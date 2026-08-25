@@ -591,7 +591,7 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(camera_target, cx));
             (
-                detail::detail_header(record.as_ref(), pal, cx).into_any_element(),
+                detail::detail_header(record.as_ref(), cx).into_any_element(),
                 detail::detail_content(
                     &detail::DetailPanels {
                         mouse_model: &self.mouse_model,
@@ -608,7 +608,6 @@ impl Render for AppView {
                     &self.app_catalog,
                     &tabs,
                     active,
-                    pal,
                     cx,
                 )
                 .into_any_element(),
