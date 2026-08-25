@@ -200,7 +200,7 @@ fn permission_field(
     status: PermissionStatus,
     permission: Permission,
     cx: &App,
-) -> impl IntoElement {
+) -> gpui::Div {
     let pal = theme::palette(cx);
     // "Not determined" means never requested — Bluetooth deliberately never is
     // (BLE mice go through IOHIDManager) — so don't label it "Unknown".
