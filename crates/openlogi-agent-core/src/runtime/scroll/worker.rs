@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,40 +19,82 @@ use crate::runtime::HidppSessionId;
 const INPUT_QUEUE_CAPACITY: usize = 128;
 /// Bounds graceful process shutdown if platform injection stops returning.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-const SMOOTH_SCROLL_FLAG: u8 = 0x80;
-const SENSITIVITY_MASK: u8 = !SMOOTH_SCROLL_FLAG;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollPreferenceSnapshot {
+    pub smooth_scroll: bool,
+    pub vertical_sensitivity: VerticalScrollSensitivity,
+    pub vertical_acceleration_enabled: bool,
+    pub vertical_acceleration: f64,
+    pub vertical_max_gain: f64,
+    pub horizontal_acceleration_enabled: bool,
+    pub horizontal_acceleration: f64,
+    pub horizontal_max_gain: f64,
+}
 
-#[derive(Clone, Copy)]
-struct ScrollPreferenceSnapshot {
-    smooth_scroll: bool,
-    vertical_sensitivity: VerticalScrollSensitivity,
+impl From<&openlogi_core::config::AppSettings> for ScrollPreferenceSnapshot {
+    fn from(settings: &openlogi_core::config::AppSettings) -> Self {
+        Self {
+            smooth_scroll: settings.smooth_scroll,
+            vertical_sensitivity: settings.vertical_scroll_sensitivity,
+            vertical_acceleration_enabled: settings.vertical_acceleration_enabled,
+            vertical_acceleration: settings.vertical_acceleration,
+            vertical_max_gain: settings.vertical_max_gain,
+            horizontal_acceleration_enabled: settings.horizontal_acceleration_enabled,
+            horizontal_acceleration: settings.horizontal_acceleration,
+            horizontal_max_gain: settings.horizontal_max_gain,
+        }
+    }
 }
 
 /// Atomically published settings read from input callbacks and the scroll
 /// worker without taking the orchestrator's config lock.
-///
-/// The smooth-scroll flag occupies the high bit and the validated `1..=100`
-/// sensitivity occupies the low seven bits. One byte therefore publishes a
-/// consistent settings snapshot instead of two independently changing values.
 pub struct ScrollPreferences {
-    encoded: AtomicU8,
+    snapshot: std::sync::RwLock<ScrollPreferenceSnapshot>,
 }
 
 impl ScrollPreferences {
-    /// Create a live settings cell from validated config values.
+    /// Create live scroll settings from full app settings.
     #[must_use]
-    pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
+    pub fn from_app_settings(settings: &openlogi_core::config::AppSettings) -> Self {
         Self {
-            encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
+            snapshot: std::sync::RwLock::new(ScrollPreferenceSnapshot::from(settings)),
         }
     }
 
-    /// Publish both settings as one snapshot.
+    /// Create a live settings cell from validated config values.
+    #[must_use]
+    pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
+        let mut snapshot =
+            ScrollPreferenceSnapshot::from(&openlogi_core::config::AppSettings::default());
+        snapshot.smooth_scroll = smooth_scroll;
+        snapshot.vertical_sensitivity = vertical_sensitivity;
+        Self {
+            snapshot: std::sync::RwLock::new(snapshot),
+        }
+    }
+
+    /// Publish updated settings snapshot from AppSettings.
+    pub fn publish_app_settings(&self, settings: &openlogi_core::config::AppSettings) {
+        if let Ok(mut lock) = self.snapshot.write() {
+            *lock = ScrollPreferenceSnapshot::from(settings);
+        }
+    }
+
+    /// Publish smooth_scroll and vertical_sensitivity.
     pub fn publish(&self, smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) {
-        self.encoded.store(
-            Self::encode(smooth_scroll, vertical_sensitivity),
-            Ordering::Relaxed,
-        );
+        if let Ok(mut lock) = self.snapshot.write() {
+            lock.smooth_scroll = smooth_scroll;
+            lock.vertical_sensitivity = vertical_sensitivity;
+        }
+    }
+
+    /// Load a snapshot of current scroll settings.
+    #[must_use]
+    pub fn load(&self) -> ScrollPreferenceSnapshot {
+        *self
+            .snapshot
+            .read()
+            .expect("scroll preferences lock poisoned")
     }
 
     /// Whether finite smooth scrolling is currently enabled.
@@ -65,24 +107,6 @@ impl ScrollPreferences {
     #[must_use]
     pub fn vertical_sensitivity(&self) -> VerticalScrollSensitivity {
         self.load().vertical_sensitivity
-    }
-
-    fn encode(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> u8 {
-        let sensitivity = u8::from(vertical_sensitivity);
-        debug_assert_eq!(sensitivity & SMOOTH_SCROLL_FLAG, 0);
-        sensitivity | if smooth_scroll { SMOOTH_SCROLL_FLAG } else { 0 }
-    }
-
-    fn load(&self) -> ScrollPreferenceSnapshot {
-        let encoded = self.encoded.load(Ordering::Relaxed);
-        let raw_sensitivity = encoded & SENSITIVITY_MASK;
-        let Ok(vertical_sensitivity) = VerticalScrollSensitivity::try_new(raw_sensitivity) else {
-            unreachable!("ScrollPreferences is initialized and published from validated values");
-        };
-        ScrollPreferenceSnapshot {
-            smooth_scroll: encoded & SMOOTH_SCROLL_FLAG != 0,
-            vertical_sensitivity,
-        }
     }
 }
 
@@ -144,19 +168,20 @@ impl ScrollInputHandle {
             return false;
         };
         let preferences = self.preferences.load();
-        let Some(scaled) =
-            impulse.with_vertical_scale(preferences.vertical_sensitivity.scroll_multiplier())
-        else {
-            return false;
-        };
+        let vertical_scaled = impulse.y != 0.0
+            && (preferences.vertical_sensitivity.scroll_multiplier() != 1.0
+                || preferences.vertical_acceleration_enabled);
+        let horizontal_scaled =
+            impulse.x != 0.0 && preferences.horizontal_acceleration_enabled;
+
         let output = if preferences.smooth_scroll {
             ScrollOutputMode::Smooth { at: Instant::now() }
-        } else if scaled != impulse {
+        } else if vertical_scaled || horizontal_scaled {
             ScrollOutputMode::Direct
         } else {
             return false;
         };
-        self.try_enqueue(ScrollSource::current_hook(), scaled, output)
+        self.try_enqueue(ScrollSource::current_hook(), impulse, output)
     }
 
     /// Queue one diverted thumb-wheel impulse from an active HID++ session.
@@ -345,6 +370,7 @@ fn run_worker(
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
     let mut engine = ScrollEngine::default();
+    let mut accel_engine = super::ScrollAccelerationEngine::default();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
     let mut overflow_cancelled_sources = HashSet::new();
@@ -383,15 +409,41 @@ fn run_worker(
                 if input.generation == generation
                     && !overflow_cancelled_sources.contains(&input.source) =>
             {
-                match input.output {
-                    ScrollOutputMode::Smooth { at } if preferences.smooth_scroll_enabled() => {
-                        engine.impulse(input.source, input.impulse, at, emit_smooth);
+                let prefs = preferences.load();
+                let at = match input.output {
+                    ScrollOutputMode::Smooth { at } => at,
+                    ScrollOutputMode::Direct => Instant::now(),
+                };
+                let (gain_x, gain_y) = accel_engine.compute_gains(
+                    input.impulse.x,
+                    input.impulse.y,
+                    at,
+                    prefs.vertical_acceleration_enabled,
+                    prefs.vertical_acceleration,
+                    prefs.vertical_max_gain,
+                    prefs.horizontal_acceleration_enabled,
+                    prefs.horizontal_acceleration,
+                    prefs.horizontal_max_gain,
+                );
+                let scaled_impulse = WheelDelta {
+                    x: input.impulse.x * gain_x,
+                    y: input.impulse.y * prefs.vertical_sensitivity.scroll_multiplier() * gain_y,
+                };
+
+                if scaled_impulse.x.is_finite()
+                    && scaled_impulse.y.is_finite()
+                    && !scaled_impulse.is_zero()
+                {
+                    match input.output {
+                        ScrollOutputMode::Smooth { .. } if prefs.smooth_scroll => {
+                            engine.impulse(input.source, scaled_impulse, at, emit_smooth);
+                        }
+                        ScrollOutputMode::Direct => {
+                            engine.cancel_source(&input.source, emit_smooth);
+                            emit_direct(scaled_impulse);
+                        }
+                        ScrollOutputMode::Smooth { .. } => {}
                     }
-                    ScrollOutputMode::Direct => {
-                        engine.cancel_source(&input.source, emit_smooth);
-                        emit_direct(input.impulse);
-                    }
-                    ScrollOutputMode::Smooth { .. } => {}
                 }
             }
             Ok(ScrollCommand::CancelSource(source)) => {
@@ -418,9 +470,14 @@ mod tests {
     }
 
     fn preferences(smooth_scroll: bool, sensitivity: u8) -> Arc<ScrollPreferences> {
-        Arc::new(ScrollPreferences::new(
-            smooth_scroll,
-            self::sensitivity(sensitivity),
+        Arc::new(ScrollPreferences::from_app_settings(
+            &openlogi_core::config::AppSettings {
+                smooth_scroll,
+                vertical_scroll_sensitivity: self::sensitivity(sensitivity),
+                vertical_acceleration_enabled: false,
+                horizontal_acceleration_enabled: false,
+                ..Default::default()
+            },
         ))
     }
 
@@ -478,7 +535,7 @@ mod tests {
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
 
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
+        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 2.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Direct));
     }
 
@@ -488,7 +545,7 @@ mod tests {
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
 
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
+        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 2.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
     }
 
@@ -519,7 +576,7 @@ mod tests {
         preferences.publish(true, sensitivity(28));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
+        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 1.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
     }
 

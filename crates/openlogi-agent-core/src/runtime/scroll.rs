@@ -6,8 +6,10 @@
 //! never enters this runtime, so native trackpad and continuous wheel streams
 //! cannot be mixed with wheel ticks.
 
+pub(crate) mod acceleration;
 mod worker;
 
+pub use acceleration::{AxisAcceleration, ScrollAccelerationEngine};
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
 use std::collections::HashMap;
@@ -58,11 +60,6 @@ impl WheelDelta {
             x: self.x * factor,
             y: self.y * factor,
         }
-    }
-
-    fn with_vertical_scale(self, factor: f64) -> Option<Self> {
-        let y = self.y * factor;
-        y.is_finite().then_some(Self { x: self.x, y })
     }
 
     fn post(self) {

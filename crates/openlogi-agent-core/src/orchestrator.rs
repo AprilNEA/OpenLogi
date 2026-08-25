@@ -197,9 +197,8 @@ impl Orchestrator {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
-            scroll_preferences: Arc::new(ScrollPreferences::new(
-                config.app_settings.smooth_scroll,
-                config.app_settings.vertical_scroll_sensitivity,
+            scroll_preferences: Arc::new(ScrollPreferences::from_app_settings(
+                &config.app_settings,
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
@@ -763,10 +762,9 @@ impl Orchestrator {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.config = config;
-        self.shared.scroll_preferences.publish(
-            self.config.app_settings.smooth_scroll,
-            self.config.app_settings.vertical_scroll_sensitivity,
-        );
+        self.shared
+            .scroll_preferences
+            .publish_app_settings(&self.config.app_settings);
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self

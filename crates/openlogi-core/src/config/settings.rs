@@ -138,7 +138,7 @@ pub enum AssetSourcePreference {
 ///
 /// All fields are `#[serde(default)]` so adding a new one is backward
 /// compatible — old config files just keep the default for the new field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -204,6 +204,24 @@ pub struct AppSettings {
     /// continuous pixel input is never scaled.
     #[serde(default)]
     pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
+    /// Whether vertical mouse-wheel acceleration is enabled.
+    #[serde(default = "default_true")]
+    pub vertical_acceleration_enabled: bool,
+    /// Vertical acceleration strength multiplier.
+    #[serde(default = "default_acceleration_factor")]
+    pub vertical_acceleration: f64,
+    /// Maximum upper bound for vertical acceleration gain.
+    #[serde(default = "default_vertical_max_gain")]
+    pub vertical_max_gain: f64,
+    /// Whether horizontal mouse-wheel acceleration is enabled.
+    #[serde(default)]
+    pub horizontal_acceleration_enabled: bool,
+    /// Horizontal acceleration strength multiplier.
+    #[serde(default = "default_acceleration_factor")]
+    pub horizontal_acceleration: f64,
+    /// Maximum upper bound for horizontal acceleration gain.
+    #[serde(default = "default_horizontal_max_gain")]
+    pub horizontal_max_gain: f64,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -455,6 +473,12 @@ impl Default for AppSettings {
             capture_mouse_events: true,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
+            vertical_acceleration_enabled: true,
+            vertical_acceleration: 1.0,
+            vertical_max_gain: 2.5,
+            horizontal_acceleration_enabled: false,
+            horizontal_acceleration: 1.0,
+            horizontal_max_gain: 2.0,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
@@ -476,6 +500,18 @@ impl Default for AppSettings {
 /// out-of-the-box behavior.
 fn default_true() -> bool {
     true
+}
+
+const fn default_acceleration_factor() -> f64 {
+    1.0
+}
+
+const fn default_vertical_max_gain() -> f64 {
+    2.5
+}
+
+const fn default_horizontal_max_gain() -> f64 {
+    2.0
 }
 
 /// Per-device RGB lighting: a single static color, brightness, and on/off.
