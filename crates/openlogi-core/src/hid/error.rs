@@ -133,6 +133,9 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read or write a `0x8100 OnboardProfiles` onboard-memory sector.
+    /// Appended last — variant order is wire format.
+    OnboardProfiles,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

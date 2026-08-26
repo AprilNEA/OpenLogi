@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfileBindings, PairingError, PasskeyMethod,
+    ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -59,7 +59,12 @@ pub use succession::Identity;
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
-pub const PROTOCOL_VERSION: u32 = 28;
+/// v29: `HidppOperation::OnboardProfiles` appended for `0x8100` diagnostics'
+///      error classification.
+/// v30: `Capabilities::onboard_profiles` appended;
+///      [`Agent::read_onboard_profile_bindings`] added (read-only G-series
+///      onboard-profile button-binding display).
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -533,4 +538,11 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Read and decode `route`'s active onboard profile (HID++ `0x8100
+    /// OnboardProfiles`) button bindings — read-only. G-series gaming mice
+    /// expose `0x8100` instead of `ReprogControls`, so this is how the GUI
+    /// shows their real bindings without a Buttons panel to drive them.
+    async fn read_onboard_profile_bindings(
+        route: DeviceRoute,
+    ) -> Result<OnboardProfileBindings, WriteError>;
 }

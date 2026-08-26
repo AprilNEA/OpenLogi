@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+pub use hidpp::feature::onboard_profiles::OnboardProfilesInfo;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
@@ -10,6 +11,7 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::onboard_profiles::OnboardProfilesFeature,
     feature::unified_battery::UnifiedBatteryFeature,
     protocol::v20::Hidpp20Error,
 };
@@ -140,6 +142,139 @@ pub async fn dump_reprog_controls(
         Ok(entries)
     })
     .await
+}
+
+/// Diagnostic, read-only probe of the HID++ `0x8100 OnboardProfiles` feature.
+///
+/// G-series gaming mice (e.g. the G502 X / G502 X LIGHTSPEED families) expose
+/// no `ReprogControls` (`0x1b00`–`0x1b04`) at all, which is why
+/// `Capabilities::buttons` never becomes true for them and the desktop app's
+/// Buttons panel never appears — see `openlogi-core/src/device.rs`. Both
+/// devices do expose `0x8100`, the feature Logitech's gaming line actually
+/// uses for on-device profile and button-assignment storage.
+pub async fn dump_onboard_profiles_info(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<OnboardProfilesInfo, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles.get_info().await.map_err(|e| {
+            classify_hidpp_error(
+                e,
+                HidppOperation::OnboardProfiles,
+                OnboardProfilesFeature::ID,
+            )
+        })
+    })
+    .await
+}
+
+/// Diagnostic, read-only probe of which profile is currently active on the
+/// device via `0x8100`'s `GET_CURRENT_PROFILE`. `0` means no profile is
+/// active (onboard mode off / host-driven, e.g. under G Hub).
+pub async fn dump_onboard_current_profile(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<u8, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles.get_current_profile().await.map_err(|e| {
+            classify_hidpp_error(
+                e,
+                HidppOperation::OnboardProfiles,
+                OnboardProfilesFeature::ID,
+            )
+        })
+    })
+    .await
+}
+
+/// Diagnostic, read-only dump of one onboard-memory sector via `0x8100`'s
+/// `MEMORY_READ`. `sector_size` should come from a prior
+/// [`dump_onboard_profiles_info`] call. Sector `0x0000` is the profile
+/// directory on every device libratbag documents; see
+/// `hidpp::feature::onboard_profiles` for what is (and is not) decoded from
+/// it yet.
+pub async fn dump_onboard_profiles_sector(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    sector: u16,
+    sector_size: u16,
+) -> Result<Vec<u8>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles
+            .read_sector(sector, sector_size)
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(
+                    e,
+                    HidppOperation::OnboardProfiles,
+                    OnboardProfilesFeature::ID,
+                )
+            })
+    })
+    .await
+}
+
+/// Writes a full sector of onboard memory via `0x8100`'s `MEMORY_ADDR_WRITE`
+/// / `MEMORY_WRITE` / `MEMORY_WRITE_END`, stamping a fresh CRC over `data`
+/// first — see `hidpp::feature::onboard_profiles::OnboardProfilesFeature::
+/// write_sector`. This performs a real write to onboard flash; callers are
+/// responsible for reading the sector back afterwards to confirm it landed
+/// as intended.
+pub async fn write_onboard_profiles_sector(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    sector: u16,
+    data: Vec<u8>,
+) -> Result<(), WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut data = data;
+        let onboard_profiles = open_onboard_profiles(&channel, index).await?;
+        onboard_profiles
+            .write_sector(sector, &mut data)
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(
+                    e,
+                    HidppOperation::OnboardProfiles,
+                    OnboardProfilesFeature::ID,
+                )
+            })
+    })
+    .await
+}
+
+/// Resolves `0x8100`'s feature index on `device_index` and returns it bound
+/// to a fresh [`Device`], shared by every `OnboardProfiles` diagnostic above
+/// (and by the sibling `onboard_profiles` module's bindings decoder).
+pub(super) async fn open_onboard_profiles(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Arc<OnboardProfilesFeature>, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let info = device
+        .root()
+        .get_feature(OnboardProfilesFeature::ID)
+        .await
+        .map_err(|e| {
+            classify_hidpp_error(
+                e,
+                HidppOperation::OnboardProfiles,
+                OnboardProfilesFeature::ID,
+            )
+        })?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: OnboardProfilesFeature::ID,
+        })?;
+    Ok(device.add_feature::<OnboardProfilesFeature>(info.index))
 }
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`

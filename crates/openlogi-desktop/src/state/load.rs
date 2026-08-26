@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, SmartShiftStatus};
+use openlogi_core::hid::{DpiInfo, OnboardProfileBindings, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -30,3 +30,8 @@ pub type DpiStatus = Load<Arc<DpiInfo>>;
 /// stores wheel mode / threshold / torque in its own non-volatile memory, so the
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
+
+/// Per-device onboard-profile (`0x8100`) button-binding load state. See
+/// [`Load`]. Read-only — there is no write path, so unlike [`DpiStatus`] this
+/// is never seeded optimistically.
+pub type OnboardProfileBindingsLoad = Load<Arc<OnboardProfileBindings>>;

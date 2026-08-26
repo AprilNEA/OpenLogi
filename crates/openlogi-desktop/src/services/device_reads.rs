@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{
+    DeviceRoute, DpiInfo, OnboardProfileBindings, SmartShiftStatus, WriteError,
+};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
@@ -13,11 +15,14 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::Command;
-use crate::state::{AppState, DeviceKey, DpiStatus, Load, SmartShiftLoad, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DpiStatus, Load, OnboardProfileBindingsLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
+const ONBOARD_PROFILE_BINDINGS: &str = "onboard-profile-bindings";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -49,6 +54,7 @@ pub(crate) struct DeviceReads {
     next_generation: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
+    onboard_profile_bindings: BTreeMap<DeviceKey, DeviceRead<OnboardProfileBindings>>,
 }
 
 impl DeviceReads {
@@ -100,6 +106,77 @@ impl DeviceReads {
             }
         });
         self.dpi.insert(
+            key,
+            DeviceRead {
+                route,
+                generation,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Start the onboard-profile-bindings query unless the same device route
+    /// is already subscribed. Read-only — there is no `confirm_*`/`set_*_ready`
+    /// counterpart, since nothing ever writes this value.
+    pub(crate) fn ensure_onboard_profile_bindings(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .onboard_profile_bindings
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_onboard_profile_bindings(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let generation = self.take_generation();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| Command::ReadOnboardProfileBindings(route, reply),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !onboard_profile_bindings_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(ONBOARD_PROFILE_BINDINGS, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), onboard_profile_bindings_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(
+                query_state.read(cx),
+                onboard_profile_bindings_error_is_permanent,
+            );
+            if state.device_reads_mut().update_onboard_profile_bindings(
+                &observed_key,
+                generation,
+                load,
+            ) {
+                cx.emit(StateEvent::OnboardProfileBindingsChanged(
+                    observed_key.clone(),
+                ));
+            }
+        });
+        self.onboard_profile_bindings.insert(
             key,
             DeviceRead {
                 route,
@@ -234,6 +311,16 @@ impl DeviceReads {
         self.smartshift.get(key).map(|read| &read.load)
     }
 
+    #[must_use]
+    pub(crate) fn onboard_profile_bindings_status(
+        &self,
+        key: &DeviceKey,
+    ) -> OnboardProfileBindingsLoad {
+        self.onboard_profile_bindings
+            .get(key)
+            .map_or(Load::Unknown, |read| read.load.clone())
+    }
+
     /// Retry an exhausted DPI query without changing its registered fetcher.
     pub(crate) fn retry_dpi(&mut self, key: &DeviceKey) {
         let Some(read) = self.dpi.get_mut(key) else {
@@ -270,10 +357,18 @@ impl DeviceReads {
         }
     }
 
-    /// Forget both feature queries for a device and fence their old flights.
+    /// Forget every feature query for a device and fence their old flights.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
+        self.remove_onboard_profile_bindings(key);
+    }
+
+    pub(crate) fn remove_onboard_profile_bindings(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.onboard_profile_bindings.remove(key) {
+            drop(read);
+            self.clear::<OnboardProfileBindings>(ONBOARD_PROFILE_BINDINGS, key);
+        }
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -296,6 +391,7 @@ impl DeviceReads {
             .dpi
             .keys()
             .chain(self.smartshift.keys())
+            .chain(self.onboard_profile_bindings.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -364,6 +460,26 @@ impl DeviceReads {
         read.load = load;
         true
     }
+
+    fn update_onboard_profile_bindings(
+        &mut self,
+        key: &DeviceKey,
+        generation: u64,
+        load: OnboardProfileBindingsLoad,
+    ) -> bool {
+        let Some(read) = self
+            .onboard_profile_bindings
+            .get_mut(key)
+            .filter(|read| read.generation == generation)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
 }
 
 fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
@@ -415,6 +531,10 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn onboard_profile_bindings_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

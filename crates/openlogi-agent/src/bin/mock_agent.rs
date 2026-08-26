@@ -46,7 +46,7 @@ use openlogi_core::device::{
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
-use openlogi_core::hid::LOGITECH_VENDOR_ID;
+use openlogi_core::hid::{LOGITECH_VENDOR_ID, OnboardProfileBindings};
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
@@ -549,6 +549,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: true,
                     haptic_feedback: true,
                     haptic_panel: true,
+                    onboard_profiles: false,
                 }),
             },
             PairedDevice {
@@ -596,6 +597,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    onboard_profiles: false,
                 }),
             },
         ],
@@ -645,6 +647,7 @@ fn direct_inventory() -> DeviceInventory {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             }),
         }],
     }
@@ -787,6 +790,19 @@ impl Agent for MockAgent {
     }
 
     async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
+
+    async fn read_onboard_profile_bindings(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+    ) -> Result<OnboardProfileBindings, WriteError> {
+        // No scripted mock device exposes 0x8100 — all mock inventories are
+        // ReprogControls-based, same as every real device this project
+        // supported before G-series gaming mice.
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
+    }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;

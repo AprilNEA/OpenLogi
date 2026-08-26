@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{LightCommand, OnboardProfileBindings, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -25,7 +25,7 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    LitraModel, OnboardProfilesInfo, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 
 /// This host's HID stack.
@@ -176,6 +176,50 @@ pub async fn dump_reprog_controls(
     route: &DeviceRoute,
 ) -> Result<Vec<ReprogControlEntry>, WriteError> {
     device::dump_reprog_controls(&*native_backend(), route).await
+}
+
+/// Read the HID++ `0x8100 OnboardProfiles` info of the device `route` reaches.
+pub async fn dump_onboard_profiles_info(
+    route: &DeviceRoute,
+) -> Result<OnboardProfilesInfo, WriteError> {
+    device::dump_onboard_profiles_info(&*native_backend(), route).await
+}
+
+/// Read which onboard profile is currently active (via `0x8100`'s
+/// `GET_CURRENT_PROFILE`) of the device `route` reaches.
+pub async fn dump_onboard_current_profile(route: &DeviceRoute) -> Result<u8, WriteError> {
+    device::dump_onboard_current_profile(&*native_backend(), route).await
+}
+
+/// Read and decode the active onboard profile's button bindings of the
+/// device `route` reaches. See
+/// `openlogi_device::write::dump_onboard_profile_bindings`.
+pub async fn dump_onboard_profile_bindings(
+    route: &DeviceRoute,
+) -> Result<OnboardProfileBindings, WriteError> {
+    device::dump_onboard_profile_bindings(&*native_backend(), route).await
+}
+
+/// Read one onboard-memory sector (via `0x8100`'s `MEMORY_READ`) of the
+/// device `route` reaches.
+pub async fn dump_onboard_profiles_sector(
+    route: &DeviceRoute,
+    sector: u16,
+    sector_size: u16,
+) -> Result<Vec<u8>, WriteError> {
+    device::dump_onboard_profiles_sector(&*native_backend(), route, sector, sector_size).await
+}
+
+/// Write one onboard-memory sector (via `0x8100`'s `MEMORY_ADDR_WRITE` /
+/// `MEMORY_WRITE` / `MEMORY_WRITE_END`) of the device `route` reaches. See
+/// `openlogi_device::write::write_onboard_profiles_sector` — this performs a
+/// real write to onboard flash.
+pub async fn write_onboard_profiles_sector(
+    route: &DeviceRoute,
+    sector: u16,
+    data: Vec<u8>,
+) -> Result<(), WriteError> {
+    device::write_onboard_profiles_sector(&*native_backend(), route, sector, data).await
 }
 
 /// Read the raw battery report of the device `route` reaches.

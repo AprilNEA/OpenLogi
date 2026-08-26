@@ -128,6 +128,11 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// The device stores profiles and button bindings on its own flash via
+    /// HID++ `0x8100 OnboardProfiles` instead of `ReprogControls` — read-only
+    /// display support only so far, see [`crate::hid::onboard_profiles`].
+    #[serde(default)]
+    pub onboard_profiles: bool,
 }
 
 impl Capabilities {
@@ -153,6 +158,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            onboard_profiles: ids.contains(&0x8100),
         }
     }
 
@@ -173,6 +179,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +485,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    onboard_profiles: false,
                 }),
             }],
         }
@@ -545,9 +553,15 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
+        // A G-series gaming mouse: OnboardProfiles (0x8100) instead of
+        // ReprogControls entirely — this is the whole reason G502 X /
+        // G502 X LIGHTSPEED never got a Buttons tab.
+        assert!(Capabilities::from_feature_ids(&[0x0003, 0x8100]).onboard_profiles);
+        assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).onboard_profiles);
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(
@@ -561,6 +575,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             }
         );
         // No driving features → nothing offered.

@@ -33,7 +33,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceRecord, Load, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -570,7 +570,8 @@ fn light_tab(
     )
 }
 
-/// Device tab: device details and configuration cards stacked.
+/// Device tab: device details, configuration, and (G-series gaming mice
+/// only) onboard-profile bindings cards stacked.
 fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
@@ -579,8 +580,98 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
-            .child(configuration_card(pal, cx)),
+            .child(configuration_card(pal, cx))
+            .children(onboard_profile_bindings_card(pal, cx)),
     )
+}
+
+/// Read-only display of the active onboard profile's decoded button
+/// bindings — `None` for any device that doesn't expose HID++ `0x8100`
+/// (i.e. every device except G-series gaming mice, which have no
+/// `ReprogControls`-based Buttons panel to show this in instead).
+///
+/// Deliberately not run through `tr!`: the binding descriptions themselves
+/// are raw device data rendered in English regardless of locale (see
+/// `openlogi_core::hid::onboard_profiles`), and this offset/layout is still
+/// an empirical observation rather than a settled feature — translating
+/// wording likely to change again is wasted translator effort. Revisit once
+/// the decode is on firmer footing.
+fn onboard_profile_bindings_card(
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> Option<impl IntoElement> {
+    let has_onboard_profiles = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .and_then(|record| record.capabilities)
+        .is_some_and(|caps| caps.onboard_profiles);
+    if !has_onboard_profiles {
+        return None;
+    }
+
+    let load = AppState::try_read(cx).map_or(Load::Unknown, AppState::onboard_profile_bindings);
+    let content = match load {
+        Load::Unknown | Load::Loading => div()
+            .text_body()
+            .text_color(pal.text_muted)
+            .child("Reading onboard profile…")
+            .into_any_element(),
+        Load::Failed(_) | Load::Unsupported(_) => div()
+            .text_body()
+            .text_color(pal.text_muted)
+            .child("Could not read onboard profile bindings.")
+            .into_any_element(),
+        Load::Ready(bindings) => {
+            let Some(active_profile) = bindings.active_profile else {
+                return Some(PanelCard::new(
+                    "Onboard profile bindings",
+                    Icon::new(IconName::HardDrive),
+                    div()
+                        .text_body()
+                        .text_color(pal.text_muted)
+                        .child("No onboard profile is active on this device right now.")
+                        .into_any_element(),
+                ));
+            };
+            if bindings.bindings.is_empty() {
+                div()
+                    .text_body()
+                    .text_color(pal.text_muted)
+                    .child(format!("Profile {active_profile} has no decoded bindings."))
+                    .into_any_element()
+            } else {
+                let items = bindings
+                    .bindings
+                    .iter()
+                    .map(|binding| {
+                        DescriptionItem::new(format!("Slot {}", binding.slot))
+                            .value(binding.description.clone())
+                    })
+                    .collect::<Vec<_>>();
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(format!("Active profile: {active_profile}")),
+                    )
+                    .child(
+                        DescriptionList::new()
+                            .columns(1)
+                            .label_width(px(80.))
+                            .bordered(false)
+                            .children(items),
+                    )
+                    .into_any_element()
+            }
+        }
+    };
+
+    Some(PanelCard::new(
+        "Onboard profile bindings",
+        Icon::new(IconName::HardDrive),
+        content,
+    ))
 }
 
 fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {

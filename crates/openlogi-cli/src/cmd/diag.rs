@@ -15,6 +15,8 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod onboard_profiles;
+pub mod onboard_profiles_write_test;
 pub mod smartshift;
 pub mod wheel;
 
@@ -34,6 +36,12 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Dump decoded HID++ 0x8100 OnboardProfiles info, and optionally one
+    /// onboard-memory sector (G-series gaming mice/keyboards).
+    OnboardProfiles(onboard_profiles::OnboardProfilesArgs),
+    /// Round-trip test 0x8100's write path on one sector: read, write the
+    /// same bytes back, read again, compare. Performs a real write.
+    OnboardProfilesWriteTest(onboard_profiles_write_test::OnboardProfilesWriteTestArgs),
 }
 
 impl DiagCmd {
@@ -46,6 +54,8 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::OnboardProfiles(args) => onboard_profiles::run(args).await,
+            Self::OnboardProfilesWriteTest(args) => onboard_profiles_write_test::run(args).await,
         }
     }
 }
