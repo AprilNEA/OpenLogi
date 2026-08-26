@@ -102,11 +102,17 @@ child process is the parent. An agent spawned directly by the GUI therefore asks
 with the **GUI's** identity, and the user's grant to `OpenLogi Agent` appears
 to do nothing.
 
-Two ways to break the chain, both already in the tree
-(`openlogi-desktop/src/services/ipc.rs`):
+Three ways to break the chain, all in the tree
+(`openlogi-desktop/src/services/ipc.rs`), tried in this order:
 
-- packaged helper → `/usr/bin/open -g -n <bundle>` (LaunchServices parents it
-  under launchd, so it is its own responsible process)
+- registered login item → `launchctl kickstart gui/<uid>/<service label>`
+  (launchd spawns it directly: its own responsible process, plus crash
+  respawn from the service plist's `KeepAlive`). The registration itself is
+  `SMAppService` in `openlogi-desktop/src/platform/login_item.rs`, driven by
+  the `launch_at_login` setting.
+- packaged helper, not registered → `/usr/bin/open -g -n <bundle>`
+  (LaunchServices parents it under launchd, so it is its own responsible
+  process — but unsupervised)
 - bare dev binary → `disclaim::Command` (wraps
   `responsibility_spawnattrs_setdisclaim`)
 

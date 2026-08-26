@@ -214,8 +214,10 @@ backstop, not a substitute for running the gate yourself after a rebase.
   "not applied".
 - Each dev run first stops the agent and overlay the previous one left behind — they
   are LaunchServices-launched (for their own TCC identity), not children of the GUI,
-  and a surviving agent relaunches itself ~20 s later. `OPENLOGI_DEV_AGENT=0` opts
-  out of all of it.
+  and a surviving agent relaunches itself ~20 s later — then starts the freshly
+  built agent and waits for its socket, so the GUI's first IPC connect succeeds
+  instead of exercising the production spawn-on-unreachable fallback.
+  `OPENLOGI_DEV_AGENT=0` opts out of all of it.
 - No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock` serves
   a scripted inventory over the dev IPC socket, so the GUI runs unmodified and the
   production app stays untouched.
