@@ -13,6 +13,14 @@ use crate::services::assets::ResolvedAsset;
 /// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
 
+/// Height of a side-label card. The layout needs it to group related cards
+/// without allowing them to overlap at the minimum model height.
+pub(super) const LABEL_H: f32 = 56.;
+
+/// Empty space between the grouped Back and Forward cards when the viewport
+/// has enough room to pull them closer than the regular even spacing.
+const NAVIGATION_GROUP_GAP: f32 = 16.;
+
 /// Whether label cards occupy one or both sides of the device render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabelDistribution {
@@ -168,17 +176,26 @@ pub fn labels_from_hotspots(
         let forward = vertical_order
             .iter()
             .position(|&index| labels[index].id == ButtonId::Forward.into());
-        if let (Some(back), Some(forward)) = (back, forward) {
+        let navigation_pair = if let (Some(back), Some(forward)) = (back, forward) {
             let first = back.min(forward);
             let second = back.max(forward);
             if second > first + 1 {
                 let navigation_button = vertical_order.remove(second);
                 vertical_order.insert(first + 1, navigation_button);
             }
-        }
+            Some((vertical_order[first], vertical_order[first + 1]))
+        } else {
+            None
+        };
         let step = mouse_h / (vertical_order.len() as f32 + 1.);
         for (slot, index) in vertical_order.into_iter().enumerate() {
             labels[index].y = step * (slot as f32 + 1.);
+        }
+        if let Some((first, second)) = navigation_pair {
+            let grouped_step = step.min(LABEL_H + NAVIGATION_GROUP_GAP);
+            let adjustment = (step - grouped_step) / 2.;
+            labels[first].y += adjustment;
+            labels[second].y -= adjustment;
         }
     }
 
@@ -321,6 +338,10 @@ mod tests {
                 MouseControlId::Button(ButtonId::HapticPanel),
             ]
         );
+        let navigation_gap = labels[1].y - labels[0].y;
+        let haptic_gap = labels[2].y - labels[1].y;
+        assert!(navigation_gap < haptic_gap);
+        assert!(navigation_gap >= LABEL_H);
     }
 
     #[test]
