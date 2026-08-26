@@ -101,7 +101,7 @@ fn run_with_channel(
         .collect();
     cmd!(
         sh,
-        "cargo bundle --release --package openlogi-desktop --bin openlogi-desktop --format osx {target_args...}"
+        "cargo bundle --release --package openlogi-desktop --format osx {target_args...}"
     )
     .env("CARGO_BUNDLE_SKIP_BUILD", "1")
     .envs(xcode_env.iter().map(|(key, value)| (key, value)))
