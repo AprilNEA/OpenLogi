@@ -21,6 +21,7 @@ fn litra_ble_collection_is_not_a_hidpp_candidate() {
 fn only_ble_collection_is_long_only() {
     assert!(is_long_only_collection(0xb023, 0xff43, 0x0202)); // BLE vendor collection
     assert!(is_long_only_collection(0xb01d, 0x0001, 0x0002)); // MX Ergo BT fallback
+    assert!(is_long_only_collection(0xb027, 0x0001, 0x0002)); // Ergo M575 BT fallback
     assert!(is_long_only_collection(0xb03e, 0x0001, 0x0002)); // MX Ergo S BT fallback
     assert!(!is_long_only_collection(0xc548, 0xff00, 0x0002)); // receiver has both
     assert!(!is_long_only_collection(0xc33c, 0xff43, 0x0602)); // wired has both
@@ -28,8 +29,9 @@ fn only_ble_collection_is_long_only() {
 }
 
 #[test]
-fn mx_ergo_bluetooth_mouse_collection_is_a_candidate() {
+fn trackball_bluetooth_mouse_collection_is_a_candidate() {
     assert!(is_hidpp_candidate(0x046d, 0xb01d, 0x0001, 0x0002, false));
+    assert!(is_hidpp_candidate(0x046d, 0xb027, 0x0001, 0x0002, false));
     assert!(is_hidpp_candidate(0x046d, 0xb03e, 0x0001, 0x0002, false));
     assert!(!is_hidpp_candidate(0x046d, 0xc548, 0x0001, 0x0002, false));
     assert!(!is_hidpp_candidate(0x046d, 0xb01d, 0x0001, 0x0006, false));
