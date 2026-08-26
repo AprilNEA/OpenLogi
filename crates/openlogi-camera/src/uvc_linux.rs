@@ -35,6 +35,8 @@ const CID_SHARPNESS: u32 = 0x0098_091b;
 const CID_EXPOSURE_AUTO: u32 = 0x009a_0901;
 const CID_EXPOSURE_ABSOLUTE: u32 = 0x009a_0902;
 const CID_EXPOSURE_AUTO_PRIORITY: u32 = 0x009a_0903;
+const CID_PAN_ABSOLUTE: u32 = 0x009a_0908;
+const CID_TILT_ABSOLUTE: u32 = 0x009a_0909;
 const CID_FOCUS_ABSOLUTE: u32 = 0x009a_090a;
 const CID_FOCUS_AUTO: u32 = 0x009a_090c;
 const CID_ZOOM_ABSOLUTE: u32 = 0x009a_090d;
@@ -54,6 +56,8 @@ const EXPOSURE_APERTURE_PRIORITY: i64 = 3;
 fn control_id(control: CameraControl) -> Option<u32> {
     Some(match control {
         CameraControl::Zoom => CID_ZOOM_ABSOLUTE,
+        CameraControl::Pan => CID_PAN_ABSOLUTE,
+        CameraControl::Tilt => CID_TILT_ABSOLUTE,
         CameraControl::Focus => CID_FOCUS_ABSOLUTE,
         CameraControl::Exposure => CID_EXPOSURE_ABSOLUTE,
         CameraControl::PowerLineFrequency => CID_POWER_LINE_FREQUENCY,

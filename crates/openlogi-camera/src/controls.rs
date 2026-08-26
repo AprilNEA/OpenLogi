@@ -7,6 +7,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraControl {
     Zoom,
+    Pan,
+    Tilt,
     Focus,
     Exposure,
     PowerLineFrequency,
@@ -21,8 +23,10 @@ pub enum CameraControl {
 
 impl CameraControl {
     /// Every control, in the order the UI lists them (lens first, then image).
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Zoom,
+        Self::Pan,
+        Self::Tilt,
         Self::Focus,
         Self::Exposure,
         Self::PowerLineFrequency,
@@ -40,6 +44,8 @@ impl CameraControl {
     pub fn name(self) -> &'static str {
         match self {
             Self::Zoom => "zoom",
+            Self::Pan => "pan",
+            Self::Tilt => "tilt",
             Self::Focus => "focus",
             Self::Exposure => "exposure",
             Self::PowerLineFrequency => "power_line_frequency",

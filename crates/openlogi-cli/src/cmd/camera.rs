@@ -25,7 +25,7 @@ pub enum CameraCmd {
     /// Set a control to a value (or an auto toggle to 0/1); persists on the
     /// device.
     Set {
-        /// zoom | focus | exposure | power_line_frequency |
+        /// zoom | pan | tilt | focus | exposure | power_line_frequency |
         /// low_light_compensation | brightness | contrast | saturation |
         /// sharpness | white_balance | tint, or focus_auto | exposure_auto |
         /// white_balance_auto
