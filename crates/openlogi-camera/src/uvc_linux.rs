@@ -27,9 +27,11 @@ const CID_BRIGHTNESS: u32 = 0x0098_0900;
 const CID_CONTRAST: u32 = 0x0098_0901;
 const CID_SATURATION: u32 = 0x0098_0902;
 const CID_AUTO_WHITE_BALANCE: u32 = 0x0098_090c;
+const CID_GAIN: u32 = 0x0098_0913;
 const CID_POWER_LINE_FREQUENCY: u32 = 0x0098_0918;
 const CID_WHITE_BALANCE_TEMPERATURE: u32 = 0x0098_091a;
 const CID_SHARPNESS: u32 = 0x0098_091b;
+const CID_BACKLIGHT_COMPENSATION: u32 = 0x0098_091c;
 
 /// `V4L2_CID_EXPOSURE_AUTO` — the Camera control class base.
 const CID_EXPOSURE_AUTO: u32 = 0x009a_0901;
@@ -66,6 +68,8 @@ fn control_id(control: CameraControl) -> Option<u32> {
         CameraControl::Contrast => CID_CONTRAST,
         CameraControl::Saturation => CID_SATURATION,
         CameraControl::Sharpness => CID_SHARPNESS,
+        CameraControl::Gain => CID_GAIN,
+        CameraControl::BacklightCompensation => CID_BACKLIGHT_COMPENSATION,
         CameraControl::WhiteBalance => CID_WHITE_BALANCE_TEMPERATURE,
         CameraControl::Tint => return None,
     })

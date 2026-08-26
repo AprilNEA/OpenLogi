@@ -387,6 +387,8 @@ pub(super) fn control_label(control: CameraControl) -> SharedString {
         CameraControl::Contrast => tr!("camera.contrast"),
         CameraControl::Saturation => tr!("camera.saturation"),
         CameraControl::Sharpness => tr!("camera.sharpness"),
+        CameraControl::Gain => tr!("camera.gain"),
+        CameraControl::BacklightCompensation => tr!("camera.backlight_compensation"),
         CameraControl::WhiteBalance => tr!("camera.white_balance"),
         CameraControl::Tint => tr!("camera.tint"),
     }
