@@ -99,13 +99,14 @@ fn run_with_channel(
         .into_iter()
         .flat_map(|triple| ["--target", triple])
         .collect();
-    cmd!(
-        sh,
-        "cargo bundle --release --package openlogi-desktop --format osx {target_args...}"
-    )
-    .env("CARGO_BUNDLE_SKIP_BUILD", "1")
-    .envs(xcode_env.iter().map(|(key, value)| (key, value)))
-    .run()?;
+    {
+        let gui_dir = root.join("crates/openlogi-desktop");
+        let _gui = sh.push_dir(gui_dir);
+        cmd!(sh, "cargo bundle --release --format osx {target_args...}")
+            .env("CARGO_BUNDLE_SKIP_BUILD", "1")
+            .envs(xcode_env.iter().map(|(key, value)| (key, value)))
+            .run()?;
+    }
 
     let built_app = release_dir.join("bundle/osx/OpenLogi.app");
     ensure_dir(&built_app)?;
