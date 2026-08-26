@@ -273,6 +273,12 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 4 {
         config.migrate_transport_scoped_keys();
     }
+    // v7 swapped the thumb-wheel scroll defaults to the native firmware
+    // direction, so every released schema — v6 and below — may carry the old
+    // explicit pair that used to mean "keep native scroll".
+    if header.schema_version <= 6 {
+        config.migrate_thumbwheel_native_direction();
+    }
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
 }

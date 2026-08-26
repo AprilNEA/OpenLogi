@@ -49,6 +49,13 @@ use settings::GestureOwner;
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v7 swaps the two thumb-wheel scroll defaults to the wheel's native firmware
+/// direction (up → left, down → right). A pre-v7 file whose thumb-wheel
+/// bindings sit on the old defaults — the pair the GUI's "Horizontal Scroll"
+/// preset wrote — is rewritten onto the new defaults
+/// (see `Config::migrate_thumbwheel_native_direction`) so it keeps scrolling
+/// natively instead of starting to divert into a felt reversal.
+///
 /// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
 ///
 /// v5 also drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
@@ -86,7 +93,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,6 +519,48 @@ impl Config {
                 if let Some((new, _)) = renames.get(target) {
                     *target = new.clone();
                 }
+            }
+        }
+    }
+
+    /// One-time load migration for pre-v7 thumb-wheel scroll pairs.
+    ///
+    /// v7 swapped the two thumb-wheel scroll defaults to the wheel's native
+    /// firmware direction (see `binding::defaults`). A pre-v7 device whose
+    /// thumb-wheel trio sits entirely on the old defaults — the explicit pair
+    /// the GUI's "Horizontal Scroll" preset wrote — never diverted and
+    /// scrolled natively; left as written it would now differ from the new
+    /// defaults and divert into a felt reversal, so the pair is rewritten onto
+    /// the new defaults and keeps feeling exactly as it did. Any other
+    /// thumb-wheel binding means the wheel was already diverted with every
+    /// explicit direction injecting the action it names, which the swap does
+    /// not change — those devices, and per-app overlay entries (whose
+    /// old-default values were equally inert pre-v7), are left as written.
+    #[cfg(feature = "fs")]
+    fn migrate_thumbwheel_native_direction(&mut self) {
+        let old_up = Binding::Single(Action::HorizontalScrollRight);
+        let old_down = Binding::Single(Action::HorizontalScrollLeft);
+        for device in self.devices.values_mut() {
+            let trio_on_old_defaults = device
+                .bindings
+                .get(&ButtonId::ThumbwheelScrollUp)
+                .is_none_or(|binding| *binding == old_up)
+                && device
+                    .bindings
+                    .get(&ButtonId::ThumbwheelScrollDown)
+                    .is_none_or(|binding| *binding == old_down)
+                && device
+                    .bindings
+                    .get(&ButtonId::Thumbwheel)
+                    .is_none_or(|binding| *binding == Binding::Single(Action::None));
+            if !trio_on_old_defaults {
+                continue;
+            }
+            if let Some(binding) = device.bindings.get_mut(&ButtonId::ThumbwheelScrollUp) {
+                *binding = Binding::Single(Action::HorizontalScrollLeft);
+            }
+            if let Some(binding) = device.bindings.get_mut(&ButtonId::ThumbwheelScrollDown) {
+                *binding = Binding::Single(Action::HorizontalScrollRight);
             }
         }
     }

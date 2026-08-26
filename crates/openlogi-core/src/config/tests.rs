@@ -1047,6 +1047,91 @@ Click = \"Paste\"
 }
 
 #[test]
+fn migrates_pre_v7_thumbwheel_pair_on_old_defaults_to_the_new_defaults() {
+    // The pair the pre-v7 GUI wrote for "Horizontal Scroll": it equaled the
+    // old defaults, so the wheel never diverted and scrolled natively. On the
+    // new defaults it must land as the (swapped) new default pair to keep not
+    // diverting.
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+}
+
+#[test]
+fn pre_v7_thumbwheel_migration_leaves_a_customized_trio_alone() {
+    // A nondefault thumb-wheel binding meant the wheel was already diverted,
+    // with every explicit direction injecting the action it names — the
+    // default swap changes nothing for it, so nothing may be rewritten.
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"NextTab\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::NextTab))
+    );
+}
+
+#[test]
+fn v7_thumbwheel_reversed_pair_survives_a_reload() {
+    // Post-v7 the old default pair is exactly what the GUI's "Horizontal
+    // Scroll (Reversed)" preset writes; the version gate is what keeps the
+    // migration from undoing that choice on every load.
+    let v7 = "\
+schema_version = 7
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v7).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v7");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+}
+
+#[test]
 fn migration_gesture_map_wins_over_legacy_single_gesture_button_entry() {
     // The data-loss guard: when a legacy single button_bindings[GestureButton]
     // entry coexists with a gesture_bindings map (reachable via hand-edited

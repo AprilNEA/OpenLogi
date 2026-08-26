@@ -533,6 +533,22 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
     }
 }
 
+#[test]
+fn thumbwheel_defaults_to_the_scroll_its_firmware_already_does() {
+    // Same constraint as the wheel tilt above, with a sharper failure mode: a
+    // seed that doesn't match the wheel's native direction (up → left) makes
+    // the swapped binding pair a felt no-op and turns any other divert cause
+    // (a sensitivity change) into a silent direction flip.
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollUp),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollDown),
+        Action::HorizontalScrollRight
+    );
+}
+
 // ── Effect classification ─────────────────────────────────────────────────
 //
 // `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three
