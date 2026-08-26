@@ -2,6 +2,8 @@
 
 use super::{AppState, StateEvent};
 use gpui::Context;
+#[cfg(target_os = "windows")]
+use openlogi_core::config::TrayIconStyle;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
     UiScale, VerticalScrollSensitivity,
@@ -48,6 +50,39 @@ impl AppState {
             .edit(|config| config.app_settings.show_in_menu_bar = enabled);
         self.persist_and_reload("show-in-menu-bar setting");
     }
+    /// Toggle low-battery notifications and persist them. The agent reads the
+    /// value live on its next inventory tick, so the reload this triggers is
+    /// enough — no restart, unlike [`Self::set_show_in_menu_bar`]. No-op when
+    /// unchanged.
+    ///
+    /// Gated to Windows, matching the switch that drives it: the notification
+    /// is a balloon on the tray icon, so without a tray there is nothing to
+    /// attach it to. M2 widens this and its switch together, when the macOS
+    /// menu-bar item can render the same surfaces.
+    #[cfg(target_os = "windows")]
+    pub fn set_battery_alerts(&mut self, enabled: bool) {
+        if self.config.app_settings.battery_alerts == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.battery_alerts = enabled);
+        self.persist_and_reload("battery-alerts setting");
+    }
+
+    /// Switch the tray icon between the brand mark and a battery indicator and
+    /// persist it. Read live by the agent. No-op when unchanged.
+    ///
+    /// Windows-only for the same reason as [`Self::set_battery_alerts`].
+    #[cfg(target_os = "windows")]
+    pub fn set_tray_icon_style(&mut self, style: TrayIconStyle) {
+        if self.config.app_settings.tray_icon_style == style {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_icon_style = style);
+        self.persist_and_reload("tray-icon-style setting");
+    }
+
     /// Toggle the opt-in update check and persist it. No immediate side
     /// effect beyond the next launch reading the new value. No-op when
     /// unchanged.

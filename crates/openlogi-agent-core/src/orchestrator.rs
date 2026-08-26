@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, LightSettings, ScrollResolution, TrayIconStyle};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
@@ -722,6 +722,22 @@ impl Orchestrator {
             self.inventory = InventoryState::Unavailable;
             self.publish_inventory();
         }
+    }
+
+    /// Whether low-battery notifications are enabled in the current config.
+    ///
+    /// Read on every inventory tick rather than latched at startup, so
+    /// `reload_config` makes the toggle take effect immediately.
+    #[must_use]
+    pub fn battery_alerts(&self) -> bool {
+        self.config.app_settings.battery_alerts
+    }
+
+    /// What the tray icon should draw, per the current config. Read live, as
+    /// [`Self::battery_alerts`] is.
+    #[must_use]
+    pub fn tray_icon_style(&self) -> TrayIconStyle {
+        self.config.app_settings.tray_icon_style
     }
 
     /// Foreground-app change → re-overlay per-app bindings on the hook maps and

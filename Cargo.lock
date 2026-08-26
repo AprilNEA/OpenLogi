@@ -5373,6 +5373,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-ipc",
  "plist",
+ "resvg 0.46.0",
  "succession",
  "sysinfo 0.38.4",
  "tarpc",

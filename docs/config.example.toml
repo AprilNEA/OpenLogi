@@ -7,6 +7,12 @@ launch_at_login = true
 check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
+# Notify once when a device's battery gets low (and again if it goes critical).
+# Re-arms after charging or recovery. Needs show_in_menu_bar = true.
+battery_alerts = true
+# What the tray icon draws: "brand" (the OpenLogi mark) or "battery"
+# (a charge indicator for the lowest device). Windows only for now.
+tray_icon_style = "brand"
 capture_mouse_events = true
 smooth_scroll = false
 vertical_scroll_sensitivity = 14

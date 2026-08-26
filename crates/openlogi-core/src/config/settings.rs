@@ -134,6 +134,22 @@ pub enum AssetSourcePreference {
     Fastly,
 }
 
+/// What the agent's menu-bar / notification-area icon draws.
+///
+/// `Brand` (the default) is the OpenLogi mark the tray has always shown.
+/// `Battery` replaces it with a charge indicator for the online device with
+/// the *lowest* battery — the tray is a warning surface, so it shows whichever
+/// device is closest to dying. The tray menu lists every device either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayIconStyle {
+    /// The OpenLogi brand mark. Unchanged from every release before this one.
+    #[default]
+    Brand,
+    /// A battery indicator for the lowest-charge online device.
+    Battery,
+}
+
 /// App-wide preferences not tied to any particular device.
 ///
 /// All fields are `#[serde(default)]` so adding a new one is backward
@@ -180,6 +196,23 @@ pub struct AppSettings {
     /// while a window is open). Ignored on Linux.
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
+    /// Whether the agent raises a one-shot notification when a device's
+    /// battery crosses into the firmware's `Low` (and then `Critical`) level.
+    /// `true` (default). Read live on every inventory tick, so flipping it
+    /// takes effect without an agent restart — unlike
+    /// [`Self::show_in_menu_bar`].
+    ///
+    /// Requires the tray to be visible: on Windows the notification is a
+    /// balloon attached to the notification-area icon, so
+    /// `show_in_menu_bar = false` leaves nothing to attach it to and silences
+    /// the alert.
+    #[serde(default = "default_true")]
+    pub battery_alerts: bool,
+    /// What the menu-bar / notification-area icon draws — the brand mark
+    /// (default) or a battery indicator. Read live, as
+    /// [`Self::battery_alerts`] is. Ignored on Linux, which has no tray.
+    #[serde(default)]
+    pub tray_icon_style: TrayIconStyle,
     /// Whether the agent installs the OS-level mouse hook (CGEventTap /
     /// exclusive `evdev` grab / `WH_MOUSE_LL`) that intercepts mouse events
     /// for button remapping. `true` (default) keeps remapping active;
@@ -452,6 +485,8 @@ impl Default for AppSettings {
             auto_install_updates: false,
             update_prompt_seen: false,
             show_in_menu_bar: true,
+            battery_alerts: true,
+            tray_icon_style: TrayIconStyle::Brand,
             capture_mouse_events: true,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
@@ -471,9 +506,9 @@ impl Default for AppSettings {
 }
 
 /// serde default for the on-by-default [`AppSettings`] toggles
-/// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
-/// [`AppSettings::auto_download_assets`]), so configs predating a field keep the
-/// out-of-the-box behavior.
+/// ([`AppSettings::show_in_menu_bar`], [`AppSettings::battery_alerts`],
+/// [`AppSettings::capture_mouse_events`], [`AppSettings::auto_download_assets`]),
+/// so configs predating a field keep the out-of-the-box behavior.
 fn default_true() -> bool {
     true
 }
@@ -811,6 +846,31 @@ mod tests {
         assert_eq!(
             VerticalScrollSensitivity::from_rounded(f32::INFINITY),
             VerticalScrollSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn a_config_predating_the_tray_battery_keys_keeps_the_current_behaviour() {
+        let settings: AppSettings =
+            toml::from_str("show_in_menu_bar = true").expect("an older config still parses");
+        assert!(settings.battery_alerts, "alerts are on out of the box");
+        assert_eq!(
+            settings.tray_icon_style,
+            TrayIconStyle::Brand,
+            "an existing user's tray icon must not change shape on update"
+        );
+    }
+
+    #[test]
+    fn the_tray_icon_style_round_trips_through_toml() {
+        let settings: AppSettings =
+            toml::from_str("tray_icon_style = \"battery\"").expect("parses");
+        assert_eq!(settings.tray_icon_style, TrayIconStyle::Battery);
+
+        let rendered = toml::to_string(&settings).expect("serializes");
+        assert!(
+            rendered.contains("tray_icon_style = \"battery\""),
+            "the persisted spelling must survive a round trip, got:\n{rendered}"
         );
     }
 }

@@ -22,15 +22,6 @@ pub(crate) fn battery_charging_no_reading(battery: &BatteryInfo) -> bool {
     is_charging(battery.status) && battery.percentage == 0
 }
 
-/// Whether a discharging battery should draw the user's attention.
-pub(crate) fn battery_needs_attention(battery: &BatteryInfo) -> bool {
-    battery.percentage <= 20
-        && !matches!(
-            battery.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
-}
-
 /// A battery readout with presentations sized for each desktop context.
 #[derive(IntoElement)]
 pub(crate) struct BatteryIndicator {
@@ -181,7 +172,7 @@ fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
             BatteryStatus::Full => Some(tr!("Full")),
             BatteryStatus::Error => Some(tr!("Battery error")),
             BatteryStatus::Discharging | BatteryStatus::Unknown => {
-                battery_needs_attention(battery).then(|| tr!("Low battery"))
+                battery.needs_attention().then(|| tr!("Low battery"))
             }
         }
     }
@@ -214,7 +205,7 @@ fn summary_label(battery: &BatteryInfo) -> gpui::SharedString {
         BatteryStatus::Full => tr!("Full"),
         BatteryStatus::Error => tr!("Battery error"),
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
-            if battery_needs_attention(battery) {
+            if battery.needs_attention() {
                 tr!("Low battery")
             } else {
                 tr!("Battery")
@@ -241,7 +232,7 @@ fn battery_tone(battery: &BatteryInfo) -> BatteryTone {
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
             if battery.level == BatteryLevel::Critical {
                 BatteryTone::Critical
-            } else if battery_needs_attention(battery) {
+            } else if battery.needs_attention() {
                 BatteryTone::Low
             } else {
                 BatteryTone::Normal

@@ -52,6 +52,11 @@ plist = "1.10.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
+# Renders the vendored Lucide battery SVGs into the tray icon. Pinned to the
+# exact version gpui already resolves to, so this adds a dependency edge, not a
+# crate — the gpui Cargo.lock pin cannot move. `usvg` and `tiny-skia` come
+# through resvg's own re-exports rather than as separate entries.
+resvg = { version = "0.46", default-features = false }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

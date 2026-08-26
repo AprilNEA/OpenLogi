@@ -229,6 +229,35 @@ pub struct BatteryInfo {
     pub status: BatteryStatus,
 }
 
+impl BatteryInfo {
+    /// The percentage at or below which a discharging battery is worth
+    /// warning about.
+    ///
+    /// Deliberately a percentage rather than [`BatteryLevel::Low`]: the
+    /// firmware bucket is family-specific and, on the families we've measured,
+    /// arrives well after a user would want the hint.
+    pub const ATTENTION_PERCENTAGE: u8 = 20;
+
+    /// Whether this battery should draw the user's attention.
+    ///
+    /// Every surface that warns about a battery calls this — the GUI device
+    /// card, its menu rows, and the Windows tray glyph — so that they cannot
+    /// disagree about which device is worth worrying about. They previously
+    /// each carried their own copy of the rule, and drifted apart the first
+    /// time one of them was redesigned.
+    ///
+    /// False while charging or full: a battery on its way up is not a problem
+    /// however little charge it currently holds.
+    #[must_use]
+    pub const fn needs_attention(&self) -> bool {
+        self.percentage <= Self::ATTENTION_PERCENTAGE
+            && !matches!(
+                self.status,
+                BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
+            )
+    }
+}
+
 /// Identity of an enumerated receiver — no paired-device state (that lives
 /// in [`DeviceInventory::paired`]). For a direct (Bluetooth/wired) device,
 /// a synthetic entry mirroring the device's own HID identity fills this role.
@@ -350,6 +379,45 @@ pub struct PairedDevice {
     /// table. `None` for devices we couldn't probe (offline / unreachable);
     /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
+}
+
+impl PairedDevice {
+    /// The device's user-facing name: the firmware codename when it reported
+    /// a non-blank one, otherwise its classified kind plus pairing slot.
+    ///
+    /// Deliberately does not consult the asset registry — that lookup is
+    /// network-backed and lives in the GUI. Callers that must render a device
+    /// name without a GUI (the agent's tray menu and its notifications) use
+    /// this instead.
+    ///
+    /// The kind match is exhaustive on purpose: a new [`DeviceKind`] should
+    /// fail the build here and get a real name, not silently render as
+    /// "Device".
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        if let Some(codename) = self.codename.as_deref()
+            && !codename.trim().is_empty()
+        {
+            return codename.to_string();
+        }
+        let kind = match self.kind {
+            DeviceKind::Mouse => "Mouse",
+            DeviceKind::Keyboard => "Keyboard",
+            DeviceKind::Numpad => "Numpad",
+            DeviceKind::Presenter => "Presenter",
+            DeviceKind::Remote => "Remote",
+            DeviceKind::Trackball => "Trackball",
+            DeviceKind::Touchpad => "Touchpad",
+            DeviceKind::Tablet => "Tablet",
+            DeviceKind::Gamepad => "Gamepad",
+            DeviceKind::Joystick => "Joystick",
+            DeviceKind::Headset => "Headset",
+            DeviceKind::Camera => "Camera",
+            DeviceKind::Light => "Light",
+            DeviceKind::Unknown => "Device",
+        };
+        format!("{kind} (slot {})", self.slot)
+    }
 }
 
 /// Address of a standalone raw-HID interface.
@@ -648,5 +716,69 @@ mod tests {
             "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
         );
         result.expect_err("a zero step must not survive deserialization");
+    }
+
+    #[test]
+    fn display_name_prefers_the_firmware_codename() {
+        let mut device = paired_fixture();
+        device.codename = Some("MX Master 3S".to_string());
+        assert_eq!(device.display_name(), "MX Master 3S");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_kind_and_slot() {
+        let mut device = paired_fixture();
+        device.codename = None;
+        device.kind = DeviceKind::Keyboard;
+        device.slot = 2;
+        assert_eq!(device.display_name(), "Keyboard (slot 2)");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_device_for_an_unclassified_kind() {
+        let mut device = paired_fixture();
+        device.codename = None;
+        device.kind = DeviceKind::Unknown;
+        device.slot = 1;
+        assert_eq!(device.display_name(), "Device (slot 1)");
+    }
+
+    #[test]
+    fn display_name_ignores_a_blank_codename() {
+        let mut device = paired_fixture();
+        device.codename = Some("   ".to_string());
+        device.kind = DeviceKind::Mouse;
+        device.slot = 4;
+        assert_eq!(device.display_name(), "Mouse (slot 4)");
+    }
+
+    /// The attention threshold is inclusive, and charging exempts a battery
+    /// from it however low the reading is.
+    #[test]
+    fn a_low_discharging_battery_needs_attention() {
+        let battery = |percentage, status| BatteryInfo {
+            percentage,
+            level: BatteryLevel::Low,
+            status,
+        };
+
+        assert!(battery(20, BatteryStatus::Discharging).needs_attention());
+        assert!(!battery(21, BatteryStatus::Discharging).needs_attention());
+        assert!(!battery(20, BatteryStatus::Charging).needs_attention());
+        assert!(!battery(1, BatteryStatus::Full).needs_attention());
+    }
+
+    /// A minimal online device; each test overrides only what it asserts on.
+    fn paired_fixture() -> PairedDevice {
+        PairedDevice {
+            slot: 1,
+            codename: None,
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        }
     }
 }
