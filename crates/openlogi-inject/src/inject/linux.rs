@@ -19,6 +19,8 @@ use openlogi_core::scroll::ScrollDelta;
 
 use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
+mod gnome_shell;
+
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
 #[derive(Default)]
@@ -138,13 +140,48 @@ fn dispatch_media(key: MediaKey) {
     }
 }
 
-/// Dispatch a window-manager or power [`NativeAction`]. `action` is only
-/// used for its label in the "no Linux equivalent" debug log.
+/// Dispatch a window-manager or power [`NativeAction`].
 fn dispatch_native(action: &Action, native: NativeAction) {
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
+    let meta = KeyCode::KEY_LEFTMETA;
     match native {
-        // No universal Linux equivalent; the compositor shortcut varies.
+        NativeAction::MissionControl | NativeAction::AppExpose if current_desktop_is("gnome") => {
+            match gnome_shell::toggle_overview() {
+                Ok(()) => tracing::debug!("GNOME overview toggled via D-Bus"),
+                Err(error) if error.fallback_is_safe() => {
+                    tracing::warn!(
+                        %error,
+                        "GNOME overview D-Bus operation failed before delivery; falling back to Super"
+                    );
+                    press_key(&[], meta);
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "GNOME overview D-Bus outcome is uncertain; suppressing Super fallback"
+                ),
+            }
+        }
+        NativeAction::ShowDesktop if current_desktop_is("gnome") => {
+            press_key(&[meta], KeyCode::KEY_D);
+        }
+        NativeAction::LaunchpadShow if current_desktop_is("gnome") => {
+            match gnome_shell::show_applications() {
+                Ok(()) => tracing::debug!("GNOME applications shown via D-Bus"),
+                Err(error) if error.fallback_is_safe() => {
+                    tracing::warn!(
+                        %error,
+                        "GNOME applications D-Bus operation failed before delivery; falling back to Super+A"
+                    );
+                    press_key(&[meta], KeyCode::KEY_A);
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "GNOME applications D-Bus outcome is uncertain; suppressing Super+A fallback"
+                ),
+            }
+        }
+        // Other compositors do not share a stable shortcut or D-Bus API.
         NativeAction::MissionControl
         | NativeAction::AppExpose
         | NativeAction::ShowDesktop
@@ -167,6 +204,23 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
     }
+}
+
+fn current_desktop_is(expected: &str) -> bool {
+    [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .into_iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .flat_map(|value| {
+        value
+            .split([':', ';'])
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    })
+    .any(|name| name.eq_ignore_ascii_case(expected))
 }
 
 fn dispatch_script(script: Script<'_>) {
