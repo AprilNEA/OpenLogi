@@ -41,10 +41,25 @@ paths:
   `#[cfg(target_os = "macos")]`-gated `use gpui::StatefulInteractiveElement as _;`
   compiles fine locally but breaks the Linux/Windows CI jobs the moment an ungated
   element calls `.id(..).on_click(..)`. When adding such an element, ungate the import.
-- Icons are not limited to gpui-component's `IconName`: vendor any SVG (must use
-  `stroke="currentColor"`) into `crates/openlogi-ui/action-icons/`, register it in that
-  crate's `app_assets.rs` `ACTION_ICONS`, render via
-  `Icon::empty().path("action-icons/….svg")`. Both binaries serve the same set.
+- **An icon is never a text character.** `×` for close, `·` for a centre press, `+`
+  for add, `←`/`→` for anything — all of them are bugs, not shortcuts. A glyph's
+  advance width is set by the font, so a row of them does not align and no two read
+  at the same weight; a screen reader announces "multiplication sign". Reach for
+  `IconName` first, then a vendored SVG. Punctuation *between* text stays text: `·`
+  as a metadata separator and `…` on a menu item that opens a dialog are correct.
+- Icons are not limited to gpui-component's `IconName` (which is lucide, generated
+  from the `gpui-component-assets` icon directory): vendor any SVG (must use
+  `stroke="currentColor"`) into `crates/openlogi-ui/action-icons/`, register it in
+  that crate's `action_icons.rs` `ACTION_ICONS`, render via
+  `Icon::empty().path("action-icons/….svg")` or `svg().path(..)`. Both binaries
+  serve the same set — the overlay pays for every entry, so prefer `IconName` when
+  it has the icon. The overlay itself has no `IconName`: it does not depend on
+  gpui-component, so anything both processes draw (the ring's cancel target) has to
+  be vendored and named through one shared const, never spelled out on each side.
+- `Icon` does **not** keep its own default size: its render overwrites the base
+  style refinement with the caller's, so a bare `Icon` falls through to the current
+  font size instead of the 16px `Default` sets. Any icon meant to line up with a
+  neighbouring `svg().size_4()` needs an explicit `.size_4()`.
 - Config panels/tabs gate on `Capabilities` (derived from the HID++ feature table),
   **never** on device `kind` — kind is identity-only (icon/label). A new panel means a
   new capability in `Capabilities::from_feature_ids` plus a `tabs_for` arm.
