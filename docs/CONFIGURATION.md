@@ -63,6 +63,10 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `gesture_response_times`: per-control click-versus-swipe gates in
+  milliseconds (`80..=300`; `160` is the default). The GUI offers 110, 160,
+  and 200 ms presets independently for each gesture-mode control; advanced
+  users may enter another value in this range for a control
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

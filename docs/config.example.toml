@@ -28,6 +28,11 @@ thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
 
+# Milliseconds per gesture control; UI presets are 110, 160 (default), and 200.
+[devices."receiver:aabbccdd:slot:1".gesture_response_times]
+HapticPanel = 110
+GestureButton = 160
+
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
 Forward = "BrowserForward"
