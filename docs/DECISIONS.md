@@ -155,7 +155,10 @@ mature crates (`tempfile`, `which`, `plist`, `walkdir`, `xshell`, `sysinfo`,
   guarantee process spawn.
 - GUI helper launch keeps `/usr/bin/open -g -n` intentionally: it needs
   LaunchServices-specific flags to start the packaged agent under its own TCC
-  identity, which generic opener crates do not expose.
+  identity, which generic opener crates do not expose. (Since 2026-08 it is
+  the *fallback*: a registered login item is kickstarted through `launchctl`
+  instead, which supervises the agent as well — `open` remains for
+  unregistered installs and stays custom for the same reason.)
 - Agent autostart install keeps direct `systemctl` calls because it is managing
   systemd user units, not merely opening or spawning an arbitrary program.
 - Self-restart and `disclaim` launches stay custom because they are process
