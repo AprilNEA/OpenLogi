@@ -8,13 +8,14 @@
 //! Each change is written to the device *and* persisted to `config.toml` (via
 //! [`AppState::commit_smartshift`]): the device holds wheel mode / threshold /
 //! torque in volatile RAM that resets on a power cycle (#189), so the agent
-//! re-applies the saved config when the device reconnects. The current state is
-//! read lazily on the same background-thread pattern as
-//! [`crate::features::pointer::dpi`].
+//! re-applies the saved config when the device reconnects. [`AppState`] reads
+//! the current value through the agent when selection/inventory lifecycle
+//! events make a device active; this view only consumes the resulting cache.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement,
-    ParentElement, Render, SharedString, Styled, Subscription, Window, div, px, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
     Disableable as _, Selectable as _,
@@ -27,11 +28,11 @@ use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
 use openlogi_core::hid::{
-    DeviceRoute, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
 };
 
-use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus};
-use crate::ui::device_read::issue_device_read;
+use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus, StateEvent};
+use crate::ui::components::Toggle;
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -95,16 +96,18 @@ impl SmartShiftPanel {
                         let threshold = threshold_from_slider(value.start());
                         panel.pending_threshold = None;
                         panel.last_threshold = threshold;
-                        cx.update_global::<AppState, _>(|state, _| {
-                            let Some(status) = state.current_smartshift_ready() else {
-                                return;
-                            };
-                            state.commit_smartshift(SmartShiftStatus {
-                                mode: SmartShiftMode::Ratchet,
-                                auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
-                                ..status
-                            });
-                        });
+                        let status =
+                            AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
+                        if let Some(status) = status {
+                            AppState::update_smartshift(
+                                cx,
+                                SmartShiftStatus {
+                                    mode: SmartShiftMode::Ratchet,
+                                    auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
+                                    ..status
+                                },
+                            );
+                        }
                         cx.notify();
                     }
                 },
@@ -128,17 +131,33 @@ impl SmartShiftPanel {
                     let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
                     panel.pending_wheel_sensitivity = None;
                     panel.last_wheel_sensitivity = sensitivity;
-                    cx.update_global::<AppState, _>(|state, _| {
-                        let key = state.current_record().map(|r| r.config_key.clone());
-                        if let Some(key) = key {
-                            state.set_device_thumbwheel_sensitivity(&key, sensitivity);
+                    AppState::update(cx, |state, cx| {
+                        let record = state
+                            .current_record()
+                            .map(|record| (record.config_key.clone(), record.device_key()));
+                        if let Some((config_key, event_key)) = record {
+                            state.set_device_thumbwheel_sensitivity(&config_key, sensitivity);
+                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
                         }
                     });
                     cx.notify();
                 }
             },
         );
-        let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::SmartShiftChanged(key) | StateEvent::DeviceConfigChanged(key) => {
+                    AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .is_some_and(|record| record.device_key() == *key)
+                }
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             threshold,
             last_threshold: DEFAULT_THRESHOLD,
@@ -152,74 +171,14 @@ impl SmartShiftPanel {
         }
     }
 
-    /// Kick off a one-shot SmartShift read for the active device when it hasn't
-    /// been queried yet — same lazy, dedicated-OS-thread pattern as
-    /// [`crate::features::pointer::dpi::DpiPanel`].
-    fn ensure_smartshift_load(cx: &mut Context<Self>) {
-        let Some((key, route, write_id)) = smartshift_load_target(cx) else {
-            return;
-        };
-        cx.update_global::<AppState, _>(|state, _| state.reads.smartshift.mark_loading(&key));
-        Self::issue_smartshift_read(
-            key,
-            route,
-            write_id,
-            |state, key| state.reads.smartshift.clear_loading(key),
-            cx,
-        );
-    }
-
-    /// Re-read once after an optimistic write to confirm the device actually
-    /// took it — a rejected / timed-out write would otherwise leave the panel
-    /// showing a setting that never applied. No Loading marker, so the
-    /// optimistic value stays on screen until the real state replaces it.
-    fn ensure_smartshift_confirm(cx: &mut Context<Self>) {
-        let Some((key, route, write_id)) =
-            cx.update_global::<AppState, _>(|state, _| state.take_active_smartshift_confirm())
-        else {
-            return;
-        };
-        Self::issue_smartshift_read(
-            key,
-            route,
-            Some(write_id),
-            move |state, key| state.fail_smartshift_confirm(key, write_id),
-            cx,
-        );
-    }
-
-    /// Send a SmartShift read over IPC and store the typed result. Shared by the
-    /// lazy initial load and the post-write confirm; the caller decides whether
-    /// to set the Loading marker first. The agent returns the typed `WriteError`,
-    /// so a permanent `FeatureUnsupported` reaches `store_smartshift_status`
-    /// intact and the panel stops re-probing instead of retrying every reselect.
-    fn issue_smartshift_read(
-        key: DeviceKey,
-        route: DeviceRoute,
-        write_id: Option<u64>,
-        clear: impl Fn(&mut AppState, &DeviceKey) + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        issue_device_read(
-            cx,
-            key,
-            route,
-            crate::services::ipc::Command::ReadSmartShift,
-            move |state, key, route, result| {
-                state.store_smartshift_status(key, route, write_id, result);
-            },
-            clear,
-        );
-    }
-
     /// The interactive body shown once the device's SmartShift config resolves.
     fn ready_body(
         &mut self,
         status: SmartShiftStatus,
         window: &mut Window,
-        pal: Palette,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
         let mode = status.mode;
         let permanent = status.auto_disengage.is_permanent();
         let ratchet = matches!(mode, SmartShiftMode::Ratchet);
@@ -257,7 +216,6 @@ impl SmartShiftPanel {
                             mode: SmartShiftMode::Free,
                             ..status
                         },
-                        pal,
                     ))
                     .child(mode_pill(
                         tr!("Ratchet"),
@@ -271,7 +229,6 @@ impl SmartShiftPanel {
                             auto_disengage: SmartShiftAutoDisengage::Threshold(committed),
                             ..status
                         },
-                        pal,
                     )),
             );
 
@@ -294,16 +251,15 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
-            .child(if sensitivity_enabled {
-                Slider::new(&self.threshold).horizontal().into_any_element()
-            } else {
-                disabled_track(pal)
+            .when(sensitivity_enabled, |row| {
+                row.child(Slider::new(&self.threshold).horizontal())
             })
+            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
             .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Higher keeps the ratchet engaged longer before free-spin."
             )));
 
-        let wheel_row = self.wheel_sensitivity_row(window, pal, cx);
+        let wheel_row = self.wheel_sensitivity_row(window, cx);
 
         let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
@@ -314,7 +270,6 @@ impl SmartShiftPanel {
             .child(sensitivity_row)
             .child(permanent_row)
             .child(wheel_row)
-            .into_any_element()
     }
 }
 
@@ -322,14 +277,9 @@ impl SmartShiftPanel {
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
-    fn wheel_sensitivity_row(
-        &mut self,
-        window: &mut Window,
-        pal: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let committed = cx
-            .try_global::<AppState>()
+    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let committed = AppState::try_read(cx)
             .and_then(|state| {
                 state
                     .current_record()
@@ -357,53 +307,44 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
-            .child(
-                Slider::new(&self.wheel_sensitivity)
-                    .horizontal()
-                    .into_any_element(),
-            )
-            .into_any_element()
+            .child(Slider::new(&self.wheel_sensitivity).horizontal())
     }
 }
 
 impl Render for SmartShiftPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::ensure_smartshift_load(cx);
-        Self::ensure_smartshift_confirm(cx);
         let pal = theme::palette(cx);
 
-        let (key, status) = cx
-            .try_global::<AppState>()
+        let (key, status) = AppState::try_read(cx)
             .and_then(|state| {
                 let key = state.current_record()?.device_key();
-                Some((Some(key.clone()), state.reads.smartshift.status(&key)))
+                Some((Some(key.clone()), state.smartshift_status_for(&key)))
             })
             .unwrap_or((None, SmartShiftLoad::Unknown));
-        let write_status = cx
-            .try_global::<AppState>()
-            .and_then(AppState::current_smartshift_write_status);
-        let reachable = cx
-            .try_global::<AppState>()
+        let write_status =
+            AppState::try_read(cx).and_then(AppState::current_smartshift_write_status);
+        let reachable = AppState::try_read(cx)
             .and_then(AppState::current_record)
             .is_some_and(|r| r.route.is_some());
 
         let show_write_status = matches!(status, SmartShiftLoad::Ready(_));
         let content: AnyElement = match status {
-            SmartShiftLoad::Ready(s) => self.ready_body(s, window, pal, cx),
+            SmartShiftLoad::Ready(s) => self.ready_body(*s, window, cx).into_any_element(),
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
-                status_line(tr!("Device offline — SmartShift unavailable."), pal)
+                status_line(tr!("Device offline — SmartShift unavailable."), pal).into_any_element()
             }
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown => {
-                status_line(tr!("Reading SmartShift settings…"), pal)
+                status_line(tr!("Reading SmartShift settings…"), pal).into_any_element()
             }
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
                 tr!("Couldn't read SmartShift — click to retry."),
                 pal,
                 retry_smartshift_closure(key.clone()),
-            ),
+            )
+            .into_any_element(),
             SmartShiftLoad::Unsupported(_) => {
-                status_line(tr!("This device does not support SmartShift."), pal)
+                status_line(tr!("This device does not support SmartShift."), pal).into_any_element()
             }
         };
 
@@ -418,9 +359,8 @@ impl Render for SmartShiftPanel {
 fn retry_smartshift_closure(key: Option<DeviceKey>) -> impl Fn(&mut App) + 'static {
     move |cx| {
         if let Some(key) = &key {
-            cx.update_global::<AppState, _>(|state, _| state.retry_smartshift(key));
+            AppState::retry_smartshift_read(cx, key.clone());
         }
-        cx.refresh_windows();
     }
 }
 
@@ -431,34 +371,22 @@ fn smartshift_write_feedback(
 ) -> Option<AnyElement> {
     match status {
         Some(SmartShiftWriteStatus::Applying { .. }) => {
-            Some(status_line(tr!("Reading SmartShift settings…"), pal))
+            Some(status_line(tr!("Reading SmartShift settings…"), pal).into_any_element())
         }
-        Some(SmartShiftWriteStatus::Confirmed) => Some(status_line(tr!("Done"), pal)),
-        Some(SmartShiftWriteStatus::Failed) => Some(retry_line(
-            "smartshift-confirm-retry",
-            tr!("Couldn't read SmartShift — click to retry."),
-            pal,
-            retry_smartshift_closure(key),
-        )),
+        Some(SmartShiftWriteStatus::Confirmed) => {
+            Some(status_line(tr!("Done"), pal).into_any_element())
+        }
+        Some(SmartShiftWriteStatus::Failed) => Some(
+            retry_line(
+                "smartshift-confirm-retry",
+                tr!("Couldn't read SmartShift — click to retry."),
+                pal,
+                retry_smartshift_closure(key),
+            )
+            .into_any_element(),
+        ),
         None => None,
     }
-}
-
-fn smartshift_load_target(
-    cx: &mut Context<SmartShiftPanel>,
-) -> Option<(DeviceKey, DeviceRoute, Option<u64>)> {
-    cx.try_global::<AppState>().and_then(|state| {
-        let record = state.current_record()?;
-        let key = record.device_key();
-        if !state.reads.smartshift.unqueried(&key) {
-            return None;
-        }
-        let write_id = match state.current_smartshift_write_status() {
-            Some(SmartShiftWriteStatus::Applying { write_id, .. }) => Some(write_id),
-            Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => None,
-        };
-        Some((key, record.route.clone()?, write_id))
-    })
 }
 
 /// The "Permanent ratchet" label + toggle row.
@@ -482,23 +410,31 @@ fn permanent_row(
                         .child(tr!("Never auto-switch to free-spin.")),
                 ),
         )
-        .child(permanent_toggle(
-            permanent,
-            ratchet,
-            restore_threshold,
-            status,
-            pal,
-        ))
+        .child(
+            Toggle::new("smartshift-permanent")
+                .selected(permanent)
+                .disabled(!ratchet)
+                .on_change(move |permanent, _window, cx| {
+                    let auto_disengage = if *permanent {
+                        SmartShiftAutoDisengage::Permanent
+                    } else {
+                        SmartShiftAutoDisengage::Threshold(restore_threshold)
+                    };
+                    AppState::update_smartshift(
+                        cx,
+                        SmartShiftStatus {
+                            mode: SmartShiftMode::Ratchet,
+                            auto_disengage,
+                            ..status
+                        },
+                    );
+                }),
+        )
 }
 
 /// One wheel-mode pill. Clicking it writes `target` while preserving the
 /// device's current threshold + torque.
-fn mode_pill(
-    label: SharedString,
-    selected: bool,
-    status: SmartShiftStatus,
-    _pal: Palette,
-) -> AnyElement {
+fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> impl IntoElement {
     let id = match status.mode {
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
@@ -508,55 +444,13 @@ fn mode_pill(
         .label(label)
         .selected(selected)
         .on_click(move |_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| {
-                state.commit_smartshift(status);
-            });
-            cx.refresh_windows();
+            AppState::update_smartshift(cx, status);
         })
-        .into_any_element()
-}
-
-/// The permanent-ratchet on/off pill. Disabled (muted, non-clickable) under
-/// free-spin, where it has no meaning.
-fn permanent_toggle(
-    on: bool,
-    enabled: bool,
-    restore_threshold: SmartShiftThreshold,
-    status: SmartShiftStatus,
-    _pal: Palette,
-) -> AnyElement {
-    let label = if on { tr!("On") } else { tr!("Off") };
-    Button::new("smartshift-permanent")
-        .compact()
-        .label(label)
-        .selected(on)
-        .disabled(!enabled)
-        .on_click(move |_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| {
-                let auto_disengage = if on {
-                    SmartShiftAutoDisengage::Threshold(restore_threshold)
-                } else {
-                    SmartShiftAutoDisengage::Permanent
-                };
-                state.commit_smartshift(SmartShiftStatus {
-                    mode: SmartShiftMode::Ratchet,
-                    auto_disengage,
-                    ..status
-                });
-            });
-            cx.refresh_windows();
-        })
-        .into_any_element()
 }
 
 /// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> AnyElement {
-    div()
-        .w_full()
-        .h(px(6.))
-        .rounded_full()
-        .bg(pal.border)
-        .into_any_element()
+fn disabled_track(pal: Palette) -> gpui::Div {
+    div().w_full().h(px(6.)).rounded_full().bg(pal.border)
 }
 
 /// Round + clamp a raw slider read into the friendly threshold range.

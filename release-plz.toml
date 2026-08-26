@@ -16,7 +16,7 @@
 #
 # Changelog: release-plz is package-path-scoped and skips `release = false` app
 # crates (gui/agent), so it does NOT own CHANGELOG.md. Whole-repo notes are
-# written by git-cliff via `cliff.toml` after each release-pr (same idea as
+# written by git-cliff via `.config/cliff.toml` after each release-pr (same idea as
 # GoReleaser's `changelog.use: git` — every conventional commit since the last
 # tag, no per-crate path filter).
 
@@ -30,7 +30,7 @@ semver_check = false
 # Per-crate tags/releases are off; the root crate owns the one workspace release.
 git_tag_enable = false
 git_release_enable = false
-# Version bumps only — root CHANGELOG.md is written by git-cliff (cliff.toml).
+# Version bumps only — root CHANGELOG.md is written by git-cliff (`.config/cliff.toml`).
 changelog_update = false
 # Only publish/tag when the release PR merges (branch prefix above). A later
 # master tip after a failed crates.io publish must not cut v{version} — re-run
@@ -44,6 +44,10 @@ git_tag_enable = true
 git_tag_name = "v{{ version }}"
 # GitHub Release is owned by release.yml (softprops), not release-plz — see header.
 git_release_enable = false
+
+[[package]]
+name = "openlogi-device-registry"
+version_group = "openlogi"
 
 [[package]]
 name = "openlogi-core"

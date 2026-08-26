@@ -314,9 +314,10 @@ macro_rules! derive_action_icon {
                 match action {
                     $( Action::$variant => Self::$icon, )*
                     Action::SetDpiPreset(_) => Self::Gauge,
-                    Action::CustomShortcut(_) | Action::TypeText(_) | Action::Workflow(_) => {
-                        Self::Keyboard
-                    }
+                    Action::CustomShortcut(_)
+                    | Action::TypeText(_)
+                    | Action::Workflow(_)
+                    | Action::HoldShortcut(_) => Self::Keyboard,
                     Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
                     Action::OpenApplication(_) => Self::Applications,
                 }

@@ -28,6 +28,15 @@ paths:
   surfaces) and gpui-component's `cx.theme()` (widget chrome). Only the `ThemeMode` is
   shared between them. A "white box under dark UI" or a surface that doesn't flip with
   the OS appearance is a ThemeMode wiring bug — fix that, not per-element `bg()`.
+- The same split exists for sizing: gpui-component's size ladder (xs 20 / sm 24 /
+  md 32 / lg 44 px) has no step at the app's 30 px control rhythm
+  (`theme::CONTROL_H`), and its custom `Size::Size` heights are broken (`input_h`
+  falls through to 24 px, text scales with the size). Build standalone form
+  controls — filled/outline buttons, single-line inputs, selects — with
+  `ui::components::{control_button, control_input, control_select}`, which take
+  `.small()` typography and pin `CONTROL_H`. A bare `.small()` on one of those is
+  the "squashed control" bug; ghost/link affordances, `.compact()` inline buttons,
+  pills, and icon-only toggles stay on the stock ladder deliberately.
 - Trait imports must be unconditional for cross-platform widgets: a
   `#[cfg(target_os = "macos")]`-gated `use gpui::StatefulInteractiveElement as _;`
   compiles fine locally but breaks the Linux/Windows CI jobs the moment an ungated
@@ -41,6 +50,23 @@ paths:
   new capability in `Capabilities::from_feature_ids` plus a `tabs_for` arm.
 - Mouse-diagram hotspots come from Logi metadata; if the metadata omits a button
   marker, omit the button — never synthesize hotspot positions.
+- Keep render helpers statically typed (`impl IntoElement` or a concrete element) until
+  a genuinely heterogeneous branch, collection, callback, or stored field requires
+  `AnyElement`. Prefer one typed `.when()` / `.when_some()` / `.children()` pipeline to
+  branching early and erasing each result.
+- Key dynamic `ElementId`s by a stable domain identity, not a filtered position or a
+  formatted display label. Derive reusable-component child IDs from the component's
+  caller-provided root ID so multiple instances cannot share focus or scroll state.
+- A view, entity, or app service owns every `Task` and `Subscription` whose work belongs
+  to its lifetime. Use `.detach()` only for true process-lifetime work or bounded
+  one-shots whose completion is safe after the initiating view disappears.
+- When an async UI operation captures inputs that may change before it completes
+  (device, route, query, selection, or request), capture their identity or generation
+  at launch and compare again before committing the result. Cancellation is useful,
+  but is not the stale-result fence.
+- When changing reusable controls, prefer focused `#[gpui::test]` behavior contracts
+  over screenshot coverage: keyboard activation, disabled no-op, controlled selected
+  state/callbacks, and independent parent/child interaction targets.
 - Verifying UI changes needs the running app: re-`cargo run -p openlogi-desktop` (a plain
   `cargo build` leaves the dev bundle stale) after quitting the previous instance
   (singleton lock). The GUI shows only the empty state unless the agent is running.

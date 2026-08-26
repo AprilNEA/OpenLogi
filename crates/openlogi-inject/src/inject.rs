@@ -6,7 +6,15 @@
 //! of which translates an [`Action`] into the native event(s) — CGEvent/NSEvent
 //! on macOS, uinput/D-Bus on Linux, SendInput on Windows.
 
-use openlogi_core::binding::Action;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::collections::HashMap;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::sync::{LazyLock, Mutex, PoisonError};
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use openlogi_core::binding::KeyboardUsage;
+use openlogi_core::binding::{Action, KeyCombo};
+use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -16,6 +24,154 @@ mod linux;
 
 #[cfg(target_os = "windows")]
 mod windows;
+
+/// Which isolated edge of a held keyboard chord to synthesize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyPhase {
+    Down,
+    Up,
+}
+
+/// One physical keyboard output shared by held chords.
+///
+/// Logical Cmd and Ctrl are distinct on macOS. Cmd aliases Ctrl on Linux and
+/// Windows, so ownership is counted after that platform mapping is resolved.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HeldKey {
+    #[cfg(target_os = "macos")]
+    Command,
+    Control,
+    Shift,
+    Alt,
+    Key(KeyboardUsage),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HoldTransition {
+    up: Vec<HeldKey>,
+    down: Vec<HeldKey>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HeldModifiers(u8);
+
+#[cfg(target_os = "macos")]
+impl HeldModifiers {
+    fn set(&mut self, key: HeldKey, held: bool) {
+        let Some(mask) = Self::mask(key) else {
+            return;
+        };
+        if held {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
+    fn contains(self, key: HeldKey) -> bool {
+        Self::mask(key).is_some_and(|mask| self.0 & mask != 0)
+    }
+
+    fn mask(key: HeldKey) -> Option<u8> {
+        match key {
+            HeldKey::Command => Some(1 << 0),
+            HeldKey::Control => Some(1 << 1),
+            HeldKey::Shift => Some(1 << 2),
+            HeldKey::Alt => Some(1 << 3),
+            HeldKey::Key(_) => None,
+        }
+    }
+}
+
+/// Reference counts for physical keyboard outputs across active chords.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Default)]
+struct HeldOutput {
+    owners: HashMap<HeldKey, usize>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl HeldOutput {
+    fn transition(
+        &mut self,
+        released: Option<&KeyCombo>,
+        pressed: Option<&KeyCombo>,
+    ) -> HoldTransition {
+        let released = released.map_or_else(Vec::new, held_keys);
+        let pressed = pressed.map_or_else(Vec::new, held_keys);
+        let before = self.owners.clone();
+
+        for key in &released {
+            match self.owners.get_mut(key) {
+                Some(owners) if *owners > 1 => *owners -= 1,
+                Some(_) => {
+                    self.owners.remove(key);
+                }
+                None => {}
+            }
+        }
+        for key in &pressed {
+            *self.owners.entry(*key).or_default() += 1;
+        }
+
+        HoldTransition {
+            up: released
+                .into_iter()
+                .filter(|key| before.contains_key(key) && !self.owners.contains_key(key))
+                .collect(),
+            down: pressed
+                .into_iter()
+                .filter(|key| !before.contains_key(key) && self.owners.contains_key(key))
+                .collect(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn modifiers(&self) -> HeldModifiers {
+        let mut modifiers = HeldModifiers::default();
+        for key in [
+            HeldKey::Command,
+            HeldKey::Control,
+            HeldKey::Shift,
+            HeldKey::Alt,
+        ] {
+            modifiers.set(key, self.owners.contains_key(&key));
+        }
+        modifiers
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
+    LazyLock::new(|| Mutex::new(HeldOutput::default()));
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
+    let mut keys = Vec::with_capacity(4);
+    #[cfg(target_os = "macos")]
+    if combo.has_command() {
+        keys.push(HeldKey::Command);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if combo.has_command() || combo.has_control() {
+        keys.push(HeldKey::Control);
+    }
+    #[cfg(target_os = "macos")]
+    if combo.has_control() {
+        keys.push(HeldKey::Control);
+    }
+    if combo.has_shift() {
+        keys.push(HeldKey::Shift);
+    }
+    if combo.has_option() {
+        keys.push(HeldKey::Alt);
+    }
+    keys.push(HeldKey::Key(combo.key()));
+    keys
+}
 
 /// Synthesise the OS-level event for `action`.
 ///
@@ -82,6 +238,59 @@ pub fn execute(action: &Action) {
     }
 }
 
+/// Synthesise the down edge of `combo`, leaving its output held.
+///
+/// Every successful lifecycle start must be paired with [`release_hold`],
+/// including cancellation and shutdown paths. Prefer [`execute`] when the
+/// caller does not own a matching terminal event.
+pub fn press_hold(combo: &KeyCombo) {
+    hold_transition(None, Some(combo));
+}
+
+/// Synthesise the up edge matching a prior [`press_hold`].
+///
+/// Each successful [`press_hold`] must be released exactly once. The lifecycle
+/// owner provides that guarantee; duplicate releases would consume ownership
+/// retained for an overlapping chord.
+pub fn release_hold(combo: &KeyCombo) {
+    hold_transition(Some(combo), None);
+}
+
+/// Replace one held chord without releasing physical keys shared by both.
+pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
+    hold_transition(Some(old), Some(new));
+}
+
+fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
+    cfg_select! {
+        target_os = "macos" => {
+            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let modifiers = output.modifiers();
+            let transition = output.transition(released, pressed);
+            let modifiers = macos::hold_keys(&transition.up, KeyPhase::Up, modifiers);
+            let modifiers = macos::hold_keys(&transition.down, KeyPhase::Down, modifiers);
+            debug_assert_eq!(modifiers, output.modifiers());
+        }
+        target_os = "linux" => {
+            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let transition = output.transition(released, pressed);
+            linux::hold_keys(&transition.up, KeyPhase::Up);
+            linux::hold_keys(&transition.down, KeyPhase::Down);
+        }
+        target_os = "windows" => {
+            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let transition = output.transition(released, pressed);
+            windows::hold_keys(&transition.up, KeyPhase::Up);
+            windows::hold_keys(&transition.down, KeyPhase::Down);
+        }
+        _ => {
+            tracing::warn!(
+                "held shortcut output unsupported on this platform"
+            );
+        }
+    }
+}
+
 /// Navigate the browser identified by `pid` backwards or forwards using the
 /// Accessibility API (`AXPress` on the "Go back" / "Go forward" toolbar button).
 ///
@@ -102,33 +311,105 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
-/// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
+/// Integer scroll units ready for a platform API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QuantizedScroll {
+    x: i32,
+    y: i32,
+}
+
+/// Carries fractional platform units across frames so rounding never changes
+/// the cumulative distance.
+#[derive(Default)]
+struct ScrollQuantizer {
+    residual_x: f64,
+    residual_y: f64,
+}
+
+impl ScrollQuantizer {
+    fn quantize(&mut self, delta: ScrollDelta, units_per_input: f64) -> QuantizedScroll {
+        QuantizedScroll {
+            x: quantize_axis(&mut self.residual_x, delta.x(), units_per_input),
+            y: quantize_axis(&mut self.residual_y, delta.y(), units_per_input),
+        }
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the rounded value is clamped to the i32 range before conversion"
+)]
+fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
+    let exact = input.mul_add(units_per_input, *residual);
+    let rounded = exact
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
+    let output = rounded as i32;
+    *residual = exact - f64::from(output);
+    output
+}
+
+/// Synthesise a typed scroll distance at the current focus.
 ///
-/// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
-/// wheel's scrolling after the wheel has been diverted over HID++ to capture its
-/// click. `delta` is the device's raw rotation; its sign follows the wheel's
-/// rotation convention and its magnitude (one line per rotation increment) may
-/// need tuning per device, since the diverted resolution differs from native.
-///
-/// No-op (logs nothing) on platforms without a supported injection mechanism.
-pub fn post_horizontal_scroll(delta: i32) {
+/// Fractional wheel ticks are retained until the platform can represent them,
+/// so a sequence of high-resolution frames preserves its cumulative distance.
+/// Non-finite input is rejected at this I/O boundary.
+pub fn post_scroll(delta: ScrollDelta) {
+    if !delta.is_finite() || (delta.x() == 0.0 && delta.y() == 0.0) {
+        return;
+    }
     cfg_select! {
         target_os = "macos" => {
-            macos::post_horizontal_scroll(delta);
+            macos::post_scroll(delta);
         }
         target_os = "linux" => {
-            // `delta` is already in "one line per rotation increment" units (see
-            // doc above), which matches REL_HWHEEL's convention of one unit per
-            // detent. This is intentionally different from
-            // Action::HorizontalScrollLeft/Right, which hardcode ±3 as a fixed
-            // "scroll tick" with no device delta involved.
-            linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta);
+            linux::post_scroll(delta);
         }
         target_os = "windows" => {
-            windows::post_horizontal_scroll(delta);
+            windows::post_scroll(delta);
         }
         _ => {
             let _ = delta;
+        }
+    }
+}
+
+/// Lifecycle phase of one synthetic smooth-scroll frame.
+///
+/// macOS forwards this state to the scroll-wheel event so applications see a
+/// balanced continuous gesture. Linux and Windows have no equivalent field;
+/// there the phase is retained by the runtime contract but only the frame's
+/// distance is injected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothScrollPhase {
+    /// First output frame of a new animation.
+    Began,
+    /// An intermediate output frame, including frames after retargeting.
+    Changed,
+    /// Final frame, carrying any correction needed to reach the exact target.
+    Ended,
+    /// The capture source ended before the animation reached its target.
+    Cancelled,
+}
+
+/// Synthesise one frame of a finite smooth-scroll animation.
+///
+/// On macOS wheel ticks become continuous pixel events at ten points per tick,
+/// matching the line/point relationship carried in native continuous events.
+/// Other platforms preserve fractional wheel ticks through their native
+/// high-resolution output. Non-finite distance is rejected at this I/O
+/// boundary; zero-distance terminal frames remain meaningful on macOS.
+pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
+    if !delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_smooth_scroll(delta, phase);
+        }
+        _ => {
+            let _ = phase;
+            post_scroll(delta);
         }
     }
 }
@@ -199,6 +480,178 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::scroll::ScrollDelta;
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    use openlogi_core::binding::KeyCombo;
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    use super::{HeldKey, HeldOutput, HoldTransition};
+    use super::{QuantizedScroll, ScrollQuantizer};
+
+    /// Synthetic high-resolution input: eight eighth-ticks must total exactly
+    /// one Windows/Linux wheel detent (120 raw units). This is deterministic
+    /// model data, not a hardware capture.
+    #[test]
+    fn fractional_frames_preserve_cumulative_wheel_distance() {
+        let mut quantizer = ScrollQuantizer::default();
+        let total = (0..8)
+            .map(|_| {
+                quantizer
+                    .quantize(ScrollDelta::wheel_ticks(0.0, 0.125), 120.0)
+                    .y
+            })
+            .sum::<i32>();
+        assert_eq!(total, 120);
+    }
+
+    #[test]
+    fn opposing_fractional_input_cancels_without_rounding_drift() {
+        let mut quantizer = ScrollQuantizer::default();
+        let forward = quantizer.quantize(ScrollDelta::wheel_ticks(0.25, 0.0), 120.0);
+        let backward = quantizer.quantize(ScrollDelta::wheel_ticks(-0.25, 0.0), 120.0);
+        assert_eq!(forward, QuantizedScroll { x: 30, y: 0 });
+        assert_eq!(backward, QuantizedScroll { x: -30, y: 0 });
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn combo(label: &str) -> KeyCombo {
+        label.parse().expect("test shortcut must be valid")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn shared_control_stays_down_until_its_last_chord_ends() {
+        let control_a = combo("Ctrl+A");
+        let control_b = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some(&control_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some(&control_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(control_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&control_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(control_a.key())],
+                down: vec![],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&control_b), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn command_and_control_share_one_physical_output() {
+        let command_a = combo("Cmd+A");
+        let control_b = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&command_a));
+        assert_eq!(
+            output.transition(None, Some(&control_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(control_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn command_and_control_are_distinct_physical_outputs() {
+        let command_a = combo("Cmd+A");
+        let control_b = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&command_a));
+        assert_eq!(
+            output.transition(None, Some(&control_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Command, HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shared_command_stays_down_until_its_last_chord_ends() {
+        let command_a = combo("Cmd+A");
+        let command_b = combo("Cmd+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&command_a));
+        assert_eq!(
+            output.transition(None, Some(&command_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(command_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_b), None),
+            HoldTransition {
+                up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn replacement_preserves_shared_physical_outputs() {
+        let old = combo("Ctrl+A");
+        let new = combo("Ctrl+B");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&old));
+        assert_eq!(
+            output.transition(Some(&old), Some(&new)),
+            HoldTransition {
+                up: vec![HeldKey::Key(old.key())],
+                down: vec![HeldKey::Key(new.key())],
+            }
+        );
+    }
+
     #[test]
     fn hid_usages_map_across_windows_key_categories() {
         use super::hid_usage_to_windows;

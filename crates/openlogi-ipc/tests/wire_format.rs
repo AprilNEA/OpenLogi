@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use bincode::Options;
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
@@ -44,9 +45,9 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation,
+    AgentSnapshot, AgentStatus, ConfigReloadError, ForegroundApps, FoundDevice, Identity,
+    InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -100,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 26);
+    assert_eq!(PROTOCOL_VERSION, 28);
 }
 
 #[test]
@@ -297,15 +298,39 @@ fn agent_snapshot() {
         standalone: Vec::new(),
         camera_active: false,
         pairing: None,
+        // Pinned on its own in `foreground_apps` below, like the inventory and
+        // pairing fields.
+        foreground: ForegroundApps::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e36010000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36010000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+}
+
+/// The foreground application rides the snapshot, so both halves are pinned:
+/// the `None`/empty resting shape and a populated one.
+#[test]
+fn foreground_apps() {
+    assert_wire(&ForegroundApps::default(), "0000");
+
+    let safari = ForegroundApp {
+        id: "com.apple.Safari".into(),
+        display_name: "Safari".into(),
+    };
+    assert_wire(&safari, "10636f6d2e6170706c652e53616661726906536166617269");
+
+    assert_wire(
+        &ForegroundApps {
+            current: Some(safari.clone()),
+            recent: vec![safari],
+        },
+        "0110636f6d2e6170706c652e536166617269065361666172690110636f6d2e6170706c652e53616661726906536166617269",
+    );
 }
 
 /// The pairing session is state, so its phases are wire format like any enum.

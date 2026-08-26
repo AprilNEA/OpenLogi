@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/openlogi",
     "crates/openlogi-core",
+    "crates/openlogi-device-registry",
     "crates/openlogi-inject",
     "crates/openlogi-hidpp",
     "crates/openlogi-hidpp-derive",
@@ -27,7 +28,7 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.7.10"
+version = "0.8.0"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
@@ -41,8 +42,9 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.10" }
-async-hid = "0.5.3"
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.0" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.0" }
+async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
 # 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
@@ -87,10 +89,14 @@ block2 = "0.6.2"
 # deliberately with `cargo update`, in lockstep with the gpui-component rev.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
+# The unstyled interaction primitives behind gpui-component. Desktop uses its
+# semantic Button for custom-painted controls that must retain native keyboard
+# and accessibility behavior without inheriting widget chrome.
+gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
 # Pinned to the same rev as gpui-component: this crate embeds the lucide SVGs
 # that the `IconName` enum is macro-generated from, so the two must agree.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
 
 # swr-gpui declares gpui from crates.io. A registry dependency and a git one are
 # different crates to cargo even at the same version, so without the
@@ -143,8 +149,8 @@ codegen-units = 1
 strip = "symbols"
 
 # Redirect swr-gpui's registry `gpui` onto the git source the rest of the tree
-# uses, so one `gpui` reaches the lock instead of two. No rev here for the same
-# reason the dependency above carries none — the exact commit stays pinned in
-# Cargo.lock, and this patch must not fork the git source.
+# uses, so one `gpui` reaches the lock instead of two. The version disambiguates
+# the two `gpui` packages now present in the zed repository; the exact commit
+# stays pinned in Cargo.lock so this patch does not fork the git source.
 [patch.crates-io]
-gpui = { git = "https://github.com/zed-industries/zed" }
+gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2" }

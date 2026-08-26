@@ -72,6 +72,19 @@ fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
 }
 
+/// Read the next completed gesture while leaving lifecycle assertions to the
+/// dedicated edge tests below.
+fn next_gesture(
+    rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
+) -> Result<CapturedInput, mpsc::error::TryRecvError> {
+    loop {
+        let input = rx.try_recv()?;
+        if matches!(input, CapturedInput::Gesture(..)) {
+            return Ok(input);
+        }
+    }
+}
+
 #[test]
 fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     // Both sources diverted: press the gesture button, add the panel, release
@@ -85,7 +98,7 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
     handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Click
@@ -103,7 +116,7 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         &tx,
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
             GestureDirection::Right
@@ -113,7 +126,7 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
 
     handle_reprog(&mut acc, release(), BOTH, &[], &[], &tx);
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "a committed takeover swipe must not also click on release"
     );
 }
@@ -138,7 +151,7 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
         &tx,
     );
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "ambiguous overlap motion must not commit a swipe"
     );
 
@@ -154,7 +167,7 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
         &tx,
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Right
@@ -174,7 +187,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
     handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Click
@@ -193,7 +206,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         &tx,
     );
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "the panel's contact jump must not commit a swipe"
     );
     handle_reprog(
@@ -205,7 +218,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         &tx,
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
             GestureDirection::Right
@@ -230,14 +243,14 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
 
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Click
         ))
     );
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "a quick tap emits exactly one click"
     );
 }
@@ -260,7 +273,7 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     );
 
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Right
@@ -269,7 +282,7 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
 
     handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "a committed swipe must not also click on release"
     );
 }
@@ -304,7 +317,7 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
     );
 
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
             GestureDirection::Up
@@ -313,7 +326,7 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
 
     handle_reprog(&mut acc, release(), PANEL, &[], &[], &tx);
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "a committed panel swipe must not also click on release"
     );
 }
@@ -327,14 +340,14 @@ fn a_quick_panel_tap_is_a_click() {
     handle_reprog(&mut acc, release(), PANEL, &[], &[], &tx);
 
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
             GestureDirection::Click
         ))
     );
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "a panel tap emits exactly one click"
     );
 }
@@ -359,7 +372,7 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
         &tx,
     );
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "the contact jump must not commit a swipe"
     );
     // The real swipe starts from a clean accumulator: had the jump been
@@ -373,7 +386,7 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
         &tx,
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
             GestureDirection::Right
@@ -400,7 +413,7 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
     );
 
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
             GestureDirection::Right
@@ -430,8 +443,33 @@ fn an_undiverted_gesture_source_does_not_gesture() {
     handle_reprog(&mut acc, release(), PANEL, &[], &[], &tx);
 
     assert!(
-        rx.try_recv().is_err(),
+        next_gesture(&mut rx).is_err(),
         "a non-owner source must neither gesture nor click"
+    );
+}
+
+#[test]
+fn gesture_sources_emit_independent_edges_without_snapshot_duplicates() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, release(), BOTH, &[], &[], &tx);
+
+    let edges: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|input| !matches!(input, CapturedInput::Gesture(..)))
+        .collect();
+    assert_eq!(
+        edges,
+        vec![
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+            CapturedInput::ButtonDown(ButtonId::HapticPanel),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+            CapturedInput::ButtonUp(ButtonId::HapticPanel),
+        ]
     );
 }
 
@@ -450,7 +488,11 @@ fn a_plain_diverted_gesture_button_presses_without_gesturing() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::GestureButton, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
     );
     assert!(
         rx.try_recv().is_err(),
@@ -472,12 +514,44 @@ fn a_plain_diverted_haptic_panel_presses_as_its_own_button() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::HapticPanel, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::HapticPanel))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::HapticPanel))
     );
     assert!(
         rx.try_recv().is_err(),
         "a plain-diverted panel must not also emit a gesture click"
     );
+}
+
+#[test]
+fn plain_button_snapshots_emit_each_edge_once_and_keep_buttons_independent() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let buttons = [(0x0053, ButtonId::Back), (0x0056, ButtonId::Forward)];
+    let back = RawControlEvent::DivertedButtons([0x0053, 0, 0, 0]);
+    let both = RawControlEvent::DivertedButtons([0x0053, 0x0056, 0, 0]);
+    let forward = RawControlEvent::DivertedButtons([0x0056, 0, 0, 0]);
+
+    handle_reprog(&mut acc, back, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, back, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, both, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, forward, &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
+
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonDown(ButtonId::Back)));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::Forward))
+    );
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonUp(ButtonId::Back)));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::Forward))
+    );
+    assert!(rx.try_recv().is_err(), "unchanged snapshots emit no edges");
 }
 
 #[test]
@@ -492,7 +566,7 @@ fn a_held_dpi_button_presses_once_on_the_rising_edge() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
     assert!(rx.try_recv().is_err(), "a held DPI button presses once");
 }
@@ -514,16 +588,21 @@ fn a_dpi_button_re_presses_after_a_release() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None))
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None)),
+        Ok(CapturedInput::ButtonUp(ButtonId::DpiToggle)),
+        "the falling edge must be preserved"
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle)),
         "a release re-arms the rising edge"
     );
     assert!(
         rx.try_recv().is_err(),
-        "press → release → press emits exactly two presses"
+        "press → release → press emits exactly three lifecycle edges"
     );
 }
 
@@ -586,7 +665,7 @@ fn a_tap_on_a_settled_wheel_is_a_tap() {
             thumb_event(0, thumbwheel::RotationStatus::Inactive, true),
             TRACED_RES
         ),
-        Some(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None))
+        Some(CapturedInput::ButtonPulse(ButtonId::Thumbwheel))
     );
 }
 

@@ -16,9 +16,10 @@
 
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
-    ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, RenderOnce, SharedString, Size, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
@@ -83,7 +84,7 @@ pub fn open(cx: &mut App) {
 /// The accumulation this used to do (collecting discovered devices out of an
 /// event stream) belongs to the agent, which is the side that knows what it has
 /// discovered; nothing is folded here any more.
-pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) -> bool {
+pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) {
     let next = match phase {
         None => PairingUi::Idle,
         Some(PairingPhase::Searching) => PairingUi::Searching,
@@ -94,10 +95,9 @@ pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) -> bool {
         Some(PairingPhase::Failed(failure)) => PairingUi::Failed(failure),
     };
     if cx.try_global::<PairingUi>() == Some(&next) {
-        return false;
+        return;
     }
     cx.set_global(next);
-    true
 }
 
 /// Report a pairing command the client could not deliver. No session will ever
@@ -144,8 +144,8 @@ fn pairing_failure_text(failure: &PairingFailure) -> String {
 }
 
 fn send(cx: &App, command: Command) {
-    if let Some(state) = cx.try_global::<AppState>() {
-        let _ = state.ipc_sender().send(command);
+    if let Some(state) = AppState::try_global(cx) {
+        let _ = state.read(cx).ipc_sender().send(command);
     }
 }
 
@@ -181,13 +181,14 @@ impl AuxWindow for AddDeviceView {
 }
 
 impl Render for AddDeviceView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
         let state = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
 
         v_flex()
             .size_full()
-            .bg(pal.bg)
+            .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -210,13 +211,25 @@ impl Render for AddDeviceView {
                             .text_heading()
                             .child(tr!("Add Device")),
                     )
-                    .child(body(&state, pal)),
+                    .child(AddDeviceBody { state }),
             )
     }
 }
 
-/// The state-dependent body of the window.
-fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
+/// The state-dependent body owns theme resolution for the complete pairing flow.
+#[derive(IntoElement)]
+struct AddDeviceBody {
+    state: PairingUi,
+}
+
+impl RenderOnce for AddDeviceBody {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        pairing_body(self.state, pal)
+    }
+}
+
+fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
     let mut col = v_flex().w_full().flex_1().gap_4();
     match state {
         PairingUi::Idle => {
@@ -232,7 +245,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
         }
         PairingUi::Searching => {
             col = col
-                .child(status_line(tr!("Searching for devices…"), pal))
+                .child(status_line(tr!("Searching for devices…")))
                 .child(hint(
                     tr!("Make sure the device is on and in pairing mode."),
                     pal,
@@ -240,25 +253,25 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 .child(cancel_button());
         }
         PairingUi::Found(devices) => {
-            col = col.child(status_line(tr!("Searching for devices…"), pal));
+            col = col.child(status_line(tr!("Searching for devices…")));
             if devices.is_empty() {
                 col = col.child(hint(tr!("No devices found yet…"), pal));
             } else {
                 col = col.child(hint(tr!("Select a device to pair:"), pal));
-                for (idx, device) in devices.iter().enumerate() {
-                    col = col.child(device_row(idx, device, pal));
+                for device in &devices {
+                    col = col.child(device_row(device, pal));
                 }
             }
             col = col.child(cancel_button());
         }
         PairingUi::Pairing => {
             col = col
-                .child(status_line(tr!("Pairing…"), pal))
+                .child(status_line(tr!("Pairing…")))
                 .child(hint(tr!("Follow the instructions on your device."), pal))
                 .child(cancel_button());
         }
         PairingUi::Passkey(method) => {
-            col = col.child(passkey_panel(method, pal));
+            col = col.child(passkey_panel(&method));
             col = col.child(cancel_button());
         }
         PairingUi::Paired { slot } => {
@@ -270,7 +283,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                         .child(tr!("Device paired")),
                 )
                 .child(hint(
-                    tr!("Paired to slot %{slot}.", slot => (*slot).to_string()),
+                    tr!("Paired to slot %{slot}.", slot => slot.to_string()),
                     pal,
                 ))
                 .child(
@@ -286,7 +299,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                         .font_weight(FontWeight::MEDIUM)
                         .child(tr!("Pairing failed")),
                 )
-                .child(hint(pairing_failure_text(failure), pal))
+                .child(hint(pairing_failure_text(&failure), pal))
                 .when(
                     matches!(failure, PairingFailure::ReceiverNotFound),
                     |this| {
@@ -310,10 +323,14 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
 }
 
 /// A discovered-device row; clicking it pairs with that device.
-fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElement {
+fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
     let address = device.address;
-    div()
-        .id(("found-device", idx))
+    let address_id = u64::from_be_bytes([
+        0, 0, address[0], address[1], address[2], address[3], address[4], address[5],
+    ]);
+    let name = SharedString::from(device.name.clone());
+    BaseButton::new(("found-device", address_id))
+        .accessibility_label(name.clone())
         .w_full()
         .px_4()
         .py_3()
@@ -321,25 +338,22 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
         .border_1()
         .border_color(pal.border)
         .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover))
-        .child(
-            div()
-                .text_body()
-                .child(SharedString::from(device.name.clone())),
-        )
+        .bg(pal.control)
+        .hover(|s| s.bg(pal.control_hover))
+        .focus_visible(|s| s.bg(pal.control_hover))
+        .child(div().text_body().child(name))
         .on_click(move |_, _, cx| send(cx, Command::PairDevice(address)))
 }
 
 /// The passkey-entry instructions panel.
-fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
+fn passkey_panel(method: &PasskeyMethod) -> impl IntoElement {
     let mut col = v_flex().w_full().gap_3();
     match method {
         PasskeyMethod::Keyboard(digits) => {
             col = col
-                .child(status_line(
-                    tr!("Type this passkey on the new keyboard, then press Enter:"),
-                    pal,
-                ))
+                .child(status_line(tr!(
+                    "Type this passkey on the new keyboard, then press Enter:"
+                )))
                 .child(div().text_title().child(SharedString::from(digits.clone())));
         }
         PasskeyMethod::Pointer { clicks, .. } => {
@@ -352,17 +366,16 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                 .collect::<Vec<_>>()
                 .join(" ");
             col = col
-                .child(status_line(
-                    tr!("On the new mouse, click in this order, then press both buttons together:"),
-                    pal,
-                ))
+                .child(status_line(tr!(
+                    "On the new mouse, click in this order, then press both buttons together:"
+                )))
                 .child(div().text_title().child(SharedString::from(sequence)));
         }
     }
     col
 }
 
-fn status_line(text: impl Into<SharedString>, _pal: Palette) -> impl IntoElement {
+fn status_line(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .text_body()
         .font_weight(FontWeight::MEDIUM)

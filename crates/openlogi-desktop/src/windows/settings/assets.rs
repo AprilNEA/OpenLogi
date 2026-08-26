@@ -1,13 +1,16 @@
 //! Assets (device-image cache) settings page.
 
 use crate::ui::theme::Typography as _;
+use gpui_base::Button as BaseButton;
 use std::time::Duration;
 
+use crate::ui::components::control_select;
+
 use super::{
-    App, AppState, AssetCommand, AssetControl, AssetSourcePreference, BorrowAppContext, Entity,
-    IconName, IndexPath, InteractiveElement, IntoElement, Palette, ParentElement, Select,
-    SelectItem, SelectState, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
-    SharedString, Sizable, StatefulInteractiveElement, Styled, div, px,
+    App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Entity, IconName, IndexPath,
+    InteractiveElement, IntoElement, Palette, ParentElement, SelectItem, SelectState, SettingField,
+    SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, StateEvent, Styled, div,
+    px,
 };
 
 #[derive(Clone)]
@@ -58,7 +61,6 @@ pub(super) fn selected_source_index(
 pub(super) fn assets_page(
     view: Entity<SettingsView>,
     asset_source_select: Entity<SelectState<Vec<AssetSourceOption>>>,
-    pal: Palette,
     cache_desc: SharedString,
 ) -> SettingPage {
     let refresh_view = view.clone();
@@ -79,19 +81,19 @@ pub(super) fn assets_page(
                 tr!("Automatically download device images"),
                 SettingField::switch(
                     |cx| {
-                        cx.try_global::<AppState>()
+                        AppState::try_read(cx)
                             .is_none_or(|s| s.app_settings().auto_download_assets)
                     },
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_auto_download_assets(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_auto_download_assets(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
                         // Re-enabling should fetch right away, not wait for the
                         // next device event.
                         if enabled {
                             send_asset_command(cx, AssetCommand::Refresh);
                         }
-                        cx.refresh_windows();
                     },
                 ),
             )
@@ -102,8 +104,9 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("Refresh assets"),
-                SettingField::render(move |_, _, _| {
+                SettingField::render(move |_, _, cx| {
                     let view = refresh_view.clone();
+                    let pal = crate::ui::theme::palette(cx);
                     action_button("assets-refresh", tr!("Refresh"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::Refresh);
                         // Give the spawned sync a moment to land small fetches,
@@ -119,11 +122,11 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("Clear cache"),
-                SettingField::render(move |_, _, _| {
+                SettingField::render(move |_, _, cx| {
                     let view = view.clone();
+                    let pal = crate::ui::theme::palette(cx);
                     action_button("assets-clear", tr!("Clear"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::ClearCache);
-                        cx.refresh_windows();
                         // The wipe runs on the main loop's channel arm, not
                         // synchronously here — without a recompute the row
                         // keeps quoting the pre-Clear size until the window
@@ -137,7 +140,8 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("Cache location"),
-                SettingField::render(move |_, _, _| {
+                SettingField::render(move |_, _, cx| {
+                    let pal = crate::ui::theme::palette(cx);
                     action_button("assets-open", tr!("Open"), pal, |_| {
                         crate::services::assets::reveal_cache_in_file_manager();
                     })
@@ -161,8 +165,7 @@ fn asset_source_select_field(
     asset_source_select: Entity<SelectState<Vec<AssetSourceOption>>>,
 ) -> impl IntoElement {
     div().flex_shrink_0().w(px(220.)).h_6().child(
-        Select::new(&asset_source_select)
-            .small()
+        control_select(&asset_source_select)
             .w(px(220.))
             .menu_width(px(220.)),
     )
@@ -206,8 +209,8 @@ fn action_button(
     pal: Palette,
     on_click: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    div()
-        .id(id)
+    BaseButton::new(id)
+        .accessibility_label(label.clone())
         .flex_shrink_0()
         .px_2()
         .py_1()
@@ -216,7 +219,9 @@ fn action_button(
         .border_color(pal.border)
         .text_caption()
         .cursor_pointer()
-        .hover(move |s| s.bg(pal.surface_hover))
+        .bg(pal.control)
+        .hover(move |s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.bg(pal.control_hover))
         .child(label)
         .on_click(move |_, _, cx| on_click(cx))
 }

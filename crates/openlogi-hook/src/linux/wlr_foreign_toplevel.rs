@@ -23,7 +23,7 @@
 //! ## Dispatch model
 //!
 //! The protocol is event-driven, but the [`super::FrontmostSource`] contract is
-//! a synchronous poll (~1 Hz from `openlogi-desktop::app_watcher`). Two primitives
+//! a synchronous poll (~1 Hz from the agent's foreground-app watcher). Two primitives
 //! bridge that gap:
 //!
 //! - **`drain_events`** (poll path) — flushes pending writes, then attempts a
@@ -432,7 +432,7 @@ impl WlrForeignToplevelSource {
 }
 
 impl FrontmostSource for WlrForeignToplevelSource {
-    fn frontmost_bundle_id(&self) -> Option<String> {
+    fn frontmost_app_id(&self) -> Option<String> {
         let mut guard = self.session.lock().ok()?;
 
         // Reconnect when the compositor sent `Finished` (compositor reload /

@@ -6,20 +6,21 @@
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px, rgb,
+    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
-    h_flex,
+    Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
-use crate::state::AppState;
-use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::components::Toggle;
+use crate::ui::theme::{self, Palette, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -50,9 +51,7 @@ pub struct LightingPanel {
 
 impl LightingPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let initial = cx
-            .try_global::<AppState>()
-            .map_or(100, |s| s.lighting().brightness);
+        let initial = AppState::try_read(cx).map_or(100, |s| s.lighting().brightness);
         let brightness = cx.new(|_| {
             SliderState::new()
                 .max(100.)
@@ -66,16 +65,31 @@ impl LightingPanel {
             cx.subscribe(&brightness, |_panel, _slider, event: &SliderEvent, cx| {
                 if let SliderEvent::Release(value) = event {
                     let pct = clamp_brightness(value.start());
-                    cx.update_global::<AppState, _>(|state, _| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
                         let mut lighting = state.lighting();
                         lighting.enabled = true;
                         lighting.brightness = pct;
                         state.commit_lighting(lighting);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::LightingChanged(key));
+                        }
                     });
                     cx.notify();
                 }
             });
-        let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::LightingChanged(key) => AppState::try_read(cx)
+                    .and_then(AppState::current_record)
+                    .is_some_and(|record| record.device_key() == *key),
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             brightness,
             last_brightness: initial,
@@ -88,8 +102,7 @@ impl LightingPanel {
 impl Render for LightingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let lighting = cx
-            .try_global::<AppState>()
+        let lighting = AppState::try_read(cx)
             .map(AppState::lighting)
             .unwrap_or_default();
 
@@ -103,10 +116,9 @@ impl Render for LightingPanel {
                 .update(cx, |slider, cx| slider.set_value(value, window, cx));
         }
 
-        let swatches: Vec<AnyElement> = PALETTE
+        let swatches: Vec<_> = PALETTE
             .iter()
-            .enumerate()
-            .map(|(idx, &color)| swatch(idx, color, &lighting, pal))
+            .map(|&color| swatch(color, &lighting, pal))
             .collect();
 
         v_flex()
@@ -122,7 +134,21 @@ impl Render for LightingPanel {
                             .text_color(pal.text_muted)
                             .child(tr!("Lighting")),
                     )
-                    .child(toggle(&lighting, pal)),
+                    .child(
+                        Toggle::new("light-toggle")
+                            .selected(lighting.enabled)
+                            .on_change(|enabled, _window, cx| {
+                                AppState::update(cx, |state, cx| {
+                                    let key = state.current_record().map(DeviceRecord::device_key);
+                                    let mut next = state.lighting();
+                                    next.enabled = *enabled;
+                                    state.commit_lighting(next);
+                                    if let Some(key) = key {
+                                        cx.emit(StateEvent::LightingChanged(key));
+                                    }
+                                });
+                            }),
+                    ),
             )
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
@@ -147,10 +173,18 @@ impl Render for LightingPanel {
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
-fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
+fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
     let selected = current.enabled && current.color == color;
-    div()
-        .id(("light-swatch", idx))
+    BaseButton::new(("light-swatch", color.packed()))
+        .role(Role::RadioButton)
+        .selected(selected)
+        .accessibility_label(format!("{} #{:06X}", tr!("Lighting"), color.packed()))
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .aria_selected(selected)
         .size(px(SWATCH))
         .rounded(pal.control_radius)
         .border_2()
@@ -161,41 +195,19 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
         })
         .bg(rgb(color.packed()))
         .cursor_pointer()
+        .focus_visible(|style| style.border_color(theme::accent()))
         .on_click(move |_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| {
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
                 let mut next = state.lighting();
                 next.enabled = true;
                 next.color = color;
                 state.commit_lighting(next);
+                if let Some(key) = key {
+                    cx.emit(StateEvent::LightingChanged(key));
+                }
             });
-            cx.refresh_windows();
         })
-        .into_any_element()
-}
-
-/// On/off pill.
-fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
-    let on = current.enabled;
-    div()
-        .id("light-toggle")
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .child(if on { tr!("On") } else { tr!("Off") })
-        .on_click(|_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| {
-                let mut next = state.lighting();
-                next.enabled = !next.enabled;
-                state.commit_lighting(next);
-            });
-            cx.refresh_windows();
-        })
-        .into_any_element()
 }
 
 /// Snap a raw slider read to a 0–100 brightness percent.

@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Arc};
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
-    device::Device,
     receiver::{
         self, Receiver,
         bolt::{
@@ -23,9 +22,11 @@ use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 
-use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
+use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
+use super::{
+    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
+};
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
@@ -170,23 +171,34 @@ async fn probe_unifying_receiver(
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
 ) -> NodeProbe {
+    // Pairing count is the health gate for this path: without it the result is
+    // settled as a failed probe regardless of any later arrival events. Check
+    // it first and stop immediately on failure instead of spending two more
+    // request timeouts enabling notifications and triggering arrivals on a
+    // channel that has already stopped delivering receiver replies.
+    let pairing_count = match unifying.count_pairings().await {
+        Ok(count) => count,
+        Err(error) => {
+            debug!(?error, "receiver pairing-count read failed");
+            return NodeProbe::failed();
+        }
+    };
+    debug!(pairing_count, "receiver reports pairing count");
     let unique_id = unifying.get_unique_id().await.ok();
-    let pairing_count = unifying.count_pairings().await.ok();
-    debug!(?pairing_count, "receiver reports pairing count");
 
-    // Trigger device-arrival events and collect one event per online device.
-    // Each event carries the slot index, kind, wpid, and online flag — enough
-    // to build a PairedDevice entry for every currently-connected device.
+    // Trigger device-arrival events and collect one event per paired slot.
+    // Each event carries the slot index, kind, wpid, and a link-status bit —
+    // enough to build a PairedDevice entry, online or not.
     //
     // Note: the Unifying `0xB5/0x5N` pairing-info register uses a different
-    // sub-register base than Bolt, so we don't yet poll offline paired slots.
-    // Online devices are covered by the arrival drain; offline device support
-    // requires resolving the correct sub-register format.
+    // sub-register base than Bolt, so paired slots are not polled directly.
+    // A slot whose re-broadcast goes missing this tick cannot be backfilled
+    // until that register format is resolved.
     //
     // The drain is therefore the *only* device source on this path, so a
     // failed arrival trigger is "couldn't check", not "no devices online":
     // settle it as a failed probe and let the ledger replay the last snapshot.
-    let Some(connections) = drain_device_arrival_unifying(&unifying).await else {
+    let Some(connections) = drain_device_arrival_unifying(&unifying, pairing_count).await else {
         return NodeProbe::failed();
     };
     debug!(events = connections.len(), "drained device-arrival events");
@@ -229,17 +241,17 @@ async fn probe_unifying_receiver(
 
     let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().flatten().unzip();
 
-    if let Some(count) = pairing_count
-        && paired.len() != usize::from(count)
-    {
+    if paired.len() != usize::from(pairing_count) {
         debug!(
-            expected = count,
+            expected = pairing_count,
             found = paired.len(),
-            "online devices differ from pairing count; offline devices not yet surfaced for Unifying"
+            "arrival drain reported fewer slots than the pairing count"
         );
     }
-    // Unlike Bolt, a count/list shortfall is *expected* here (offline paired
-    // devices aren't enumerable yet), so ledger health can't ride on it. The
+    // Unlike Bolt, a count/list shortfall is tolerated here: not every
+    // firmware re-broadcasts all paired slots (offline slots in particular can
+    // go missing), and there is no register poll to backfill them, so ledger
+    // health can't ride on it. The
     // ledger health signal is the pairing-count register answering at all: that
     // proves the receiver round-trip worked this cycle, while `None` (e.g. a
     // parked channel) is "couldn't fully check" — the ledger then replays the
@@ -249,8 +261,8 @@ async fn probe_unifying_receiver(
     // devices may appear after a late arrival drain. Report that separately as
     // `complete = false`; the unchanged-inventory fallback stops expected
     // offline Unifying shortfalls after they stabilize.
-    let healthy = pairing_count.is_some();
-    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
+    let healthy = true;
+    let complete = paired.len() == usize::from(pairing_count);
 
     NodeProbe {
         inventory: Some(DeviceInventory {
@@ -537,34 +549,64 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
     out
 }
 
-/// `None` when the arrival trigger itself failed: unlike Bolt (whose paired
+/// `None` when the receiver could not be asked: the arrival trigger failed,
+/// or the notification-flag fallback write did. Unlike Bolt (whose paired
 /// list comes from the slot registers), the drain is the only Unifying device
 /// source, so the caller must treat that as a failed probe rather than an
 /// empty receiver.
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
+    pairing_count: u8,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
-    // The receiver only re-broadcasts 0x41 arrival events while wireless
-    // notifications are on; without this the trigger below is ACK'd but emits
-    // nothing, so a paired online device never surfaces.
-    if let Err(e) = unifying.set_wireless_notifications(true).await {
-        debug!(error = ?e, "enable wireless notifications failed");
-    }
     let rx = unifying.listen();
+    // Newer Lightspeed receivers can already have notifications enabled (or
+    // emit the requested arrival event without changing the legacy Unifying
+    // flag). Ask first: c54d has been observed to answer this trigger while
+    // occasionally withholding the ACK for the notification-register setup,
+    // which otherwise stalls discovery before it reaches the useful request.
     if let Err(e) = unifying.trigger_device_arrival().await {
         debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
         return None;
     }
-
     let mut out = Vec::new();
     loop {
         match timeout(ARRIVAL_DRAIN, rx.recv()).await {
-            Ok(Ok(UnifyingEvent::DeviceConnection(c))) => out.push(c),
+            Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    Some(out)
+    // A receiver with no pairings legitimately emits nothing: don't pay a
+    // notification-register round trip and a second drain window for it on
+    // every watcher tick.
+    if !out.is_empty() || pairing_count == 0 {
+        return Some(out);
+    }
+
+    // Classic Unifying receivers only re-broadcast 0x41 arrival events while
+    // wireless notifications are on. Fall back to enabling that flag when the
+    // direct trigger produced no device, then retry once on the same listener.
+    if let Err(error) = unifying.set_wireless_notifications(true).await {
+        // A register write the receiver stopped ACK'ing is "couldn't check",
+        // exactly like a failed trigger: settle it as a failed probe so the
+        // ledger replays the last snapshot, instead of publishing an
+        // authoritative empty inventory that overwrites the node's last-good
+        // device list.
+        debug!(?error, "enable wireless notifications failed");
+        return None;
+    }
+    if let Err(error) = unifying.trigger_device_arrival().await {
+        debug!(?error, "arrival retry after enabling notifications failed");
+        return None;
+    }
+    out.clear();
+    loop {
+        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+            Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => return Some(out),
+        }
+    }
 }
 
 /// Probe a Unifying slot from a live device-connection event.
@@ -575,7 +617,7 @@ async fn drain_device_arrival_unifying(
 /// working `get_device_pairing_information` call; we derive a stable cache key
 /// from the receiver UID + slot so the feature-table walk is amortised at ~30s
 /// and two receivers sharing a slot number don't collide in the cache.
-async fn probe_unifying_slot(
+pub(super) async fn probe_unifying_slot(
     channel: &Arc<HidppChannel>,
     event: &UnifyingDeviceConnection,
     receiver_uid: &str,
@@ -583,16 +625,6 @@ async fn probe_unifying_slot(
     tick: u64,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
-    let codename = read_codename_unifying(channel, slot).await;
-    debug!(
-        slot,
-        online = event.online,
-        wpid = format_args!("{:04x}", event.wpid),
-        kind = ?event.kind,
-        codename = ?codename,
-        "unifying paired slot"
-    );
-
     // Cache key: full receiver serial + slot so two Unifying receivers with
     // a device on the same slot number never share a cache entry.
     let id = CacheKey::UnifyingSlot {
@@ -602,53 +634,68 @@ async fn probe_unifying_slot(
     let cached = cache.get(&id);
     let register_kind = map_unifying_kind(event.kind);
 
-    // `trigger_device_arrival` re-broadcasts a 0x41 for *every* paired slot,
-    // online or not, and the crate's `event.online` reads the wrong notification
-    // byte (payload[1] bit6, always set here — wire-verified `04 62 69 40`), so
-    // neither tells us if the device is actually reachable on this receiver.
-    // A cache hit must therefore still do one live round-trip: otherwise cached
-    // capabilities keep an absent device "online" forever and its reconnect is
-    // invisible to the agent's volatile-state re-apply/capture re-arm path.
+    // The 0x41 re-broadcast is the receiver's own slot report and its
+    // link-status bit is the liveness authority (Solaar's trigger scan trusts
+    // the same bit). The feature/battery refresh below is optional metadata:
+    // keep it bounded, never let its one lost reply turn a device that just
+    // announced itself into "offline" — and don't probe an offline slot at
+    // all, which would burn the budget on a link the receiver just reported
+    // as not established.
+    let probe_budget = unifying_probe_budget(cached, tick);
     let probe_result = timeout(
-        UNIFYING_SLOT_PROBE,
-        probe_unifying_features(channel, slot, &id, cached, tick),
+        probe_budget,
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online, tick),
     )
     .await;
-    let (probe, outcome, online) = if let Ok(r) = probe_result {
-        r
+    let (probe, outcome) = if let Ok(result) = probe_result {
+        result
     } else {
-        debug!(slot, budget = ?UNIFYING_SLOT_PROBE,
+        debug!(slot, budget = ?probe_budget,
             "Unifying slot probe timed out; using cached data if available");
-        let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
-        (probe, CacheOutcome::Seen(id), false)
+        let probe = cached.map_or_else(ProbedFeatures::default, |entry| entry.probe.clone());
+        (probe, CacheOutcome::Seen(id))
     };
 
-    let device = assemble_unifying_device(slot, codename, event.wpid, register_kind, probe, online);
+    // HID++ 2.0's marketing name is the same identity we need for display and
+    // avoids another receiver-register round trip. Keep the legacy codename
+    // read only for a completed feature walk that did not expose a name; never
+    // put it in front of the feature probe, where one missing receiver ACK can
+    // otherwise starve a healthy Lightspeed mouse forever.
+    let codename = if let Some(name) = probe.marketing_name.clone() {
+        Some(name)
+    } else if probe.capabilities.is_some() {
+        read_codename_unifying(channel, slot).await
+    } else {
+        None
+    };
+    debug!(
+        slot,
+        online = event.online,
+        wpid = format_args!("{:04x}", event.wpid),
+        kind = ?event.kind,
+        codename = ?codename,
+        "unifying paired slot"
+    );
+
+    let device = assemble_unifying_device(
+        slot,
+        codename,
+        event.wpid,
+        register_kind,
+        probe,
+        event.online,
+    );
     Some((device, outcome))
 }
 
-/// Return cached immutable features together with a fresh reachability result.
-///
-/// A successful full probe ([`CacheOutcome::Fresh`]) confirms liveness on a
-/// cache miss/stale entry. A fresh cached entry normally refreshes its battery,
-/// whose successful response ([`CacheOutcome::Update`]) is the liveness check.
-/// A failed battery refresh, or a device without that feature, gets a root ping
-/// before being treated as offline.
-pub(super) async fn probe_unifying_features(
-    channel: &Arc<HidppChannel>,
-    slot: u8,
-    id: &CacheKey,
-    cached: Option<&Cached>,
-    tick: u64,
-) -> (ProbedFeatures, CacheOutcome, bool) {
-    let (probe, outcome) =
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick).await;
-    let online = if matches!(outcome, CacheOutcome::Fresh(..) | CacheOutcome::Update(..)) {
-        true
+/// A fresh cache hit needs only an optional battery refresh; first-sight and
+/// stale entries retain the larger budget needed for a complete feature walk.
+pub(super) fn unifying_probe_budget(cached: Option<&Cached>, tick: u64) -> std::time::Duration {
+    if cached.is_some_and(|entry| !is_stale(entry, tick)) {
+        UNIFYING_CACHED_SLOT_PROBE
     } else {
-        Device::new(Arc::clone(channel), slot).await.is_ok()
-    };
-    (probe, outcome, online)
+        UNIFYING_SLOT_PROBE
+    }
 }
 
 pub(super) fn assemble_unifying_device(

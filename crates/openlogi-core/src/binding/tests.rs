@@ -33,10 +33,28 @@ fn catalog_excludes_custom_shortcut() {
     let catalog = Action::catalog();
     for action in &catalog {
         assert!(
-            !matches!(action, Action::CustomShortcut(_)),
-            "catalog must not contain CustomShortcut"
+            !matches!(action, Action::CustomShortcut(_) | Action::HoldShortcut(_)),
+            "catalog must not contain recorded shortcut actions"
         );
     }
+}
+
+#[test]
+fn hold_shortcut_has_distinct_lifecycle_semantics() {
+    let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
+    let held = Action::HoldShortcut(combo.clone());
+
+    assert_eq!(held.label(), "Hold Alt+Space");
+    assert_eq!(held.category(), Category::Editing);
+    assert_eq!(held.held_combo(), Some(&combo));
+    assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
+    assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+}
+
+#[test]
+fn hold_shortcut_roundtrips_toml() {
+    let action = Action::HoldShortcut("Alt+Space".parse().expect("valid shortcut failed"));
+    assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
@@ -169,6 +187,27 @@ fn binding_gesture_roundtrips() {
     assert_eq!(back[&ButtonId::GestureButton], Binding::Gesture(map));
 }
 
+#[test]
+fn binding_long_press_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("short = \"Copy\""));
+    assert!(toml.contains("long = \"MissionControl\""));
+    assert!(!toml.contains("LongPress"));
+}
+
+#[test]
+fn binding_long_press_requires_exact_short_and_long_fields() {
+    let missing_long = "[bindings.Back]\nshort = \"Copy\"";
+    assert!(toml::from_str::<BindingWrapper>(missing_long).is_err());
+
+    let unknown = "[bindings.Back]\nshort = \"Copy\"\nlong = \"Paste\"\nthreshold_ms = 900";
+    assert!(toml::from_str::<BindingWrapper>(unknown).is_err());
+}
+
 /// The untagged-routing safety guard. A TOML table keyed by ANY
 /// [`GestureDirection`] name must deserialize as [`Binding::Gesture`], never
 /// [`Binding::Single`]. If a future [`Action`] payload variant is ever named
@@ -264,6 +303,10 @@ fn persisted_action_variant_names_are_stable() {
             ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
                 .unwrap_or_else(|error| panic!("valid target failed: {error}")),
         ),
+        Action::HoldShortcut(
+            "F2".parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
     ]);
     let mut actual: Vec<String> = actions
         .into_iter()
@@ -293,6 +336,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",
         "LockScreen",
@@ -467,6 +511,28 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
     assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
 }
 
+#[test]
+fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
+    // The seed has to match the native behavior on both sides: the capture
+    // plan diverts a control only when its binding leaves the default, so any
+    // other seed would divert an untouched tilt and kill horizontal scroll.
+    assert_eq!(
+        default_binding(ButtonId::WheelTiltLeft),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::WheelTiltRight),
+        Action::HorizontalScrollRight
+    );
+    for tilt in [ButtonId::WheelTiltLeft, ButtonId::WheelTiltRight] {
+        assert!(ButtonId::ALL.contains(&tilt));
+        // A tilt reaches the host over HID++ diversion only: the OS hook sees
+        // a horizontal scroll, not a button, and it swipes nothing.
+        assert!(!tilt.is_os_hook_button());
+        assert!(!tilt.is_hidpp_gesture_source());
+    }
+}
+
 // ── Effect classification ─────────────────────────────────────────────────
 //
 // `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three
@@ -494,6 +560,13 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
         .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
     let custom_shortcut = Action::CustomShortcut(combo);
     assert_matches!(custom_shortcut.effect(), Effect::Key(_));
+
+    let hold_shortcut = Action::HoldShortcut(
+        "Ctrl+Space"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+    );
+    assert_matches!(hold_shortcut.effect(), Effect::HeldKey(_));
 
     let type_text = Action::TypeText("hi".into());
     assert_matches!(type_text.effect(), Effect::Text("hi"));

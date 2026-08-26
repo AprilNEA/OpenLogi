@@ -13,8 +13,7 @@
 //! ([`crate::features::camera::request_camera_access`]) — the prompt must
 //! originate in-app because macOS only lists an app under Privacy → Camera
 //! after it has requested access at least once. Once the grant lands, the
-//! helper's window refresh re-runs [`Self::set_target`], which starts the
-//! deferred stream.
+//! helper's typed permission event starts the deferred stream.
 //!
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
@@ -24,13 +23,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, img, px,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage, SharedString,
+    Styled, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
 
+use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 const PREVIEW_W: f32 = 480.;
@@ -48,10 +49,24 @@ pub struct CameraPreview {
     /// Target is set but the stream isn't running because Camera permission
     /// wasn't granted yet; retried once access appears.
     awaiting_access: bool,
+    _permission_obs: Subscription,
 }
 
 impl CameraPreview {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let permission_obs = cx.subscribe(
+            &AppState::global(cx),
+            |preview, _, event: &StateEvent, cx| {
+                if !matches!(event, StateEvent::CameraPermissionChanged) {
+                    return;
+                }
+                if preview.awaiting_access && openlogi_camera::camera_access_granted() {
+                    preview.awaiting_access = false;
+                    preview.start_stream(cx);
+                }
+                cx.notify();
+            },
+        );
         Self {
             stream: None,
             streaming_uid: None,
@@ -59,6 +74,7 @@ impl CameraPreview {
             last_generation: 0,
             repaint_task: None,
             awaiting_access: false,
+            _permission_obs: permission_obs,
         }
     }
 
@@ -154,35 +170,16 @@ impl Render for CameraPreview {
             }
         }
 
-        let surface: AnyElement = if let Some(image) = self.current_image.as_ref() {
-            img(image.clone())
-                .w(px(PREVIEW_W))
-                .h(px(PREVIEW_H))
-                .rounded_md()
-                .into_any_element()
-        } else if !openlogi_camera::capture_supported() {
-            note(
-                tr!("Live preview isn't available on this platform yet."),
-                pal,
-            )
-        } else if granted {
-            note(tr!("Starting preview…"), pal)
-        } else if matches!(
-            openlogi_camera::camera_authorization(),
-            CameraAuthorization::Undetermined
-        ) {
-            div()
-                .id("camera-request-access")
-                .text_body()
-                .text_color(pal.text_muted)
-                .cursor_pointer()
-                .hover(|s| s.text_color(pal.text_primary))
-                .child(tr!("Click to enable camera access."))
-                .on_click(|_, _, cx| crate::features::camera::request_camera_access(cx))
-                .into_any_element()
-        } else {
-            note(tr!("Enable Camera access in Settings to preview."), pal)
-        };
+        let image = self.current_image.clone();
+        let show_placeholder = image.is_none();
+        let capture_supported = !show_placeholder || openlogi_camera::capture_supported();
+        let authorization_undetermined = show_placeholder
+            && capture_supported
+            && !granted
+            && matches!(
+                openlogi_camera::camera_authorization(),
+                CameraAuthorization::Undetermined
+            );
 
         v_flex()
             .w(px(PREVIEW_W))
@@ -192,8 +189,47 @@ impl Render for CameraPreview {
             .rounded_md()
             .border_1()
             .border_color(pal.border)
-            .bg(pal.surface)
-            .child(surface)
+            .bg(pal.panel)
+            .when_some(image, |surface, image| {
+                surface.child(img(image).w(px(PREVIEW_W)).h(px(PREVIEW_H)).rounded_md())
+            })
+            .when(show_placeholder && !capture_supported, |surface| {
+                surface.child(note(
+                    tr!("Live preview isn't available on this platform yet."),
+                    pal,
+                ))
+            })
+            .when(
+                show_placeholder && capture_supported && granted,
+                |surface| surface.child(note(tr!("Starting preview…"), pal)),
+            )
+            .when(
+                show_placeholder && capture_supported && !granted && authorization_undetermined,
+                |surface| {
+                    surface.child(
+                        BaseButton::new("camera-request-access")
+                            .accessibility_label(tr!("Click to enable camera access."))
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(pal.text_primary))
+                            .focus_visible(|s| s.text_color(pal.text_primary))
+                            .child(tr!("Click to enable camera access."))
+                            .on_click(|_, _, cx| {
+                                crate::features::camera::request_camera_access(cx);
+                            }),
+                    )
+                },
+            )
+            .when(
+                show_placeholder && capture_supported && !granted && !authorization_undetermined,
+                |surface| {
+                    surface.child(note(
+                        tr!("Enable Camera access in Settings to preview."),
+                        pal,
+                    ))
+                },
+            )
     }
 }
 
@@ -204,10 +240,9 @@ fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
 }
 
-fn note(text: impl Into<SharedString>, pal: Palette) -> AnyElement {
+fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
     div()
         .text_body()
         .text_color(pal.text_muted)
         .child(text.into())
-        .into_any_element()
 }

@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -55,7 +56,10 @@ pub use succession::Identity;
 /// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
 /// v25: `AgentStatus::input_monitoring_granted` appended.
 /// v26: `AgentStatus::hid_open_failures` appended.
-pub const PROTOCOL_VERSION: u32 = 26;
+/// v27: `AgentSnapshot::foreground` appended — the frontmost application the
+///      agent matches per-app profiles against, plus the ones it saw recently.
+/// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -129,7 +133,43 @@ pub struct AgentSnapshot {
     pub camera_active: bool,
     /// The pairing session the agent has open, if any. See [`PairingPhase`].
     pub pairing: Option<PairingPhase>,
+    /// Which application per-app profiles are resolving against. See
+    /// [`ForegroundApps`].
+    pub foreground: ForegroundApps,
 }
+
+/// The application the agent currently resolves per-app profiles against, and
+/// the ones it recently saw in front.
+///
+/// `recent` is here because a client cannot produce these identifiers itself.
+/// They come from four incompatible namespaces — macOS bundle ids, X11
+/// `WM_CLASS`, Wayland `app_id`, Windows executable paths — and only the agent
+/// holds the one that its matcher will actually compare. Enumerating installed
+/// applications in the GUI would produce plausible strings that miss. A client
+/// offering "make a profile for…" therefore picks from this list rather than
+/// from the host.
+///
+/// It also answers the case [`Self::current`] cannot: while a client's own
+/// window is in front, *it* is the foreground application, so the app the user
+/// means is the previous entry, not the current one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForegroundApps {
+    /// The application whose profile is live right now, or `None` when nothing
+    /// is frontmost or the platform cannot say (a pure-Wayland session with no
+    /// usable backend). OpenLogi's own processes are reported here like any
+    /// other application — this is the matcher's view, not a filtered one.
+    pub current: Option<ForegroundApp>,
+    /// The most recently frontmost applications, newest first, deduplicated by
+    /// identifier and capped at [`RECENT_APPS`]. Excludes OpenLogi's own
+    /// processes, which are never a sensible profile target. Includes
+    /// [`Self::current`] when it is not one of them.
+    pub recent: Vec<ForegroundApp>,
+}
+
+/// How many applications [`ForegroundApps::recent`] remembers: enough to fill a
+/// picker with what the user was just doing, few enough that the list stays a
+/// rounding error in every observation.
+pub const RECENT_APPS: usize = 12;
 
 /// Where a pairing session stands.
 ///

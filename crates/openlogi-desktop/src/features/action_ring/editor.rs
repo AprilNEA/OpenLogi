@@ -1,17 +1,12 @@
 //! Categorized action, shortcut, path, and icon editor for one ring slot.
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Entity, InteractiveElement, IntoElement, ParentElement,
-    Role, ScrollHandle, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
-    px, rgb, svg,
+    Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _,
-    button::Button,
-    h_flex,
-    input::{Input, InputState},
-    scroll::ScrollableElement as _,
-    v_flex,
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
     Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, KeyCombo,
@@ -19,9 +14,11 @@ use openlogi_core::binding::{
 };
 
 use super::action_icons::action_icon_path;
-use crate::features::mouse::picker::popover_section;
-use crate::state::AppState;
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::features::mouse::picker::editor_section;
+use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::action::localized_action_label;
+use crate::ui::components::{MenuRow, control_input};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
@@ -32,10 +29,9 @@ pub(super) fn action_library(
     pal: Palette,
 ) -> impl IntoElement {
     let current_action = current.map(ActionRingEntry::action).cloned();
-    let current_label = current_action.as_ref().map_or_else(
-        || tr!("Empty slot").to_string(),
-        |action| rust_i18n::t!(action.label()).into_owned(),
-    );
+    let current_label = current_action
+        .as_ref()
+        .map_or_else(|| tr!("Empty slot"), localized_action_label);
 
     v_flex()
         .flex_1()
@@ -46,7 +42,7 @@ pub(super) fn action_library(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.panel)
         .child(
             v_flex()
                 .flex_none()
@@ -86,7 +82,7 @@ pub(super) fn action_library(
                 })
                 .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
-                .children(action_rows(slot, current_action.as_ref(), pal)),
+                .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
         ))
 }
@@ -121,7 +117,7 @@ fn icon_editor(
 
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Icon"), pal))
+        .child(editor_section(tr!("Icon"), pal))
         .child(
             h_flex().flex_wrap().gap_1().child(default).children(
                 ActionRingIcon::ALL
@@ -164,7 +160,7 @@ fn shortcut_editor(
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Custom shortcut"), pal))
+        .child(editor_section(tr!("Custom shortcut"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -172,7 +168,7 @@ fn shortcut_editor(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(input).small().cleanable(true)),
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
                     Button::new("ring-add-shortcut")
@@ -192,7 +188,7 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(popover_section(tr!("Open application or folder"), pal))
+        .child(editor_section(tr!("Open application or folder"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -200,7 +196,7 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(input).small().cleanable(true)),
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
                     Button::new("ring-add-path")
@@ -216,35 +212,26 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
         )
 }
 
-fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> Vec<AnyElement> {
+fn action_sections(
+    slot: ActionRingSlot,
+    current: Option<&Action>,
+    pal: Palette,
+) -> impl Iterator<Item = impl IntoElement> {
     let mut index = 0usize;
-    let mut rows = Vec::new();
-    for (category, actions) in ring_catalog() {
-        rows.push(popover_section(rust_i18n::t!(category.label()), pal));
-        for action in actions {
-            let selected = current == Some(&action);
-            let action_to_commit = action.clone();
-            let label = tr!(action.label());
-            let icon_path = action_icon_path(&action);
-            let row_index = index;
-            index += 1;
-            rows.push(
-                h_flex()
-                    .id(("ring-action", row_index))
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(pal.control_radius)
-                    .text_body()
-                    .text_color(pal.text_primary)
-                    .selected_fill(selected)
+    ring_catalog().into_iter().map(move |(category, actions)| {
+        v_flex()
+            .child(editor_section(rust_i18n::t!(category.label()), pal))
+            .children(actions.into_iter().map(|action| {
+                let selected = current == Some(&action);
+                let action_to_commit = action.clone();
+                let label = tr!(action.label());
+                let icon_path = action_icon_path(&action);
+                let row_index = index;
+                index += 1;
+                MenuRow::new(("ring-action", row_index))
                     .role(Role::MenuItem)
                     .aria_label(label.clone())
-                    .aria_selected(selected)
-                    .cursor_pointer()
+                    .selected(selected)
                     .child(
                         h_flex()
                             .items_center()
@@ -265,15 +252,11 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                                 .text_color(rgb(theme::ACCENT_BLUE)),
                         )
                     })
-                    .hover(move |row| row.bg(pal.surface_hover))
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);
                     })
-                    .into_any_element(),
-            );
-        }
-    }
-    rows
+            }))
+    })
 }
 
 fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
@@ -303,17 +286,23 @@ fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
 }
 
 fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui::App) {
-    cx.update_global::<AppState, _>(|state, _| {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
         state.commit_action_ring_slot(slot, action);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
     });
-    cx.refresh_windows();
 }
 
 fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui::App) {
-    cx.update_global::<AppState, _>(|state, _| {
+    AppState::update(cx, |state, cx| {
+        let key = state.current_record().map(DeviceRecord::device_key);
         state.commit_action_ring_icon(slot, icon);
+        if let Some(key) = key {
+            cx.emit(StateEvent::BindingsChanged(key));
+        }
     });
-    cx.refresh_windows();
 }
 
 #[cfg(test)]

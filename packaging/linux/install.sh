@@ -51,7 +51,7 @@ The script installs:
   /etc/udev/rules.d/70-openlogi.rules
   /usr/lib/systemd/user/openlogi-agent.service  (if systemd is present)
   /usr/share/applications/openlogi.desktop
-  /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
+  /usr/share/icons/hicolor/<size>/apps/openlogi.png  (16 … 1024)
 EOF
   exit 0
 fi
@@ -124,11 +124,20 @@ sudo install -Dm644 "${SCRIPT_DIR}/desktop/openlogi.desktop" \
 
 # ── icon ──────────────────────────────────────────────────────────────────────
 
+# Every standard indexed hicolor size, not only the 1024 master: a stock
+# `hicolor/index.theme` stops at 512x512, so a launcher that resolves icons
+# through the theme index shows nothing when only `1024x1024/apps` exists.
 ICON_SRC="${REPO_ROOT}/design/icon/openlogi.png"
 if [ -f "$ICON_SRC" ]; then
   echo "Installing icon …"
   sudo install -Dm644 "$ICON_SRC" \
     /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
+  for size in 512 256 128 64 48 32 16; do
+    sized="${REPO_ROOT}/design/icon/openlogi-${size}.png"
+    [ -f "$sized" ] || continue
+    sudo install -Dm644 "$sized" \
+      "/usr/share/icons/hicolor/${size}x${size}/apps/openlogi.png"
+  done
   if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
   fi

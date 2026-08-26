@@ -1,6 +1,6 @@
 project_id_env: CROWDIN_PROJECT_ID
 api_token_env: CROWDIN_PERSONAL_TOKEN
-base_path: "."
+base_path: ".."
 
 preserve_hierarchy: true
 
@@ -17,6 +17,7 @@ export_languages:
   - pt-BR
   - fi
   - sv-SE
+  - tr
   - el
   - ru
   - uk
@@ -45,6 +46,7 @@ files:
         pt-BR: "pt-BR"
         fi: "fi"
         sv-SE: "sv"
+        tr: "tr"
         el: "el"
         ja: "ja"
         ru: "ru"

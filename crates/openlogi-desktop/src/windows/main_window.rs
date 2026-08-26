@@ -17,7 +17,7 @@ use crate::ui::theme;
 use crate::windows::{WindowRegistry, titlebar_options};
 
 fn window_options(cx: &mut App) -> WindowOptions {
-    let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
+    let bounds = Bounds::centered(None, Size::new(px(1280.), px(820.)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         // Advertise a Wayland xdg-toplevel app_id (and X11 WM_CLASS). Without it

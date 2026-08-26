@@ -15,6 +15,7 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use futures::{FutureExt, pin_mut, select};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_device_registry::receiver::{ReceiverProtocol, find_receiver};
 
 use super::{RECEIVER_DEVICE_INDEX, ReceiverError};
 use crate::{
@@ -26,9 +27,6 @@ use crate::{
 mod event;
 
 pub use event::{DeviceConnection, DeviceKind, Event, PairingError, PairingPasskeyPressType};
-
-/// All USB vendor & product ID pairs that are known to identify Bolt receivers.
-pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc548)];
 
 /// All known registers of the Bolt receiver.
 ///
@@ -106,7 +104,9 @@ impl Receiver {
     /// match the ones of any known Bolt receiver, this function will return
     /// [`ReceiverError::UnknownReceiver`].
     pub fn new(chan: Arc<HidppChannel>) -> Result<Self, ReceiverError> {
-        if !VPID_PAIRS.contains(&(chan.vendor_id, chan.product_id)) {
+        if find_receiver(chan.vendor_id, chan.product_id)
+            .is_none_or(|receiver| receiver.protocol != ReceiverProtocol::Bolt)
+        {
             return Err(ReceiverError::UnknownReceiver);
         }
 

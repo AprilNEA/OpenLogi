@@ -18,6 +18,7 @@ use super::{Host, Step};
 #[derive(Clone, Copy, PartialEq, Eq, Debug, EnumIter)]
 pub(crate) enum Job {
     Rustfmt,
+    Typos,
     PublishClosure,
     Shell,
     Clippy,
@@ -66,6 +67,21 @@ const GROUPS: [(&str, &[Job]); 2] = [
     ("test", &[Job::TestsLinux, Job::TestsMacos]),
 ];
 
+fn default_spec(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    caveat: &'static str,
+) -> Spec {
+    Spec {
+        name,
+        aliases,
+        prefix: None,
+        hosts: Host::ANY,
+        in_default_run: true,
+        caveat,
+    }
+}
+
 fn focused_spec(
     name: &'static str,
     aliases: &'static [&'static str],
@@ -84,30 +100,22 @@ fn focused_spec(
 impl Job {
     fn spec(self) -> Spec {
         match self {
-            Self::Rustfmt => Spec {
-                name: "rustfmt",
-                aliases: &["fmt"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "",
-            },
-            Self::PublishClosure => Spec {
-                name: "publish closure",
-                aliases: &["publish-closure", "publish"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "Every normal/build path dependency of a crates.io package must name a registry version and target another publishable workspace package.",
-            },
-            Self::Shell => Spec {
-                name: "shell",
-                aliases: &[],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "shellcheck and shfmt over every tracked shell script. shfmt decides what counts as one — by extension, and by shebang for the extensionless ones — and takes its formatting options from .editorconfig, which any printer flag would discard.",
-            },
+            Self::Rustfmt => default_spec("rustfmt", &["fmt"], ""),
+            Self::Typos => default_spec(
+                "typos",
+                &["spelling"],
+                "Low-noise source spelling check. Needs typos-cli, which the devenv shell provides.",
+            ),
+            Self::PublishClosure => default_spec(
+                "publish closure",
+                &["publish-closure", "publish"],
+                "Every normal/build path dependency of a crates.io package must name a registry version and target another publishable workspace package.",
+            ),
+            Self::Shell => default_spec(
+                "shell",
+                &[],
+                "shellcheck and shfmt over every tracked shell script. shfmt decides what counts as one — by extension, and by shebang for the extensionless ones — and takes its formatting options from .editorconfig, which any printer flag would discard.",
+            ),
             Self::Clippy => Spec {
                 name: "clippy",
                 aliases: &[],

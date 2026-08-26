@@ -294,13 +294,19 @@ mod tests {
     use std::sync::RwLock;
 
     use openlogi_agent_core::DpiCycles;
-    use openlogi_agent_core::hook_runtime::HookMaps;
     use openlogi_agent_core::receiver_access::ReceiverAccess;
+    use openlogi_agent_core::runtime::hook::HookMaps;
+    use openlogi_agent_core::runtime::scroll::ScrollPreferences;
+    use openlogi_core::config::VerticalScrollSensitivity;
 
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            scroll_preferences: Arc::new(ScrollPreferences::new(
+                false,
+                VerticalScrollSensitivity::DEFAULT,
+            )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),

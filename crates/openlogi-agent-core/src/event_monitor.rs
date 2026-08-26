@@ -58,12 +58,17 @@ impl EventMonitor {
                 button: id.to_string(),
                 pressed: *pressed,
             },
-            MouseEvent::Scroll {
-                delta_x, delta_y, ..
-            } => MonitorEvent::Scroll {
-                delta_x: *delta_x,
-                delta_y: *delta_y,
-            },
+            MouseEvent::Scroll { delta, .. } =>
+            {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the monitor wire format is diagnostic f32 data; runtime scroll keeps f64"
+                )]
+                MonitorEvent::Scroll {
+                    delta_x: delta.x() as f32,
+                    delta_y: delta.y() as f32,
+                }
+            }
             MouseEvent::CaptureInterrupted => MonitorEvent::CaptureInterrupted,
             MouseEvent::Moved { .. } => return,
         };
@@ -173,8 +178,7 @@ mod tests {
         m.poll(); // enable
         for _ in 0..(CAPACITY + 10) {
             m.record(&MouseEvent::Scroll {
-                delta_x: 0.0,
-                delta_y: 1.0,
+                delta: openlogi_hook::ScrollDelta::wheel_ticks(0.0, 1.0),
                 from_trackpad: false,
                 device: None,
             });

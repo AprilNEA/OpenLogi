@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn retiring_one_channel_keeps_anothers_entry_but_blocks_stale_stores() {
+    fn retiring_one_channel_keeps_another_entry_but_blocks_stale_stores() {
         let mut cache = EpochGuarded::new();
         cache.store(cache.epoch, 0xA, 2, "kept", CURRENT);
         let epoch = cache.epoch;

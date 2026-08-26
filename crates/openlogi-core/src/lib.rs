@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 
 pub mod action_ring;
+pub mod app;
 pub mod binding;
 pub mod bindings;
 pub mod brand;
@@ -23,5 +24,6 @@ pub mod diagnostics;
 pub mod hid;
 #[cfg(feature = "fs")]
 pub mod paths;
+pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;

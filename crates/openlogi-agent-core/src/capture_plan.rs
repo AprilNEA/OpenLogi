@@ -11,8 +11,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
-use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
+use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS};
@@ -25,8 +25,8 @@ pub struct DeviceCapturePlan {
     pub config_key: String,
     /// HID++ route the session opens.
     pub route: DeviceRoute,
-    /// Per-button single actions for this device (per-app effective).
-    pub bindings: BTreeMap<ButtonId, Action>,
+    /// Per-button immediate or threshold bindings for this device (per-app effective).
+    pub bindings: BTreeMap<ButtonId, Binding>,
     /// Per-direction map for each HID++ gesture source (the dedicated gesture
     /// button, the MX Master 4 haptic panel) in gesture mode on this device,
     /// keyed by the button its captured swipes dispatch as; empty when none
@@ -59,7 +59,7 @@ pub fn plan_for_device(
     app: Option<&str>,
     rearm_generation: u64,
 ) -> DeviceCapturePlan {
-    let bindings = bindings_for(config, Some(config_key), app);
+    let bindings = button_bindings_for(config, Some(config_key), app);
     // A gesture-mode OS-hook button must stay native: the hook needs to see
     // its press to run hold+swipe detection, and diverting it would starve the
     // hook of events.
@@ -80,14 +80,18 @@ pub fn plan_for_device(
         .chain(plain_sources)
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
-            bindings.get(button).is_some_and(|action| {
+            bindings.get(button).is_some_and(|binding| {
+                if matches!(binding, Binding::LongPress(_)) {
+                    return true;
+                }
+                let action = binding.click_action();
                 // The panel's default is ShowActionsRing, which must be
                 // diverted to open the ring. Action::None means "leave native
                 // firmware haptics alone", so treat None as the only non-divert.
                 if *button == ButtonId::HapticPanel {
-                    *action != Action::None
+                    action != Action::None
                 } else {
-                    *action != default_binding(*button)
+                    action != default_binding(*button)
                 }
             })
         })
@@ -101,7 +105,7 @@ pub fn plan_for_device(
     .any(|button| {
         bindings
             .get(button)
-            .is_some_and(|action| *action != default_binding(*button))
+            .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     DeviceCapturePlan {
         config_key: config_key.to_owned(),
@@ -117,7 +121,7 @@ pub fn plan_for_device(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::Binding;
+    use openlogi_core::binding::{Binding, LongPressBinding};
     use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
 
     use super::*;
@@ -151,6 +155,56 @@ mod tests {
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID || cid == HAPTIC_PANEL_CID),
             "a raw-XY-diverted source must never also be plain-diverted"
+        );
+    }
+
+    #[test]
+    fn bound_wheel_tilt_is_diverted_but_an_untouched_one_stays_native() {
+        // The main wheel's tilt scrolls horizontally in firmware, so the
+        // default binding must leave it native — diverting an untouched tilt
+        // would silently kill horizontal scrolling. Binding one side to a real
+        // action is what arms its `0x1b04` divert.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::WheelTiltLeft,
+            Binding::Single(Action::PrevTab),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0);
+        assert!(
+            plan.divert_buttons
+                .contains(&(0x005b, ButtonId::WheelTiltLeft)),
+            "a bound tilt must be diverted, or the binding can never fire: {:?}",
+            plan.divert_buttons
+        );
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::WheelTiltRight),
+            "the untouched right tilt must keep its native horizontal scroll"
+        );
+    }
+
+    #[test]
+    fn long_press_is_diverted_even_when_its_short_action_matches_the_native_default() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::Back,
+            Binding::LongPress(LongPressBinding::new(
+                default_binding(ButtonId::Back),
+                Action::MissionControl,
+            )),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0);
+        assert!(
+            plan.divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "the runtime needs both edges even when the short action is native"
         );
     }
 

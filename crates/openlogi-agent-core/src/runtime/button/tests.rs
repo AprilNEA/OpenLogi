@@ -1,0 +1,780 @@
+//! Regression tests for the source-independent button lifecycle.
+
+use std::time::Instant;
+
+use openlogi_core::binding::LongPressBinding;
+
+use super::*;
+
+fn hook_press(id: u64, button: ButtonId) -> ActivePress {
+    ActivePress {
+        token: PressToken::hook_for_test(id, button),
+        behavior: PressBehavior::Immediate(Action::Copy),
+    }
+}
+
+fn long_press(short: Action, long: Action) -> Binding {
+    Binding::LongPress(LongPressBinding::new(short, long))
+}
+
+fn recv_event(receiver: &mpsc::Receiver<ButtonRuntimeEvent>) -> ButtonRuntimeEvent {
+    receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("button worker should emit an event")
+}
+
+fn emit_due_long_presses(
+    state: &mut ButtonState,
+    now: Instant,
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
+) {
+    let due_presses = state.due_long_presses(now);
+    emit_selected_long_presses(state, &due_presses, now, emit);
+}
+
+#[test]
+fn release_returns_the_exact_active_press_once() {
+    let mut state = ButtonState::default();
+    let press = hook_press(1, ButtonId::Back);
+    assert!(state.press(press.clone()).is_none());
+    assert_eq!(state.release(&press.token.key), Some(press.clone()));
+    assert_eq!(state.release(&press.token.key), None);
+}
+
+#[test]
+fn repress_replaces_the_old_press_with_a_new_identity() {
+    let mut state = ButtonState::default();
+    let old = hook_press(1, ButtonId::Back);
+    let new = hook_press(2, ButtonId::Back);
+    state.press(old.clone());
+
+    assert_eq!(state.press(new.clone()), Some(old.clone()));
+    assert!(state.active(&old.token).is_none());
+    assert_eq!(state.active(&new.token), Some(&new));
+}
+
+#[test]
+fn cancellation_is_scoped_to_one_session() {
+    let mut state = ButtonState::default();
+    let first_source = ButtonSource::Hidpp(HidppSessionId::new("mouse-a", 7));
+    let second_source = ButtonSource::Hidpp(HidppSessionId::new("mouse-b", 3));
+    let first = ActivePress {
+        token: PressToken {
+            id: PressId(1),
+            key: PressKey::new(first_source.clone(), ButtonId::Back),
+            generation: 0,
+        },
+        behavior: PressBehavior::LifecycleOnly,
+    };
+    let second = ActivePress {
+        token: PressToken {
+            id: PressId(2),
+            key: PressKey::new(second_source, ButtonId::Back),
+            generation: 0,
+        },
+        behavior: PressBehavior::LifecycleOnly,
+    };
+    state.press(first.clone());
+    state.press(second.clone());
+
+    assert_eq!(state.cancel_source(&first_source), vec![first]);
+    assert_eq!(state.release(&second.token.key), Some(second));
+}
+
+#[test]
+fn hook_cancellation_leaves_hidpp_presses_active() {
+    let mut state = ButtonState::default();
+    let hook = hook_press(1, ButtonId::Back);
+    let hidpp = ActivePress {
+        token: PressToken {
+            id: PressId(2),
+            key: PressKey::new(
+                ButtonSource::Hidpp(HidppSessionId::new("mouse-a", 7)),
+                ButtonId::Forward,
+            ),
+            generation: 0,
+        },
+        behavior: PressBehavior::LifecycleOnly,
+    };
+    state.press(hook.clone());
+    state.press(hidpp.clone());
+
+    assert_eq!(state.cancel_hooks(), vec![hook]);
+    assert_eq!(state.release(&hidpp.token.key), Some(hidpp));
+}
+
+#[test]
+fn stale_token_cannot_trigger_after_same_key_repress() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+
+    let old = input
+        .try_hook_down(ButtonId::Back, None)
+        .expect("first down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    let new = input
+        .try_hook_down(ButtonId::Back, None)
+        .expect("replacement down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::RepeatedDown),
+            ..
+        }
+    ));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    assert!(input.try_trigger_while_pressed(&old, &Action::Copy));
+    assert!(input.try_trigger_while_pressed(&new, &Action::Paste));
+    let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+        panic!("only the replacement token should trigger");
+    };
+    assert_eq!(press.token, new);
+    assert_eq!(action, Action::Paste);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn source_cancellation_invalidates_queued_gesture_work() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::new("mouse-a", 7);
+    let token = input
+        .try_hidpp_down(&session, ButtonId::Back, None)
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    input.cancel_hidpp_session(&session);
+    assert!(input.try_trigger_while_pressed(&token, &Action::Copy));
+    let sentinel = input
+        .try_hook_down(ButtonId::Forward, None)
+        .expect("sentinel down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::SourceEnded),
+            ..
+        }
+    ));
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("canceled gesture work must not run before the sentinel");
+    };
+    assert_eq!(started.token, sentinel);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn stale_hold_cancellation_emits_a_typed_terminal_event() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let stale = input
+        .try_hook_down(ButtonId::Back, None)
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    input.cancel_stale_press(&stale);
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::StaleHold),
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn invalidation_rejects_old_tokens_and_cancels_active_presses() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let token = input
+        .try_hook_down(ButtonId::Back, None)
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    input.invalidate_all();
+    assert!(!input.try_trigger_while_pressed(&token, &Action::Copy));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Invalidated),
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn worker_drops_input_queued_before_generation_invalidation() {
+    let (commands, queued) = mpsc::sync_channel(1);
+    commands
+        .send(ButtonCommand::Input {
+            generation: 0,
+            input: ButtonInput::Down(hook_press(1, ButtonId::Back)),
+        })
+        .expect("test queue should accept the command");
+    drop(commands);
+    let (_shutdown, shutdown) = mpsc::channel();
+    let generation = AtomicU64::new(1);
+    let (sent, received) = mpsc::channel();
+    let mut emit = |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    };
+
+    run_worker(&queued, &shutdown, &generation, &mut emit);
+
+    assert!(
+        received.try_recv().is_err(),
+        "an old profile's queued down must not start a lifecycle"
+    );
+}
+
+#[test]
+fn pulse_has_an_immediate_balanced_lifecycle() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::new("mouse-a", 7);
+    let binding = Binding::Single(Action::HoldShortcut(
+        "Ctrl+Space".parse().expect("valid shortcut"),
+    ));
+    assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("pulse must start before ending");
+    };
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("pulse must end immediately");
+    };
+    assert_eq!(press.token, started.token);
+    assert_eq!(reason, EndReason::Released);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn release_before_long_press_threshold_fires_only_the_short_action() {
+    let binding = long_press(Action::Copy, Action::Paste);
+    let mut state = ButtonState::default();
+    let pressed_at = Instant::now();
+    let press = ActivePress {
+        token: PressToken::hook_for_test(1, ButtonId::Back),
+        behavior: PressBehavior::new(Some(&binding), pressed_at),
+    };
+    state.press(press.clone());
+    let mut events = Vec::new();
+
+    process_input(
+        &mut state,
+        ButtonInput::Up {
+            key: press.token.key.clone(),
+            released_at: pressed_at + LONG_PRESS_THRESHOLD.saturating_sub(Duration::from_millis(1)),
+        },
+        &mut |event| events.push(event),
+    );
+
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Copy,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &events[1],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn threshold_fires_long_once_and_suppresses_short_on_release() {
+    let binding = long_press(Action::Copy, Action::Paste);
+    let mut state = ButtonState::default();
+    let pressed_at = Instant::now();
+    let press = ActivePress {
+        token: PressToken::hook_for_test(1, ButtonId::Back),
+        behavior: PressBehavior::new(Some(&binding), pressed_at),
+    };
+    state.press(press.clone());
+    let mut events = Vec::new();
+
+    emit_due_long_presses(
+        &mut state,
+        pressed_at + LONG_PRESS_THRESHOLD,
+        &mut |event| events.push(event),
+    );
+    emit_due_long_presses(
+        &mut state,
+        pressed_at + LONG_PRESS_THRESHOLD + Duration::from_secs(1),
+        &mut |event| events.push(event),
+    );
+    process_input(
+        &mut state,
+        ButtonInput::Up {
+            key: press.token.key.clone(),
+            released_at: pressed_at + LONG_PRESS_THRESHOLD + Duration::from_secs(1),
+        },
+        &mut |event| events.push(event),
+    );
+
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Paste,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &events[1],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cancellation_never_fires_a_pending_short_or_long_action() {
+    let binding = long_press(Action::Copy, Action::Paste);
+    let mut state = ButtonState::default();
+    let pressed_at = Instant::now();
+    let press = ActivePress {
+        token: PressToken::hook_for_test(1, ButtonId::Back),
+        behavior: PressBehavior::new(Some(&binding), pressed_at),
+    };
+    state.press(press);
+    let mut events = Vec::new();
+
+    emit_canceled(
+        state.cancel_all(),
+        CancelReason::Invalidated,
+        &mut |event| events.push(event),
+    );
+    emit_due_long_presses(
+        &mut state,
+        pressed_at + LONG_PRESS_THRESHOLD,
+        &mut |event| events.push(event),
+    );
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Invalidated),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn pulse_degrades_long_press_to_its_short_action() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::new("keyboard-a", 4);
+    let binding = long_press(Action::Copy, Action::Paste);
+
+    assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Copy,
+            ..
+        }
+    ));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn worker_schedules_the_long_action_without_a_capture_thread_timer() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let binding = long_press(Action::Copy, Action::Paste);
+
+    assert!(
+        input
+            .try_hook_down(ButtonId::Back, Some(&binding))
+            .is_some()
+    );
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Paste,
+            ..
+        }
+    ));
+    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn overdue_long_press_precedes_unrelated_queued_actions() {
+    let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+    let binding = long_press(Action::Copy, Action::Paste);
+    let pressed_at = Instant::now()
+        .checked_sub(LONG_PRESS_THRESHOLD)
+        .expect("test process should have run beyond the long-press threshold");
+    let mut state = ButtonState::default();
+    let press = ActivePress {
+        token: PressToken::hook_for_test(1, ButtonId::Back),
+        behavior: PressBehavior::new(Some(&binding), pressed_at),
+    };
+    state.press(press.clone());
+    commands
+        .send(ButtonCommand::Input {
+            generation: 0,
+            input: ButtonInput::Pulse(hook_press(2, ButtonId::Forward)),
+        })
+        .expect("test queue should accept the unrelated pulse");
+    commands
+        .send(ButtonCommand::Input {
+            generation: 0,
+            input: ButtonInput::Up {
+                key: press.token.key.clone(),
+                released_at: Instant::now(),
+            },
+        })
+        .expect("test queue should accept the overdue release");
+    let (_shutdown, shutdown) = mpsc::channel();
+    let shared_generation = AtomicU64::new(0);
+    let mut generation = 0;
+    let mut events = Vec::new();
+
+    assert!(!settle_due_long_presses(
+        &queued,
+        &shutdown,
+        &shared_generation,
+        &mut generation,
+        &mut state,
+        None,
+        &mut |event| events.push(event),
+    ));
+
+    assert_eq!(events.len(), 4);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Paste,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &events[1],
+        ButtonRuntimeEvent::Ended {
+            press: ended,
+            reason: EndReason::Released,
+        } if ended.token == press.token
+    ));
+    assert!(matches!(&events[2], ButtonRuntimeEvent::Started(_)));
+}
+
+#[test]
+fn continuous_commands_cannot_starve_a_long_press_deadline() {
+    let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+    let binding = long_press(Action::Copy, Action::Paste);
+    let pressed_at = Instant::now();
+    commands
+        .send(ButtonCommand::Input {
+            generation: 0,
+            input: ButtonInput::Down(ActivePress {
+                token: PressToken::hook_for_test(1, ButtonId::Back),
+                behavior: PressBehavior::new(Some(&binding), pressed_at),
+            }),
+        })
+        .expect("test queue should accept the press");
+    for _ in 1..EVENT_QUEUE_CAPACITY {
+        commands
+            .send(ButtonCommand::Wake)
+            .expect("test queue should accept the initial backlog");
+    }
+
+    let producer_running = Arc::new(AtomicBool::new(true));
+    let producer_commands = commands.clone();
+    let producer_flag = Arc::clone(&producer_running);
+    let producer = thread::spawn(move || {
+        while producer_flag.load(Ordering::Acquire)
+            && producer_commands.send(ButtonCommand::Wake).is_ok()
+        {}
+    });
+
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let generation = Arc::new(AtomicU64::new(0));
+    let worker_generation = Arc::clone(&generation);
+    let (sent, received) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        run_worker(&queued, &shutdown_rx, &worker_generation, &mut |event| {
+            sent.send(event)
+                .expect("test receiver should stay connected");
+        });
+    });
+
+    let wait_until = pressed_at + LONG_PRESS_THRESHOLD + Duration::from_millis(250);
+    let triggered_after = loop {
+        let Some(remaining) = wait_until.checked_duration_since(Instant::now()) else {
+            break None;
+        };
+        match received.recv_timeout(remaining) {
+            Ok(ButtonRuntimeEvent::Triggered {
+                action: Action::Paste,
+                ..
+            }) => break Some(pressed_at.elapsed()),
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+
+    producer_running.store(false, Ordering::Release);
+    producer.join().expect("producer should stop");
+    let (done, wait) = mpsc::sync_channel(0);
+    shutdown_tx
+        .send(ShutdownRequest { done })
+        .expect("worker should accept shutdown");
+    wait.recv_timeout(Duration::from_secs(1))
+        .expect("worker should finish shutdown");
+    worker.join().expect("worker should stop");
+
+    let triggered_after = triggered_after.expect("continuous input starved the long-press timer");
+    assert!(triggered_after <= LONG_PRESS_THRESHOLD + Duration::from_millis(250));
+}
+
+#[test]
+fn invalidation_during_a_blocked_handler_wins_over_an_overdue_long_action() {
+    let (sent, received) = mpsc::channel();
+    let (resume, blocked) = mpsc::sync_channel(0);
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        let should_block = matches!(&event, ButtonRuntimeEvent::Started(_));
+        sent.send(event)
+            .expect("test receiver should stay connected");
+        if should_block {
+            blocked.recv().expect("test should resume the handler");
+        }
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let binding = long_press(Action::Copy, Action::Paste);
+
+    assert!(
+        input
+            .try_hook_down(ButtonId::Back, Some(&binding))
+            .is_some()
+    );
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    input.invalidate_all();
+    thread::sleep(LONG_PRESS_THRESHOLD + Duration::from_millis(20));
+    resume.send(()).expect("worker should still be blocked");
+
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Invalidated),
+            ..
+        }
+    ));
+    assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn a_release_observed_before_the_threshold_wins_despite_worker_backlog() {
+    let (sent, received) = mpsc::channel();
+    let (resume, blocked) = mpsc::sync_channel(0);
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        let should_block = matches!(&event, ButtonRuntimeEvent::Started(_));
+        sent.send(event)
+            .expect("test receiver should stay connected");
+        if should_block {
+            blocked.recv().expect("test should resume the handler");
+        }
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let binding = long_press(Action::Copy, Action::Paste);
+
+    assert!(
+        input
+            .try_hook_down(ButtonId::Back, Some(&binding))
+            .is_some()
+    );
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(input.try_hook_up(ButtonId::Back));
+    thread::sleep(LONG_PRESS_THRESHOLD + Duration::from_millis(20));
+    resume.send(()).expect("worker should still be blocked");
+
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Copy,
+            ..
+        }
+    ));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn function_key_hold_has_one_balanced_lifecycle() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let action = Action::HoldShortcut("Ctrl+Space".parse().expect("valid shortcut"));
+    let token = input
+        .try_hook_key_down(0x7a, &action)
+        .expect("key down should be queued");
+
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("function key must start its lifecycle");
+    };
+    assert_eq!(started.token, token);
+    assert_eq!(started.control(), &PressControl::Key(0x7a));
+    assert!(input.try_hook_key_up(0x7a));
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("function key must end its lifecycle");
+    };
+    assert_eq!(press.token, token);
+    assert_eq!(reason, EndReason::Released);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn worker_emits_balanced_shutdown_and_rejects_later_input() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+
+    let binding = Binding::Single(Action::Copy);
+    let token = input
+        .try_hook_down(ButtonId::Back, Some(&binding))
+        .expect("down should be queued");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("expected a started event");
+    };
+    assert_eq!(started.token, token);
+    assert!(owner.shutdown());
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("expected an ended event");
+    };
+    assert_eq!(press.token, token);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::Shutdown));
+    assert!(input.try_hook_down(ButtonId::Forward, None).is_none());
+}
+
+#[test]
+fn shutdown_deadline_includes_a_blocked_terminal_handler() {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        if matches!(event, ButtonRuntimeEvent::Started(_)) {
+            entered_tx
+                .send(())
+                .expect("test receiver should stay connected");
+            let _ = release_rx.recv();
+        }
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    assert!(input.try_hook_down(ButtonId::Back, None).is_some());
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("handler should start");
+
+    let started = Instant::now();
+    assert!(!owner.shutdown_with_timeout(Duration::from_millis(20)));
+    assert!(started.elapsed() < Duration::from_millis(200));
+    let _ = release_tx.send(());
+}

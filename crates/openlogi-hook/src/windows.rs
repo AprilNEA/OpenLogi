@@ -28,11 +28,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, HookBackend, HookError, HookEvent, KeyEvent,
-    KeyModifiers, MouseEvent,
+    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
+    KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
-const WHEEL_DELTA: f32 = 120.0;
+const WHEEL_DELTA: f64 = 120.0;
 
 thread_local! {
     /// Cursor position carried by the previous mouse message of any kind,
@@ -109,7 +109,7 @@ impl HookBackend for Backend {
         clippy::cast_possible_truncation,
         reason = "the path buffer is a fixed 32768 u16s"
     )]
-    fn frontmost_app() -> Option<String> {
+    fn frontmost_app() -> Option<ForegroundApp> {
         // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
         // or null; no preconditions.
         let hwnd = unsafe { GetForegroundWindow() };
@@ -149,7 +149,18 @@ impl HookBackend for Backend {
             return None;
         }
 
-        Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
+        // The lower-cased full path is the identifier profiles key on (it is
+        // what `Config::effective_bindings` compares, alongside its
+        // `exe:<filename>` fallback); the file name is all there is to show a
+        // human, so the display name is the stem with its original casing.
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let display_name = std::path::Path::new(&path)
+            .file_stem()
+            .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
+        Some(ForegroundApp {
+            id: path.to_lowercase(),
+            display_name,
+        })
     }
 
     fn cursor_position() -> Option<CursorPosition> {
@@ -390,14 +401,18 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         // WM_MOUSEWHEEL and precision-touchpad scrolling as separate input, so
         // a wheel event is unambiguously a mouse wheel (unlike macOS).
         WM_MOUSEWHEEL => Some(MouseEvent::Scroll {
-            delta_x: 0.0,
-            delta_y: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+            delta: ScrollDelta::wheel_ticks(
+                0.0,
+                f64::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+            ),
             from_trackpad: false,
             device: None,
         }),
         WM_MOUSEHWHEEL => Some(MouseEvent::Scroll {
-            delta_x: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
-            delta_y: 0.0,
+            delta: ScrollDelta::wheel_ticks(
+                f64::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+                0.0,
+            ),
             from_trackpad: false,
             device: None,
         }),
@@ -697,16 +712,16 @@ mod tests {
             mouseData: 120u32 << 16,
             ..MSLLHOOKSTRUCT::default()
         };
-        let Some(MouseEvent::Scroll {
-            delta_x, delta_y, ..
-        }) = translate_event(WM_MOUSEWHEEL as WPARAM, forward)
+        let Some(MouseEvent::Scroll { delta, .. }) =
+            translate_event(WM_MOUSEWHEEL as WPARAM, forward)
         else {
             panic!("expected a scroll event");
         };
-        assert!(delta_x.abs() < f32::EPSILON);
+        assert!(delta.x().abs() < f64::EPSILON);
         assert!(
-            delta_y > 0.0,
-            "wheel-forward should scroll up, got {delta_y}"
+            delta.y() > 0.0,
+            "wheel-forward should scroll up, got {}",
+            delta.y()
         );
     }
 }

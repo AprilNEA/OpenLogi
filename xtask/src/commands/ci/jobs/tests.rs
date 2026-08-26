@@ -38,11 +38,11 @@ fn workflow_commands(workflow: &str) -> String {
 /// A copy nothing checks is a copy that drifts.
 ///
 /// Only the jobs whose plan does not depend on the host are compared. The
-/// other five pick their invocation — or whether they can run at all — from
-/// what the machine has: `shell` needs shellcheck and shfmt, `msrv` a
-/// toolchain, `cargo-deny` either the binary or nix, `clippy (windows)` a
-/// cross std, `wasm` the wasm32 std. Each is documented as a proxy for its CI
-/// job rather than a copy of it, and `wasm` gets
+/// other six pick their invocation — or whether they can run at all — from
+/// what the machine has: `typos` needs typos-cli, `shell` needs shellcheck and
+/// shfmt, `msrv` a toolchain, `cargo-deny` either the binary or nix, `clippy
+/// (windows)` a cross std, `wasm` the wasm32 std. Each is documented as a proxy
+/// for its CI job rather than a copy of it, and `wasm` gets
 /// [`wasm_checks_the_crates_ci_checks`] instead, which compares the crate list
 /// rather than a plan.
 #[test]

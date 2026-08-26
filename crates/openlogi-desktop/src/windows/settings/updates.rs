@@ -1,19 +1,18 @@
 //! Updates settings page.
 
 use super::{
-    AnyElement, App, AppState, BorrowAppContext, Button, ButtonVariants, Disableable, Entity,
-    FontWeight, IconName, IntoElement, Palette, ParentElement, RELEASES_URL, SettingField,
-    SettingGroup, SettingItem, SettingPage, Sizable, Styled, Tag, UpdateStatus, Updater, div,
-    h_flex, img, px, v_flex,
+    App, AppState, Button, ButtonVariants, Disableable, Entity, FontWeight, IconName,
+    ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem, SettingPage, Sizable,
+    StateEvent, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
 /// The Updates page: a hero card with the running build, its update status, and
 /// the contextual check / install / restart action; the opt-in auto-check and
 /// auto-install switches; and where updates come from.
-pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPage {
+pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
     let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
-        update_hero(&updater, pal, cx)
+        update_hero(&updater, cx)
     }));
 
     let toggles = SettingGroup::new()
@@ -21,15 +20,12 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
             SettingItem::new(
                 tr!("Check for updates"),
                 SettingField::switch(
-                    |cx| {
-                        cx.try_global::<AppState>()
-                            .is_some_and(|s| s.app_settings().check_for_updates)
-                    },
+                    |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().check_for_updates),
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_check_for_updates(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_check_for_updates(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
-                        cx.refresh_windows();
                     },
                 ),
             )
@@ -42,14 +38,14 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
                 tr!("Automatically download and install"),
                 SettingField::switch(
                     |cx| {
-                        cx.try_global::<AppState>()
+                        AppState::try_read(cx)
                             .is_some_and(|s| s.app_settings().auto_install_updates)
                     },
                     |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_auto_install_updates(enabled);
+                        AppState::update(cx, move |state, cx| {
+                            state.set_auto_install_updates(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
                         });
-                        cx.refresh_windows();
                     },
                 ),
             )
@@ -58,8 +54,7 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
             )),
         );
 
-    let source = SettingGroup::new().item(SettingItem::render(move |_, _, _| update_source(pal)));
-
+    let source = SettingGroup::new().item(SettingItem::render(move |_, _, cx| update_source(cx)));
     SettingPage::new(tr!("Updates"))
         .icon(IconName::ArrowDown)
         .resettable(false)
@@ -73,7 +68,8 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
 
 /// The Updates hero row: logo, name + version, a status pill, the live status
 /// message (or channel), and the one contextual action button.
-fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElement {
+fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
     let status = updater.read(cx).status().clone();
 
     // A short status tag for the settled states (semantic colours from the theme);
@@ -172,11 +168,11 @@ fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElem
                 ),
         )
         .child(div().flex_shrink_0().child(action.disabled(busy)))
-        .into_any_element()
 }
 
 /// The "where updates come from" row plus the privacy footnote.
-fn update_source(pal: Palette) -> AnyElement {
+fn update_source(cx: &App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
     v_flex()
         .w_full()
         .gap_3()
@@ -224,5 +220,4 @@ fn update_source(pal: Palette) -> AnyElement {
                     "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates."
                 )),
         )
-        .into_any_element()
 }

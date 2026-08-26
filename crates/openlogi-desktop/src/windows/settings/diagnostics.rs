@@ -9,14 +9,14 @@ use openlogi_hook::Hook;
 #[cfg(debug_assertions)]
 use super::AppState;
 use super::{
-    AnyElement, App, Axis, IconName, IntoElement, Palette, ParentElement, SettingField,
-    SettingGroup, SettingItem, SettingPage, Styled, div, v_flex,
+    App, Axis, IconName, IntoElement, Palette, ParentElement, SettingField, SettingGroup,
+    SettingItem, SettingPage, Styled, div, v_flex,
 };
 
 /// The Diagnostics page: the curated input-conflict check, plus (debug) the raw
 /// tap list and the live event monitor polled by
 /// [`SettingsView`](super::SettingsView)'s task.
-pub(super) fn diagnostics_page(pal: Palette) -> SettingPage {
+pub(super) fn diagnostics_page() -> SettingPage {
     SettingPage::new(tr!("Diagnostics"))
         .icon(IconName::Info)
         .resettable(false)
@@ -24,7 +24,7 @@ pub(super) fn diagnostics_page(pal: Palette) -> SettingPage {
             SettingGroup::new().item(
                 SettingItem::new(
                     tr!("Input interception"),
-                    SettingField::render(move |_, _, cx| input_conflict_field(pal, cx)),
+                    SettingField::render(move |_, _, cx| input_conflict_field(cx)),
                 )
                 .description(tr!(
                     "Detects other apps tapping the mouse event stream — a common cause of pointer lag."
@@ -40,7 +40,8 @@ pub(super) fn diagnostics_page(pal: Palette) -> SettingPage {
 /// Live status: the curated known-conflict check over the current event taps
 /// (see [`current_taps`]), plus (debug) the full tap list. Re-rendered whenever
 /// the window repaints.
-fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
+fn input_conflict_field(cx: &mut App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
     let taps = current_taps(cx);
 
     // Dedup the product names of input-gating taps owned by known conflicts.
@@ -79,12 +80,7 @@ fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
         col = col.child(debug_tap_list(&taps, pal));
         col = col.child(monitor_list(pal, cx));
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = pal;
-    }
-
-    col.into_any_element()
+    col
 }
 
 /// The event taps the conflict check inspects. Debug builds read the snapshot
@@ -95,7 +91,8 @@ fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
 fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
     #[cfg(debug_assertions)]
     {
-        cx.try_global::<AppState>()
+        AppState::try_global(cx)
+            .map(|state| state.read(cx))
             .map(|s| s.event_taps().to_vec())
             .unwrap_or_default()
     }
@@ -111,8 +108,8 @@ fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
 /// [`SettingsView`](super::SettingsView)'s task.
 #[cfg(debug_assertions)]
 fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
-    let lines: Vec<String> = cx
-        .try_global::<AppState>()
+    let lines: Vec<String> = AppState::try_global(cx)
+        .map(|state| state.read(cx))
         .map(|s| {
             s.monitor_events()
                 .iter()

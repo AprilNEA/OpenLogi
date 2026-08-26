@@ -18,8 +18,9 @@
                     entry); defaults to the committed design/icon/openlogi.ico
                     below, so the release workflow needs no extra define
 
-  - Requires WixToolset.Util.wixext (util:CloseApplication below); the
-    windows-msi job installs it pinned to the same version as wix itself.
+  - Requires WixToolset.UI.wixext (the progress-only dialog flow) and
+    WixToolset.Util.wixext (util:CloseApplication below); the windows-msi job
+    installs both pinned to the same version as wix itself.
 -->
 
 <!--
@@ -40,6 +41,7 @@
 <?endif?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="OpenLogi"
            Manufacturer="AprilNEA"
@@ -51,6 +53,34 @@
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of OpenLogi is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!--
+      Start interactive installs immediately, but keep the standard progress
+      and terminal dialogs so closing the OpenLogi processes below cannot make
+      a successful, cancelled, or failed install look like it simply vanished.
+      Windows Installer suppresses this authored UI at the /qn UI level, so
+      staged updates remain non-interactive.
+    -->
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="UserExit" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="EndDialog"
+               Value="Return"
+               Order="999" />
+
+      <ui:WixUI Id="WixUI_Common" />
+    </UI>
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">

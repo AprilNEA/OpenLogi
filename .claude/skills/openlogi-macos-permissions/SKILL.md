@@ -18,7 +18,8 @@ list). Classify before doing anything else. The discriminator is one log line:
 | Agent log | Layer | TCC? |
 |---|---|---|
 | `HID++ candidate interfaces count=0` | enumeration | **No.** The device's HID++ collection never matched — unsupported device, or not connected. |
-| `failed to open HID++ channel — retrying next tick error=Message("Failed to open device")` | open | **Yes, usually.** `IOHIDDeviceOpen` was denied. Same string also covers exclusive access and a device that vanished — see §5. |
+| `failed to open HID++ channel … Failed to open device: Input Monitoring is NOT granted to this process…` | open | **Yes.** The message classifies itself — grant Input Monitoring to the identity named in §2. |
+| `… Failed to open device: Input Monitoring is granted to this process — another app may hold the device exclusively, or macOS is serving a stale permission session (log out and back in)` | open | **The grant is fine.** Quit the other app (usually Logi Options+), or log out and back in. See §5. |
 | `opened HID++ channel` … then `Device::new failed` / `enumerate_features failed` with `Channel(Timeout)` or `report writer callback error: 0xE00002D6` | probe | **No.** The open succeeded, so permissions are fine. This is the async-hid macOS write bug (upstream `sidit77/async-hid#45`). |
 
 All of these lines are `debug`-level except the open failure, which is a
@@ -39,15 +40,18 @@ permissions.
 
 | Identity | Binary | Needs |
 |---|---|---|
-| `org.openlogi.agent` | `…/Contents/Library/LoginItems/OpenLogiAgent.app` | **Input Monitoring** (opens HID) and **Accessibility** (owns the event tap) |
+| `org.openlogi.agent` | `…/Contents/Library/LoginItems/OpenLogi Agent.app` | **Input Monitoring** (opens HID) and **Accessibility** (owns the event tap) |
 | `org.openlogi.openlogi` | `…/Contents/MacOS/openlogi-desktop` | Camera only. It is a pure IPC client and needs neither of the above. |
 | `openlogi` | `…/Contents/MacOS/openlogi` (embedded CLI) | Input Monitoring, because it opens HID directly today |
 | `org.openlogi.overlay` | `…/LoginItems/OpenLogiOverlay.app` | Nothing |
 
 Two consequences that drive most reports:
 
-- The identity the user must grant is **OpenLogiAgent**, which lives inside the
-  app bundle. The System Settings `+` picker will not browse into a bundle, so
+- The identity the user must grant is **OpenLogi Agent**, which lives inside the
+  app bundle. Bundles built before the rename spell that directory
+  `OpenLogiAgent.app`; both are the same identity (`org.openlogi.agent`), and
+  the grant survived the rename because TCC keys on the identifier, not the
+  path. The System Settings `+` picker will not browse into a bundle, so
   they have to use Go-to-Folder. Say this explicitly; do not tell someone to
   "grant OpenLogi permission".
 - A grant to the GUI does nothing for the agent, and vice versa. There is no
@@ -62,14 +66,23 @@ Two consequences that drive most reports:
 Run `scripts/diagnose.sh` from this skill, or the same steps by hand. It is
 read-only and safe to hand to a reporter.
 
-The one step it cannot do for them: **the agent's log has nowhere to go.** The
-generated LaunchAgent plist sets no `StandardOutPath`/`StandardErrorPath` and
-there is no file logger, so launchd discards everything. Until that changes, the
-only way to see the agent's own log is to stop it and run it in the foreground:
+**Ask for the agent's log file first.** launchd discards the agent's stderr,
+so the agent also writes a daily-rotated file (7 kept) a reporter can attach:
+
+```sh
+case ${XDG_STATE_HOME:-} in
+  /*) state_home=$XDG_STATE_HOME ;;
+  *) state_home=$HOME/.local/state ;;
+esac
+ls "$state_home/openlogi/"
+```
+
+It carries panics too. Only when that file is missing or predates the failure
+is a foreground run worth its cost:
 
 ```sh
 OPENLOGI_LOG=debug \
-  /Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
+  "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent"
 ```
 
 Note what that costs: run from a terminal, the agent's responsible process
@@ -86,8 +99,8 @@ Access.
 
 macOS attributes a TCC request to the *responsible* process, which for a plain
 child process is the parent. An agent spawned directly by the GUI therefore asks
-with the **GUI's** identity, and the user's grant to `OpenLogiAgent` appears to
-do nothing.
+with the **GUI's** identity, and the user's grant to `OpenLogi Agent` appears
+to do nothing.
 
 Two ways to break the chain, both already in the tree
 (`openlogi-desktop/src/services/ipc.rs`):
@@ -116,10 +129,10 @@ every grant on that machine is being ignored.
   after a grant or revoke the calling process keeps seeing the old answer until
   it restarts. That is why the agent calls
   `binary_watch::relaunch_after_input_monitoring_grant()`.
-- `IOHIDDeviceOpen` — **denial is silent**. There is no TCC-specific error; the
-  failure is indistinguishable from exclusive access or a disconnect. Never
-  report `Failed to open device` to a user as-is; check
-  `openlogi_hid::permissions::has_access()` and say which one it was.
+- `IOHIDDeviceOpen` — **denial is silent**. There is no TCC-specific error, so
+  the transport pairs every open failure with
+  `openlogi_hid::permissions::has_access()` and says which case it is (§1).
+  Keep it that way: a bare `Failed to open device` is not reportable.
 
 ## 6. Invariants — do not break these
 
@@ -142,14 +155,11 @@ every grant on that machine is being ignored.
 
 ## 7. Known-broken right now
 
-Check these before filing a new diagnosis. This list is a snapshot — confirm
-each is still open (`gh issue view 606`, `gh pr view 760`) before citing it:
-
-- The Settings → Input Monitoring row queries the **GUI's** grant, not the
-  agent's (#606, PR #760 open). It can read "Granted" while the agent has
-  nothing. The Accessibility row above it is already correct — it goes over IPC.
-- The agent's launchd log has no destination (§3). Open.
-- `disclaim`'s spawn result is discarded in `ipc.rs` (`.map(|_| ())`).
+Nothing in the launch, permission-reporting, or diagnosis path is known
+broken right now: the Settings row reads the agent's own grant over IPC
+(#606), the agent writes a log file (§3), open failures classify themselves
+(§1), and the `open -g -n` handoff checks its exit status. This is a
+snapshot — re-check the tracker before telling anyone a gap is still open.
 
 ## 8. What this cannot fix
 

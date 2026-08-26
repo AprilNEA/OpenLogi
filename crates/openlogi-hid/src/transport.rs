@@ -305,20 +305,16 @@ fn is_receiver_child_node(id: &async_hid::DeviceId) -> bool {
 /// can be unit-tested without filesystem access.
 #[cfg(any(target_os = "linux", test))]
 fn is_receiver_child_sysfs_path(path: &str) -> bool {
-    // Build parent-component markers from the canonical PID lists so adding a
-    // new receiver PID only needs to be done in one place (route.rs).
+    // Build parent-component markers from the canonical receiver registry so
+    // adding a new receiver identity only needs to be done in one place.
     // The kernel HID device name format is "BUS:VID:PID.IFACE" with uppercase hex.
-    crate::BOLT_PIDS
-        .iter()
-        .chain(crate::UNIFYING_PIDS.iter())
-        .chain(crate::LIGHTSPEED_PIDS.iter())
-        .any(|&pid| {
-            let marker = format!(":{LOGITECH_VENDOR_ID:04X}:{pid:04X}.");
-            // A parent component contains the marker followed by at least one
-            // more "/" — it is not the terminal component of the path.
-            path.find(&marker)
-                .is_some_and(|idx| path[idx + marker.len()..].contains('/'))
-        })
+    crate::RECEIVERS.iter().any(|receiver| {
+        let marker = format!(":{:04X}:{:04X}.", receiver.vendor_id, receiver.product_id);
+        // A parent component contains the marker followed by at least one
+        // more "/" — it is not the terminal component of the path.
+        path.find(&marker)
+            .is_some_and(|idx| path[idx + marker.len()..].contains('/'))
+    })
 }
 
 #[cfg(not(target_os = "linux"))]

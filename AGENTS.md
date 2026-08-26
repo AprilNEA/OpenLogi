@@ -22,6 +22,7 @@ sits beneath both.
 |---|---|
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog. No I/O, no async |
+| `crates/openlogi-device-registry` | Pure hardware identity registry: receiver protocols and standalone-device driver metadata |
 | `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
 | `crates/openlogi-device` | The HID++ device layer: enumeration, probing, writes, sessions, pairing. Knows no host — expressed against `HidBackend` |
 | `crates/openlogi-hid` | That layer wired to this host: `async-hid` transport, macOS Input Monitoring, the on-disk probe cache |
@@ -82,21 +83,58 @@ are a final gate, not an inner development loop.
    -D warnings`). For a shared public API, `cargo check` its affected consumers;
    do not Clippy every consumer unless their source changed or `cargo check` exposes
    a problem there.
-4. **Before push only:** run the full local gate below once on the final tree. If a
-   gate command fails, fix the cause, use a focused command while iterating, then
-   rerun the whole gate once after the tree is final again.
+4. **Before push only:** choose the affected-package or full local gate below from
+   the final diff. If a gate command fails, fix the cause with a focused command,
+   then rerun that tier once after the tree is final again.
 
 Do not rerun an identical broad command merely because a later edit touched an
 unrelated file. Do rerun the focused check whose inputs changed. If no commit or push
 was requested, the task does not need the push gate solely because this file documents
 one; report the targeted verification that was actually relevant.
 
-### Local gate (hard stop — do this before every push)
+### Local gate (hard stop before push — scale it to the affected graph)
 
-**Never `git push` until the final tree has passed the full local gate.**
-This section applies to the final pre-push tree, not normal edit iterations.
-`cargo check` alone is not enough. Conflict resolution + "it compiles on my
-Mac" is not enough. Run **all four** on the commit you are about to push:
+The local gate keeps predictable failures off a PR update; CI then sweeps the
+whole workspace on its other hosts. CI does not run for an ordinary branch push
+that has no open PR, so never use it as a substitute for the local tier.
+
+A **Rust-bearing diff** changes Rust source or an input that controls how the Rust
+workspace builds or is validated. A truly non-Rust diff does not need Rust commands
+merely because it is being pushed. Run the applicable checks from
+`.claude/rules/ci.md` instead (shell, Nix, packaging, and so on).
+
+For a Rust-bearing diff, derive the **affected package set** from the final tree:
+every changed workspace package plus every workspace package that depends on one of
+them, transitively. Run `cargo tree --workspace --target all --invert <changed>` for
+each changed package and take the union of workspace packages in the output. Count
+that set, not edited crate directories — changing only `openlogi-core` still affects
+much of the application. When the set is uncertain, use the full tier.
+
+**Affected-package tier** — allowed only when all of these are true:
+
+- no Rust-bearing commit was rebased and no conflict was resolved since the last
+  full gate;
+- the diff changes no workspace-wide build or validation input: any `Cargo.toml`
+  or `build.rs`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/**`, lint/format/hook
+  configuration, devenv configuration, CI workflows, or the local CI runner.
+
+Run fmt plus Clippy and tests for the whole affected set, not just the packages
+whose files changed:
+
+```sh
+export RUSTFLAGS="-D warnings"
+cargo fmt --all -- --check
+cargo clippy -p <affected>… --all-targets -- -D warnings
+cargo test -p <affected>…
+```
+
+Repeat `-p` for every package in the set. The mandatory pre-push hook still runs
+full-workspace Clippy and non-GUI rustdoc before Git contacts the remote; this tier
+does not authorize skipping that backstop.
+
+**Full tier** — required after a Rust-bearing rebase or conflict resolution, for
+any workspace-wide input above, when the affected set cannot be derived reliably,
+or whenever a subsystem rule explicitly requires it:
 
 ```sh
 export RUSTFLAGS="-D warnings"   # CI sets this globally; clippy `-D warnings` is not the same
@@ -110,8 +148,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
 # every CI job this host can reproduce: cargo xtask ci
 ```
 
-Exit non-zero on any of those → fix, re-run the **whole** set, then push.
-Do not push "to see if CI likes it." CI is confirmation, not the first compile.
+Exit non-zero in either tier → fix, rerun that tier on the final tree, then push.
+Do not push a known-red tree "to see if CI likes it." CI is confirmation, not
+the first compile.
 
 The rustdoc step mirrors CI's `rustdoc (non-GUI crates)` job and catches what the
 other three cannot: a broken intra-doc link is neither a compile error nor a clippy
@@ -125,8 +164,8 @@ impl to a derive macro kills every `Type::trait_method` doc link — is explaine
 
 The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
 (Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
-`--all-targets` tests, cargo-deny, Windows clippy, wasm portability, shell lint). macOS-green is
-not that matrix. To run every job this machine can reproduce:
+`--all-targets` tests, typos, cargo-deny, Windows clippy, wasm portability, shell
+lint). macOS-green is not that matrix. To run every job this machine can reproduce:
 
 ```sh
 cargo xtask ci
@@ -140,17 +179,19 @@ OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as no
 run in the PR Testing section. Full map, including "if you changed X, run Y":
 [`.claude/rules/ci.md`](.claude/rules/ci.md).
 
-prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy **and
-rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a backstop,
-not a substitute for running the gate yourself after a rebase.
+prek hooks (`prek.toml`): typos and `cargo fmt` at commit; full-workspace clippy
+**and rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a
+backstop, not a substitute for running the gate yourself after a rebase.
 
 **Push checklist (agents):**
 
 1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
-2. Full local gate green on the **final** tree (fmt + Clippy + tests + rustdoc).
-3. Pipeline jobs this host can reproduce for the diff: `cargo xtask ci`
-   (or named jobs from `--list`). Skipped jobs stay named as not run — never
-   claimed green. Mapping: `.claude/rules/ci.md`.
+2. Applicable local gate green on the **final** tree: non-Rust checks for a
+   non-Rust diff; affected-package tier when none of the full-tier triggers above
+   applies; full otherwise.
+3. Additional pipeline jobs required by the diff run by name with
+   `cargo xtask ci <job>…`. Skipped jobs stay named as not run — never claimed
+   green. Mapping: `.claude/rules/ci.md`.
 4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
    `.claude/rules/cross-platform.md`.
@@ -219,10 +260,11 @@ loaded for any Rust or `Cargo.toml` edit.
 - Never post to external repos or reply publicly on the maintainer's behalf — draft the
   text for approval. Keep public drafts short, casual, and problem-focused.
 - Contributor PRs are adopted, not rejected: check `maintainerCanModify`, rebase onto
-  **fresh** master in a worktree, fix review findings, run the **full local gate** on
-  the rebased tip, **then** push to the fork branch; preserve authorship
-  (`Co-authored-by` when re-homing work). Squash-then-rebase is fine when the PR is
-  far behind and commit-by-commit conflicts thrash.
+  **fresh** master in a worktree, fix review findings, run the applicable local gate
+  on the rebased tip (a Rust-bearing rebase takes the full tier), **then** push to the
+  fork branch; preserve authorship (`Co-authored-by` when re-homing work).
+  Squash-then-rebase is fine when the PR is far behind and commit-by-commit conflicts
+  thrash.
 - Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
   `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
   TODO comment.

@@ -13,6 +13,13 @@ use crate::services::assets::ResolvedAsset;
 /// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
 
+/// Whether label cards occupy one or both sides of the device render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelDistribution {
+    LeftOnly,
+    BothSides,
+}
+
 /// Scale the device image to *fit inside* a `max_w` × `target_h` box while
 /// preserving the **actual PNG's** aspect ratio. A tall device (a mouse) is
 /// bound by the height; a wide one (a keyboard) is bound by the width — which
@@ -110,67 +117,66 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
     hotspots
 }
 
-/// Lay labels out on the left side, evenly spaced down the mouse's vertical
-/// extent. Slots are assigned in order of the hotspots' y position (top
-/// hotspot → top label) so leader lines don't cross.
+/// Lay labels out evenly down one or both sides of the mouse. A two-sided
+/// layout sends the leftmost half of the hotspots left and the rightmost half
+/// right, then orders each side by hotspot height so its leader lines do not
+/// cross.
 #[expect(
     clippy::cast_precision_loss,
     reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
 )]
-pub fn labels_from_hotspots(hotspots: &[Hotspot], mouse_h: f32) -> Vec<Label> {
+pub fn labels_from_hotspots(
+    hotspots: &[Hotspot],
+    mouse_h: f32,
+    distribution: LabelDistribution,
+) -> Vec<Label> {
     if hotspots.is_empty() {
         return Vec::new();
     }
-    // Even vertical slots across the (possibly scaled) model height, so the
-    // labels track the model when it shrinks to fit the viewport.
-    let step = mouse_h / (hotspots.len() as f32 + 1.);
 
-    let mut ranks: Vec<usize> = (0..hotspots.len()).collect();
-    ranks.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
-    let mut slot_of: Vec<usize> = vec![0; hotspots.len()];
-    for (rank, idx) in ranks.into_iter().enumerate() {
-        slot_of[idx] = rank;
+    let mut labels: Vec<Label> = hotspots
+        .iter()
+        .map(|hotspot| Label {
+            id: hotspot.id,
+            side: Side::Left,
+            y: 0.,
+        })
+        .collect();
+    if distribution == LabelDistribution::BothSides {
+        let mut horizontal_order: Vec<usize> = (0..hotspots.len()).collect();
+        horizontal_order
+            .sort_by(|&a, &b| hotspots[a].center().0.total_cmp(&hotspots[b].center().0));
+        for index in horizontal_order
+            .into_iter()
+            .skip(hotspots.len().div_ceil(2))
+        {
+            labels[index].side = Side::Right;
+        }
     }
 
-    hotspots
-        .iter()
-        .enumerate()
-        .map(|(i, h)| Label {
-            id: h.id,
-            side: Side::Left,
-            y: step * (slot_of[i] as f32 + 1.),
-        })
-        .collect()
+    for side in [Side::Left, Side::Right] {
+        let mut vertical_order: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, label)| (label.side == side).then_some(index))
+            .collect();
+        vertical_order.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
+        let step = mouse_h / (vertical_order.len() as f32 + 1.);
+        for (slot, index) in vertical_order.into_iter().enumerate() {
+            labels[index].y = step * (slot as f32 + 1.);
+        }
+    }
+
+    labels
 }
 
 /// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool) -> Vec<Label> {
-    let layout: &[(MouseControlId, f32)] = if thumbwheel {
-        &[
-            (MouseControlId::Button(ButtonId::MiddleClick), 80.),
-            (MouseControlId::ThumbwheelRotation, 165.),
-            (MouseControlId::Button(ButtonId::Back), 250.),
-            (MouseControlId::Button(ButtonId::Forward), 335.),
-            (MouseControlId::Button(ButtonId::DpiToggle), 420.),
-            (MouseControlId::Button(ButtonId::GestureButton), 505.),
-        ]
-    } else {
-        &[
-            (MouseControlId::Button(ButtonId::MiddleClick), 120.),
-            (MouseControlId::Button(ButtonId::Back), 240.),
-            (MouseControlId::Button(ButtonId::Forward), 340.),
-            (MouseControlId::Button(ButtonId::DpiToggle), 430.),
-            (MouseControlId::Button(ButtonId::GestureButton), 510.),
-        ]
-    };
-    layout
-        .iter()
-        .map(|(id, y)| Label {
-            id: *id,
-            side: Side::Left,
-            y: *y,
-        })
-        .collect()
+pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+    labels_from_hotspots(
+        &super::hotspots::default_hotspots(thumbwheel),
+        MOUSE_MODEL_SIZE.1,
+        distribution,
+    )
 }
 
 /// Logitech's stable slot vocabulary → OpenLogi's visual control IDs. Intentionally
@@ -181,6 +187,15 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         "SLOT_NAME_LEFT_BUTTON" => Some(MouseControlId::Button(ButtonId::LeftClick)),
         "SLOT_NAME_RIGHT_BUTTON" => Some(MouseControlId::Button(ButtonId::RightClick)),
         "SLOT_NAME_MIDDLE_BUTTON" => Some(MouseControlId::Button(ButtonId::MiddleClick)),
+        // The main wheel's tilt. Logi names the two slots after the scroll they
+        // produce in firmware; each is its own reprogrammable control
+        // (`0x1b04` CIDs `0x005b` / `0x005d`), not part of the middle click.
+        "SLOT_NAME_LEFT_SCROLL_BUTTON" | "SLOT_NAME_SCROLL_LEFT" => {
+            Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
+        }
+        "SLOT_NAME_RIGHT_SCROLL_BUTTON" | "SLOT_NAME_SCROLL_RIGHT" => {
+            Some(MouseControlId::Button(ButtonId::WheelTiltRight))
+        }
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
         "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
@@ -202,12 +217,12 @@ mod tests {
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
         assert!(
-            !default_labels(false)
+            !default_labels(false, LabelDistribution::LeftOnly)
                 .iter()
                 .any(|label| label.id == MouseControlId::ThumbwheelRotation)
         );
         assert_eq!(
-            default_labels(true)
+            default_labels(true, LabelDistribution::LeftOnly)
                 .iter()
                 .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
                 .count(),
@@ -224,14 +239,42 @@ mod tests {
     }
 
     #[test]
+    fn wheel_tilt_slot_names_map_to_their_own_controls() {
+        // MX Anywhere uses the longer names; MX Ergo uses the shorter aliases.
+        for name in ["SLOT_NAME_LEFT_SCROLL_BUTTON", "SLOT_NAME_SCROLL_LEFT"] {
+            assert_eq!(
+                map_slot_name(name),
+                Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
+            );
+        }
+        for name in ["SLOT_NAME_RIGHT_SCROLL_BUTTON", "SLOT_NAME_SCROLL_RIGHT"] {
+            assert_eq!(
+                map_slot_name(name),
+                Some(MouseControlId::Button(ButtonId::WheelTiltRight))
+            );
+        }
+    }
+
+    #[test]
     fn labels_track_hotspots_and_avoid_crossing() {
         let hotspots = default_hotspots(true);
-        let labels = labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1);
+        let labels =
+            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
         assert_eq!(labels.len(), hotspots.len());
 
         let mut ys: Vec<f32> = labels.iter().map(|l| l.y).collect();
         ys.sort_by(f32::total_cmp);
         ys.dedup();
         assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
+    }
+
+    #[test]
+    fn a_two_sided_layout_uses_both_sides() {
+        let hotspots = default_hotspots(true);
+        let labels =
+            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::BothSides);
+
+        assert!(labels.iter().any(|label| label.side == Side::Left));
+        assert!(labels.iter().any(|label| label.side == Side::Right));
     }
 }

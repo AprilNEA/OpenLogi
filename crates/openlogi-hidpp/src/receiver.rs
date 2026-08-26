@@ -8,12 +8,12 @@
 //! providing information and testing.
 //!
 //! Receivers can generally only be differentiated by their USB vendor and
-//! product IDs, so the [`detect`] function does nothing more than matching
-//! those values to the sets of known vendor and product ID pairs of the
-//! different receivers.
+//! product IDs, so [`detect`] dispatches through the shared
+//! `openlogi-device-registry`.
 
 use std::sync::Arc;
 
+use openlogi_device_registry::receiver::{ReceiverProtocol, find_receiver};
 use thiserror::Error;
 
 use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
@@ -26,16 +26,10 @@ pub const RECEIVER_DEVICE_INDEX: u8 = 0xff;
 
 /// Tries to detect the receiver present on a HID++ channel.
 pub fn detect(chan: Arc<HidppChannel>) -> Option<Receiver> {
-    let vpid_pair = &(chan.vendor_id, chan.product_id);
-
-    if bolt::VPID_PAIRS.contains(vpid_pair) {
-        return bolt::Receiver::new(chan).ok().map(Receiver::Bolt);
+    match find_receiver(chan.vendor_id, chan.product_id)?.protocol {
+        ReceiverProtocol::Bolt => bolt::Receiver::new(chan).ok().map(Receiver::Bolt),
+        ReceiverProtocol::Unifying => unifying::Receiver::new(chan).ok().map(Receiver::Unifying),
     }
-
-    if unifying::VPID_PAIRS.contains(vpid_pair) {
-        return unifying::Receiver::new(chan).ok().map(Receiver::Unifying);
-    }
-    None
 }
 
 /// Represents a HID++ wireless receiver.

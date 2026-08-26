@@ -18,6 +18,13 @@ hooks = [
 ]
 
 [[repos]]
+repo = "https://github.com/crate-ci/typos"
+rev = "v1.49.0"
+hooks = [
+    { id = "typos", args = ["--config", ".config/typos.toml", "--write-changes", "--force-exclude"] },
+]
+
+[[repos]]
 repo = "local"
 
 [[repos.hooks]]

@@ -32,8 +32,9 @@ pub use backend::{
 };
 pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use channel::route::{
-    BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, LOGITECH_VENDOR_ID,
-    UNIFYING_PIDS, receiver_display_name, speaks_unifying_protocol,
+    DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
+    ReceiverDescriptor, ReceiverProtocol, find_receiver, receiver_display_name,
+    speaks_unifying_protocol,
 };
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel};
 pub use inventory::hotplug::watch_hotplug;
@@ -60,14 +61,15 @@ pub use session::keyboard::{
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
-    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraModel, ReprogControlEntry,
-    ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError, apply_litra,
-    clear_haptic_feature_cache, commands_for_light_settings, dump_features, dump_firmware_entities,
-    dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, get_backlight, get_dpi,
-    get_dpi_info, get_dpi_info_on, get_scroll_wheel_mode, get_scroll_wheel_mode_on,
-    get_smartshift_status, get_smartshift_status_on, matches_litra, play_haptic, play_haptic_on,
-    read_battery_raw, set_backlight_enabled, set_dpi, set_dpi_on, set_fn_lock, set_fn_lock_on,
-    set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel,
+    ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError,
+    apply_litra, clear_haptic_feature_cache, commands_for_light_settings, dump_features,
+    dump_firmware_entities, dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on,
+    find_litra, get_backlight, get_dpi, get_dpi_info, get_dpi_info_on, get_scroll_wheel_mode,
+    get_scroll_wheel_mode_on, get_smartshift_status, get_smartshift_status_on,
+    litra_model_for_route, matches_litra, play_haptic, play_haptic_on, read_battery_raw,
+    set_backlight_enabled, set_dpi, set_dpi_on, set_fn_lock, set_fn_lock_on, set_keyboard_color,
+    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
     set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,

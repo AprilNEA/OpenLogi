@@ -1,30 +1,28 @@
 //! About settings page.
 
 use super::{
-    AnyElement, App, Button, ButtonVariants, ClipboardItem, Entity, FontWeight, HELP_URL, Icon,
-    IconName, IntoElement, Palette, ParentElement, RELEASES_URL, REPO_URL, SettingGroup,
-    SettingItem, SettingPage, SettingsView, SharedString, Sizable, Styled, div, h_flex, img, px,
-    v_flex,
+    App, Button, ButtonVariants, ClipboardItem, Entity, FontWeight, HELP_URL, Icon, IconName,
+    ParentElement, RELEASES_URL, REPO_URL, SettingGroup, SettingItem, SettingPage, SettingsView,
+    SharedString, Sizable, Styled, div, h_flex, img, px, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
 /// The About page: a hero card with the build identity and outbound links, the
 /// on-disk config location, and a trademark disclaimer.
-pub(super) fn about_page(view: Entity<SettingsView>, copied: bool, pal: Palette) -> SettingPage {
+pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPage {
     let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
-        about_hero(&view, copied, pal, cx)
+        about_hero(&view, copied, cx)
     }));
-    let config = SettingGroup::new().item(SettingItem::render(move |_, _, _| about_config(pal)));
-    let footer = SettingGroup::new().item(SettingItem::render(move |_, _, _| {
+    let config = SettingGroup::new().item(SettingItem::render(move |_, _, cx| about_config(cx)));
+    let footer = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
+        let pal = crate::ui::theme::palette(cx);
         div()
             .text_caption()
             .text_color(pal.text_muted)
             .child(tr!(
                 "Not affiliated with Logitech. \"Logitech\", \"MX Master\", and \"Options+\" are trademarks of Logitech International S.A."
             ))
-            .into_any_element()
     }));
-
     SettingPage::new(tr!("About"))
         .icon(IconName::Info)
         .resettable(false)
@@ -38,7 +36,8 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool, pal: Palette)
 
 /// The About hero row: logo, wordmark, the clickable build line, and the link /
 /// diagnostics buttons.
-fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut App) -> AnyElement {
+fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
     let diag_label = if copied {
         tr!("Copied!")
     } else {
@@ -145,11 +144,11 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
                         ),
                 ),
         )
-        .into_any_element()
 }
 
 /// The config-file location row with a reveal-in-file-manager button.
-fn about_config(pal: Palette) -> AnyElement {
+fn about_config(cx: &App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
     let path = openlogi_core::paths::config_path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -190,7 +189,6 @@ fn about_config(pal: Palette) -> AnyElement {
                     }),
             ),
         )
-        .into_any_element()
 }
 
 /// A subtle ghost button with a leading icon that opens `href`, used for the

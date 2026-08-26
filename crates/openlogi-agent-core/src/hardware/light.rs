@@ -8,7 +8,8 @@ use std::thread;
 use openlogi_core::config::LightSettings;
 use openlogi_core::device::LightCapabilities;
 use openlogi_hid::{
-    DeviceRoute, HidppOperation, LightCommand, LitraModel, WriteError, commands_for_light_settings,
+    DeviceRoute, HidppOperation, LightCommand, WriteError, commands_for_light_settings,
+    litra_model_for_route,
 };
 use tracing::{debug, info, warn};
 
@@ -204,7 +205,7 @@ async fn apply_light_unlocked(
     route: &DeviceRoute,
     command: LightCommand,
 ) -> Result<(), WriteError> {
-    let Some(model) = LitraModel::from_route(route) else {
+    let Some(model) = litra_model_for_route(route) else {
         return Err(WriteError::LightUnsupported {
             control: "raw_hid_route".into(),
         });

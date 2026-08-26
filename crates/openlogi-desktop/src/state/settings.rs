@@ -3,7 +3,8 @@
 use super::AppState;
 use gpui::App;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, ThumbwheelSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
+    UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -22,7 +23,8 @@ impl AppState {
         if self.config.app_settings.launch_at_login == enabled {
             return;
         }
-        self.config.app_settings.launch_at_login = enabled;
+        self.config
+            .edit(|config| config.app_settings.launch_at_login = enabled);
         // The agent owns autostart now; it reconciles its LaunchAgent (which
         // points at the agent, not the GUI) when it reloads the config.
         self.persist_and_reload("launch-at-login setting");
@@ -42,7 +44,8 @@ impl AppState {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return;
         }
-        self.config.app_settings.show_in_menu_bar = enabled;
+        self.config
+            .edit(|config| config.app_settings.show_in_menu_bar = enabled);
         self.persist_and_reload("show-in-menu-bar setting");
     }
     /// Toggle the opt-in update check and persist it. No immediate side
@@ -52,7 +55,8 @@ impl AppState {
         if self.config.app_settings.check_for_updates == enabled {
             return;
         }
-        self.config.app_settings.check_for_updates = enabled;
+        self.config
+            .edit(|config| config.app_settings.check_for_updates = enabled);
         self.persist_config("update-check setting");
     }
     /// Toggle opt-in automatic install and persist it. The launch-time updater
@@ -63,7 +67,8 @@ impl AppState {
         if self.config.app_settings.auto_install_updates == enabled {
             return;
         }
-        self.config.app_settings.auto_install_updates = enabled;
+        self.config
+            .edit(|config| config.app_settings.auto_install_updates = enabled);
         self.persist_config("auto-install setting");
     }
     /// Persist the light/dark appearance preference. The caller re-applies the
@@ -73,21 +78,39 @@ impl AppState {
         if self.config.app_settings.appearance == appearance {
             return;
         }
-        self.config.app_settings.appearance = appearance;
+        self.config
+            .edit(|config| config.app_settings.appearance = appearance);
         self.persist_config("appearance setting");
+    }
+    /// Persist the text and interface scale. Open window roots apply the new
+    /// rem size when the caller refreshes them. No-op when unchanged.
+    pub fn set_ui_scale(&mut self, scale: UiScale) {
+        if self.config.app_settings.ui_scale == scale {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.ui_scale = scale);
+        self.persist_config("UI scale setting");
     }
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
     /// theme). No-op when unchanged.
     pub fn set_theme(&mut self, dark: bool, name: Option<String>) {
-        let slot = if dark {
-            &mut self.config.app_settings.theme_dark
+        let current = if dark {
+            &self.config.app_settings.theme_dark
         } else {
-            &mut self.config.app_settings.theme_light
+            &self.config.app_settings.theme_light
         };
-        if *slot == name {
+        if *current == name {
             return;
         }
-        *slot = name;
+        self.config.edit(|config| {
+            let slot = if dark {
+                &mut config.app_settings.theme_dark
+            } else {
+                &mut config.app_settings.theme_light
+            };
+            *slot = name;
+        });
         self.persist_config("theme setting");
     }
     /// Persist the chosen app icon and wear it now. Unlike the theme settings
@@ -99,7 +122,8 @@ impl AppState {
         if self.config.app_settings.app_icon == icon {
             return;
         }
-        self.config.app_settings.app_icon = icon;
+        self.config
+            .edit(|config| config.app_settings.app_icon = icon);
         // Only wear what the config kept: a failed write rolls the setting
         // back, and an icon applied over that would outlive the choice it came
         // from — Finder would show one thing and Settings another.
@@ -113,13 +137,53 @@ impl AppState {
         if self.config.app_settings.ui_radius == radius {
             return;
         }
-        self.config.app_settings.ui_radius = radius;
+        self.config
+            .edit(|config| config.app_settings.ui_radius = radius);
         self.persist_config("UI radius setting");
+    }
+    /// Persist the Home device-gallery layout. No-op when unchanged.
+    pub fn set_device_view_mode(&mut self, mode: DeviceViewMode) {
+        if self.config.app_settings.device_view_mode == mode {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.device_view_mode = mode);
+        self.persist_config("device view mode");
     }
     /// Whether OpenLogi manages `key` (capture + volatile re-apply).
     #[must_use]
     pub fn device_enabled(&self, key: &str) -> bool {
         self.config.device_enabled(key)
+    }
+
+    /// Set the user-facing name of one gallery device. Whitespace-only names
+    /// clear the alias and restore the hardware model name. `record_key` is
+    /// distinct per live serial-less camera even though their hardware settings
+    /// intentionally share a model-scoped config key.
+    pub fn set_device_custom_name(&mut self, record_key: &str, custom_name: &str) {
+        let custom_name = match custom_name.trim() {
+            "" => None,
+            name => Some(name.to_string()),
+        };
+        if self.config.device_custom_name(record_key) == custom_name.as_deref() {
+            return;
+        }
+        self.config.edit(|config| {
+            config.set_device_custom_name(record_key, custom_name.clone());
+        });
+        if !self.persist_config("device name") {
+            return;
+        }
+        for record in self
+            .devices
+            .records
+            .iter_mut()
+            .filter(|record| record.record_key() == record_key)
+        {
+            record.display_name = custom_name
+                .clone()
+                .unwrap_or_else(|| record.model_name.clone());
+        }
     }
 
     /// Enable or disable OpenLogi's management of `key` and persist it. The
@@ -128,7 +192,8 @@ impl AppState {
         if self.config.device_enabled(key) == enabled {
             return;
         }
-        self.config.set_device_enabled(key, enabled);
+        self.config
+            .edit(|config| config.set_device_enabled(key, enabled));
         self.persist_and_reload("device enabled");
     }
 
@@ -161,8 +226,9 @@ impl AppState {
         if stored == override_value {
             return;
         }
-        self.config
-            .set_device_thumbwheel_sensitivity(key, override_value);
+        self.config.edit(|config| {
+            config.set_device_thumbwheel_sensitivity(key, override_value);
+        });
         self.persist_and_reload("device thumbwheel sensitivity");
     }
 
@@ -174,14 +240,38 @@ impl AppState {
         if self.config.app_settings.thumbwheel_sensitivity == sensitivity {
             return;
         }
-        self.config.app_settings.thumbwheel_sensitivity = sensitivity;
+        self.config
+            .edit(|config| config.app_settings.thumbwheel_sensitivity = sensitivity);
         self.persist_and_reload("thumbwheel sensitivity");
+    }
+    /// Toggle finite animation for traditional mouse-wheel input and persist
+    /// it. The agent publishes the change to the scroll worker on config
+    /// reload. No-op when unchanged; disk failures restore the persisted value.
+    pub fn set_smooth_scroll(&mut self, enabled: bool) {
+        if self.config.app_settings.smooth_scroll == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.smooth_scroll = enabled);
+        self.persist_and_reload("smooth scroll");
+    }
+    /// Set traditional vertical mouse-wheel sensitivity and persist it. The
+    /// agent publishes the value to its scroll worker on config reload. No-op
+    /// when unchanged; disk failures restore the persisted value.
+    pub fn set_vertical_scroll_sensitivity(&mut self, sensitivity: VerticalScrollSensitivity) {
+        if self.config.app_settings.vertical_scroll_sensitivity == sensitivity {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.vertical_scroll_sensitivity = sensitivity);
+        self.persist_and_reload("vertical scroll sensitivity");
     }
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
         if self.config.app_settings.auto_download_assets == enabled {
             return;
         }
-        self.config.app_settings.auto_download_assets = enabled;
+        self.config
+            .edit(|config| config.app_settings.auto_download_assets = enabled);
         self.persist_config("auto-download-assets setting");
     }
     /// Persist the preferred device-asset source. The Settings view requests a
@@ -191,15 +281,18 @@ impl AppState {
         if self.config.app_settings.asset_source == source {
             return;
         }
-        self.config.app_settings.asset_source = source;
+        self.config
+            .edit(|config| config.app_settings.asset_source = source);
         self.persist_config("asset-source setting");
     }
     /// Record the answer to the first-run update-check prompt: enable (or leave
     /// disabled) the check, and mark the prompt as seen so it never reappears.
     /// Persists once.
     pub fn record_update_consent(&mut self, enabled: bool) {
-        self.config.app_settings.check_for_updates = enabled;
-        self.config.app_settings.update_prompt_seen = true;
+        self.config.edit(|config| {
+            config.app_settings.check_for_updates = enabled;
+            config.app_settings.update_prompt_seen = true;
+        });
         self.persist_config("update-check consent");
     }
     /// The stored UI-language preference: `Some(code)` for an explicit choice,
@@ -217,9 +310,11 @@ impl AppState {
         if self.config.app_settings.language == language {
             return;
         }
-        self.config.app_settings.language = language;
+        self.config
+            .edit(|config| config.app_settings.language = language);
         self.persist_config("language setting");
         openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
+        // Locale lookup is process-global, so every open window must repaint.
         cx.refresh_windows();
         crate::app::menu::rebuild(cx);
     }

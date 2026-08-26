@@ -60,6 +60,11 @@ env:
   CARGO_INCREMENTAL: 0
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # PR merge refs and release tags cannot warm another ref. Only dispatches
+  # and other branch-scoped runs write reusable compiler objects.
+  SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag') && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Opt-in gate for PR builds. Non-PR triggers (workflow_call / dispatch)
@@ -119,18 +124,23 @@ jobs:
     env:
       OPENLOGI_BUNDLE_ASSETS: ${{ vars.OPENLOGI_BUNDLE_ASSETS }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           # Release profile (fat LTO) — never share with CI debug keys.
           shared-key: macos-stable-release
-          # Packaging never runs on master push; allow same-repo PRs/dispatch/release
-          # to refresh the shared release cache (few keys, not per-job thrash).
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          cache-targets: false
+          # PR and tag caches are isolated to that ref. Restore there, but only
+          # save Cargo inputs from branch-scoped dispatches/callers.
+          save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
@@ -156,7 +166,7 @@ jobs:
       - name: Load release secrets from 1Password
         id: load_secrets
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -173,7 +183,7 @@ jobs:
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
 
       - name: Cache Homebrew downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -346,21 +356,24 @@ jobs:
     # can't access a protected environment at all, then build fine).
     environment: ${{ inputs.sign && 'release' || '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # Release builds need their own cache (crt-static RUSTFLAGS + --release).
-      # Shared per matrix.arch so labeled PR packaging and dispatch runs warm
-      # each other; tag-only saves were pure quota churn under the old per-ref
-      # keys, but a shared-key entry is restorable across PR/dispatch/release.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      # Both targets consume the same Cargo registry/git inputs. Compiler
+      # outputs stay isolated by sccache's command and target-triple hashes.
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: windows-stable-release-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          prefix-key: v2-cargo
+          shared-key: windows-stable-release
+          cache-targets: false
+          save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       # Azure signing config lives in 1Password, matching the macOS job's secret flow.
       # load-secrets-action is a node action, so it runs on Windows runners too. The
@@ -369,7 +382,7 @@ jobs:
       - name: Load Azure signing config from 1Password
         id: azure_config
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -412,10 +425,10 @@ jobs:
       - name: Load static updater config from 1Password
         id: update_config
         if: ${{ inputs.sign }}
-        # Pinned to an immutable commit (matching crowdin.yml): this step runs
+        # Pinned to an immutable commit (matching the Crowdin workflow): this step runs
         # with the 1Password service-account token during signed release
         # builds, so a repointed mutable tag must not be able to swap the code.
-        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -594,7 +607,7 @@ jobs:
     environment: ${{ inputs.sign && 'release' || '' }}
     steps:
       # Needed for packaging/windows/OpenLogi.wxs.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The portable zip from this arch's windows leg, containing the
       # already-signed OpenLogi.exe, openlogi-agent.exe, openlogi-overlay.exe,
@@ -618,7 +631,7 @@ jobs:
       - name: Load Azure signing config from 1Password
         id: azure_config
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -653,10 +666,12 @@ jobs:
         # Pinned exactly: a WiX point release can silently change the produced
         # MSI (validation, cab layout), and nothing in CI installs the MSI, so
         # drift would only surface on end-user machines. Bump deliberately.
-        # The Util extension (util:CloseApplication in OpenLogi.wxs) is pinned
-        # to the same version — WiX extensions release in lockstep with wix.
+        # The UI extension (the progress-only dialog flow) and Util extension
+        # (util:CloseApplication in OpenLogi.wxs) are pinned to the same version
+        # — WiX extensions release in lockstep with wix.
         run: |
           dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.UI.wixext/6.0.2
           wix extension add --global WixToolset.Util.wixext/6.0.2
 
       - name: Build the MSI
@@ -685,6 +700,7 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           wix build packaging\windows\OpenLogi.wxs `
+            -ext WixToolset.UI.wixext `
             -ext WixToolset.Util.wixext `
             -arch ${{ matrix.msi_platform }} `
             -d Version=$version `
@@ -763,24 +779,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The native build host defines the oldest GLIBC these binaries can
+          # load against. Keep both architectures on the documented 2.35 floor.
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: linux-stable-release
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          prefix-key: v2-cargo
+          # Cargo does not include the host GLIBC in its freshness checks. Do
+          # not share Cargo inputs under the Ubuntu 24.04 CI key; sccache hashes
+          # the compiler command and target environment independently.
+          shared-key: linux-jammy-stable-release
+          cache-targets: false
+          save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       # The nfpm `arch` and the runner's native arch must agree — the packages
       # are built natively, not cross-compiled, so a mismatched runner would
@@ -821,6 +847,29 @@ jobs:
 
       - name: Build and package
         run: cargo run -p xtask -- linux package
+
+      - name: Verify GLIBC baseline
+        env:
+          MAX_GLIBC_VERSION: "2.35"
+        run: |
+          for binary in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
+            required=$(
+              readelf --version-info "target/release/$binary" \
+                | sed -n 's/.*Name: GLIBC_\([0-9][0-9.]*\).*/\1/p' \
+                | sort -Vu \
+                | tail -n 1
+            )
+            if [ -z "$required" ]; then
+              echo "could not determine the GLIBC requirement for $binary" >&2
+              exit 1
+            fi
+            echo "$binary requires GLIBC $required"
+            newest=$(printf '%s\n%s\n' "$MAX_GLIBC_VERSION" "$required" | sort -V | tail -n 1)
+            if [ "$newest" != "$MAX_GLIBC_VERSION" ]; then
+              echo "$binary exceeds the GLIBC $MAX_GLIBC_VERSION release baseline" >&2
+              exit 1
+            fi
+          done
 
       - name: Collect packages
         env:

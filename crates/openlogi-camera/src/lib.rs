@@ -179,7 +179,7 @@ pub use uvc::{
 
 /// Logitech's USB vendor id. Reported in decimal (`1133`) inside an
 /// `AVCaptureDevice` modelID, and in hex (`046d`) most everywhere else.
-pub const LOGITECH_VID: u16 = 0x046d;
+pub use openlogi_device_registry::LOGITECH_VENDOR_ID as LOGITECH_VID;
 
 /// Tri-state Camera permission, mirroring macOS `AVAuthorizationStatus`.
 ///

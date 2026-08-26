@@ -1,37 +1,61 @@
-//! The Home (device gallery) screen: the top bar, the scrollable device-card
-//! row, and the loading/empty states shown in place of the gallery before the
-//! agent has reported an inventory.
+//! The Home (device gallery) screen: its top bar, switchable grid/list/carousel
+//! layouts, and the loading/empty states shown before the agent reports an
+//! inventory.
+
+mod views;
+
+pub(super) use views::device_gallery;
+#[cfg(test)]
+pub(super) use views::ordered_device_indices;
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, Div, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Role, SharedString, StatefulInteractiveElement as _, Styled, canvas, div, fill,
-    img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    Icon, IconName, Sizable as _, WindowExt as _,
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::DialogButtonProps,
+    h_flex,
+    input::InputState,
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    tooltip::Tooltip,
+    v_flex,
 };
-use openlogi_core::config::LightSettings;
-use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
-};
+use openlogi_core::config::{DeviceViewMode, LightSettings};
+use openlogi_core::device::{DeviceKind, DeviceTransports};
 use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
-use super::widgets::{add_device_button, kind_label, settings_button};
+use super::widgets::{
+    add_device_button, connectivity_dot, kind_label, route_label, settings_button,
+};
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::state::{AppState, DeviceRecord};
-use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
+use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::{BatteryIndicator, glance_hint};
+use crate::ui::components::control_input;
+use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
 
-/// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
-/// Add-Device button — the entry points the old carousel header used to carry.
-pub(super) fn home_header(pal: Palette) -> impl IntoElement {
+/// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
+/// and Add Device.
+pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
+    let pal = theme::palette(cx);
+    let device_count = AppState::try_read(cx).map_or(0, |state| state.devices().len());
+    let current_mode = AppState::try_read(cx).map_or(DeviceViewMode::Grid, |state| {
+        state.app_settings().device_view_mode
+    });
+    let view = cx.entity();
+    let device_count_label = if device_count == 1 {
+        tr!("%{count} device", count => device_count)
+    } else {
+        tr!("%{count} devices", count => device_count)
+    };
     h_flex()
         .h(px(HEADER_H))
         .w_full()
@@ -41,117 +65,21 @@ pub(super) fn home_header(pal: Palette) -> impl IntoElement {
         .border_b_1()
         .border_color(pal.border)
         .child(
-            div()
+            v_flex()
                 .flex_1()
                 .min_w_0()
-                .text_heading()
-                .child(tr!("Devices")),
+                .gap_0p5()
+                .child(div().text_heading().child(tr!("Devices")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(device_count_label),
+                ),
         )
+        .child(views::device_view_switcher(current_mode, view))
         .child(settings_button())
         .child(add_device_button())
-}
-
-/// Horizontal gap between gallery cards, in pixels.
-const GALLERY_GAP: f32 = 24.;
-
-/// The Home device list: an equal-size, horizontally scrollable row of device
-/// cards (Logi Options+ style), via [`Carousel`]'s `uniform` mode. Each card
-/// floats the device photo on the window background above its name and battery;
-/// the row centres while the cards fit the viewport and scrolls once they don't.
-/// Clicking a card opens its detail screen and makes it the active device.
-/// Capture runs per device, so which card is current only decides what the
-/// detail screen shows; the active card wears an accent fill. A disabled
-/// device wears a persistent red ring so the unmanaged state stays visible.
-pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
-    let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
-        let len = s.device_list.len();
-        (len, s.current_device.min(len.saturating_sub(1)))
-    });
-    let view = cx.entity();
-
-    v_flex().flex_1().w_full().min_h_0().child(
-        Carousel::new("device-carousel")
-            .len(len)
-            .selected(active_idx)
-            .uniform(px(theme::GALLERY_CARD_W))
-            .gap(px(GALLERY_GAP))
-            // The arrows stay: they are the only tab-focusable control that
-            // moves the selection (and the row scrolls to the selected card),
-            // so they are the keyboard path to off-screen devices. The dots go:
-            // they duplicate the scroll position and, as plain divs, were never
-            // keyboard-operable anyway.
-            .indicators(false)
-            .accent(rgb(theme::ACCENT_BLUE).into())
-            .render_item(move |idx, focused, _window, cx| {
-                let pal = theme::palette(cx);
-                let Some(record) = cx
-                    .try_global::<AppState>()
-                    .and_then(|s| s.device_list.get(idx).cloned())
-                else {
-                    return div().into_any_element();
-                };
-                let key = record.config_key.clone();
-                let enabled = cx
-                    .try_global::<AppState>()
-                    .is_some_and(|s| s.device_enabled(&record.config_key));
-                let light_enabled = cx.try_global::<AppState>().is_some_and(|state| {
-                    record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key())
-                });
-                let light_settings = cx
-                    .try_global::<AppState>()
-                    .map_or_else(LightSettings::default, |state| {
-                        state.light_for(&record.device_key())
-                    });
-                let glow = cx
-                    .try_global::<AppState>()
-                    .and_then(|s| keyboard_glow(s, &record));
-                let view = view.clone();
-                device_card(
-                    &record,
-                    enabled,
-                    focused,
-                    glow,
-                    light_enabled,
-                    light_settings,
-                    pal,
-                )
-                .id(("device-card", idx))
-                .active(gpui::Styled::shadow_2xs)
-                .role(Role::Button)
-                .aria_label(record.display_name.clone())
-                .aria_description(device_accessibility_description(&record))
-                .aria_selected(focused)
-                .cursor_pointer()
-                .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |this, cx| this.open_device(key.clone(), cx));
-                })
-                .into_any_element()
-            })
-            .on_select(cx.listener(|_, ix: &usize, _, cx| {
-                cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
-                cx.notify();
-            })),
-    )
-}
-
-fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
-    let status = if record.online {
-        tr!("Connected")
-    } else {
-        tr!("Offline")
-    };
-    let metadata = format!(
-        "{status}. {}. {} {}.",
-        kind_label(record.kind),
-        tr!("Slot"),
-        record.slot
-    );
-    if let Some(battery) = record.battery.as_ref() {
-        format!("{metadata} {} {}%.", tr!("Battery"), battery.percentage).into()
-    } else {
-        metadata.into()
-    }
 }
 
 /// Opacity the lighting colour is painted at over the device image, in both the
@@ -170,7 +98,7 @@ pub(crate) fn keyboard_glow(
         return None;
     }
     let lighting = state
-        .lighting_for(&record.config_key)
+        .lighting_for(&record.config_key, &record.route_key)
         .filter(|l| l.enabled)?;
     let geom = record.asset.as_ref()?.glow.clone()?;
     let (r, g, b) = lighting.color.components();
@@ -220,123 +148,382 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
     .size_full()
 }
 
-/// A device card in the Home gallery: the device photo floating on the window
-/// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. The `active` device (whose
-/// bindings and DPI are live) keeps a persistent accent ring and faint fill;
-/// inactive cards gain the same ring on hover. A low resting shadow strengthens
-/// on hover and settles on press. The 1px border is always reserved so the hover
-/// ring never nudges the layout. Returns a bare [`Div`] so the gallery can wire
-/// the hover and click handlers.
+/// A device card in the Home grid and carousel: product image with the
+/// connectivity-and-battery glance in its corner, then the identity line and
+/// the transport it is reachable over.
+/// The `active` device keeps a persistent accent ring and faint fill; inactive
+/// cards gain the same ring on hover or keyboard focus.
+/// Returns an unstyled semantic button so the gallery can add its activation
+/// handler without giving up keyboard behavior.
 fn device_card(
     record: &DeviceRecord,
     enabled: bool,
-    active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     light_enabled: bool,
     light_settings: LightSettings,
     pal: Palette,
-) -> Div {
-    // Disabled devices get a persistent red ring; active managed devices keep
-    // the accent ring; otherwise transparent until hover (wired by the gallery).
-    let ring = if !enabled {
-        rgb(theme::STATUS_DISABLED).into()
-    } else if active {
-        theme::accent()
-    } else {
-        gpui::transparent_black()
-    };
-    v_flex()
-        .w(px(theme::GALLERY_CARD_W))
-        .flex_shrink_0()
-        .items_center()
+) -> BaseButton {
+    BaseButton::new((ElementId::from("device-card"), record.record_key()))
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_stretch()
         .gap_3()
-        .p_3()
+        .p_4()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(ring)
+        .border_color(device_ring(enabled))
+        .bg(pal.panel)
         .shadow_xs()
-        .selected_fill(active)
         .child(
             div()
                 .relative()
                 .w_full()
                 .h(px(theme::GALLERY_PHOTO_H))
-                .flex()
-                .items_center()
-                .justify_center()
-                .overflow_hidden()
-                .opacity(if record.online { 1. } else { 0.55 })
-                .when_some(glow, |this, (geom, color)| {
-                    this.child(glow_canvas(geom, color))
-                })
-                .child(device_image(record, light_enabled, light_settings, pal)),
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        // The green hardware LED is baked into several product
+                        // renders. Dimming the complete render is the only
+                        // truthful treatment available for an offline card
+                        // without generating a second asset that edits the
+                        // manufacturer's artwork.
+                        .opacity(if record.online { 1. } else { 0.38 })
+                        .when_some(glow, |this, (geom, color)| {
+                            this.child(glow_canvas(geom, color))
+                        })
+                        .child(device_image(record, light_enabled, light_settings, pal)),
+                )
+                // Outside the dimmed render, so an offline card's status
+                // stays legible.
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .child(transport_glance(record, pal)),
+                )
+                .when_some(record.battery.as_ref(), |image, battery| {
+                    image.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .child(battery_glance(battery, record)),
+                    )
+                }),
         )
         .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_subheading()
-                                .child(record.display_name.clone()),
-                        )
-                        .child(status_dot(record.online)),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_caption()
-                                .text_color(pal.text_muted)
-                                .child(if matches!(record.kind, DeviceKind::Camera) {
-                                    // A camera's synthetic slot 0 means nothing
-                                    // next to real receiver slots.
-                                    kind_label(record.kind)
-                                } else {
-                                    format!("{} · slot {}", kind_label(record.kind), record.slot)
-                                }),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1p5()
-                                .child(
-                                    svg()
-                                        .path(if matches!(record.kind, DeviceKind::Camera) {
-                                            // UVC cameras are always on the cable.
-                                            "action-icons/usb.svg"
-                                        } else {
-                                            connection_icon_path(
-                                                record.route.as_ref(),
-                                                record.model_info.as_ref().map(|m| &m.transports),
-                                            )
-                                        })
-                                        .size_3()
-                                        .flex_none()
-                                        .text_color(pal.text_muted),
+            v_flex().w_full().gap_2().child(
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_subheading()
+                                            .child(record.display_name.clone()),
+                                    )
+                                    .child(kind_badge(record.kind, pal)),
+                            )
+                            .when_some(custom_model_subtitle(record), |column, model| {
+                                column.child(
+                                    div()
+                                        .truncate()
+                                        .text_caption()
+                                        .text_color(pal.text_muted)
+                                        .child(model),
                                 )
-                                .when_some(record.battery.as_ref(), |this, b| {
-                                    this.child(battery_view(b, pal))
-                                }),
-                        ),
-                ),
+                            }),
+                    )
+                    .when(record.persistent, |row| {
+                        row.child(device_menu_button(record, pal))
+                    }),
+            ),
         )
+}
+
+/// Transport glyph in the card corner, colored by the transport itself —
+/// Bluetooth blue, receiver green, cable muted; the connectivity words ride
+/// its hover tip and the dimmed render already marks an offline card.
+fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+    let path = if matches!(record.kind, DeviceKind::Camera) {
+        "action-icons/usb.svg"
+    } else {
+        connection_icon_path(
+            record.route.as_ref(),
+            record.model_info.as_ref().map(|model| &model.transports),
+        )
+    };
+    let color: Hsla = match path {
+        "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
+        "action-icons/bolt.svg" | "action-icons/unifying.svg" => {
+            rgb(theme::STATUS_CONNECTED).into()
+        }
+        _ => pal.text_muted,
+    };
+    let hint: SharedString = format!(
+        "{} · {}",
+        if record.online {
+            tr!("Connected")
+        } else {
+            tr!("Offline")
+        },
+        connection_summary(record)
+    )
+    .into();
+    div()
+        .id((ElementId::from("transport-glance"), record.record_key()))
+        .flex_none()
+        .child(svg().path(path).size_4().flex_none().text_color(color))
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+}
+
+/// [`BatteryIndicator::glance`] under a hover tip carrying the value and
+/// words the corner has no room for.
+fn battery_glance(
+    battery: &openlogi_core::device::BatteryInfo,
+    record: &DeviceRecord,
+) -> impl IntoElement {
+    let hint: SharedString = glance_hint(battery, record.online).into();
+    div()
+        .id((ElementId::from("battery-glance"), record.record_key()))
+        .flex_none()
+        .child(BatteryIndicator::glance(battery))
+        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+}
+
+fn device_ring(enabled: bool) -> Hsla {
+    if enabled {
+        gpui::transparent_black()
+    } else {
+        rgb(theme::STATUS_DISABLED).into()
+    }
+}
+
+/// The device class as a small pill riding the name line, in the outlined
+/// shape of the header's `status_badge`.
+pub(super) fn kind_badge(kind: DeviceKind, pal: Palette) -> impl IntoElement {
+    div()
+        .flex_none()
+        .px_1p5()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.muted)
+        .text_caption()
+        .text_color(pal.text_muted)
+        .child(kind_label(kind))
+}
+
+/// The model name under a custom display name; `None` when the name already
+/// is the model.
+pub(super) fn custom_model_subtitle(record: &DeviceRecord) -> Option<SharedString> {
+    (record.display_name != record.model_name).then(|| record.model_name.clone().into())
+}
+
+/// The card's action menu — rename, and for an offline device, delete. One
+/// builder serves both the corner menu button and the card's context menu.
+pub(super) fn device_menu(
+    record: &DeviceRecord,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let record_key = record.record_key();
+    let custom_name = if record.display_name == record.model_name {
+        String::new()
+    } else {
+        record.display_name.clone()
+    };
+    let model_name = record.model_name.clone();
+    let display_name = record.display_name.clone();
+    // A live device would simply re-register on the next inventory snapshot,
+    // so deletion is only offered once it is offline.
+    let deletable = record.persistent && !record.online;
+    move |menu, _window, _cx| {
+        let menu = menu.item(
+            PopupMenuItem::new(tr!("Rename…"))
+                .icon(Icon::empty().path("action-icons/pencil.svg"))
+                .on_click({
+                    let record_key = record_key.clone();
+                    let custom_name = custom_name.clone();
+                    let model_name = model_name.clone();
+                    move |_, window, cx| {
+                        open_rename_dialog(
+                            window,
+                            cx,
+                            record_key.clone(),
+                            custom_name.clone(),
+                            model_name.clone(),
+                        );
+                    }
+                }),
+        );
+        if !deletable {
+            return menu;
+        }
+        menu.item(PopupMenuItem::separator()).item(
+            PopupMenuItem::new(tr!("Delete device…"))
+                .icon(IconName::Delete)
+                .on_click({
+                    let record_key = record_key.clone();
+                    let display_name = display_name.clone();
+                    move |_, window, cx| {
+                        open_delete_confirmation(
+                            window,
+                            cx,
+                            record_key.clone(),
+                            display_name.clone(),
+                        );
+                    }
+                }),
+        )
+    }
+}
+
+/// The card corner's ellipsis button, opening the same menu the card offers
+/// on right-click.
+pub(super) fn device_menu_button(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+    Button::new((ElementId::from("device-menu"), record.record_key()))
+        .ghost()
+        .xsmall()
+        .text_color(pal.text_muted)
+        .icon(IconName::Ellipsis)
+        .dropdown_menu_with_anchor(Anchor::TopRight, device_menu(record))
+}
+
+/// Confirm before forgetting a device: the record, its custom name, and its
+/// per-device settings all go.
+fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: String, name: String) {
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title(tr!("Delete %{name}?", name => name.clone()))
+            .description(tr!(
+                "This forgets the device and its settings. Reconnect or pair it again to set it up from scratch."
+            ))
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("Delete device"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(tr!("Cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok({
+                let record_key = record_key.clone();
+                move |_event, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        if state.forget_device(&record_key) {
+                            cx.emit(StateEvent::InventoryChanged);
+                        }
+                    });
+                    true
+                }
+            })
+    });
+}
+
+fn open_rename_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    record_key: String,
+    custom_name: String,
+    model_name: String,
+) {
+    let input = cx.new(|cx| {
+        let mut input = InputState::new(window, cx).placeholder(model_name);
+        input.set_value(custom_name, window, cx);
+        input
+    });
+    window.open_dialog(cx, move |dialog, window, cx| {
+        input.update(cx, |input, cx| input.focus(window, cx));
+        dialog
+            .w(px(420.))
+            .title(tr!("Rename device"))
+            .child(
+                v_flex().gap_2().child(control_input(&input)).child(
+                    div()
+                        .text_caption()
+                        .text_color(theme::palette(cx).text_muted)
+                        .child(tr!("Leave blank to use the model name.")),
+                ),
+            )
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("Save"))
+                    .cancel_text(tr!("Cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok({
+                let input = input.clone();
+                let record_key = record_key.clone();
+                move |_, _, cx| {
+                    let custom_name = input.read(cx).value().to_string();
+                    AppState::update(cx, |state, cx| {
+                        state.set_device_custom_name(&record_key, &custom_name);
+                        cx.emit(StateEvent::InventoryChanged);
+                    });
+                    true
+                }
+            })
+    });
+}
+
+fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_1p5()
+        .items_center()
+        .text_caption()
+        .text_color(pal.text_muted)
+        .child(connectivity_dot(record.online, pal))
+        .child(if record.online {
+            tr!("Connected")
+        } else {
+            tr!("Offline")
+        })
+        .child("·")
+        .child(
+            svg()
+                .path(if matches!(record.kind, DeviceKind::Camera) {
+                    "action-icons/usb.svg"
+                } else {
+                    connection_icon_path(
+                        record.route.as_ref(),
+                        record.model_info.as_ref().map(|model| &model.transports),
+                    )
+                })
+                .size_3()
+                .flex_none(),
+        )
+        .child(div().min_w_0().truncate().child(connection_summary(record)))
+}
+
+fn connection_summary(record: &DeviceRecord) -> String {
+    let route = route_label(record.route.as_ref());
+    if matches!(
+        record.route,
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    ) {
+        format!("{route} · {} {}", tr!("Channel"), record.slot)
+    } else {
+        route
+    }
 }
 
 /// The device photo, scaled to fit its container (object-fit contain), or a
@@ -360,7 +547,8 @@ fn device_image(
             light_enabled,
             light_settings,
             pal,
-        );
+        )
+        .into_any_element();
     }
     if let Some(path) = record
         .asset
@@ -383,56 +571,6 @@ fn device_image(
         .justify_center()
         .child(Icon::new(icon).size_8().text_color(pal.text_muted))
         .into_any_element()
-}
-
-/// Connectivity dot for a gallery card: a steady grey when offline, green when
-/// connected. Flat and unhaloed, matching every other status dot in the app
-/// (the detail header's, the footer's, the permission rows'): connectivity is a
-/// binary readout, and a halo would say nothing the colour doesn't already say.
-fn status_dot(online: bool) -> AnyElement {
-    let color = if online {
-        theme::STATUS_CONNECTED
-    } else {
-        theme::STATUS_OFFLINE
-    };
-    div()
-        .size(px(10.))
-        .rounded_full()
-        .bg(rgb(color))
-        .into_any_element()
-}
-
-/// Battery readout for a gallery card: a charge/level glyph plus the
-/// percentage, in the muted metadata style.
-fn battery_view(b: &BatteryInfo, pal: Palette) -> AnyElement {
-    let row = h_flex()
-        .gap_1()
-        .items_center()
-        .text_caption()
-        .text_color(pal.text_muted)
-        .child(Icon::new(battery_icon(b)).size_3());
-    if super::widgets::battery_charging_no_reading(b) {
-        row.child(tr!("Charging")).into_any_element()
-    } else {
-        row.child(format!("{}%", b.percentage)).into_any_element()
-    }
-}
-
-/// Pick the battery glyph from charge state first (charging / full / error),
-/// then fall back to the discrete charge level for a plain discharge.
-fn battery_icon(b: &BatteryInfo) -> IconName {
-    match b.status {
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow => IconName::BatteryCharging,
-        BatteryStatus::Full => IconName::BatteryFull,
-        BatteryStatus::Error => IconName::BatteryWarning,
-        BatteryStatus::Discharging | BatteryStatus::Unknown => match b.level {
-            BatteryLevel::Critical => IconName::BatteryWarning,
-            BatteryLevel::Low => IconName::BatteryLow,
-            BatteryLevel::Good => IconName::BatteryMedium,
-            BatteryLevel::Full => IconName::BatteryFull,
-            BatteryLevel::Unknown => IconName::Battery,
-        },
-    }
 }
 
 /// Connection-type glyph for a gallery card: a dongle for receiver-paired
@@ -474,12 +612,11 @@ pub(super) fn connection_icon_path(
 /// user whose devices are about to appear. Swaps to the gallery, to
 /// [`device_empty_state`], or to [`scanning_unavailable_state`] the moment
 /// the agent reports where its enumeration landed.
-pub(super) fn device_scanning_state(pal: Palette) -> AnyElement {
-    loading_body(tr!("Scanning for devices…"), pal)
+pub(super) fn device_scanning_state(cx: &App) -> Div {
+    loading_body(tr!("Scanning for devices…"), cx)
         .flex_1()
         .w_full()
         .min_h_0()
-        .into_any_element()
 }
 
 /// Home body when the agent reports enumeration as broken
@@ -487,23 +624,23 @@ pub(super) fn device_scanning_state(pal: Palette) -> AnyElement {
 /// just by waiting, so showing a spinner (or claiming "no devices") would
 /// both be wrong. The agent keeps retrying and a recovery flows back in as a
 /// regular snapshot.
-pub(super) fn scanning_unavailable_state(pal: Palette) -> AnyElement {
+pub(super) fn scanning_unavailable_state(cx: &App) -> Div {
     notice_body(
         tr!("Device scanning is unavailable"),
         tr!("The background service couldn't scan for devices — check its log for details."),
-        pal,
+        cx,
     )
     .flex_1()
     .w_full()
     .min_h_0()
-    .into_any_element()
 }
 
 /// Body shown when the agent has completed an enumeration and found no
 /// devices. The polling keeps running and `AppView`'s `AppState` observer
 /// swaps the device UI back in the moment one appears, so this is purely a
 /// wait-and-pair placeholder.
-pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
+pub(super) fn device_empty_state(cx: &App) -> Div {
+    let pal = theme::palette(cx);
     v_flex()
         .flex_1()
         .w_full()
@@ -524,7 +661,7 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
         )
         .child(
             div()
-                .max_w(px(440.))
+                .max_w(ContentWidth::Narrow.rems())
                 .text_body()
                 .text_center()
                 .child(tr!(
@@ -538,8 +675,7 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
                 .label(tr!("Add Device"))
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().mt_1().max_w(px(440.)).text_caption().text_center().text_color(pal.text_muted).child(tr!(
+        .child(div().mt_1().max_w(ContentWidth::Narrow.rems()).text_caption().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
-        .into_any_element()
 }

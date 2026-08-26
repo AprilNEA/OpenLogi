@@ -12,8 +12,7 @@
 
 #![expect(
     clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "GPUI builders take owned Copy palette values and slot tables"
+    reason = "GPUI builders take owned Copy palette values"
 )]
 // Not `expect`: these fire inside `assert_eq!`, and rustc does not credit an
 // expectation with a lint raised in a macro expansion.
@@ -26,12 +25,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, point,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{h_flex, input::InputState, v_flex};
+use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 
@@ -41,11 +40,13 @@ use super::editors::{
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::mouse::picker::{
-    PickFn, action_icon_path, action_rows, divider, menu_card, menu_row, popover_section,
-    scroll_list,
+    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
+    editor_section,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::action::localized_action_label;
+use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
@@ -134,7 +135,18 @@ pub struct FunctionRowView {
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |_view, _, event: &StateEvent, cx| {
+            let relevant = match event {
+                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::BindingsChanged(key) => AppState::try_read(cx)
+                    .and_then(AppState::current_record)
+                    .is_some_and(|record| record.device_key() == *key),
+                _ => false,
+            };
+            if relevant {
+                cx.notify();
+            }
+        });
         Self {
             selected_key: None,
             hovered_key: None,
@@ -228,34 +240,21 @@ impl FunctionRowView {
     }
 }
 
-/// The app-state slice the view renders from: the device's asset, the global
-/// keyboard bindings, and the lighting glow (geometry + tinted colour).
-type StateSnapshot = (
-    Option<ResolvedAsset>,
-    Vec<(KeyTrigger, Action)>,
-    Option<(Arc<GlowGeometry>, Hsla)>,
-);
-
 impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = theme::palette(cx);
-        let (asset, bindings, glow): StateSnapshot = cx
-            .try_global::<AppState>()
-            .map(|s| {
-                (
-                    s.current_record().and_then(|r| r.asset.clone()),
-                    s.keyboard_bindings
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                    s.current_record().and_then(|r| keyboard_glow(s, r)),
-                )
-            })
-            .unwrap_or_default();
+        let state = AppState::try_read(cx);
+        let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
+        let bindings = state.map(AppState::keyboard_bindings);
+        let glow = state.and_then(|state| {
+            state
+                .current_record()
+                .and_then(|record| keyboard_glow(state, record))
+        });
 
         let viewport_h = f32::from(window.viewport_size().height);
-        let render_size = keyboard_render_size(asset.as_ref(), viewport_h);
-        let points = key_points(asset.as_ref());
+        let render_size = keyboard_render_size(asset, viewport_h);
+        let points = key_points(asset);
+        let image_path = asset.map(|asset| asset.image_path.clone());
         let slots: Vec<KeySlot> = FUNCTION_KEYS
             .iter()
             .zip(points.iter())
@@ -265,17 +264,15 @@ impl Render for FunctionRowView {
                     keycode: *keycode,
                     modifiers: KeyModifiers::default(),
                 };
-                let bound = bindings
-                    .iter()
-                    .find(|(k, _)| *k == trigger)
-                    .map(|(_, a)| a.clone());
+                let bound = bindings.and_then(|bindings| bindings.get(&trigger));
                 KeySlot {
                     idx,
                     label,
                     trigger,
                     x_frac: point.x_frac,
                     y_frac: point.y_frac,
-                    bound,
+                    binding: binding_label(bound),
+                    binding_icon: bound.map(action_icon_path),
                 }
             })
             .collect();
@@ -294,10 +291,7 @@ impl Render for FunctionRowView {
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
-            let current_action = bindings
-                .iter()
-                .find(|(trigger, _)| trigger == &slot.trigger)
-                .map(|(_, action)| action);
+            let current_action = bindings.and_then(|bindings| bindings.get(&slot.trigger));
             match kind {
                 PowerUserKind::Workflow => {
                     if self.workflow_draft.is_empty() {
@@ -316,27 +310,19 @@ impl Render for FunctionRowView {
                 }
             }
         }
-        let text_state = self.text_state.clone();
-        let workflow_draft = self.workflow_draft.clone();
         let view = cx.entity();
+        let keyboard =
+            KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
+                .selected(selected)
+                .hovered(hovered);
+        let panel = selected.map(|selected| self.config_panel(selected, &slots, &view, cx));
 
         // The whole row animates as one: when a key is selected the right-side
         // panel grows in and the keyboard nudges left to make room.
-        v_flex().w_full().items_center().child(inspector_row(
-            slots,
-            asset,
-            glow,
-            render_size,
-            selected,
-            hovered,
-            active_editor,
-            text_state,
-            workflow_draft,
-            &view,
-            &pal,
-            window,
-            cx,
-        ))
+        v_flex()
+            .w_full()
+            .items_center()
+            .child(InspectorRow::new(keyboard).panel(panel))
     }
 }
 
@@ -361,95 +347,112 @@ struct KeySlot {
     trigger: KeyTrigger,
     x_frac: f32,
     y_frac: f32,
-    bound: Option<Action>,
+    binding: gpui::SharedString,
+    binding_icon: Option<&'static str>,
 }
 
-/// The two-pane row: keyboard photo + (when a key is selected) the side panel.
-fn inspector_row(
-    slots: Vec<KeySlot>,
-    asset: Option<ResolvedAsset>,
-    glow: Option<(Arc<GlowGeometry>, Hsla)>,
-    render_size: (f32, f32),
-    selected: Option<usize>,
-    hovered: Option<usize>,
-    active_editor: Option<PowerUserKind>,
-    text_state: Option<Entity<InputState>>,
-    workflow_draft: Vec<WorkflowStep>,
-    view: &Entity<FunctionRowView>,
-    pal: &Palette,
-    window: &mut Window,
-    cx: &mut Context<FunctionRowView>,
-) -> impl IntoElement {
-    let keyboard = keyboard_pane(
-        slots.clone(),
-        asset.as_ref(),
-        glow,
-        render_size,
-        selected,
-        hovered,
-        view,
-        pal,
-    );
+/// The two-pane row: keyboard photo + an optional side panel.
+#[derive(IntoElement)]
+struct InspectorRow {
+    keyboard: KeyboardPane,
+    panel: Option<gpui::Div>,
+}
 
-    // When nothing is selected, just the keyboard, full width.
-    let Some(selected) = selected else {
-        return h_flex()
+impl InspectorRow {
+    fn new(keyboard: KeyboardPane) -> Self {
+        Self {
+            keyboard,
+            panel: None,
+        }
+    }
+
+    #[must_use]
+    fn panel(mut self, panel: Option<gpui::Div>) -> Self {
+        self.panel = panel;
+        self
+    }
+}
+
+impl RenderOnce for InspectorRow {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        h_flex()
             .w_full()
+            .items_center()
             .justify_center()
-            .child(keyboard)
-            .into_any_element();
-    };
-
-    let panel = config_panel(
-        selected,
-        &slots,
-        active_editor,
-        text_state,
-        workflow_draft,
-        view,
-        pal,
-        window,
-        cx,
-    );
-
-    // The panel grows in from width 0 → PANEL_W over SLIDE_MS, easing in/out,
-    // always on the right as a stable inspector.
-    let animated_panel = div().overflow_hidden().child(panel).with_animation(
-        "panel-slide",
-        Animation::new(std::time::Duration::from_millis(SLIDE_MS)).with_easing(ease_in_out),
-        |el, delta| el.w(px(PANEL_W * delta)),
-    );
-
-    h_flex()
-        .w_full()
-        .gap_5()
-        .items_center()
-        .justify_center()
-        .child(keyboard)
-        .child(animated_panel)
-        .into_any_element()
+            .child(self.keyboard)
+            .when_some(self.panel, |row, panel| {
+                // The panel grows in from width 0 → PANEL_W over SLIDE_MS,
+                // easing in/out, always on the right as a stable inspector.
+                let animated_panel = div().overflow_hidden().child(panel).with_animation(
+                    "panel-slide",
+                    Animation::new(std::time::Duration::from_millis(SLIDE_MS))
+                        .with_easing(ease_in_out),
+                    |element, delta| element.w(px(PANEL_W * delta)),
+                );
+                row.gap_5().child(animated_panel)
+            })
+    }
 }
 
 /// The keyboard photo with callout bubbles above each function key, leader
 /// lines, and invisible click-targets over the real keys.
-fn keyboard_pane(
+#[derive(IntoElement)]
+struct KeyboardPane {
     slots: Vec<KeySlot>,
-    asset: Option<&ResolvedAsset>,
+    image_path: Option<std::path::PathBuf>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
-    (img_w, img_h): (f32, f32),
+    render_size: (f32, f32),
     selected: Option<usize>,
     hovered: Option<usize>,
-    view: &Entity<FunctionRowView>,
-    pal: &Palette,
-) -> impl IntoElement {
-    let img_path = asset.map(|a| a.image_path.clone());
-    let view_clone = view.clone();
+    view: Entity<FunctionRowView>,
+}
 
-    div()
-        .relative()
-        .w(px(img_w))
-        .h(px(CALLOUT_BAND_H + img_h))
-        .child(
+impl KeyboardPane {
+    fn new(
+        slots: Vec<KeySlot>,
+        image_path: Option<std::path::PathBuf>,
+        glow: Option<(Arc<GlowGeometry>, Hsla)>,
+        render_size: (f32, f32),
+        view: Entity<FunctionRowView>,
+    ) -> Self {
+        Self {
+            slots,
+            image_path,
+            glow,
+            render_size,
+            selected: None,
+            hovered: None,
+            view,
+        }
+    }
+
+    #[must_use]
+    fn selected(mut self, selected: impl Into<Option<usize>>) -> Self {
+        self.selected = selected.into();
+        self
+    }
+
+    #[must_use]
+    fn hovered(mut self, hovered: impl Into<Option<usize>>) -> Self {
+        self.hovered = hovered.into();
+        self
+    }
+}
+
+impl RenderOnce for KeyboardPane {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (img_w, img_h) = self.render_size;
+        let img_path = self.image_path;
+        let view_clone = self.view;
+        let selected = self.selected;
+        let hovered = self.hovered;
+        let pal = theme::palette(cx);
+
+        div()
+            .relative()
+            .w(px(img_w))
+            .h(px(CALLOUT_BAND_H + img_h))
+            .child(
             div()
                 .absolute()
                 .top(px(CALLOUT_BAND_H))
@@ -460,137 +463,149 @@ fn keyboard_pane(
                 // keys occlude it and the colour only reads through the
                 // inter-key gaps — same treatment as the home gallery and the
                 // mouse model.
-                .when_some(glow, |this, (geom, color)| {
+                    .when_some(self.glow, |this, (geom, color)| {
                     this.child(glow_canvas(geom, color))
                 })
-                .child(image_or_fallback(img_path, img_w, img_h, pal)),
-        )
-        .child(keyboard_leader_canvas(
-            slots.clone(),
-            selected,
-            hovered,
-            (img_w, img_h),
-        ))
-        .children({
-            let count = slots.len();
-            let view_for_callouts = view_clone.clone();
-            slots.iter().cloned().map(move |s| {
-                let highlighted = key_is_highlighted(s.idx, selected, hovered);
-                key_callout(s, count, highlighted, img_w, &view_for_callouts, pal)
+                    .child(image_or_fallback(img_path, img_w, img_h, &pal)),
+            )
+            .child(keyboard_leader_canvas(
+                self.slots.clone(),
+                selected,
+                hovered,
+                (img_w, img_h),
+            ))
+            .children({
+                let count = self.slots.len();
+                let view_for_callouts = view_clone.clone();
+                self.slots.iter().cloned().map(move |slot| {
+                    let highlighted = key_is_highlighted(slot.idx, selected, hovered);
+                    KeyCallout {
+                        slot,
+                        count,
+                        highlighted,
+                        img_w,
+                        view: view_for_callouts.clone(),
+                    }
+                })
             })
-        })
-        // Click-targets overlay, centered on each key's marker point.
-        .child(
-            div()
-                .absolute()
-                .top(px(CALLOUT_BAND_H))
-                .left(px(0.))
-                .w(px(img_w))
-                .h(px(img_h))
-                .children(slots.into_iter().map(|s| {
-                    let highlighted = key_is_highlighted(s.idx, selected, hovered);
-                    key_click_target(s, highlighted, (img_w, img_h), &view_clone, pal)
+            // Click-targets overlay, centered on each key's marker point.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(CALLOUT_BAND_H))
+                    .left(px(0.))
+                    .w(px(img_w))
+                    .h(px(img_h))
+                    .children(self.slots.into_iter().map(|slot| {
+                    let highlighted = key_is_highlighted(slot.idx, selected, hovered);
+                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone)
                 })),
-        )
+            )
+    }
 }
 
 /// One callout bubble in the band above the keyboard.
-fn key_callout(
+#[derive(IntoElement)]
+struct KeyCallout {
     slot: KeySlot,
     count: usize,
     highlighted: bool,
     img_w: f32,
-    view: &Entity<FunctionRowView>,
-    pal: &Palette,
-) -> AnyElement {
-    let idx = slot.idx;
-    let left = callout_left_px(idx, count, img_w, KEY_CALLOUT_W);
-    let top = callout_top_px(idx);
-    let view_hover = view.clone();
-    let view_click = view.clone();
-    let binding = binding_label(slot.bound.as_ref());
-    let binding_icon = slot.bound.as_ref().map(action_icon_path);
+    view: Entity<FunctionRowView>,
+}
 
-    v_flex()
-        .id(("key-callout", idx))
-        .absolute()
-        .top(px(top))
-        .left(px(left))
-        .w(px(KEY_CALLOUT_W))
-        .h(px(KEY_CALLOUT_H))
-        .px_1()
-        .justify_center()
-        .items_center()
-        .gap(px(1.))
-        .rounded_md()
-        .border_1()
-        .border_color(if highlighted {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .bg(if highlighted {
-            theme::accent_tint()
-        } else {
-            pal.surface_hover
-        })
-        .cursor_pointer()
-        .hover(move |s| {
-            s.bg(if highlighted {
-                theme::accent_tint_hover()
+impl RenderOnce for KeyCallout {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let idx = self.slot.idx;
+        let left = callout_left_px(idx, self.count, self.img_w, KEY_CALLOUT_W);
+        let top = callout_top_px(idx);
+        let view_hover = self.view.clone();
+        let view_click = self.view;
+        let binding = self.slot.binding;
+        let binding_icon = self.slot.binding_icon;
+        let highlighted = self.highlighted;
+
+        v_flex()
+            .id(("key-callout", idx))
+            .absolute()
+            .top(px(top))
+            .left(px(left))
+            .w(px(KEY_CALLOUT_W))
+            .h(px(KEY_CALLOUT_H))
+            .px_1()
+            .justify_center()
+            .items_center()
+            .gap(px(1.))
+            .rounded_md()
+            .border_1()
+            .border_color(if highlighted {
+                rgb(ACCENT_BLUE).into()
             } else {
-                pal.surface
+                pal.border
             })
-        })
-        .child(
-            div()
-                .text_caption()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if highlighted {
-                    rgb(ACCENT_BLUE).into()
+            .bg(if highlighted {
+                theme::accent_tint()
+            } else {
+                pal.control
+            })
+            .cursor_pointer()
+            .hover(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
                 } else {
-                    pal.text_primary
+                    pal.control_hover
                 })
-                .child(slot.label),
-        )
-        .child(
-            h_flex()
-                .items_center()
-                .justify_center()
-                .gap(px(2.))
-                .max_w(px(KEY_CALLOUT_W - 8.))
-                .when_some(binding_icon, |row, icon| {
-                    row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
-                        if highlighted {
-                            rgb(ACCENT_BLUE).into()
-                        } else {
-                            pal.text_muted
-                        },
-                    ))
-                })
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_caption()
-                        .text_color(if highlighted {
-                            rgb(ACCENT_BLUE).into()
-                        } else {
-                            pal.text_muted
-                        })
-                        .child(binding),
-                ),
-        )
-        .on_hover(move |hovered, _window, cx| {
-            let next = (*hovered).then_some(idx);
-            view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
-        })
-        .on_click(move |_ev, _window, cx| {
-            view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
-        })
-        .into_any_element()
+            })
+            .child(
+                div()
+                    .text_caption()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if highlighted {
+                        rgb(ACCENT_BLUE).into()
+                    } else {
+                        pal.text_primary
+                    })
+                    .child(self.slot.label),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(2.))
+                    .max_w(px(KEY_CALLOUT_W - 8.))
+                    .when_some(binding_icon, |row, icon| {
+                        row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
+                            if highlighted {
+                                rgb(ACCENT_BLUE).into()
+                            } else {
+                                pal.text_muted
+                            },
+                        ))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_caption()
+                            .text_color(if highlighted {
+                                rgb(ACCENT_BLUE).into()
+                            } else {
+                                pal.text_muted
+                            })
+                            .child(binding),
+                    ),
+            )
+            .on_hover(move |hovered, _window, cx| {
+                let next = (*hovered).then_some(idx);
+                view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
+            })
+            .on_click(move |_ev, _window, cx| {
+                view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
+            })
+    }
 }
 
 /// One invisible click-target over a function key. Selecting it opens the
@@ -600,8 +615,7 @@ fn key_click_target(
     highlighted: bool,
     (img_w, img_h): (f32, f32),
     view: &Entity<FunctionRowView>,
-    _pal: &Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     let idx = slot.idx;
     let x_frac = slot.x_frac;
     let y_frac = slot.y_frac;
@@ -651,13 +665,11 @@ fn key_click_target(
         .on_click(move |_ev, _window, cx| {
             view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
         })
-        .into_any_element()
 }
 
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
-        Some(Action::CustomShortcut(combo)) => combo.rendered_label().into(),
-        Some(a) => tr!(a.label()),
+        Some(action) => localized_action_label(action),
         None => tr!("Off"),
     }
 }
@@ -767,56 +779,56 @@ fn callout_lane_is_lower(idx: usize) -> bool {
 /// The scrollable config panel for the selected key. Lists the same action
 /// catalog the mouse picker uses, plus a Power User section. Renders the rows
 /// directly (no popover) in a tall card.
-fn config_panel(
-    selected_idx: usize,
-    slots: &[KeySlot],
-    active_editor: Option<PowerUserKind>,
-    text_state: Option<Entity<InputState>>,
-    workflow_draft: Vec<WorkflowStep>,
-    view: &Entity<FunctionRowView>,
-    pal: &Palette,
-    _window: &mut Window,
-    cx: &mut Context<FunctionRowView>,
-) -> impl IntoElement {
-    let slot = &slots[selected_idx];
-    let trigger = slot.trigger.clone();
-    let key_name = trigger.to_string();
+impl FunctionRowView {
+    fn config_panel(
+        &self,
+        selected_idx: usize,
+        slots: &[KeySlot],
+        view: &Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let slot = &slots[selected_idx];
+        let trigger = slot.trigger.clone();
+        let key_name = trigger.to_string();
 
-    // If an editor is active, render it instead of the list.
-    if let Some(kind) = active_editor {
-        return super::editors::editor_card(
-            trigger,
-            kind,
-            text_state,
-            workflow_draft,
-            view,
-            *pal,
-            cx,
-        );
-    }
+        // If an editor is active, render it instead of the list.
+        if let Some(kind) = self.active_editor {
+            return super::editors::editor_card(
+                trigger,
+                kind,
+                self.text_state.clone(),
+                self.workflow_draft.clone(),
+                view,
+                pal,
+            );
+        }
 
-    let current = cx
-        .try_global::<AppState>()
-        .and_then(|s| s.keyboard_bindings.get(&trigger).cloned());
+        let current = AppState::try_read(cx)
+            .and_then(|state| state.keyboard_bindings().get(&trigger).cloned());
 
-    let view_for_pick = view.clone();
-    let trigger_for_pick = trigger.clone();
-    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        cx.update_global::<AppState, _>(|state, _| {
-            state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
+        let view_for_pick = view.clone();
+        let trigger_for_pick = trigger.clone();
+        let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+            AppState::update(cx, |state, cx| {
+                let key = state.current_record().map(DeviceRecord::device_key);
+                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
+                if let Some(key) = key {
+                    cx.emit(StateEvent::BindingsChanged(key));
+                }
+            });
+            view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
-        view_for_pick.update(cx, |_, vcx| vcx.notify());
-    });
 
-    let rows = panel_action_rows(current.as_ref(), &on_pick, view, pal);
+        let rows = panel_action_rows(current.as_ref(), &on_pick, view, &pal);
 
-    menu_card(*pal)
-        .w(px(PANEL_W))
-        .max_h(px(500.))
-        .child(title_header(&key_name, pal))
-        .child(divider(*pal))
-        .child(scroll_list("key-panel-scroll", rows))
-        .into_any_element()
+        compact_panel(pal)
+            .w(px(PANEL_W))
+            .max_h(px(500.))
+            .child(title_header(&key_name, &pal))
+            .child(divider(pal))
+            .child(editor_scroll_list("key-panel-scroll", rows))
+    }
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".
@@ -842,9 +854,8 @@ fn panel_action_rows(
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
-) -> Vec<AnyElement> {
+) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
-    children.push(popover_section(tr!("Power User").to_string(), *pal));
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (
@@ -869,50 +880,55 @@ fn panel_action_rows(
         ),
     ];
 
-    for (idx, (kind, label, icon_path)) in power_user_actions.iter().enumerate() {
-        let kind = *kind;
-        let view = view.clone();
-        let selected = matches!(
-            (current, kind),
-            (Some(Action::TypeText(_)), PowerUserKind::TypeText)
-                | (
-                    Some(Action::RunAppleScript(_)),
-                    PowerUserKind::RunAppleScript
-                )
-                | (
-                    Some(Action::RunShellCommand(_)),
-                    PowerUserKind::RunShellCommand
-                )
-                | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
-        );
-        children.push(
-            menu_row(format!("panel-power-{idx}"), *pal, selected)
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
+    children.push(
+        v_flex()
+            .child(editor_section(tr!("Power User").to_string(), *pal))
+            .children(power_user_actions.iter().enumerate().map(
+                |(idx, (kind, label, icon_path))| {
+                    let kind = *kind;
+                    let view = view.clone();
+                    let selected = matches!(
+                        (current, kind),
+                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+                            | (
+                                Some(Action::RunAppleScript(_)),
+                                PowerUserKind::RunAppleScript
+                            )
+                            | (
+                                Some(Action::RunShellCommand(_)),
+                                PowerUserKind::RunShellCommand
+                            )
+                            | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
+                    );
+                    MenuRow::new(format!("panel-power-{idx}"))
+                        .selected(selected)
+                        .role(Role::MenuItem)
                         .child(
-                            svg()
-                                .path(*icon_path)
-                                .size_4()
-                                .flex_none()
-                                .text_color(pal.text_muted),
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path(*icon_path)
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(div().child((*label).to_string())),
                         )
-                        .child(div().child((*label).to_string())),
-                )
-                .when(selected, |s| {
-                    s.child(
-                        gpui_component::Icon::new(gpui_component::IconName::Check)
-                            .size_3()
-                            .text_color(rgb(ACCENT_BLUE)),
-                    )
-                })
-                .on_click(move |_ev, _window, cx| {
-                    view.update(cx, |v, vcx| v.open_editor(kind, vcx));
-                })
-                .into_any_element(),
-        );
-    }
+                        .when(selected, |s| {
+                            s.child(
+                                gpui_component::Icon::new(gpui_component::IconName::Check)
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
+                            )
+                        })
+                        .on_click(move |_ev, _window, cx| {
+                            view.update(cx, |v, vcx| v.open_editor(kind, vcx));
+                        })
+                },
+            )),
+    );
     children
 }
 
@@ -1133,7 +1149,7 @@ fn image_or_fallback(
             .rounded_md()
             .border_1()
             .border_color(pal.border)
-            .bg(pal.surface)
+            .bg(pal.panel)
             .flex()
             .items_center()
             .justify_center()
