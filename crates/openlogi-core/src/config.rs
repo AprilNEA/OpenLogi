@@ -144,6 +144,96 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Import physical keys and route aliases written by pre-release custom
+    /// builds that used `device:<identity>` plus a top-level
+    /// `device_aliases` table.
+    ///
+    /// Only explicit alias evidence is converted into [`DeviceConfig::links`].
+    /// An alias whose target has no persisted device entry is deliberately
+    /// ignored: guessing its owner from a model name could merge two physical
+    /// mice of the same model. The caller keeps the original source as a
+    /// migration backup before the normalized config is saved.
+    pub(crate) fn migrate_legacy_device_keys(
+        &mut self,
+        legacy_aliases: BTreeMap<String, String>,
+    ) -> bool {
+        fn normalized_identity_key(key: &str) -> Option<String> {
+            let identity = key.strip_prefix("device:")?;
+            PhysicalDeviceKey::parse(identity).map(|_| identity.to_string())
+        }
+
+        fn normalized_route_key(key: &str) -> Option<String> {
+            if let Some(rest) = key.strip_prefix("direct:") {
+                let mut parts = rest.splitn(3, ':');
+                let vendor = parts.next()?;
+                let product = parts.next()?;
+                let identity = parts.next()?;
+                PhysicalDeviceKey::parse(identity)?;
+                return Some(format!("direct:{vendor}:{product}"));
+            }
+            key.starts_with("receiver:").then(|| key.to_string())
+        }
+
+        let mut changed = false;
+        let old_keys = self.devices.keys().cloned().collect::<Vec<_>>();
+        for old in old_keys {
+            let Some(new) = normalized_identity_key(&old) else {
+                continue;
+            };
+            let Some(legacy) = self.devices.remove(&old) else {
+                continue;
+            };
+            if let Some(existing) = self.devices.get_mut(&new) {
+                // A mixed custom/current file can contain both spellings.
+                // Preserve any disagreement on the historical key instead of
+                // overwriting either side silently.
+                identity::fold(existing, legacy, &old);
+            } else {
+                self.devices.insert(new, legacy);
+            }
+            changed = true;
+        }
+
+        if let Some(new) = self
+            .selected_device
+            .as_deref()
+            .and_then(normalized_identity_key)
+        {
+            self.selected_device = Some(new);
+            changed = true;
+        }
+        for device in self.devices.values_mut() {
+            for target in &mut device.host_switch_targets {
+                if let Some(new) = normalized_identity_key(target) {
+                    *target = new;
+                    changed = true;
+                }
+            }
+            device.host_switch_targets.sort();
+            device.host_switch_targets.dedup();
+        }
+
+        for (alias, target) in legacy_aliases {
+            let target = normalized_identity_key(&target).unwrap_or(target);
+            let Some(canonical) = PhysicalDeviceKey::parse(&target) else {
+                continue;
+            };
+            if !self.devices.contains_key(canonical.as_str()) {
+                tracing::warn!(
+                    %alias,
+                    target = %canonical.as_str(),
+                    "legacy device alias has no persisted target; leaving it unmerged"
+                );
+                continue;
+            }
+            let Some(route) = normalized_route_key(&alias) else {
+                continue;
+            };
+            changed |= self.adopt_route(&canonical, &route, None);
+        }
+        changed
+    }
+
     /// A config that never touches the on-disk file: [`Self::save_atomic`] is
     /// a no-op. For tests that drive the state layer's persistence paths —
     /// with a default config those would overwrite the developer's real

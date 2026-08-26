@@ -1,7 +1,7 @@
 //! Version-aware configuration loading and conflict-safe persistence.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -123,9 +123,9 @@ impl ConfigFile {
     pub fn load_from_path(path: &Path) -> Result<(Config, Self), ConfigError> {
         match fs::read_to_string(path) {
             Ok(source) => {
-                let (config, loaded_version) = parse_config(path, &source)?;
-                let migrated_from =
-                    (loaded_version < SCHEMA_VERSION).then(|| (loaded_version, source.clone()));
+                let (config, loaded_version, migrated_legacy_keys) = parse_config(path, &source)?;
+                let migrated_from = (loaded_version < SCHEMA_VERSION || migrated_legacy_keys)
+                    .then(|| (loaded_version, source.clone()));
                 Ok((
                     config,
                     Self {
@@ -245,9 +245,10 @@ impl Config {
 }
 
 /// Parse `source`, applying every migration its declared `schema_version`
-/// needs. Returns the migrated config plus the version the file actually
-/// declared, so callers can tell a migrated load from an already-current one.
-fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError> {
+/// needs. Returns the migrated config, the version the file actually declared,
+/// and whether same-schema private-build keys were normalized, so callers can
+/// retain a recovery copy before either kind of migration is saved.
+fn parse_config(path: &Path, source: &str) -> Result<(Config, u32, bool), ConfigError> {
     let header: ConfigHeader = toml::from_str(source).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source: Box::new(source),
@@ -259,10 +260,29 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
         });
     }
     reject_obsolete_fields(path, source, header.schema_version)?;
-    let mut config: Config = toml::from_str(source).map_err(|source| ConfigError::Parse {
+    let mut value: toml::Value = toml::from_str(source).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source: Box::new(source),
     })?;
+    // Private builds predating schema 6 persisted transport aliases in a
+    // top-level `device_aliases` table. It was never part of the released
+    // schema, so keep the strict Config shape and consume it only inside this
+    // one-way migration adapter.
+    let legacy_aliases = value
+        .as_table_mut()
+        .and_then(|table| table.remove("device_aliases"))
+        .map(toml::Value::try_into)
+        .transpose()
+        .map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })?
+        .unwrap_or_else(BTreeMap::new);
+    let mut config: Config = value.try_into().map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    let migrated_legacy_keys = config.migrate_legacy_device_keys(legacy_aliases);
     if header.schema_version <= 3 {
         config.migrate_owner_locked_gestures();
     }
@@ -274,7 +294,7 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
         config.migrate_transport_scoped_keys();
     }
     config.schema_version = SCHEMA_VERSION;
-    Ok((config, header.schema_version))
+    Ok((config, header.schema_version, migrated_legacy_keys))
 }
 
 fn reject_obsolete_fields(path: &Path, source: &str, version: u32) -> Result<(), ConfigError> {

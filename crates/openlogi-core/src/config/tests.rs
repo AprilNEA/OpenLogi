@@ -1797,6 +1797,83 @@ dpi = 1600
 }
 
 #[test]
+fn custom_device_aliases_migrate_to_identity_keys_and_links() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let original = r#"
+schema_version = 6
+selected_device = "device:serial:abc123"
+
+[device_aliases]
+"direct:046d:b03e:serial:abc123" = "device:serial:abc123"
+"receiver:82839805:slot:2" = "device:serial:abc123"
+"receiver:82839805:slot:3" = "device:unit:05060708"
+
+[devices."device:serial:abc123"]
+dpi = 1600
+
+[devices."device:serial:abc123".identity]
+display_name = "MX Ergo S"
+kind = "trackball"
+
+[devices."device:serial:abc123".identity.capabilities]
+buttons = true
+pointer = true
+lighting = false
+scroll_inversion = false
+hires_wheel = false
+thumbwheel = false
+haptic_feedback = false
+haptic_panel = false
+
+[devices."device:unit:01020304"]
+dpi = 800
+
+[devices."device:unit:01020304".identity]
+display_name = "MX Ergo S"
+kind = "trackball"
+
+[devices."device:unit:01020304".identity.capabilities]
+buttons = true
+pointer = true
+lighting = false
+scroll_inversion = false
+hires_wheel = false
+thumbwheel = false
+haptic_feedback = false
+haptic_panel = false
+"#;
+    fs::write(&path, original).expect("write custom config");
+
+    let (config, mut file) = ConfigFile::load_from_path(&path).expect("load custom config");
+    assert_eq!(config.selected_device.as_deref(), Some("serial:abc123"));
+    assert!(config.devices.contains_key("serial:abc123"));
+    assert!(config.devices.contains_key("unit:01020304"));
+    assert!(!config.devices.contains_key("device:serial:abc123"));
+    let links = &config.devices["serial:abc123"].links;
+    assert!(links.contains_key("direct:046d:b03e"));
+    assert!(links.contains_key("receiver:82839805:slot:2"));
+    assert!(
+        config
+            .devices
+            .values()
+            .all(|device| !device.links.contains_key("receiver:82839805:slot:3")),
+        "an alias whose target has no persisted identity is not guessed onto a same-model mouse"
+    );
+
+    file.save(&config).expect("save migrated config");
+    assert_eq!(
+        fs::read(path.with_file_name("config.toml.v6.bak")).expect("read migration backup"),
+        original.as_bytes(),
+        "same-schema custom migrations still preserve their original source"
+    );
+    let written = fs::read_to_string(&path).expect("read migrated config");
+    assert!(!written.contains("device_aliases"));
+    assert!(!written.contains("device:serial:"));
+    assert!(!written.contains("device:unit:"));
+}
+
+#[test]
 fn migrating_two_direct_routes_of_one_device_folds_instead_of_dropping_one() {
     // An MX Master 3S reached over USB *and* over Bluetooth-direct has two v4
     // entries whose keys both rename to `unit:6be9d300`. Inserting would let
