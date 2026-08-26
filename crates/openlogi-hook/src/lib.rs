@@ -55,8 +55,7 @@ pub struct CursorPosition {
 /// through the currently selected UI device.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventDevice {
-    /// Native identity that remains stable while this physical device is
-    /// attached, such as a serial number or platform device path.
+    /// Native serial or unit identity for the physical source.
     pub stable_id: Option<EventDeviceId>,
     /// USB/Bluetooth vendor id when the platform exposes it.
     pub vendor_id: Option<u32>,
@@ -66,22 +65,27 @@ pub struct EventDevice {
     pub product_name: Option<String>,
 }
 
-/// Normalized native identity for an OS-event source.
+/// Normalized hardware identity shared by native event sources and HID++
+/// inventory records.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EventDeviceId(String);
 
 impl EventDeviceId {
-    /// Normalize a non-empty native device identifier for matching.
+    /// Normalize a non-empty serial number or unit identifier for matching.
     #[must_use]
     pub fn new(value: impl Into<String>) -> Option<Self> {
-        let value = value.into().trim().to_ascii_lowercase();
+        let value = value.into();
+        let value = value.trim().to_ascii_lowercase();
+        let compact = value
+            .chars()
+            .filter(|ch| !matches!(ch, ':' | '-' | ' '))
+            .collect::<String>();
+        let value = if !compact.is_empty() && compact.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            compact
+        } else {
+            value
+        };
         (!value.is_empty()).then_some(Self(value))
-    }
-
-    /// Borrow the normalized identifier.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 

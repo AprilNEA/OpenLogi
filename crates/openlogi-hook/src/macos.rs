@@ -291,9 +291,7 @@ fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
                         .as_deref()
                         .is_some_and(|p| p.to_lowercase().contains("trackpad")),
                     event_device: EventDevice {
-                        stable_id: string_prop("SerialNumber")
-                            .and_then(EventDeviceId::new)
-                            .or_else(|| EventDeviceId::new(format!("iokit:{sender_id}"))),
+                        stable_id: string_prop("SerialNumber").and_then(EventDeviceId::new),
                         vendor_id: num_prop("VendorID").or_else(|| num_prop("idVendor")),
                         product_id: num_prop("ProductID").or_else(|| num_prop("idProduct")),
                         product_name,

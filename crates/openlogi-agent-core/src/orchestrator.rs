@@ -55,6 +55,7 @@ struct AgentDevice {
     slot: u8,
     serial: Option<String>,
     unit_id: [u8; 4],
+    event_source_id: Option<String>,
     capabilities: Option<Capabilities>,
     /// HID++-reported device kind — identity only (capability decisions come
     /// from the feature table). Used to find the keyboard the key-capture
@@ -300,23 +301,10 @@ impl Orchestrator {
                 .collect()
         });
         let mut response_times_by_source = BTreeMap::new();
-        let mut product_counts = HashMap::new();
         for device in &self.devices {
-            if let Some(product_id) = hook_product_id(device) {
-                *product_counts.entry(product_id).or_insert(0usize) += 1;
-            }
-        }
-        let mut response_times_by_product = BTreeMap::new();
-        for device in &self.devices {
-            let times = hook_response_times_for(&self.config, &device.config_key, app);
+            let times = hook_response_times_for(&self.config, &device.config_key);
             for source_id in hook_source_ids(device) {
                 response_times_by_source.insert(source_id, times.clone());
-            }
-            if let Some(product_id) = hook_product_id(device)
-                && product_counts.get(&product_id) == Some(&1)
-            {
-                response_times_by_product
-                    .insert((openlogi_hook::LOGITECH_VENDOR_ID, product_id), times);
             }
         }
         HookMaps {
@@ -324,7 +312,6 @@ impl Orchestrator {
             gestures,
             gesture_response_times,
             gesture_response_times_by_source: response_times_by_source,
-            gesture_response_times_by_product: response_times_by_product,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }
@@ -936,11 +923,12 @@ impl Orchestrator {
 fn hook_response_times_for(
     config: &Config,
     config_key: &str,
-    app: Option<&str>,
 ) -> BTreeMap<ButtonId, GestureResponseTime> {
-    oshook_gestures_for(config, Some(config_key), app)
-        .keys()
-        .map(|&button| (button, config.gesture_response_time(config_key, button)))
+    ButtonId::ALL
+        .iter()
+        .copied()
+        .filter(|button| button.is_os_hook_button())
+        .map(|button| (button, config.gesture_response_time(config_key, button)))
         .collect()
 }
 
@@ -948,24 +936,15 @@ fn hook_source_ids(device: &AgentDevice) -> Vec<EventDeviceId> {
     let mut ids = Vec::new();
     if let Some(serial) = device.serial.as_deref() {
         ids.extend(EventDeviceId::new(serial));
-        ids.extend(EventDeviceId::new(format!("serial:{serial}")));
     }
     if device.unit_id != [0; 4] {
         let unit = format!("{:08x}", u32::from_be_bytes(device.unit_id));
-        ids.extend(EventDeviceId::new(unit.clone()));
-        ids.extend(EventDeviceId::new(format!("unit:{unit}")));
+        ids.extend(EventDeviceId::new(unit));
+    }
+    if let Some(source_id) = device.event_source_id.as_deref() {
+        ids.extend(EventDeviceId::new(source_id));
     }
     ids
-}
-
-fn hook_product_id(device: &AgentDevice) -> Option<u32> {
-    if !matches!(device.kind, DeviceKind::Mouse | DeviceKind::Trackball) {
-        return None;
-    }
-    let suffix = device
-        .model_key
-        .get(device.model_key.len().checked_sub(4)?..)?;
-    u32::from_str_radix(suffix, 16).ok()
 }
 
 /// Resolve the two independently-gated HiResWheel settings for one device.
@@ -1035,6 +1014,11 @@ fn build_devices(
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
+                event_source_id: if paired.slot == DIRECT_DEVICE_INDEX {
+                    inv.receiver.event_source_id.clone()
+                } else {
+                    None
+                },
                 capabilities: paired.capabilities,
                 kind: paired.kind,
                 light_capabilities: None,
@@ -1069,6 +1053,7 @@ fn build_devices(
             slot: DIRECT_DEVICE_INDEX,
             serial: device.serial_number.clone(),
             unit_id: device.unit_id,
+            event_source_id: device.serial_number.clone(),
             capabilities: device.capabilities,
             kind: device.kind,
             light_capabilities: device.light_capabilities,
