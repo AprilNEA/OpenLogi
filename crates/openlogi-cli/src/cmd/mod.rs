@@ -10,6 +10,7 @@ pub mod diag;
 pub mod light;
 pub mod list;
 pub mod snapshot;
+pub mod unpair;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -30,6 +31,8 @@ pub enum Command {
     /// Inspect and control standalone Logitech lights.
     #[command(subcommand)]
     Light(light::LightCmd),
+    /// Remove a device from a receiver's pairing table.
+    Unpair(unpair::UnpairArgs),
 }
 
 impl Command {
@@ -49,6 +52,7 @@ impl Command {
             Self::Assets(cmd) => cmd.run()?,
             Self::Diag(cmd) => cmd.run().await?,
             Self::Light(cmd) => cmd.run().await?,
+            Self::Unpair(args) => unpair::run(args).await?,
         }
         Ok(ExitCode::SUCCESS)
     }
