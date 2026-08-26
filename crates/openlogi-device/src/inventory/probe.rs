@@ -1,4 +1,10 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures_concurrency::future::Join as _;
 use hidpp::{
@@ -26,7 +32,8 @@ use crate::channel::route::DIRECT_DEVICE_INDEX;
 use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
 use super::{
-    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
+    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE,
+    UNIFYING_SLOT_PROBE, UNIFYING_TRIGGER_ATTEMPT_TIMEOUT, UNIFYING_TRIGGER_RETRY_DELAY,
 };
 
 /// One node probe's verdict about its own trustworthiness. Three-valued on
@@ -39,9 +46,13 @@ pub(super) enum ProbeVerdict {
     /// feature walk that never finished): the ledger replays the last-good
     /// snapshot instead of presenting the failure as truth.
     Failed,
-    /// The node answered — the only verdict that counts as stability
-    /// evidence. `complete` reports whether every expected device was seen,
-    /// which is what lets the one-shot retry stop early.
+    /// The receiver answered a liveness register, but the only operation that
+    /// can produce an authoritative device list failed. The ledger may replay
+    /// its last-good snapshot briefly, but must eventually reopen the channel.
+    AliveButIncomplete,
+    /// The node produced an authoritative inventory — the only verdict that
+    /// counts as stability evidence. `complete` reports whether every expected
+    /// device was seen, which is what lets the one-shot retry stop early.
     Healthy {
         /// Every expected device is present in this probe's inventory.
         complete: bool,
@@ -59,7 +70,7 @@ impl ProbeVerdict {
         }
     }
 
-    /// The node answered this tick (the ledger's replay gate).
+    /// The node produced an authoritative inventory this tick.
     pub(super) fn is_healthy(self) -> bool {
         matches!(self, Self::Healthy { .. })
     }
@@ -86,6 +97,16 @@ impl NodeProbe {
         Self {
             inventory: None,
             verdict: ProbeVerdict::Failed,
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// A Unifying receiver that answered `count_pairings` but rejected the
+    /// synthetic arrival trigger remains usable for existing control capture.
+    fn arrival_replay_failed() -> Self {
+        Self {
+            inventory: None,
+            verdict: ProbeVerdict::AliveButIncomplete,
             outcomes: Vec::new(),
         }
     }
@@ -238,13 +259,14 @@ async fn probe_unifying_receiver(
     // A slot whose re-broadcast goes missing this tick cannot be backfilled
     // until that register format is resolved.
     //
-    // The drain is therefore the *only* device source on this path, so a
-    // failed arrival trigger is "couldn't check", not "no devices online":
-    // settle it as a failed probe and let the ledger replay the last snapshot.
+    // The drain is therefore the only source of a fresh device list. A failed
+    // trigger leaves that list unchanged, but the successful pairing-count
+    // read above proves the receiver channel is still live; don't tear down a
+    // working capture session for this narrower transient.
     let Some(connections) =
         drain_device_arrival_unifying(&unifying, pairing_count, subscriptions).await
     else {
-        return NodeProbe::failed();
+        return NodeProbe::arrival_replay_failed();
     };
     debug!(events = connections.len(), "drained device-arrival events");
 
@@ -643,10 +665,12 @@ async fn drain_device_arrival_unifying(
     // flag). Ask first: c54d has been observed to answer this trigger while
     // occasionally withholding the ACK for the notification-register setup,
     // which otherwise stalls discovery before it reaches the useful request.
-    if let Err(e) = unifying.trigger_device_arrival().await {
-        debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
-        return None;
-    }
+    retry_arrival_trigger(
+        || unifying.trigger_device_arrival(),
+        UNIFYING_TRIGGER_ATTEMPT_TIMEOUT,
+        UNIFYING_TRIGGER_RETRY_DELAY,
+    )
+    .await?;
     let mut out = Vec::new();
     loop {
         match timeout(ARRIVAL_DRAIN, rx.recv()).await {
@@ -689,6 +713,46 @@ async fn drain_device_arrival_unifying(
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => return Some(out),
+        }
+    }
+}
+
+/// Retry one transient receiver refusal without hiding persistent failures
+/// from the inventory ledger.
+pub(super) async fn retry_arrival_trigger<F, Fut, E>(
+    mut trigger: F,
+    attempt_timeout: Duration,
+    retry_delay: Duration,
+) -> Option<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+    E: Debug,
+{
+    match timeout(attempt_timeout, trigger()).await {
+        Ok(Ok(())) => return Some(()),
+        Ok(Err(error)) => debug!(?error, "trigger_device_arrival failed; retrying once"),
+        Err(_) => debug!(
+            ?attempt_timeout,
+            "trigger_device_arrival timed out; retrying once"
+        ),
+    }
+    tokio::time::sleep(retry_delay).await;
+    match timeout(attempt_timeout, trigger()).await {
+        Ok(Ok(())) => Some(()),
+        Ok(Err(error)) => {
+            debug!(
+                ?error,
+                "trigger_device_arrival retry failed; receiver may report no devices"
+            );
+            None
+        }
+        Err(_) => {
+            debug!(
+                ?attempt_timeout,
+                "trigger_device_arrival retry timed out; receiver may report no devices"
+            );
+            None
         }
     }
 }

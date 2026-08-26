@@ -162,17 +162,18 @@ pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChanne
     )
 }
 
-/// How a scripted node behaves when the layers above ask to open it.
+/// Outcome produced when the scripted backend opens a listed node.
 ///
-/// The two cases are distinct contracts the enumerator must not conflate: only
-/// [`Self::OpenFails`] is a failure the ledger replays a last-good snapshot
-/// through. A node that opens into a live HID++ channel belongs here too — add
-/// that variant with the test that drives it, so it never sits unconstructed.
-pub(crate) enum ScriptedNode {
+/// The cases are distinct contracts the enumerator must not conflate: only
+/// [`Self::Fails`] is a backend failure the ledger replays a last-good snapshot
+/// through.
+pub(crate) enum ScriptedOpen {
     /// The backend cannot open the node at all — unplugged mid-tick, or denied.
-    OpenFails,
+    Fails,
     /// The node opens but carries no HID++ collection.
     NotHidpp,
+    /// The node opens into a live HID++ channel that does not answer requests.
+    UnresponsiveHidpp,
 }
 
 /// A [`HidBackend`] over scripted nodes.
@@ -182,16 +183,16 @@ pub(crate) enum ScriptedNode {
 /// will not open, one that is not HID++ at all) that hardware cannot be asked
 /// to reproduce on demand.
 pub(crate) struct ScriptedBackend {
-    nodes: Vec<(NodeInfo, ScriptedNode)>,
+    nodes: Vec<(NodeInfo, ScriptedOpen)>,
 }
 
 impl ScriptedBackend {
     /// A backend presenting `nodes`, in the order given.
-    pub(crate) fn new(nodes: Vec<(NodeInfo, ScriptedNode)>) -> Arc<Self> {
+    pub(crate) fn new(nodes: Vec<(NodeInfo, ScriptedOpen)>) -> Arc<Self> {
         Arc::new(Self { nodes })
     }
 
-    fn node(&self, id: &NodeId) -> Option<&ScriptedNode> {
+    fn open_outcome(&self, id: &NodeId) -> Option<&ScriptedOpen> {
         self.nodes
             .iter()
             .find_map(|(info, node)| (info.id == *id).then_some(node))
@@ -209,9 +210,13 @@ impl HidBackend for ScriptedBackend {
     }
 
     async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError> {
-        match self.node(&node.id) {
-            None | Some(ScriptedNode::OpenFails) => Err(BackendError::Disconnected),
-            Some(ScriptedNode::NotHidpp) => Ok(None),
+        match self.open_outcome(&node.id) {
+            None | Some(ScriptedOpen::Fails) => Err(BackendError::Disconnected),
+            Some(ScriptedOpen::NotHidpp) => Ok(None),
+            Some(ScriptedOpen::UnresponsiveHidpp) => {
+                let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+                Ok(Some(scripted_channel(raw).await))
+            }
         }
     }
 

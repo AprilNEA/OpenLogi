@@ -24,11 +24,12 @@ use std::hash::Hash;
 use openlogi_core::device::DeviceInventory;
 use tracing::{debug, warn};
 
-/// Ticks a node's last-good inventory keeps being served while its probe
-/// fails. Past this the live (partial or empty) result is surfaced, so a
-/// receiver that is genuinely wedged eventually shows the truth instead of an
-/// ever-staler snapshot. Mirrors the probe cache's `CACHE_MISS_GRACE`, so a
-/// node recovers with its memoized probes still warm.
+/// Ticks a node's last-good inventory keeps being served while its probe does
+/// not produce an authoritative result. Opening a replacement channel does not
+/// reset this clock: a receiver that is genuinely wedged must eventually show
+/// the truth instead of repeatedly resurrecting an ever-staler snapshot.
+/// Mirrors the probe cache's `CACHE_MISS_GRACE`, so a node recovers with its
+/// memoized probes still warm.
 const NODE_MISS_GRACE: u8 = 3;
 
 /// Consecutive failed probes after which the node's cached channel should be
@@ -38,22 +39,69 @@ const NODE_MISS_GRACE: u8 = 3;
 /// and node-vanish eviction never fires for a node the OS keeps listing.
 const CHANNEL_EVICT_AFTER: u8 = 2;
 
+/// Consecutive arrival-replay failures tolerated after the receiver answered
+/// its pairing-count register. This path gets a longer channel grace because
+/// it proves the transport is responsive, but cannot be trusted forever
+/// because the published device list may be stale.
+const ARRIVAL_REPLAY_EVICT_AFTER: u8 = NODE_MISS_GRACE + 1;
+
 /// What [`NodeLedger::settle`] decided for one node this tick.
 pub(crate) struct SettledNode {
     /// The inventory to report for the node: the live result, or the replayed
     /// last-good snapshot while the failure is within grace.
     pub inventory: Option<DeviceInventory>,
     /// Whether the node's cached channel should be dropped so the next tick
-    /// reopens it. `true` on every failed tick from [`CHANNEL_EVICT_AFTER`]
-    /// onwards, so a persistently sick node keeps getting a fresh channel.
+    /// reopens it. `true` once the current failure kind reaches its threshold,
+    /// so a persistently sick node keeps getting a fresh channel.
     pub evict_channel: bool,
 }
 
-/// Tracks, per HID node, the last completed inventory and how many
-/// consecutive probes have failed since.
+/// Tracks each HID node's last completed inventory, bounded replay age, and
+/// channel-local failure streaks.
 pub(crate) struct NodeLedger<K> {
     last_good: HashMap<K, DeviceInventory>,
-    failures: HashMap<K, u8>,
+    failures: HashMap<K, FailureCounts>,
+}
+
+#[derive(Default)]
+struct FailureCounts {
+    /// Consecutive probes that produced no liveness evidence.
+    probe: u8,
+    /// Failed arrival replays on the current channel generation.
+    arrival_replay: u8,
+    /// Non-authoritative ticks since the last complete inventory.
+    publication_misses: u8,
+}
+
+#[derive(Clone, Copy)]
+enum FailureKind {
+    Probe,
+    ArrivalReplay,
+}
+
+impl FailureKind {
+    fn record(self, counts: &mut FailureCounts) -> u8 {
+        match self {
+            Self::Probe => {
+                counts.probe = counts.probe.saturating_add(1);
+                counts.probe
+            }
+            Self::ArrivalReplay => {
+                // The pairing-count response proves transport liveness, so a
+                // later ordinary failure must start its own streak again.
+                counts.probe = 0;
+                counts.arrival_replay = counts.arrival_replay.saturating_add(1);
+                counts.arrival_replay
+            }
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Probe => "probe",
+            Self::ArrivalReplay => "arrival replay",
+        }
+    }
 }
 
 // Hand-written: `derive(Default)` would needlessly bound `K: Default`, which
@@ -68,6 +116,30 @@ impl<K> Default for NodeLedger<K> {
 }
 
 impl<K: Eq + Hash + Clone> NodeLedger<K> {
+    /// Start channel-eviction accounting again after the enumerator opens a
+    /// replacement channel, without re-arming expired inventory replay.
+    pub fn reset_channel_failures_after_open(&mut self, node: &K) {
+        if let Some(counts) = self.failures.get_mut(node) {
+            counts.probe = 0;
+            counts.arrival_replay = 0;
+        }
+    }
+
+    /// Keep the last complete inventory briefly after a receiver proved it can
+    /// still answer but could not replay its arrival notifications this tick.
+    ///
+    /// This is distinct from [`Self::settle`] with `healthy = false`: an
+    /// arrival-trigger write may fail transiently while ordinary receiver
+    /// registers and an already-armed capture session remain functional.
+    pub fn settle_arrival_replay_failure(&mut self, node: &K) -> SettledNode {
+        self.settle_failure(
+            node,
+            None,
+            ARRIVAL_REPLAY_EVICT_AFTER,
+            FailureKind::ArrivalReplay,
+        )
+    }
+
     /// Fold one node's probe result into the ledger and decide what to report.
     ///
     /// `healthy` means the node actually answered this tick — a completed
@@ -97,30 +169,47 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
             };
         }
 
-        let failures = self.failures.entry(node.clone()).or_insert(0);
-        *failures = failures.saturating_add(1);
-        let failures = *failures;
-        let inventory = match self.last_good.get(node) {
-            Some(prev) if failures <= NODE_MISS_GRACE => {
+        self.settle_failure(node, live, CHANNEL_EVICT_AFTER, FailureKind::Probe)
+    }
+
+    fn settle_failure(
+        &mut self,
+        node: &K,
+        live: Option<DeviceInventory>,
+        evict_after: u8,
+        failure_kind: FailureKind,
+    ) -> SettledNode {
+        let counts = self.failures.entry(node.clone()).or_default();
+        let channel_failures = failure_kind.record(counts);
+        counts.publication_misses = counts.publication_misses.saturating_add(1);
+        let publication_misses = counts.publication_misses;
+        let failure_kind = failure_kind.label();
+        let inventory = if publication_misses <= NODE_MISS_GRACE {
+            if let Some(previous) = self.last_good.get(node) {
                 debug!(
-                    failures,
-                    "node probe failed — replaying its last good inventory"
+                    failures = publication_misses,
+                    channel_failures,
+                    failure_kind,
+                    "node check incomplete — replaying its last good inventory"
                 );
-                Some(prev.clone())
-            }
-            _ => {
-                if self.last_good.remove(node).is_some() {
-                    warn!(
-                        failures,
-                        "node probe failures exhausted the replay grace — surfacing the live result"
-                    );
-                }
+                Some(previous.clone())
+            } else {
                 live
             }
+        } else {
+            if self.last_good.remove(node).is_some() {
+                warn!(
+                    failures = publication_misses,
+                    channel_failures,
+                    failure_kind,
+                    "node check failures exhausted the replay grace — surfacing the live result"
+                );
+            }
+            live
         };
         SettledNode {
             inventory,
-            evict_channel: failures >= CHANNEL_EVICT_AFTER,
+            evict_channel: channel_failures >= evict_after,
         }
     }
 
@@ -136,7 +225,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
 mod tests {
     use openlogi_core::device::{DeviceInventory, ReceiverInfo};
 
-    use super::{CHANNEL_EVICT_AFTER, NODE_MISS_GRACE, NodeLedger};
+    use super::{ARRIVAL_REPLAY_EVICT_AFTER, CHANNEL_EVICT_AFTER, NODE_MISS_GRACE, NodeLedger};
 
     fn inventory(name: &str) -> DeviceInventory {
         DeviceInventory {
@@ -193,6 +282,142 @@ mod tests {
             Some("bolt"),
             "the recovery should re-arm the full replay grace"
         );
+    }
+
+    #[test]
+    fn transient_arrival_replay_failures_keep_the_channel_and_snapshot() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 1..ARRIVAL_REPLAY_EVICT_AFTER {
+            let retained = ledger.settle_arrival_replay_failure(&1);
+            assert_eq!(receiver_name(retained.inventory.as_ref()), Some("unifying"));
+            assert!(!retained.evict_channel);
+        }
+    }
+
+    #[test]
+    fn persistent_arrival_replay_failure_retires_the_channel_and_snapshot() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 1..ARRIVAL_REPLAY_EVICT_AFTER {
+            ledger.settle_arrival_replay_failure(&1);
+        }
+
+        let exhausted = ledger.settle_arrival_replay_failure(&1);
+
+        assert!(exhausted.evict_channel);
+        assert!(exhausted.inventory.is_none());
+    }
+
+    #[test]
+    fn expired_arrival_snapshot_does_not_resurface_on_probe_failure() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 0..ARRIVAL_REPLAY_EVICT_AFTER {
+            ledger.settle_arrival_replay_failure(&1);
+        }
+
+        let retiring = ledger.settle(&1, false, None);
+
+        assert!(retiring.inventory.is_none());
+        assert!(!retiring.evict_channel);
+    }
+
+    #[test]
+    fn complete_probe_resets_the_arrival_replay_failure_streak() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 1..ARRIVAL_REPLAY_EVICT_AFTER {
+            ledger.settle_arrival_replay_failure(&1);
+        }
+        ledger.settle(&1, true, Some(inventory("unifying")));
+
+        let retained = ledger.settle_arrival_replay_failure(&1);
+
+        assert!(!retained.evict_channel);
+        assert_eq!(receiver_name(retained.inventory.as_ref()), Some("unifying"));
+    }
+
+    #[test]
+    fn one_probe_timeout_does_not_inherit_arrival_replay_failures() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        ledger.settle_arrival_replay_failure(&1);
+        ledger.settle_arrival_replay_failure(&1);
+
+        let first_probe_timeout = ledger.settle(&1, false, None);
+
+        assert!(!first_probe_timeout.evict_channel);
+        assert_eq!(
+            receiver_name(first_probe_timeout.inventory.as_ref()),
+            Some("unifying")
+        );
+        assert!(
+            ledger.settle(&1, false, None).evict_channel,
+            "ordinary failures still retire on their own second consecutive tick"
+        );
+    }
+
+    #[test]
+    fn mixed_timeouts_do_not_hide_persistent_arrival_replay_failure() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 1..ARRIVAL_REPLAY_EVICT_AFTER {
+            assert!(!ledger.settle_arrival_replay_failure(&1).evict_channel);
+            assert!(!ledger.settle(&1, false, None).evict_channel);
+        }
+
+        let exhausted = ledger.settle_arrival_replay_failure(&1);
+
+        assert!(exhausted.evict_channel);
+        assert!(exhausted.inventory.is_none());
+    }
+
+    #[test]
+    fn replacement_channel_gets_fresh_eviction_grace_without_resurrecting_inventory() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        for _ in 0..ARRIVAL_REPLAY_EVICT_AFTER - 1 {
+            ledger.settle_arrival_replay_failure(&1);
+        }
+        assert!(!ledger.settle(&1, false, None).evict_channel);
+        let retired = ledger.settle(&1, false, None);
+        assert!(retired.evict_channel);
+        assert!(retired.inventory.is_none());
+
+        for _ in 0..=NODE_MISS_GRACE {
+            ledger.settle(&1, false, None);
+        }
+        assert!(
+            ledger.settle(&1, false, None).inventory.is_none(),
+            "a long retirement must still stop publishing stale inventory"
+        );
+
+        ledger.reset_channel_failures_after_open(&1);
+        let replacement_failure = ledger.settle_arrival_replay_failure(&1);
+
+        assert!(!replacement_failure.evict_channel);
+        assert!(replacement_failure.inventory.is_none());
+    }
+
+    #[test]
+    fn repeated_channel_opens_do_not_rearm_inventory_replay() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("unifying")));
+        let mut published = Vec::new();
+
+        for _ in 0..3 {
+            ledger.reset_channel_failures_after_open(&1);
+            let first = ledger.settle(&1, false, None);
+            published.push(first.inventory.is_some());
+            assert!(!first.evict_channel);
+
+            let second = ledger.settle(&1, false, None);
+            published.push(second.inventory.is_some());
+            assert!(second.evict_channel);
+        }
+
+        assert_eq!(published, vec![true, true, true, false, false, false]);
     }
 
     #[test]
