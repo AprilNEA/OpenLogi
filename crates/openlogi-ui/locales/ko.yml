@@ -198,6 +198,7 @@ _version: 1
 "Vertical Scroll": "세로 스크롤"
 "Vertical Scroll (Reversed)": "세로 스크롤(반대 방향)"
 "Horizontal Scroll": "가로 스크롤"
+"Horizontal Scroll (Reversed)": "가로 스크롤(반대 방향)"
 "Custom": "사용자 지정"
 "Gesture Button": "제스처 버튼"
 "Gestures": "제스처"

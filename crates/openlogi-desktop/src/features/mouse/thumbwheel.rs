@@ -28,10 +28,11 @@ pub(crate) enum ThumbwheelPreset {
     VerticalScroll,
     VerticalScrollReversed,
     HorizontalScroll,
+    HorizontalScrollReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -44,6 +45,7 @@ impl ThumbwheelPreset {
         Self::VerticalScroll,
         Self::VerticalScrollReversed,
         Self::HorizontalScroll,
+        Self::HorizontalScrollReversed,
     ];
 
     #[must_use]
@@ -60,7 +62,13 @@ impl ThumbwheelPreset {
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
             Self::VerticalScrollReversed => (Action::ScrollUp, Action::ScrollDown),
-            Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            // The plain pair must equal the native-direction defaults so
+            // picking it never diverts the wheel; the reversed pair is the
+            // swap, which diverts and injects the opposite direction.
+            Self::HorizontalScroll => (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
+            Self::HorizontalScrollReversed => {
+                (Action::HorizontalScrollLeft, Action::HorizontalScrollRight)
+            }
         };
         ThumbwheelPair { backward, forward }
     }
@@ -90,6 +98,7 @@ impl ThumbwheelPreset {
             Self::VerticalScroll => "Vertical Scroll",
             Self::VerticalScrollReversed => "Vertical Scroll (Reversed)",
             Self::HorizontalScroll => "Horizontal Scroll",
+            Self::HorizontalScrollReversed => "Horizontal Scroll (Reversed)",
         }
     }
 
@@ -105,7 +114,9 @@ impl ThumbwheelPreset {
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::CycleDpi => "action-icons/gauge.svg",
             Self::VerticalScroll | Self::VerticalScrollReversed => "action-icons/chevrons-up.svg",
-            Self::HorizontalScroll => "action-icons/chevrons-right.svg",
+            Self::HorizontalScroll | Self::HorizontalScrollReversed => {
+                "action-icons/chevrons-right.svg"
+            }
         }
     }
 }
@@ -128,6 +139,7 @@ mod tests {
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ScrollDown, Action::ScrollUp),
             (Action::ScrollUp, Action::ScrollDown),
+            (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         ];
 
