@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureResponseTime};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -17,6 +17,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::Dpi;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hook::EventDeviceId;
 use std::sync::Arc;
 
 use crate::observable::ObservableState;
@@ -26,6 +27,39 @@ use crate::observable::ObservableState;
 /// than only in the running agent.
 fn orchestrator(config: Config) -> Orchestrator {
     Orchestrator::new(config, Arc::new(ObservableState::new("test".to_string())))
+}
+
+#[test]
+fn hook_response_times_are_published_for_every_source_device() {
+    let first_key = "serial:mouse-a";
+    let second_key = "serial:mouse-b";
+    let mut config = Config::default();
+    for key in [first_key, second_key] {
+        config.set_gesture_mode(key, ButtonId::Back, true);
+    }
+    config.set_gesture_response_time(first_key, ButtonId::Back, GestureResponseTime::FAST);
+    config.set_gesture_response_time(second_key, ButtonId::Back, GestureResponseTime::DELIBERATE);
+    let mut orch = orchestrator(config);
+    let mut first = dev(first_key, 1, true);
+    first.serial = Some("mouse-a".to_string());
+    let mut second = dev(second_key, 2, true);
+    second.serial = Some("mouse-b".to_string());
+    orch.devices = vec![first, second];
+
+    let maps = orch.hook_maps_for(Some(first_key), None);
+
+    assert_eq!(
+        maps.gesture_response_times_by_source
+            .get(&EventDeviceId::new("mouse-a").unwrap())
+            .and_then(|times| times.get(&ButtonId::Back)),
+        Some(&GestureResponseTime::FAST)
+    );
+    assert_eq!(
+        maps.gesture_response_times_by_source
+            .get(&EventDeviceId::new("mouse-b").unwrap())
+            .and_then(|times| times.get(&ButtonId::Back)),
+        Some(&GestureResponseTime::DELIBERATE)
+    );
 }
 
 fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {

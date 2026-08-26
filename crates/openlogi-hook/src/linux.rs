@@ -50,8 +50,8 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    LOGITECH_VENDOR_ID, MouseEvent,
+    ButtonId, CursorPosition, EventDevice, EventDeviceId, EventDisposition, ForegroundApp,
+    HookBackend, HookError, HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
 };
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
@@ -460,6 +460,16 @@ fn device_thread(
     let hires_scroll = device
         .supported_relative_axes()
         .is_some_and(|axes| axes.contains(RelativeAxisCode::REL_WHEEL_HI_RES));
+    let input_id = device.input_id();
+    let event_device = EventDevice {
+        stable_id: device
+            .unique_name()
+            .or_else(|| device.physical_path())
+            .and_then(|value| EventDeviceId::new(value.to_owned())),
+        vendor_id: Some(u32::from(input_id.vendor())),
+        product_id: Some(u32::from(input_id.product())),
+        product_name: device.name().map(str::to_owned),
+    };
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
@@ -506,6 +516,22 @@ fn device_thread(
                 }
             } else {
                 let disposition = match translate(&event, hires_scroll) {
+                    Some(MouseEvent::Button { id, pressed, .. }) => {
+                        cb(HookEvent::Mouse(MouseEvent::Button {
+                            id,
+                            pressed,
+                            device: Some(event_device.clone()),
+                        }))
+                    }
+                    Some(MouseEvent::Scroll {
+                        delta,
+                        from_trackpad,
+                        ..
+                    }) => cb(HookEvent::Mouse(MouseEvent::Scroll {
+                        delta,
+                        from_trackpad,
+                        device: Some(event_device.clone()),
+                    })),
                     Some(me) => cb(HookEvent::Mouse(me)),
                     // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
                     // is active — passing them through would double the scroll distance.

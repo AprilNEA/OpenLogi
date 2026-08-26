@@ -55,12 +55,34 @@ pub struct CursorPosition {
 /// through the currently selected UI device.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventDevice {
+    /// Native identity that remains stable while this physical device is
+    /// attached, such as a serial number or platform device path.
+    pub stable_id: Option<EventDeviceId>,
     /// USB/Bluetooth vendor id when the platform exposes it.
     pub vendor_id: Option<u32>,
     /// USB/Bluetooth/HID product id when the platform exposes it.
     pub product_id: Option<u32>,
     /// Human-readable product name, normalized by consumers before matching.
     pub product_name: Option<String>,
+}
+
+/// Normalized native identity for an OS-event source.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EventDeviceId(String);
+
+impl EventDeviceId {
+    /// Normalize a non-empty native device identifier for matching.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into().trim().to_ascii_lowercase();
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    /// Borrow the normalized identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl EventDevice {
