@@ -1,7 +1,7 @@
 //! App-level settings (launch-at-login, theme, assets, language).
 
-use super::AppState;
-use gpui::App;
+use super::{AppState, StateEvent};
+use gpui::Context;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
     UiScale, VerticalScrollSensitivity,
@@ -306,7 +306,7 @@ impl AppState {
     /// Set the UI language (`None` = follow system), persist it, switch the
     /// process-global locale via [`openlogi_ui::locale`], and repaint open UI.
     /// No-op when unchanged.
-    pub fn set_language(&mut self, language: Option<String>, cx: &mut App) {
+    pub fn set_language(&mut self, language: Option<String>, cx: &mut Context<Self>) {
         if self.config.app_settings.language == language {
             return;
         }
@@ -314,8 +314,17 @@ impl AppState {
             .edit(|config| config.app_settings.language = language);
         self.persist_config("language setting");
         openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
-        // Locale lookup is process-global, so every open window must repaint.
+        // Locale lookup is process-global, so every open window must repaint;
+        // localized text cached in view state re-derives on this event.
+        cx.emit(StateEvent::LanguageChanged);
         cx.refresh_windows();
-        crate::app::menu::rebuild(cx);
+        // Deferred: the Device menu reads this entity, whose lease is still
+        // held here (callers switch language inside `AppState::update`), and a
+        // re-entrant read panics. The native window titles ride along — they
+        // are stamped at open and don't re-render with the refresh.
+        cx.defer(|cx| {
+            crate::app::menu::rebuild(cx);
+            crate::windows::retitle_open(cx);
+        });
     }
 }

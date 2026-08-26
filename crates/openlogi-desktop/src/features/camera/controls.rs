@@ -19,7 +19,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Selectable as _, h_flex,
+    IconName, Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -791,11 +791,11 @@ fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
         );
     }
     row = row.child(
-        ProfileTab::new("camera-profile-save", format!("+ {}", tr!("New"))).on_click(cx.listener(
-            |panel, _: &ClickEvent, _window, cx| {
+        ProfileTab::new("camera-profile-save", tr!("New"))
+            .icon(IconName::Plus)
+            .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
                 panel.save_profile(cx);
-            },
-        )),
+            })),
     );
     row
 }

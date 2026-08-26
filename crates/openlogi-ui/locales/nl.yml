@@ -468,6 +468,7 @@ _version: 1
 "Profile options": "Profile options"
 "Remove %{app} profile and its %{count} overrides?": "Remove %{app} profile and its %{count} overrides?"
 "Remove %{app} profile and its 1 override?": "Remove %{app} profile and its 1 override?"
+"Remove %{name}": "%{name} verwijderen"
 "Remove profile": "Remove profile"
 "Remove profile…": "Remove profile…"
 "Select a button on the device to change what it does.": "Select a button on the device to change what it does."

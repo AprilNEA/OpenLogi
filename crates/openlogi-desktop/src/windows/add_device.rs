@@ -16,13 +16,13 @@
 
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
-    ParentElement as _, Render, RenderOnce, SharedString, Size, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, RenderOnce, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    v_flex,
+    h_flex, v_flex,
 };
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
@@ -70,11 +70,17 @@ pub fn open(cx: &mut App) {
     }
     windows::open_or_focus(
         |reg| &mut reg.add_device,
-        tr!("Add Device"),
+        window_title(),
         Size::new(px(520.), px(460.)),
         AddDeviceView::new,
         cx,
     );
+}
+
+/// The window's native title — one definition for open and the live-language
+/// retitle ([`windows::retitle_open`]), so the two cannot drift.
+pub(crate) fn window_title() -> SharedString {
+    tr!("Add Device")
 }
 
 /// Show the agent's pairing session. `None` is no session — including after a
@@ -271,7 +277,7 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
                 .child(cancel_button());
         }
         PairingUi::Passkey(method) => {
-            col = col.child(passkey_panel(&method));
+            col = col.child(passkey_panel(&method, pal));
             col = col.child(cancel_button());
         }
         PairingUi::Paired { slot } => {
@@ -346,7 +352,7 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
 }
 
 /// The passkey-entry instructions panel.
-fn passkey_panel(method: &PasskeyMethod) -> impl IntoElement {
+fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
     let mut col = v_flex().w_full().gap_3();
     match method {
         PasskeyMethod::Keyboard(digits) => {
@@ -357,22 +363,58 @@ fn passkey_panel(method: &PasskeyMethod) -> impl IntoElement {
                 .child(div().text_title().child(SharedString::from(digits.clone())));
         }
         PasskeyMethod::Pointer { clicks, .. } => {
-            let sequence: String = clicks
-                .iter()
-                .map(|c| match c {
-                    Click::Left => "←",
-                    Click::Right => "→",
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
             col = col
                 .child(status_line(tr!(
                     "On the new mouse, click in this order, then press both buttons together:"
                 )))
-                .child(div().text_title().child(SharedString::from(sequence)));
+                .child(
+                    h_flex()
+                        .id("passkey-sequence")
+                        // The icons carry no text of their own, so the order is
+                        // spelled out once here rather than left to assistive
+                        // tech as a row of unlabelled images.
+                        .aria_label(spoken_click_sequence(clicks))
+                        .gap_2()
+                        .children(clicks.iter().enumerate().map(|(step, click)| {
+                            v_flex()
+                                .items_center()
+                                .gap_0p5()
+                                .child(svg().path(click_icon(*click)).size_6().flex_none())
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(pal.text_muted)
+                                        .child((step + 1).to_string()),
+                                )
+                        })),
+                );
         }
     }
     col
+}
+
+/// The mouse body with the button this step wants filled in.
+fn click_icon(click: Click) -> &'static str {
+    match click {
+        Click::Left => "action-icons/mouse-left.svg",
+        Click::Right => "action-icons/mouse-right.svg",
+    }
+}
+
+/// The click sequence as an ordered sentence, for the accessibility tree.
+fn spoken_click_sequence(clicks: &[Click]) -> String {
+    clicks
+        .iter()
+        .enumerate()
+        .map(|(step, click)| {
+            let label = match click {
+                Click::Left => tr!("Left Click"),
+                Click::Right => tr!("Right Click"),
+            };
+            format!("{}. {label}", step + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn status_line(text: impl Into<SharedString>) -> impl IntoElement {

@@ -5,9 +5,10 @@ pub(crate) mod identity;
 mod signing;
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use clap::ValueEnum;
 use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
@@ -23,23 +24,49 @@ use identity::{Channel, Component};
 pub(super) use embed::{HELPERS, Helper};
 pub(super) use signing::quoted_identity;
 
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum DistributionTarget {
+    #[value(name = "aarch64-apple-darwin")]
+    Aarch64,
+    #[value(name = "x86_64-apple-darwin")]
+    X8664,
+}
+
+impl DistributionTarget {
+    fn triple(self) -> &'static str {
+        match self {
+            Self::Aarch64 => "aarch64-apple-darwin",
+            Self::X8664 => "x86_64-apple-darwin",
+        }
+    }
+}
+
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
 /// local identity is available (dev) or leaving it unsigned (production).
 pub(crate) fn run(channel: Channel) -> Result<()> {
-    run_with_channel(channel, None)
+    run_with_channel(channel, None, None)
 }
 
 /// Build the bundle that ships: always the production identity, signed with the
 /// Developer ID identity when one is given.
-pub(crate) fn run_for_distribution(sign_identity: Option<&str>) -> Result<()> {
-    run_with_channel(Channel::Production, sign_identity)
+pub(crate) fn run_for_distribution(
+    sign_identity: Option<&str>,
+    target: Option<DistributionTarget>,
+) -> Result<()> {
+    run_with_channel(Channel::Production, sign_identity, target)
 }
 
-fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()> {
+fn run_with_channel(
+    channel: Channel,
+    sign_identity: Option<&str>,
+    target: Option<DistributionTarget>,
+) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
     let xcode_env = xcode::env()?;
+    let target_triple = target.map(DistributionTarget::triple);
+    let release_dir = release_dir(&root, target_triple);
 
     println!("==> app icon");
     AppBundle.compile()?;
@@ -67,20 +94,27 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
             .run()?;
     }
+    embed::build_release_binaries(&root, &xcode_env, target_triple)?;
+    let target_args: Vec<&str> = target_triple
+        .into_iter()
+        .flat_map(|triple| ["--target", triple])
+        .collect();
     {
         let gui_dir = root.join("crates/openlogi-desktop");
         let _gui = sh.push_dir(gui_dir);
-        cmd!(sh, "cargo bundle --release")
+        cmd!(sh, "cargo bundle --release --format osx {target_args...}")
+            .env("CARGO_BUNDLE_SKIP_BUILD", "1")
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
             .run()?;
     }
-    remove_cargo_bundle_dmg(&root)?;
 
+    let built_app = release_dir.join("bundle/osx/OpenLogi.app");
+    ensure_dir(&built_app)?;
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
-    ensure_dir(&app)?;
+    move_to_canonical_path(&built_app, &app)?;
     AppBundle.install(&app)?;
-    embed::embed_helpers(&root, &app, &xcode_env, channel)?;
-    embed::embed_cli(&root, &app, &xcode_env)?;
+    embed::embed_helpers(&root, &release_dir, &app, channel)?;
+    embed::embed_cli(&release_dir, &app)?;
     embed::verify_bundle_binaries(&app, channel)?;
     info_plist::stamp_privacy_usage_descriptions(&app)?;
     // Identity first, then the checks, then signing — a signature seals the
@@ -103,14 +137,70 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
     Ok(())
 }
 
-fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
-    let dmg = root.join("target/release/bundle/dmg/OpenLogi.dmg");
-    if dmg.exists() {
-        fs_err::remove_file(&dmg)
-            .with_context(|| format!("could not remove stale {}", dmg.display()))?;
-        println!(
-            "    removed cargo-bundle DMG before helper embedding; use `macos package` for a DMG"
-        );
+fn release_dir(root: &Path, target: Option<&str>) -> PathBuf {
+    let mut dir = root.join("target");
+    if let Some(target) = target {
+        dir.push(target);
     }
+    dir.join("release")
+}
+
+fn move_to_canonical_path(source: &Path, destination: &Path) -> Result<()> {
+    if source == destination {
+        return Ok(());
+    }
+    if destination.exists() {
+        fs_err::remove_dir_all(destination)
+            .with_context(|| format!("could not remove {}", destination.display()))?;
+    }
+    if let Some(parent) = destination.parent() {
+        fs_err::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    fs_err::rename(source, destination).with_context(|| {
+        format!(
+            "could not move {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_bundle_already_has_the_canonical_path() {
+        let root = tempfile::tempdir().unwrap();
+        let app = release_dir(root.path(), None).join("bundle/osx/OpenLogi.app");
+        fs_err::create_dir_all(&app).unwrap();
+        fs_err::write(app.join("binary"), []).unwrap();
+
+        assert_eq!(
+            app,
+            root.path().join("target/release/bundle/osx/OpenLogi.app")
+        );
+        move_to_canonical_path(&app, &app).unwrap();
+        assert!(app.join("binary").is_file());
+    }
+
+    #[test]
+    fn cross_compiled_bundle_replaces_the_canonical_app() {
+        let root = tempfile::tempdir().unwrap();
+        let source =
+            release_dir(root.path(), Some("x86_64-apple-darwin")).join("bundle/osx/OpenLogi.app");
+        let destination = root.path().join("target/release/bundle/osx/OpenLogi.app");
+        fs_err::create_dir_all(&source).unwrap();
+        fs_err::write(source.join("new"), []).unwrap();
+        fs_err::create_dir_all(&destination).unwrap();
+        fs_err::write(destination.join("stale"), []).unwrap();
+
+        move_to_canonical_path(&source, &destination).unwrap();
+
+        assert!(!source.exists());
+        assert!(destination.join("new").is_file());
+        assert!(!destination.join("stale").exists());
+    }
 }

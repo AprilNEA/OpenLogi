@@ -153,7 +153,13 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
+            if matches!(event, StateEvent::LanguageChanged) {
+                // The cache-size line is localized text cached in view state
+                // (it interpolates an IO-derived size); rebuild it in the new
+                // locale.
+                this.asset_cache_desc = assets::cache_size_description();
+            }
             if matches!(
                 event,
                 StateEvent::AgentChanged
@@ -161,6 +167,7 @@ impl SettingsView {
                     | StateEvent::InventoryChanged
                     | StateEvent::CameraPermissionChanged
                     | StateEvent::SettingsChanged
+                    | StateEvent::LanguageChanged
             ) {
                 cx.notify();
             }
@@ -404,10 +411,16 @@ pub fn open(cx: &mut App) {
 /// Open the Settings window on a specific page, or focus it if it's already
 /// open. The page only steers a *fresh* open — an already-open window is just
 /// focused on whatever page it last showed (the Settings widget owns selection).
+/// The window's native title — one definition for open and the live-language
+/// retitle ([`windows::retitle_open`]), so the two cannot drift.
+pub(crate) fn window_title() -> SharedString {
+    tr!("Settings")
+}
+
 pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
-        tr!("Settings"),
+        window_title(),
         // Wide enough that the pages' custom rows keep slack under fonts wider
         // than the macOS system font (Segoe UI tipped the old 840 into
         // clipping the hero rows' trailing buttons on Windows).
@@ -420,6 +433,12 @@ pub fn open_at(page: SettingsPage, cx: &mut App) {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply_ui_scale(window, cx);
+        crate::ui::components::localize_placeholder(
+            &self.theme_search,
+            tr!("Filter themes…"),
+            window,
+            cx,
+        );
         let pal = theme::palette(cx);
         let view = cx.entity();
         // Only surface the Camera permission when a webcam is actually present,

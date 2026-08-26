@@ -42,6 +42,24 @@ pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().min_h(px(theme::CONTROL_H))
 }
 
+/// Re-derive an input's placeholder from the current locale.
+///
+/// Placeholders are stored inside [`InputState`] at construction, so a live
+/// language switch leaves them stale — the owning view calls this from render
+/// with a fresh `tr!` string to keep them current. Guarded, because
+/// `set_placeholder` notifies unconditionally and a bare per-render call would
+/// re-render forever.
+pub(crate) fn localize_placeholder(
+    state: &Entity<InputState>,
+    text: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if *state.read(cx).presentation().placeholder() != text {
+        state.update(cx, |state, cx| state.set_placeholder(text, window, cx));
+    }
+}
+
 /// A select trigger at the house control height; see [`control_button`].
 pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
     state: &Entity<SelectState<D>>,
@@ -324,6 +342,7 @@ impl RenderOnce for MenuRow {
 pub(crate) struct ProfileTab {
     base: BaseButton,
     label: SharedString,
+    icon: Option<Icon>,
     selected: bool,
     children: Vec<AnyElement>,
     on_click: Option<ClickHandler>,
@@ -335,11 +354,20 @@ impl ProfileTab {
         Self {
             base: BaseButton::new(id).role(Role::Tab),
             label: label.into(),
+            icon: None,
             selected: false,
             children: Vec::new(),
             on_click: None,
             delete: None,
         }
+    }
+
+    /// A mark before the label, for a tab that is an action rather than a
+    /// profile (the one that creates a new profile).
+    #[must_use]
+    pub(crate) fn icon(mut self, icon: impl Into<Icon>) -> Self {
+        self.icon = Some(icon.into());
+        self
     }
 
     #[must_use]
@@ -437,6 +465,7 @@ impl RenderOnce for ProfileTab {
                     })
                     .border_color(accent)
             })
+            .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
             .when_some(self.on_click, |tab, handler| {
@@ -445,13 +474,13 @@ impl RenderOnce for ProfileTab {
             .when_some(self.delete, |tab, (id, handler)| {
                 tab.child(
                     BaseButton::new(id)
-                        .accessibility_label(format!("{label} ×"))
+                        .accessibility_label(tr!("Remove %{name}", name => label.to_string()))
                         .px_0p5()
                         .rounded_full()
                         .text_color(pal.text_muted)
                         .hover(|style| style.text_color(pal.text_primary))
                         .focus_visible(|style| style.text_color(pal.text_primary))
-                        .child("×")
+                        .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
                             handler(event, window, cx);
@@ -525,7 +554,8 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
-        Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render, TestAppContext, point,
+        AppContext as _, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render,
+        TestAppContext, point,
     };
 
     use super::*;
@@ -592,7 +622,7 @@ mod tests {
                     )
                     .child(
                         BaseButton::new("keyboard-preset-remove")
-                            .child("×")
+                            .child(Icon::new(IconName::Close).size_3())
                             .on_click(move |_, _, _| removals.set(removals.get() + 1)),
                     ),
             )
@@ -710,6 +740,40 @@ mod tests {
         activate_key(cx, "space");
 
         assert_eq!(activations.get(), 2);
+    }
+
+    /// The guard is the point: `set_placeholder` notifies unconditionally, so
+    /// an unguarded per-render restamp would re-render forever. Same text must
+    /// not notify; a changed text must land.
+    #[gpui::test]
+    fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
+        struct Blank;
+        impl Render for Blank {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui::Empty
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| Blank);
+        let input =
+            cx.update(|window, cx| cx.new(|cx| InputState::new(window, cx).placeholder("old")));
+        let notifies = Rc::new(Cell::new(0_usize));
+        let _obs = cx.update(|_, cx| {
+            cx.observe(&input, {
+                let notifies = notifies.clone();
+                move |_, _| notifies.set(notifies.get() + 1)
+            })
+        });
+
+        cx.update(|window, cx| localize_placeholder(&input, "old".into(), window, cx));
+        assert_eq!(notifies.get(), 0, "unchanged text must not notify");
+
+        cx.update(|window, cx| localize_placeholder(&input, "new".into(), window, cx));
+        assert_eq!(notifies.get(), 1);
+        cx.update(|_, cx| {
+            assert_eq!(*input.read(cx).presentation().placeholder(), "new");
+        });
     }
 
     #[gpui::test]

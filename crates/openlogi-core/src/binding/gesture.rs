@@ -50,18 +50,6 @@ impl GestureDirection {
             GestureDirection::Click => "Click",
         }
     }
-
-    /// Arrow glyph for compact list rendering.
-    #[must_use]
-    pub fn glyph(self) -> &'static str {
-        match self {
-            GestureDirection::Up => "↑",
-            GestureDirection::Down => "↓",
-            GestureDirection::Left => "←",
-            GestureDirection::Right => "→",
-            GestureDirection::Click => "·",
-        }
-    }
 }
 
 impl fmt::Display for GestureDirection {

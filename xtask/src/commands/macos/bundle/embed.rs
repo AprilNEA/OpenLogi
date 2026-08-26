@@ -44,7 +44,32 @@ pub(crate) const HELPERS: [Helper; 2] = [
     },
 ];
 
-/// Build each helper and embed it as a nested login-item bundle.
+/// Build every executable the distribution bundle contains in one Cargo
+/// invocation so their shared dependency features are unified once.
+pub(super) fn build_release_binaries(
+    root: &Path,
+    xcode_env: &[(String, String)],
+    target: Option<&str>,
+) -> Result<()> {
+    let sh = Shell::new()?;
+    let _repo = sh.push_dir(root);
+    let mut targets = vec!["--package", "openlogi-desktop", "--bin", "openlogi-desktop"];
+    for helper in &HELPERS {
+        targets.extend(["--package", helper.package, "--bin", helper.binary]);
+    }
+    targets.extend(["--package", "openlogi", "--bin", "openlogi"]);
+    if let Some(target) = target {
+        targets.extend(["--target", target]);
+    }
+
+    println!("==> release binaries (build)");
+    cmd!(sh, "cargo build --locked --release {targets...}")
+        .envs(xcode_env.iter().map(|(key, value)| (key, value)))
+        .run()?;
+    Ok(())
+}
+
+/// Embed each helper as a nested login-item bundle.
 ///
 /// The agent is the always-on process (hook + device I/O + menu bar); shipping
 /// it inside the GUI bundle keeps one notarized artifact, lets `open -b`
@@ -56,39 +81,29 @@ pub(crate) const HELPERS: [Helper; 2] = [
 /// pane, Login Items. Icon generation already ran, so the icns is on disk.
 pub(super) fn embed_helpers(
     root: &Path,
+    release_dir: &Path,
     app: &Path,
-    xcode_env: &[(String, String)],
     channel: Channel,
 ) -> Result<()> {
     let icon = root.join("crates/openlogi-desktop/icon/AppIcon.icns");
     ensure_file(&icon)?;
     for helper in &HELPERS {
-        embed_helper(root, app, xcode_env, helper, &icon, channel)?;
+        embed_helper(root, release_dir, app, helper, &icon, channel)?;
     }
     Ok(())
 }
 
 fn embed_helper(
     root: &Path,
+    release_dir: &Path,
     app: &Path,
-    xcode_env: &[(String, String)],
     helper: &Helper,
     icon: &Path,
     channel: Channel,
 ) -> Result<()> {
-    let sh = Shell::new()?;
-    let _repo = sh.push_dir(root);
-    let Helper {
-        package,
-        binary,
-        label,
-        ..
-    } = *helper;
-    println!("==> {label} (build)");
-    cmd!(sh, "cargo build -p {package} --bin {binary} --release")
-        .envs(xcode_env.iter().map(|(key, value)| (key, value)))
-        .run()?;
-    let built = root.join("target/release").join(binary);
+    let Helper { binary, label, .. } = *helper;
+    println!("==> {label} (embed)");
+    let built = release_dir.join(binary);
     ensure_file(&built)?;
 
     let bundle = helper.component.root(app, channel);
@@ -115,14 +130,9 @@ fn embed_helper(
     Ok(())
 }
 
-pub(super) fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
-    let sh = Shell::new()?;
-    let _repo = sh.push_dir(root);
-    println!("==> cli (build)");
-    cmd!(sh, "cargo build -p openlogi --release")
-        .envs(xcode_env.iter().map(|(key, value)| (key, value)))
-        .run()?;
-    let cli_bin = root.join("target/release/openlogi");
+pub(super) fn embed_cli(release_dir: &Path, app: &Path) -> Result<()> {
+    println!("==> cli (embed)");
+    let cli_bin = release_dir.join("openlogi");
     ensure_file(&cli_bin)?;
 
     let macos = app.join("Contents/MacOS");

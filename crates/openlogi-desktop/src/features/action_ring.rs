@@ -14,6 +14,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot};
+use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
@@ -174,9 +175,16 @@ fn editor_input(
     window: &mut Window,
     cx: &mut Context<ActionRingPanel>,
 ) -> Entity<InputState> {
+    let placeholder = placeholder.into();
+    let state = state
+        .get_or_insert_with(|| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.clone()))
+        })
+        .clone();
+    // Callers pass a per-render `tr!` string, so a cached input follows a live
+    // language switch instead of keeping the placeholder it was built with.
+    crate::ui::components::localize_placeholder(&state, placeholder, window, cx);
     state
-        .get_or_insert_with(|| cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)))
-        .clone()
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
@@ -249,7 +257,7 @@ fn ring_preview(
                 .rounded_full()
                 .bg(pal.muted)
                 .text_color(pal.text_muted)
-                .child("×"),
+                .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
         )
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(

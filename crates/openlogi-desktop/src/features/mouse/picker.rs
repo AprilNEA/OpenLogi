@@ -7,7 +7,7 @@ use gpui::{
     Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category};
+use openlogi_core::binding::{Action, Category, GestureDirection};
 
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
@@ -39,6 +39,20 @@ pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
 
 /// Icon for a gesture-mode button's five-direction summary.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
+
+/// Icon for one gesture direction: an arrow away from the centre, or the
+/// centre itself for the click. Four come from gpui-component's bundled set
+/// and the dot is vendored, but all five are lucide at the same stroke weight
+/// as the action icons they sit above.
+pub(crate) fn gesture_direction_icon(direction: GestureDirection) -> Icon {
+    match direction {
+        GestureDirection::Up => Icon::new(IconName::ArrowUp),
+        GestureDirection::Down => Icon::new(IconName::ArrowDown),
+        GestureDirection::Left => Icon::new(IconName::ArrowLeft),
+        GestureDirection::Right => Icon::new(IconName::ArrowRight),
+        GestureDirection::Click => Icon::empty().path("action-icons/circle-dot.svg"),
+    }
+}
 
 /// Asset path of the vendored glyph for an action. Exhaustive so a new action
 /// must deliberately choose an icon.

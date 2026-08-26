@@ -118,6 +118,10 @@ pub(crate) enum StateEvent {
     DeviceConfigChanged(DeviceKey),
     /// Application-wide preferences changed.
     SettingsChanged,
+    /// The interface language switched live. Views re-render localized strings
+    /// on the accompanying refresh; this event is for localized text *cached
+    /// in state*, which must be recomputed in the new locale.
+    LanguageChanged,
 }
 
 struct GlobalAppState(Entity<AppState>);

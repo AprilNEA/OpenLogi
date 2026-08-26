@@ -107,7 +107,10 @@ jobs:
     name: macOS DMG (${{ matrix.arch }})
     needs: should-build
     if: ${{ needs.should-build.outputs.run == 'true' }}
-    runs-on: ${{ matrix.runner }}
+    # Apple Silicon compiles both slices. Building the Intel slice on the arm64
+    # runner is supported by Rust and Xcode and avoids the much slower hosted
+    # Intel runner; every bundled Mach-O is checked below before it can ship.
+    runs-on: macos-latest
     # Bound a stuck brew/linker/notarize hang so it can't hold a PR build slot
     # for the 6-hour runner default (the signed path also notarizes).
     timeout-minutes: 60
@@ -116,9 +119,9 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-latest
+            target: aarch64-apple-darwin
           - arch: x86_64
-            runner: macos-15-intel
+            target: x86_64-apple-darwin
     permissions:
       contents: read
     env:
@@ -127,6 +130,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -143,13 +148,10 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       - name: Verify runner architecture
-        run: test "$(uname -m)" = "${{ matrix.arch }}"
+        run: test "$(uname -m)" = arm64
 
-      # The two macOS legs run on different images, and their default Xcode is
-      # whatever `/Applications/Xcode.app` happens to point at — 26.x on the
-      # arm64 image, 16.4 on the Intel one. Compiling the app icon needs an
-      # Icon Composer-capable actool (Xcode 26+), and a bundle should not be
-      # built by two different toolchains depending on which leg produced it.
+      # Pin both target builds to an Icon Composer-capable Xcode instead of
+      # relying on whatever `/Applications/Xcode.app` points at today.
       - name: Select the Xcode both legs build with
         run: |
           # An unmatched glob stays literal, which `-d` then rejects — where
@@ -188,13 +190,16 @@ jobs:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Caches/Homebrew/downloads
-          key: brew-macos-${{ runner.arch }}-librsvg-create-dmg-v1
+          key: brew-macos-${{ runner.arch }}-librsvg-create-dmg-cargo-bundle-v2
           restore-keys: |
             brew-macos-${{ runner.arch }}-
 
       - name: Install packaging tools
         run: |
-          brew install librsvg create-dmg
+          # cargo-bundle has bottles for both hosted macOS architectures.
+          # Installing the bottle avoids compiling the tool from source in
+          # every release leg before OpenLogi itself can start building.
+          brew install librsvg create-dmg cargo-bundle
 
       - name: Validate release secrets
         if: ${{ inputs.sign }}
@@ -238,10 +243,28 @@ jobs:
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
           if [ "${{ inputs.sign }}" = "true" ]; then
-            cargo run -p xtask -- macos package --sign-identity "$APPLE_SIGNING_IDENTITY"
+            cargo run -p xtask -- macos package --target ${{ matrix.target }} --sign-identity "$APPLE_SIGNING_IDENTITY"
           else
-            cargo run -p xtask -- macos package
+            cargo run -p xtask -- macos package --target ${{ matrix.target }}
           fi
+
+      - name: Verify bundled architectures
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          binaries=(
+            "$app/Contents/MacOS/openlogi-desktop"
+            "$app/Contents/MacOS/openlogi"
+            "$app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent"
+            "$app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
+          )
+          for binary in "${binaries[@]}"; do
+            archs=$(lipo -archs "$binary")
+            echo "$binary: $archs"
+            test "$archs" = "$EXPECTED_ARCH"
+          done
 
       # xtask stamps and verifies this itself; re-checking the artifact here is
       # deliberate redundancy, because a bundle that ships with the `.dev`

@@ -17,6 +17,7 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 use super::hotspots::MouseControlId;
 use super::picker::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
+    gesture_direction_icon,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -356,19 +357,25 @@ fn gesture_directions(
                         .selected(selected)
                         .role(Role::Button)
                         .child(
-                            v_flex()
+                            h_flex()
                                 .min_w_0()
-                                .child(div().text_body().child(format!(
-                                    "{}  {}",
-                                    direction.glyph(),
-                                    tr!(direction.label())
-                                )))
+                                .gap_2()
+                                // `.size_4()` is not decoration: a bare `Icon`
+                                // falls through to the current font size, which
+                                // would leave these a step under the 16px leading
+                                // column the action rows below use.
+                                .child(gesture_direction_icon(direction).size_4())
                                 .child(
-                                    div()
-                                        .truncate()
-                                        .text_caption()
-                                        .text_color(pal.text_muted)
-                                        .child(localized_action_label(&action)),
+                                    v_flex()
+                                        .min_w_0()
+                                        .child(div().text_body().child(tr!(direction.label())))
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_caption()
+                                                .text_color(pal.text_muted)
+                                                .child(localized_action_label(&action)),
+                                        ),
                                 ),
                         )
                         .when(selected, |row| {

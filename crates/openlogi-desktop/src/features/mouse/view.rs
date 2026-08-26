@@ -229,6 +229,12 @@ fn set_control_hovered(
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::components::localize_placeholder(
+            &self.action_search,
+            tr!("Search actions…"),
+            window,
+            cx,
+        );
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
