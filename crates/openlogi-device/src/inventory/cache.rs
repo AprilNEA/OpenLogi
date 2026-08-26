@@ -13,11 +13,8 @@ use crate::backend::NodeId;
 pub(super) enum CacheKey {
     /// Bolt: the unit id from the pairing register (cheap, read every tick).
     Bolt { unit_id: [u8; 4] },
-    /// Unifying: keyed on the full receiver serial number + pairing slot.
-    /// Using the complete serial (not just a prefix) avoids collisions between
-    /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
-    /// "DA2604F2" share "DA2").
-    UnifyingSlot { receiver_uid: String, slot: u8 },
+    /// Unifying: the unit id from the extended pairing register.
+    Unifying { unit_id: [u8; 4] },
     /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
     /// id, Linux dev path, Windows interface path). Unique *per node*, so two
     /// units of the same model never collide, and stable while connected so the

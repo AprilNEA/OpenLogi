@@ -7,15 +7,12 @@
 //! fully probed once keeps its identity across restarts, even on transports
 //! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
 //!
-//! Only Bolt identities are persisted, because only they are keyed on the
-//! device's *own* identity (the pairing-register unit id), which no re-pairing
-//! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
-//! different device paired into that slot while the agent is down would
-//! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
-//! is an OS-runtime node id with no cross-boot stability. Loaded entries have
-//! no runtime channel association. The first live channel adopts them without
-//! repeating the immutable feature-table walk; a replacement channel validates
-//! them once before reuse.
+//! Bolt and Unifying identities are persisted because both are keyed on the
+//! device's *own* unit id from their pairing registers, which no re-pairing can
+//! silently reassign. A `CacheKey::Direct` is an OS-runtime node id with no
+//! cross-boot stability. Loaded entries have no runtime channel association.
+//! The first live channel adopts them without repeating the immutable
+//! feature-table walk; a replacement channel validates them once before reuse.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
@@ -31,8 +28,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
-/// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
-const SCHEMA_VERSION: u32 = 2;
+/// v3 restores Unifying entries under the device's own extended-pairing unit
+/// id, replacing the unsafe receiver-slot key removed by v2.
+const SCHEMA_VERSION: u32 = 3;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -85,16 +83,18 @@ struct PersistedEntry {
     battery: Option<BatteryProbe>,
 }
 
-/// The persistable subset of [`CacheKey`] — Bolt only (see the module docs).
+/// The persistable subset of [`CacheKey`] (see the module docs).
 #[derive(Clone, Copy, Serialize, Deserialize)]
 enum PersistedKey {
     Bolt { unit_id: [u8; 4] },
+    Unifying { unit_id: [u8; 4] },
 }
 
 fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     match key {
         CacheKey::Bolt { unit_id } => Some(PersistedKey::Bolt { unit_id: *unit_id }),
-        CacheKey::UnifyingSlot { .. } | CacheKey::Direct(_) => None,
+        CacheKey::Unifying { unit_id } => Some(PersistedKey::Unifying { unit_id: *unit_id }),
+        CacheKey::Direct(_) => None,
     }
 }
 
@@ -108,6 +108,7 @@ pub(super) fn is_persistable(key: &CacheKey) -> bool {
 fn runtime_key(key: PersistedKey) -> CacheKey {
     match key {
         PersistedKey::Bolt { unit_id } => CacheKey::Bolt { unit_id },
+        PersistedKey::Unifying { unit_id } => CacheKey::Unifying { unit_id },
     }
 }
 
@@ -199,7 +200,7 @@ mod tests {
     /// the whole point of the snapshot — but only the parts that are actually
     /// immutable, and only for keys a re-pair cannot silently reassign.
     #[test]
-    fn a_snapshot_keeps_bolt_identity_and_drops_the_volatile_reading() {
+    fn a_snapshot_keeps_receiver_identities_and_drops_volatile_readings() {
         let model = DeviceModelInfo {
             entity_count: 1,
             serial_number: Some("TESTSERIAL01".into()),
@@ -228,13 +229,19 @@ mod tests {
                 channel: None,
             },
         );
+        let unifying_key = CacheKey::Unifying {
+            unit_id: [0x11, 0x22, 0x33, 0x44],
+        };
         cache.insert(
-            CacheKey::UnifyingSlot {
-                receiver_uid: "DA2699E1".into(),
-                slot: 2,
-            },
+            unifying_key.clone(),
             Cached {
-                probe: ProbedFeatures::default(),
+                probe: ProbedFeatures {
+                    model_info: Some(DeviceModelInfo {
+                        unit_id: [0x11, 0x22, 0x33, 0x44],
+                        ..model.clone()
+                    }),
+                    ..Default::default()
+                },
                 battery: None,
                 channel: None,
             },
@@ -262,12 +269,8 @@ mod tests {
             "a restored entry must not retain a runtime channel"
         );
         assert!(
-            !restored.contains_key(&CacheKey::UnifyingSlot {
-                receiver_uid: "DA2699E1".into(),
-                slot: 2,
-            }),
-            "unifying entries are slot-keyed, so a re-pair while the agent is \
-             down could hand them to a different device — never persisted"
+            restored.contains_key(&unifying_key),
+            "a Unifying unit id is a physical identity and survives restart"
         );
     }
 

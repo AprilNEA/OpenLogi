@@ -7,7 +7,7 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice,
+    LightCapabilities, PairedDevice, StandaloneDevice,
 };
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
@@ -161,81 +161,11 @@ pub(super) fn build_device_list(
 ) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
-        for paired in &inv.paired {
-            let route = DeviceRoute::device_route_for(inv, paired.slot);
-            let (model_key, asset, model_info, codename, serial_number, unit_id) =
-                if let Some(model) = paired.model_info.as_ref() {
-                    let asset = cache.resolve(model, paired.codename.as_deref());
-                    (
-                        model.config_key(),
-                        asset,
-                        Some(model.clone()),
-                        paired.codename.clone(),
-                        model.serial_number.clone(),
-                        model.unit_id,
-                    )
-                } else {
-                    // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
-                    // timed out. Surface the device anyway using the wpid (or slot
-                    // as a last-resort model key) so it appears in the gallery
-                    // with a stable display fallback.
-                    let key = paired.wpid.map_or_else(
-                        || format!("slot{}", paired.slot),
-                        |w| format!("wpid{w:04x}"),
-                    );
-                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
-                };
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                serial_number.as_deref(),
-                unit_id,
-            );
-            let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
-            let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
-                .map_or_else(
-                    || (stable_id.runtime_key(), false),
-                    |key| (key.into_string(), true),
-                );
-            let canonical_key =
-                canonical_device_key(&stable_id, paired.online.then_some(&identity))
-                    .map(PhysicalDeviceKey::into_string);
-            let route_key = stable_id.route_key();
-
-            let display_name = asset
-                .as_ref()
-                .map(|a| a.display_name.clone())
-                .or_else(|| paired.codename.as_deref().map(prettify_codename))
-                .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
-            let mut record = DeviceRecord {
-                config_key,
-                canonical_key,
-                persistent,
-                route_key,
-                model_key,
-                model_name: display_name.clone(),
-                display_name,
-                asset,
-                model_info,
-                codename,
-                serial_number,
-                unit_id,
-                driver_id: None,
-                registry_model_id: None,
-                route,
-                capture_id: None,
-                kind,
-                capabilities: paired.capabilities,
-                light_capabilities: None,
-                slot: paired.slot,
-                online: paired.online,
-                battery: paired.battery.clone(),
-            };
-            record = hydrate_offline_linked_record(record, cache, config);
-            list.push(record);
-        }
+        list.extend(
+            inv.paired
+                .iter()
+                .filter_map(|paired| paired_record(inv, paired, cache, config)),
+        );
     }
     append_standalone(&mut list, standalone, cache, config);
     #[cfg(debug_assertions)]
@@ -265,6 +195,102 @@ pub(super) fn build_device_list(
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
+}
+
+/// Build one receiver/direct inventory record, or suppress an unknown offline
+/// receiver pairing until it has been observed online once.
+fn paired_record(
+    inventory: &DeviceInventory,
+    paired: &PairedDevice,
+    cache: &AssetResolver,
+    config: &Config,
+) -> Option<DeviceRecord> {
+    let route = DeviceRoute::device_route_for(inventory, paired.slot);
+    let (model_key, asset, model_info, codename, serial_number, unit_id) =
+        if let Some(model) = paired.model_info.as_ref() {
+            let asset = cache.resolve(model, paired.codename.as_deref());
+            (
+                model.config_key(),
+                asset,
+                Some(model.clone()),
+                paired.codename.clone(),
+                model.serial_number.clone(),
+                model.unit_id,
+            )
+        } else {
+            // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
+            // timed out. Surface an online device using WPID (or slot as the
+            // last-resort model key) so it remains actionable.
+            let key = paired.wpid.map_or_else(
+                || format!("slot{}", paired.slot),
+                |wpid| format!("wpid{wpid:04x}"),
+            );
+            (key, None, None, paired.codename.clone(), None, [0; 4])
+        };
+    let stable_id = DeviceStableId::from_parts(
+        route.as_ref(),
+        paired.slot,
+        serial_number.as_deref(),
+        unit_id,
+    );
+    let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+    // Receiver pairing registers retain a physical unit id while the mouse
+    // sleeps or uses Bluetooth. That identity is authoritative even when
+    // offline; all-zero identities remain excluded by `config_key()`.
+    let physical_identity = identity.config_key().is_some().then_some(&identity);
+    let (config_key, persistent) = config
+        .resolve_device_key(&stable_id, physical_identity)
+        .map_or_else(
+            || (stable_id.runtime_key(), false),
+            |key| (key.into_string(), true),
+        );
+    let canonical_key =
+        canonical_device_key(&stable_id, physical_identity).map(PhysicalDeviceKey::into_string);
+    let route_key = stable_id.route_key();
+
+    // A receiver can retain pairings OpenLogi has never observed. An offline
+    // slot with no persisted device entry has neither actionable settings nor
+    // reliable presentation metadata and used to render as anonymous `Slot N`
+    // cards. Known devices remain visible for continuity.
+    let receiver_route = matches!(
+        route.as_ref(),
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    );
+    if receiver_route && !paired.online && !config.devices.contains_key(&config_key) {
+        return None;
+    }
+
+    let display_name = asset
+        .as_ref()
+        .map(|asset| asset.display_name.clone())
+        .or_else(|| paired.codename.as_deref().map(prettify_codename))
+        .unwrap_or_else(|| format!("Slot {}", paired.slot));
+    let kind = effective_kind(paired.kind, asset.as_ref().map(|asset| asset.kind));
+    let record = DeviceRecord {
+        config_key,
+        canonical_key,
+        persistent,
+        route_key,
+        model_key,
+        model_name: display_name.clone(),
+        display_name,
+        asset,
+        model_info,
+        codename,
+        serial_number,
+        unit_id,
+        driver_id: None,
+        registry_model_id: None,
+        route,
+        capture_id: None,
+        kind,
+        capabilities: paired.capabilities,
+        light_capabilities: None,
+        slot: paired.slot,
+        online: paired.online,
+        battery: paired.battery.clone(),
+    };
+    Some(hydrate_offline_linked_record(record, cache, config))
 }
 
 /// Restore persisted model metadata for an offline sighting attributed to a
@@ -1198,6 +1224,75 @@ mod tests {
         let cache = AssetResolver::new();
         let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
         assert_eq!(list[0].display_name, "Slot 2");
+    }
+
+    #[test]
+    fn unknown_offline_receiver_slots_do_not_create_gallery_cards() {
+        let mut slot_one = paired_device_no_model_info(1, Some(0x4051));
+        slot_one.online = false;
+        let mut slot_two = paired_device_no_model_info(2, None);
+        slot_two.online = false;
+
+        let list = build_device_list(
+            &[inventory_with(vec![slot_one, slot_two])],
+            &[],
+            &AssetResolver::new(),
+            &Config::default(),
+            &[],
+        );
+
+        assert!(
+            list.is_empty(),
+            "never-seen offline pairings must not render as anonymous Slot cards"
+        );
+    }
+
+    #[test]
+    fn offline_unifying_unit_id_resolves_the_known_physical_device() {
+        let unit_id = [0x29, 0x16, 0xdb, 0xbe];
+        let model = DeviceModelInfo {
+            entity_count: 0,
+            serial_number: None,
+            unit_id,
+            transports: DeviceTransports {
+                equad: true,
+                btle: true,
+                ..DeviceTransports::default()
+            },
+            model_ids: [0xb027, 0x4051, 0],
+            extended_model_id: 0,
+        };
+        let mut config = Config::default();
+        config.set_device_identity(
+            "unit:2916dbbe",
+            DeviceIdentity {
+                display_name: "Ergo M575".into(),
+                kind: DeviceKind::Trackball,
+                capabilities: Capabilities::presumed_from_kind(DeviceKind::Trackball),
+                light_capabilities: None,
+                model_info: Some(model.clone()),
+                codename: Some("Ergo M575".into()),
+                driver_id: None,
+                registry_model_id: None,
+            },
+        );
+        let mut paired = paired_device_no_model_info(3, Some(0x4051));
+        paired.online = false;
+        paired.kind = DeviceKind::Trackball;
+        paired.model_info = Some(model);
+
+        let list = build_device_list(
+            &[inventory_with(vec![paired])],
+            &[],
+            &AssetResolver::new(),
+            &config,
+            &[],
+        );
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].config_key, "unit:2916dbbe");
+        assert_eq!(list[0].display_name, "Ergo M575");
+        assert!(!list[0].online);
     }
 
     #[test]

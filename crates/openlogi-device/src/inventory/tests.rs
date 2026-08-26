@@ -13,8 +13,8 @@ use super::cache::{
 };
 use super::features::ProbedFeatures;
 use super::probe::{
-    NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
-    preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    NodeProbe, UnifyingSlotIdentity, assemble_bolt_probe, assemble_unifying_device,
+    parse_codename_unifying, preferred_direct_codename, unifying_probe_budget, walk_unifying_slot,
 };
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
@@ -44,15 +44,12 @@ fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
 
 #[test]
 fn cache_dirty_tracks_only_persistable_keys() {
-    // A system whose devices never persist (direct-only, or Unifying) must not
+    // A system whose devices never persist (direct-only) must not
     // rewrite probe-cache.json on every refresh pass: the file's content
     // wouldn't change.
     let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
-    let unifying = CacheKey::UnifyingSlot {
-        receiver_uid: "DA2699E1".into(),
-        slot: 1,
-    };
-    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry())]);
+    let direct = CacheKey::Direct("node-1".to_string().into());
+    e.apply_outcomes(vec![CacheOutcome::Fresh(direct.clone(), cache_entry())]);
     assert!(
         !e.cache_dirty,
         "non-persistable fresh probe dirtied the cache"
@@ -63,10 +60,10 @@ fn cache_dirty_tracks_only_persistable_keys() {
     for _ in 0..=CACHE_MISS_GRACE {
         e.evict_unseen(&nobody);
     }
-    assert!(!e.cache.contains_key(&unifying), "entry should be evicted");
+    assert!(!e.cache.contains_key(&direct), "entry should be evicted");
     assert!(!e.cache_dirty, "non-persistable eviction dirtied the cache");
 
-    // A Bolt probe is what the file stores — that one dirties it.
+    // Receiver probes have physical unit ids and do dirty the snapshot.
     let bolt = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
@@ -74,6 +71,15 @@ fn cache_dirty_tracks_only_persistable_keys() {
     assert!(
         e.cache_dirty,
         "persistable fresh probe must dirty the cache"
+    );
+    e.cache_dirty = false;
+    let unifying = CacheKey::Unifying {
+        unit_id: [5, 6, 7, 8],
+    };
+    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying, cache_entry())]);
+    assert!(
+        e.cache_dirty,
+        "a Unifying physical unit id must be persistable"
     );
 }
 
@@ -166,9 +172,17 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
     let writes_before = handle.written_reports().len();
 
     let cache = HashMap::new();
-    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache)
-        .await
-        .expect("an offline slot still surfaces from its re-broadcast");
+    let identity = UnifyingSlotIdentity {
+        slot: event.index,
+        id: Some(CacheKey::Unifying {
+            unit_id: [1, 2, 3, 4],
+        }),
+        unit_id: [1, 2, 3, 4],
+        online: event.online,
+        register_kind: DeviceKind::Mouse,
+        wpid: event.wpid,
+    };
+    let (device, _) = walk_unifying_slot(&channel, &identity, &cache).await;
 
     assert!(!device.online);
     assert_eq!(device.wpid, Some(0x4069));
@@ -185,6 +199,7 @@ fn unifying_arrival_liveness_survives_missing_feature_data() {
         1,
         None,
         0x40b8,
+        [0; 4],
         DeviceKind::Mouse,
         ProbedFeatures::default(),
         true,

@@ -38,9 +38,9 @@ use probe::{NodeProbe, probe_one};
 /// ping; we err on the side of waiting.
 const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
 
-/// Maximum number of pairing slots a Bolt receiver supports. We iterate this
-/// range to surface paired-but-offline devices that won't fire arrival events.
-const MAX_BOLT_SLOTS: u8 = 6;
+/// Maximum number of pairing slots a receiver supports. We iterate this range
+/// to surface paired-but-offline devices that won't fire arrival events.
+const MAX_RECEIVER_SLOTS: u8 = 6;
 
 /// Upper bound on probing one HID node. `hidpp`'s request/response has no
 /// timeout of its own, so without this a single unresponsive (e.g. asleep)

@@ -14,7 +14,9 @@ use hidpp::{
         },
     },
 };
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+};
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
@@ -25,7 +27,8 @@ use crate::channel::route::DIRECT_DEVICE_INDEX;
 use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
 use super::{
-    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
+    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_RECEIVER_SLOTS, UNIFYING_CACHED_SLOT_PROBE,
+    UNIFYING_SLOT_PROBE,
 };
 
 /// One probed node's contribution this tick: its inventory (if any), whether
@@ -95,7 +98,7 @@ async fn probe_bolt_receiver(
     // (wrong unit id / online / kind). They are cheap register reads, so
     // serializing them costs little.
     let mut identities = Vec::new();
-    for slot in 1u8..=MAX_BOLT_SLOTS {
+    for slot in 1u8..=MAX_RECEIVER_SLOTS {
         if let Some(identity) =
             read_bolt_slot_identity(&bolt, &channel, by_slot.get(&slot), slot).await
         {
@@ -183,83 +186,69 @@ async fn probe_unifying_receiver(
     debug!(pairing_count, "receiver reports pairing count");
     let unique_id = unifying.get_unique_id().await.ok();
 
-    // Trigger device-arrival events and collect one event per paired slot.
-    // Each event carries the slot index, kind, wpid, and a link-status bit —
-    // enough to build a PairedDevice entry, online or not.
-    //
-    // Note: the Unifying `0xB5/0x5N` pairing-info register uses a different
-    // sub-register base than Bolt, so paired slots are not polled directly.
-    // A slot whose re-broadcast goes missing this tick cannot be backfilled
-    // until that register format is resolved.
-    //
-    // The drain is therefore the *only* device source on this path, so a
-    // failed arrival trigger is "couldn't check", not "no devices online":
-    // settle it as a failed probe and let the ledger replay the last snapshot.
-    let Some(connections) = drain_device_arrival_unifying(&unifying, pairing_count).await else {
-        return NodeProbe::failed();
-    };
-    debug!(events = connections.len(), "drained device-arrival events");
-
-    // The receiver can re-broadcast the same 0x41 for a slot more than once per
-    // trigger, so keep one connection per slot — otherwise the device is listed
-    // twice. Last write wins: a later event carries the freshest online flag.
-    let mut connections: Vec<_> = connections
+    // Arrival events remain the liveness authority, but they are not an
+    // inventory authority: a sleeping device often emits no event at all.
+    // Read every occupied slot from the receiver registers as the durable
+    // inventory, then overlay the freshest event's online bit when present.
+    let arrivals = drain_device_arrival_unifying(&unifying, pairing_count).await;
+    let arrival_ok = arrivals.is_some();
+    let by_slot: HashMap<u8, UnifyingDeviceConnection> = arrivals
+        .unwrap_or_default()
         .into_iter()
-        .map(|c| (c.index, c))
-        .collect::<HashMap<_, _>>()
-        .into_values()
+        .map(|connection| (connection.index, connection))
         .collect();
-    // HashMap iteration is unordered; sort by slot so the device list is stable
-    // across probe cycles instead of jittering.
-    connections.sort_by_key(|c| c.index);
+    debug!(events = by_slot.len(), "drained device-arrival events");
 
-    // Probe all online slots concurrently so a slow HID++ 2.0 feature walk on
-    // one device doesn't push the next slot past the PROBE_BUDGET deadline.
-    // Pass the receiver UID so each slot's cache key is scoped to this specific
-    // receiver — two Unifying receivers sharing a slot number must not share a
-    // cache entry (different devices, different capabilities).
-    let receiver_uid_fallback;
-    let receiver_uid = if let Some(uid) = unique_id.as_deref() {
-        uid
-    } else {
-        // UID fetch failed — use the product ID as a weaker discriminant so
-        // two receivers with the same PID still collide, but a receiver and a
-        // direct device never share a cache entry.
-        tracing::warn!("Unifying receiver UID unavailable; cache isolation may be degraded");
-        receiver_uid_fallback = format!("pid:{:04x}", info.product_id);
-        &receiver_uid_fallback
-    };
-    let slot_results = connections
+    // Pairing and extended-pairing reads all address receiver register 0xB5.
+    // The channel correlates those replies by register rather than by the slot
+    // encoded in the payload, so issue them sequentially. Extended pairing
+    // supplies the physical unit id that lets receiver and Bluetooth routes
+    // resolve to one device without ever merging two same-model units.
+    let mut identities = Vec::new();
+    for slot in 1u8..=MAX_RECEIVER_SLOTS {
+        if let Some(identity) =
+            read_unifying_slot_identity(&unifying, by_slot.get(&slot), slot).await
+        {
+            identities.push(identity);
+            if identities.len() == usize::from(pairing_count) {
+                break;
+            }
+        }
+    }
+
+    // Feature walks address separate device indexes and are safe to run in
+    // parallel. A sleeping slot skips I/O and still surfaces with its stable
+    // receiver-stored identity.
+    let mut slot_results = identities
         .iter()
-        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, cache))
+        .map(|identity| walk_unifying_slot(&channel, identity, cache))
         .collect::<Vec<_>>()
         .join()
         .await;
 
-    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().flatten().unzip();
+    // Legacy receiver codenames also share register 0xB5. Preserve the old
+    // fallback, but serialize it after feature walks so one missing receiver
+    // ACK cannot block a healthy HID++ 2.0 device from being identified.
+    for (device, _) in &mut slot_results {
+        if device.codename.is_none() && device.capabilities.is_some() {
+            device.codename = read_codename_unifying(&channel, device.slot).await;
+        }
+    }
+
+    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().unzip();
 
     if paired.len() != usize::from(pairing_count) {
         debug!(
             expected = pairing_count,
             found = paired.len(),
-            "arrival drain reported fewer slots than the pairing count"
+            "pairing registers reported fewer slots than the pairing count"
         );
     }
-    // Unlike Bolt, a count/list shortfall is tolerated here: not every
-    // firmware re-broadcasts all paired slots (offline slots in particular can
-    // go missing), and there is no register poll to backfill them, so ledger
-    // health can't ride on it. The
-    // ledger health signal is the pairing-count register answering at all: that
-    // proves the receiver round-trip worked this cycle, while `None` (e.g. a
-    // parked channel) is "couldn't fully check" — the ledger then replays the
-    // last good snapshot instead of presenting a possibly-empty list (#218).
-    //
-    // The one-shot CLI path still needs a retry when the count says more
-    // devices may appear after a late arrival drain. Report that separately as
-    // `complete = false`; the unchanged-inventory fallback stops expected
-    // offline Unifying shortfalls after they stabilize.
-    let healthy = true;
     let complete = paired.len() == usize::from(pairing_count);
+    // A missing arrival trigger means online state was not checked. Publish
+    // the register inventory as a fallback only after the ledger's normal
+    // failure grace; until then replay the last-good liveness snapshot.
+    let healthy = complete && arrival_ok;
 
     NodeProbe {
         inventory: Some(DeviceInventory {
@@ -275,6 +264,64 @@ async fn probe_unifying_receiver(
         complete,
         outcomes,
     }
+}
+
+/// Receiver-stored identity for one occupied Unifying slot.
+///
+/// The unit id is physical-device identity; slot and WPID are only route/model
+/// metadata. An all-zero unit id remains unkeyed and is never cached.
+pub(super) struct UnifyingSlotIdentity {
+    pub(super) slot: u8,
+    pub(super) id: Option<CacheKey>,
+    pub(super) unit_id: [u8; 4],
+    pub(super) online: bool,
+    pub(super) register_kind: DeviceKind,
+    pub(super) wpid: u16,
+}
+
+async fn read_unifying_slot_identity(
+    unifying: &UnifyingReceiver,
+    event: Option<&UnifyingDeviceConnection>,
+    slot: u8,
+) -> Option<UnifyingSlotIdentity> {
+    let pairing = match unifying.get_device_pairing_information(slot).await {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            debug!(slot, ?error, "Unifying slot empty or unreadable");
+            return None;
+        }
+    };
+    let unit_id = match unifying.get_device_extended_pairing_information(slot).await {
+        Ok(extended) => extended.unit_id,
+        Err(error) => {
+            debug!(slot, ?error, "Unifying extended identity unavailable");
+            [0; 4]
+        }
+    };
+    let online = event.is_some_and(|connection| connection.online);
+    let register_kind = event.map_or_else(
+        || map_unifying_kind(pairing.kind),
+        |connection| map_unifying_kind(connection.kind),
+    );
+    let wpid = event.map_or(pairing.wpid, |connection| connection.wpid);
+    let id = (unit_id != [0; 4]).then_some(CacheKey::Unifying { unit_id });
+    debug!(
+        slot,
+        online,
+        wpid = format_args!("{wpid:04x}"),
+        ?register_kind,
+        ?unit_id,
+        has_event = event.is_some(),
+        "Unifying paired slot"
+    );
+    Some(UnifyingSlotIdentity {
+        slot,
+        id,
+        unit_id,
+        online,
+        register_kind,
+        wpid,
+    })
 }
 
 /// Identity read from the receiver's registers for one occupied Bolt slot
@@ -604,29 +651,18 @@ async fn drain_device_arrival_unifying(
     }
 }
 
-/// Probe a Unifying slot from a live device-connection event.
-///
-/// Device-arrival events carry the slot index, kind, wpid, and online status —
-/// enough to surface an entry for every currently-connected device. The
-/// unit_id (needed for stable caching across ticks) is not available without a
-/// working `get_device_pairing_information` call; we derive a stable cache key
-/// from the receiver UID + slot so the feature-table walk is amortised at ~30s
-/// and two receivers sharing a slot number don't collide in the cache.
-pub(super) async fn probe_unifying_slot(
+/// Walk one Unifying slot using the receiver-stored physical identity read in
+/// phase 1. Sleeping devices perform no device I/O but still carry their unit
+/// id into the inventory, allowing an offline receiver route to reconcile with
+/// the same unit's Bluetooth route.
+pub(super) async fn walk_unifying_slot(
     channel: &Arc<HidppChannel>,
-    event: &UnifyingDeviceConnection,
-    receiver_uid: &str,
+    identity: &UnifyingSlotIdentity,
     cache: &HashMap<CacheKey, Cached>,
-) -> Option<(PairedDevice, CacheOutcome)> {
-    let slot = event.index;
-    // Cache key: full receiver serial + slot so two Unifying receivers with
-    // a device on the same slot number never share a cache entry.
-    let id = CacheKey::UnifyingSlot {
-        receiver_uid: receiver_uid.to_string(),
-        slot,
-    };
-    let cached = cache.get(&id);
-    let register_kind = map_unifying_kind(event.kind);
+) -> (PairedDevice, CacheOutcome) {
+    let slot = identity.slot;
+    let id = identity.id.clone();
+    let cached = id.as_ref().and_then(|key| cache.get(key));
 
     // The 0x41 re-broadcast is the receiver's own slot report and its
     // link-status bit is the liveness authority (Solaar's trigger scan trusts
@@ -638,7 +674,7 @@ pub(super) async fn probe_unifying_slot(
     let probe_budget = unifying_probe_budget(cached, channel);
     let probe_result = timeout(
         probe_budget,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online),
+        probe_or_reuse(channel, slot, id.clone(), cached, identity.online),
     )
     .await;
     let (probe, outcome) = if let Ok(result) = probe_result {
@@ -647,26 +683,15 @@ pub(super) async fn probe_unifying_slot(
         debug!(slot, budget = ?probe_budget,
             "Unifying slot probe timed out; using cached data if available");
         let probe = cached.map_or_else(ProbedFeatures::default, |entry| entry.probe.clone());
-        (probe, CacheOutcome::Seen(id))
+        (probe, seen(id))
     };
 
-    // HID++ 2.0's marketing name is the same identity we need for display and
-    // avoids another receiver-register round trip. Keep the legacy codename
-    // read only for a completed feature walk that did not expose a name; never
-    // put it in front of the feature probe, where one missing receiver ACK can
-    // otherwise starve a healthy Lightspeed mouse forever.
-    let codename = if let Some(name) = probe.marketing_name.clone() {
-        Some(name)
-    } else if probe.capabilities.is_some() {
-        read_codename_unifying(channel, slot).await
-    } else {
-        None
-    };
+    let codename = probe.marketing_name.clone();
     debug!(
         slot,
-        online = event.online,
-        wpid = format_args!("{:04x}", event.wpid),
-        kind = ?event.kind,
+        online = identity.online,
+        wpid = format_args!("{:04x}", identity.wpid),
+        kind = ?identity.register_kind,
         codename = ?codename,
         "unifying paired slot"
     );
@@ -674,12 +699,13 @@ pub(super) async fn probe_unifying_slot(
     let device = assemble_unifying_device(
         slot,
         codename,
-        event.wpid,
-        register_kind,
+        identity.wpid,
+        identity.unit_id,
+        identity.register_kind,
         probe,
-        event.online,
+        identity.online,
     );
-    Some((device, outcome))
+    (device, outcome)
 }
 
 /// A cache hit needs only an optional battery refresh; first sight retains the
@@ -700,10 +726,34 @@ pub(super) fn assemble_unifying_device(
     slot: u8,
     codename: Option<String>,
     wpid: u16,
+    unit_id: [u8; 4],
     register_kind: DeviceKind,
-    probe: ProbedFeatures,
+    mut probe: ProbedFeatures,
     online: bool,
 ) -> PairedDevice {
+    // The extended pairing register is readable even while the device sleeps
+    // and is the same physical unit id HID++ 2.0 reports over Bluetooth. Fold
+    // it into the model payload so downstream identity resolution can unify
+    // routes without any model-name heuristic. A HID++ 1.0/offline device may
+    // have no feature-table model info at all; synthesize only the fields the
+    // receiver authoritatively owns.
+    if unit_id != [0; 4] {
+        if let Some(model) = probe.model_info.as_mut() {
+            model.unit_id = unit_id;
+        } else {
+            probe.model_info = Some(DeviceModelInfo {
+                entity_count: 0,
+                serial_number: None,
+                unit_id,
+                transports: DeviceTransports {
+                    equad: true,
+                    ..DeviceTransports::default()
+                },
+                model_ids: [wpid, 0, 0],
+                extended_model_id: 0,
+            });
+        }
+    }
     PairedDevice {
         slot,
         codename,
