@@ -28,13 +28,17 @@ impl AppState {
         }
         self.config
             .edit(|config| config.app_settings.launch_at_login = enabled);
-        if let Err(error) = crate::platform::login_item::sync_registration(enabled) {
-            // The persisted setting stays authoritative; the Settings row
-            // reads the live status back, so a failed registration shows up
-            // there rather than silently pretending.
+        // Persist first: only a saved preference may drive launchd, or a disk
+        // failure (which rolls the setting back) would leave the login item
+        // flipped against the value the window shows. The reverse failure —
+        // saved but the registration call failed — is convergent instead: the
+        // config is the desired state, the startup reconcile retries it, and
+        // the Settings row reads the live status back.
+        if self.persist_and_reload("launch-at-login setting")
+            && let Err(error) = crate::platform::login_item::sync_registration(enabled)
+        {
             tracing::warn!(error, enabled, "login-item registration failed");
         }
-        self.persist_and_reload("launch-at-login setting");
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The
     /// icon is hosted by the always-on agent, which reads this on startup and
