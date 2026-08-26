@@ -16,6 +16,7 @@ _version: 1
 "Off": "Off"
 "Open OpenLogi": "Apri OpenLogi"
 "Quit OpenLogi": "Esci da OpenLogi"
+"Show Main Window": "Mostra finestra principale"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "Collega o associa un dispositivo Logitech supportato: apparirà qui automaticamente. Per connessioni Bluetooth dirette, associa il dispositivo nelle impostazioni Bluetooth del computer."
 "No active device": "Nessun dispositivo attivo"
 "Active device": "Dispositivo attivo"

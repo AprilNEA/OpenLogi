@@ -16,6 +16,7 @@ _version: 1
 "Off": "Kapalı"
 "Open OpenLogi": "OpenLogi'yi aç"
 "Quit OpenLogi": "OpenLogi'den çık"
+"Show Main Window": "Ana pencereyi göster"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "Desteklenen bir Logitech cihazını takın veya eşleştirin — burada otomatik olarak görünecektir. Doğrudan Bluetooth bağlantıları için bilgisayarınızın Bluetooth ayarlarından eşleştirin."
 "No active device": "Etkin cihaz yok"
 "Active device": "Etkin cihaz"

@@ -16,6 +16,7 @@ _version: 1
 "Off": "Pois"
 "Open OpenLogi": "Avaa OpenLogi"
 "Quit OpenLogi": "Lopeta OpenLogi"
+"Show Main Window": "Näytä pääikkuna"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "Liitä tai parita tuettu Logitech-laite — se näkyy täällä automaattisesti. Suoria Bluetooth-yhteyksiä varten paritus tehdään tietokoneen Bluetooth-asetuksissa."
 "No active device": "Ei aktiivista laitetta"
 "Active device": "Aktiivinen laite"

@@ -292,19 +292,35 @@ fn install_status_item(
     STATUS_ITEM.with_borrow_mut(|slot| *slot = Some(status_item.clone()));
     let menu = status_item::new_menu(mtm);
 
-    let show =
-        status_item::new_action_item(mtm, "Show Main Window", sel!(openOpenLogi:), &target, "m");
+    let show = status_item::new_action_item(
+        mtm,
+        &rust_i18n::t!("Show Main Window"),
+        sel!(openOpenLogi:),
+        &target,
+        "m",
+    );
     menu.addItem(&show);
     status_item::add_separator(&menu, mtm);
 
-    let settings =
-        status_item::new_action_item(mtm, "Settings…", sel!(openSettings:), &target, ",");
+    let settings = status_item::new_action_item(
+        mtm,
+        &rust_i18n::t!("Settings…"),
+        sel!(openSettings:),
+        &target,
+        ",",
+    );
     menu.addItem(&settings);
-    let about = status_item::new_action_item(mtm, "About OpenLogi", sel!(openAbout:), &target, "");
+    let about = status_item::new_action_item(
+        mtm,
+        &rust_i18n::t!("About OpenLogi"),
+        sel!(openAbout:),
+        &target,
+        "",
+    );
     menu.addItem(&about);
     let updates = status_item::new_action_item(
         mtm,
-        "Check for Updates…",
+        &rust_i18n::t!("Check for Updates…"),
         sel!(checkForUpdates:),
         &target,
         "u",
@@ -312,11 +328,16 @@ fn install_status_item(
     menu.addItem(&updates);
     status_item::add_separator(&menu, mtm);
 
-    let quit =
-        status_item::new_action_item(mtm, "Quit OpenLogi", sel!(quitOpenLogi:), &target, "q");
+    let quit = status_item::new_action_item(
+        mtm,
+        &rust_i18n::t!("Quit OpenLogi"),
+        sel!(quitOpenLogi:),
+        &target,
+        "q",
+    );
     if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str("xmark.square"),
-        Some(&NSString::from_str("Quit")),
+        Some(&NSString::from_str(&rust_i18n::t!("Quit OpenLogi"))),
     ) {
         image.setTemplate(true);
         quit.setImage(Some(&image));

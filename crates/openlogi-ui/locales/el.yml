@@ -16,6 +16,7 @@ _version: 1
 "Off": "Ανενεργό"
 "Open OpenLogi": "Άνοιγμα του OpenLogi"
 "Quit OpenLogi": "Τερματισμός OpenLogi"
+"Show Main Window": "Εμφάνιση κύριου παραθύρου"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "Συνδέστε ή αντιστοιχίστε μια υποστηριζόμενη συσκευή Logitech — θα εμφανιστεί εδώ αυτόματα. Για απευθείας συνδέσεις Bluetooth, αντιστοιχίστε τη συσκευή στις ρυθμίσεις Bluetooth του υπολογιστή σας."
 "No active device": "Καμία ενεργή συσκευή"
 "Active device": "Ενεργή συσκευή"

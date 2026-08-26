@@ -256,9 +256,21 @@ unsafe fn show_menu(hwnd: HWND) {
         if menu.is_null() {
             return;
         }
-        AppendMenuW(menu, MF_STRING, ID_SHOW, wide("Show Main Window").as_ptr());
+        // Built fresh on every right-click, so `t!` follows a live language
+        // switch with no rebuild plumbing.
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_SHOW,
+            wide(&rust_i18n::t!("Show Main Window")).as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit OpenLogi").as_ptr());
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_QUIT,
+            wide(&rust_i18n::t!("Quit OpenLogi")).as_ptr(),
+        );
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&raw mut pt);

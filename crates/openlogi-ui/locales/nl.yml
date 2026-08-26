@@ -16,6 +16,7 @@ _version: 1
 "Off": "Uit"
 "Open OpenLogi": "OpenLogi openen"
 "Quit OpenLogi": "Stop OpenLogi"
+"Show Main Window": "Hoofdvenster tonen"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "Sluit een ondersteund Logitech-apparaat aan of koppel het — het verschijnt hier automatisch. Voor directe Bluetooth-verbindingen koppel je het apparaat in de Bluetooth-instellingen van je computer."
 "No active device": "Geen actief apparaat"
 "Active device": "Actief apparaat"

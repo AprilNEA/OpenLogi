@@ -16,6 +16,7 @@ _version: 1
 "Off": "オフ"
 "Open OpenLogi": "OpenLogi を開く"
 "Quit OpenLogi": "OpenLogi を終了"
+"Show Main Window": "メインウィンドウを表示"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "対応する Logitech デバイスを接続またはペアリングすると、ここに自動的に表示されます。直接 Bluetooth 接続の場合は、コンピューターの Bluetooth 設定でペアリングしてください。"
 "No active device": "アクティブなデバイスがありません"
 "Active device": "アクティブなデバイス"

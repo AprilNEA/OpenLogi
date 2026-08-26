@@ -16,6 +16,7 @@ _version: 1
 "Off": "关"
 "Open OpenLogi": "打开 OpenLogi"
 "Quit OpenLogi": "退出 OpenLogi"
+"Show Main Window": "显示主窗口"
 "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.": "接入或配对受支持的 Logitech 设备，它会自动显示在这里。如需直接蓝牙连接，请在电脑的蓝牙设置中配对。"
 "No active device": "没有活动设备"
 "Active device": "当前设备"

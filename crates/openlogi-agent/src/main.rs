@@ -23,6 +23,11 @@ mod overlay;
 mod pairing;
 #[cfg(target_os = "windows")]
 mod resume_windows;
+// The shared locale catalogs live in `openlogi-ui`; the negotiation that picks
+// one is `openlogi_core::locale`. `t!` resolves against a backend each binary
+// generates itself, hence the relative path — see
+// `tests::the_shared_catalog_is_wired_up` for why a wrong path is silent.
+rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 mod server;
 mod shutdown;
 mod startup;
@@ -84,6 +89,10 @@ fn main() {
         warn!(error = %e, "could not load config.toml; using defaults");
         Config::default()
     });
+    // The tray renders localized strings; resolve the stored preference (or
+    // the system locale) before any menu is built. A live language switch
+    // reaches the running agent through `reload_config`.
+    openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -148,5 +157,21 @@ fn main() {
         }
         #[cfg(not(target_os = "windows"))]
         runtime.block_on(lifecycle::run(config, uninstalled));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// Mirror of the overlay's guard: the `i18n!` at the top reaches the
+    /// shared catalog by relative path, and a wrong path does **not** fail the
+    /// build — `rust_i18n` compiles it to an empty catalog, and every tray
+    /// string silently renders in English in all locales. Pin one tray key in
+    /// a non-English locale so that breakage is loud.
+    #[test]
+    fn the_shared_catalog_is_wired_up() {
+        rust_i18n::set_locale("zh-CN");
+        assert_eq!(rust_i18n::t!("Show Main Window"), "显示主窗口");
+        rust_i18n::set_locale("en");
     }
 }
