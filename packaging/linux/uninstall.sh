@@ -8,6 +8,7 @@
 
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX=/usr/local
 
 for arg in "$@"; do
@@ -51,8 +52,26 @@ sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-desktop" \
 # ── udev rules ────────────────────────────────────────────────────────────────
 
 echo "Removing udev rules …"
-# The /etc path is the pre-0.9 install location.
-sudo rm -f /usr/lib/udev/rules.d/70-openlogi.rules /etc/udev/rules.d/70-openlogi.rules
+sudo rm -f /usr/lib/udev/rules.d/70-openlogi.rules
+# The /etc path is the pre-0.9 install location — but it is also the admin
+# override directory, so only remove a copy whose effective rules (comments
+# and blank lines aside, so a pre-0.9 copy still matches after header-only
+# edits) equal the packaged ones; a modified file may be a deliberate policy
+# and stays.
+effective_rules() {
+  sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"
+}
+ETC_RULES=/etc/udev/rules.d/70-openlogi.rules
+if [ -f "$ETC_RULES" ]; then
+  if [ "$(effective_rules "$ETC_RULES")" = \
+    "$(effective_rules "${SCRIPT_DIR}/udev/70-openlogi.rules")" ]; then
+    sudo rm -f "$ETC_RULES"
+  else
+    echo "Warning: $ETC_RULES differs from the packaged rules and was left in" >&2
+    echo "place. If it is not a deliberate override, remove it with:" >&2
+    echo "  sudo rm $ETC_RULES && sudo udevadm control --reload-rules" >&2
+  fi
+fi
 if command -v udevadm >/dev/null 2>&1; then
   sudo udevadm control --reload-rules
   sudo udevadm trigger --subsystem-match=hidraw

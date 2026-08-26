@@ -86,8 +86,25 @@ sudo install -Dm755 "${BUILD_DIR}/openlogi-agent" "${BINDIR}/openlogi-agent"
 echo "Installing udev rules …"
 sudo install -Dm644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
   /usr/lib/udev/rules.d/70-openlogi.rules
-# A leftover copy in the admin directory would shadow the vendor file.
-sudo rm -f /etc/udev/rules.d/70-openlogi.rules
+# A same-named file in the admin directory shadows the vendor file. Remove it
+# only when its effective rules (comments and blank lines aside, so a pre-0.9
+# copy still matches after header-only edits here) equal the packaged ones —
+# anything else may be a deliberate admin override, which /etc/udev/rules.d
+# exists for: leave it and say so.
+effective_rules() {
+  sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"
+}
+ETC_RULES=/etc/udev/rules.d/70-openlogi.rules
+if [ -f "$ETC_RULES" ]; then
+  if [ "$(effective_rules "$ETC_RULES")" = \
+    "$(effective_rules "${SCRIPT_DIR}/udev/70-openlogi.rules")" ]; then
+    sudo rm -f "$ETC_RULES"
+  else
+    echo "Warning: $ETC_RULES differs from the packaged rules and overrides the" >&2
+    echo "vendor file just installed. If it is only a leftover from an old install:" >&2
+    echo "  sudo rm $ETC_RULES && sudo udevadm control --reload-rules" >&2
+  fi
+fi
 
 if command -v udevadm >/dev/null 2>&1; then
   echo "Reloading udev rules …"

@@ -6,7 +6,7 @@
 #
 # Install (packages place this in /usr/lib/udev/rules.d, the vendor directory;
 # a same-named file in /etc/udev/rules.d overrides it):
-#   sudo cp 70-openlogi.rules /usr/lib/udev/rules.d/
+#   sudo install -Dm644 70-openlogi.rules /usr/lib/udev/rules.d/70-openlogi.rules
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
 #
