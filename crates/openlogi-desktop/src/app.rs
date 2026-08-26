@@ -1,9 +1,9 @@
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, TitleBar,
     button::{Button, ButtonVariants as _},
@@ -23,10 +23,10 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::ProfileIconCache;
+use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
 mod detail;
@@ -39,9 +39,6 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
-// Tray menu and other crate-level callers need the cold-start charging quirk.
-pub(crate) use widgets::battery_charging_no_reading;
-
 /// Which screen the root view is showing.
 ///
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
@@ -175,6 +172,9 @@ pub struct AppView {
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
     profile_icons: ProfileIconCache,
+    app_catalog: Entity<AppCatalogPicker>,
+    /// Redraw the profile picker after discovery, filtering, or expansion changes.
+    _app_catalog_obs: Subscription,
     appearance_obs: Option<Subscription>,
     /// Invalidates the root only for semantic state changes its current route
     /// reads; feature entities subscribe to their own events directly.
@@ -233,6 +233,9 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let profile_icons = ProfileIconCache::default();
+        let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
+        let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
             let active_key = AppState::try_read(cx)
                 .and_then(AppState::current_record)
@@ -287,7 +290,9 @@ impl AppView {
             camera_preview,
             camera_controls,
             light_panel,
-            profile_icons: ProfileIconCache::default(),
+            profile_icons,
+            app_catalog,
+            _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
             config_issue_visible: false,
@@ -308,17 +313,12 @@ impl AppView {
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
         AppState::global(cx).update(cx, |state, cx| {
             if let Some(idx) = state
-                .device_list
+                .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
+                && let Some(key) = state.set_current_device(idx)
             {
-                let changed = state.current_device != idx;
-                state.set_current_device(idx);
-                if changed {
-                    cx.emit(StateEvent::DeviceSelected(
-                        state.device_list[idx].device_key(),
-                    ));
-                }
+                cx.emit(StateEvent::DeviceSelected(key));
             }
         });
         AppState::load_current_device_reads(cx);
@@ -361,7 +361,8 @@ impl AppView {
         }))
     }
 
-    fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn accessibility_gate(cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
         v_flex()
             .size_full()
             .bg(pal.page)
@@ -382,7 +383,7 @@ impl AppView {
             )
             .child(
                 div()
-                    .max_w(px(440.))
+                    .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!(
@@ -394,7 +395,7 @@ impl AppView {
             )
             .child(
                 div()
-                    .max_w(px(440.))
+                    .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!(
@@ -415,19 +416,19 @@ impl AppView {
                 "Takes effect automatically once granted — no restart needed."
             )))
             .child(
-                div()
-                    .id("skip-accessibility")
+                BaseButton::new("skip-accessibility")
+                    .accessibility_label(tr!("Not now (use DPI and other features only)"))
                     .text_caption()
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
+                    .focus_visible(|s| s.text_color(pal.text_primary))
                     .child(tr!("Not now (use DPI and other features only)"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;
                         cx.notify();
                     })),
             )
-            .into_any_element()
     }
 }
 
@@ -449,7 +450,8 @@ fn request_accessibility(cx: &mut App) {
 /// server-side decorations and gpui falls back to client-side ones it doesn't
 /// paint — still gets a titlebar and window controls. On macOS the widget
 /// reserves the traffic-light space.
-fn app_title_bar(pal: Palette) -> impl IntoElement {
+fn app_title_bar(cx: &App) -> impl IntoElement {
+    let pal = theme::palette(cx);
     TitleBar::new().child(
         div()
             .flex_1()
@@ -489,7 +491,7 @@ impl Render for AppView {
             // error frames — so the chrome is present from the first frame on.
             // macOS / Windows keep their native titlebar.
             .when(cfg!(target_os = "linux"), |this| {
-                this.child(app_title_bar(pal))
+                this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);
 
@@ -501,7 +503,7 @@ impl Render for AppView {
         if let Some(issue) = config_issue {
             window.set_window_title("OpenLogi");
             return root
-                .child(status::config_issue_body(issue, pal))
+                .child(status::config_issue_body(issue, cx))
                 .into_any_element();
         }
 
@@ -518,17 +520,15 @@ impl Render for AppView {
         let status = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::connecting_body(pal)).into_any_element();
+                return root.child(status::connecting_body(cx)).into_any_element();
             }
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(pal)).into_any_element();
+                return root.child(status::unreachable_body(cx)).into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
-                return root
-                    .child(status::outdated_gui_body(pal))
-                    .into_any_element();
+                return root.child(status::outdated_gui_body(cx)).into_any_element();
             }
             AgentLink::Ready(status) => status,
         };
@@ -536,14 +536,12 @@ impl Render for AppView {
         let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return root
-                .child(Self::accessibility_gate(pal, cx))
-                .into_any_element();
+            return root.child(Self::accessibility_gate(cx)).into_any_element();
         }
 
         let has_device = AppState::try_global(cx)
             .map(|state| state.read(cx))
-            .is_some_and(|s| !s.device_list.is_empty());
+            .is_some_and(|s| !s.devices().is_empty());
 
         // Resolve the route. A detail route lives only while its device is
         // still the live selection; if a hot-plug dropped or reordered it (or
@@ -593,7 +591,7 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(camera_target, cx));
             (
-                detail::detail_header(record.as_ref(), pal, cx).into_any_element(),
+                detail::detail_header(record.as_ref(), cx).into_any_element(),
                 detail::detail_content(
                     &detail::DetailPanels {
                         mouse_model: &self.mouse_model,
@@ -606,10 +604,10 @@ impl Render for AppView {
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
                     },
-                    &mut self.profile_icons,
+                    &self.profile_icons,
+                    &self.app_catalog,
                     &tabs,
                     active,
-                    pal,
                     cx,
                 )
                 .into_any_element(),
@@ -618,30 +616,32 @@ impl Render for AppView {
             self.camera_preview
                 .update(cx, |preview, cx| preview.set_target(None, cx));
             (
-                home::home_header(pal, cx).into_any_element(),
+                home::home_header(cx).into_any_element(),
                 if has_device {
                     home::device_gallery(cx).into_any_element()
                 } else {
                     match status.inventory {
-                        InventoryHealth::Scanning => home::device_scanning_state(pal),
-                        InventoryHealth::Unavailable => home::scanning_unavailable_state(pal),
-                        InventoryHealth::Ready => home::device_empty_state(pal),
+                        InventoryHealth::Scanning => home::device_scanning_state(cx),
+                        InventoryHealth::Unavailable => home::scanning_unavailable_state(cx),
+                        InventoryHealth::Ready => home::device_empty_state(cx),
                     }
+                    .into_any_element()
                 },
             )
         };
 
         root.child(header_el)
             .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(pal)))
+            .when(!granted, |this| this.child(status::attention_footer(cx)))
             .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::home::{battery_needs_attention, connection_icon_path, ordered_device_indices};
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
+    use super::home::{connection_icon_path, ordered_device_indices};
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+    use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
         LightValueRange, LightValueUnit,
@@ -776,7 +776,9 @@ mod tests {
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {
             config_key: "test".to_string(),
+            canonical_key: None,
             persistent: true,
+            route_key: "test".to_string(),
             model_key: "test".to_string(),
             model_name: "Test".to_string(),
             display_name: "Test".to_string(),

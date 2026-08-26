@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::AppState;
 use super::device_key::DeviceKey;
-use super::device_ui::DeviceUiState;
+use super::device_runtime::DeviceRuntimeState;
 
 const fn camera_policy_applies(light: LightSettings) -> bool {
     cfg!(target_os = "macos") && light.auto_camera
@@ -25,8 +25,28 @@ pub enum LightCommandStatus {
     Offline,
 }
 
+/// Process-session state shared by standalone-light devices.
+#[derive(Debug, Default)]
+pub(super) struct LightingState {
+    camera_active: bool,
+    next_request_id: u64,
+}
+
+/// Runtime state scoped to one standalone light.
+#[derive(Debug, Default)]
+pub(super) struct LightDeviceState {
+    /// Transient manual power choice while camera automation is enabled.
+    manual_override: Option<bool>,
+    /// Session-only settings for a device without a persistent identity.
+    volatile_settings: Option<LightSettings>,
+    /// The in-flight optimistic write, if any.
+    pending: Option<PendingLightCommand>,
+    /// Visible outcome of the latest write for this device.
+    status: Option<(u64, LightCommandStatus)>,
+}
+
 #[derive(Debug)]
-pub(super) struct PendingLightCommand {
+struct PendingLightCommand {
     request_id: u64,
     pending: u16,
     settings: Option<LightSettings>,
@@ -65,10 +85,11 @@ impl AppState {
     pub fn light_enabled_for(&self, key: &DeviceKey) -> bool {
         let light = self.light_for(key);
         if camera_policy_applies(light) {
-            self.device_ui
+            self.devices
+                .runtime
                 .get(key)
-                .and_then(|entry| entry.manual_light_override)
-                .unwrap_or(self.camera_active)
+                .and_then(|entry| entry.light.manual_override)
+                .unwrap_or(self.lighting.camera_active)
         } else {
             light.enabled
         }
@@ -77,13 +98,13 @@ impl AppState {
     /// Update the runtime camera state used by camera-linked light rendering.
     /// A real transition clears every transient manual override.
     pub fn set_camera_active(&mut self, active: bool) -> bool {
-        let changed = self.camera_active != active;
+        let changed = self.lighting.camera_active != active;
         if changed {
-            for entry in self.device_ui.values_mut() {
-                entry.manual_light_override = None;
+            for entry in self.devices.runtime.values_mut() {
+                entry.light.manual_override = None;
             }
         }
-        self.camera_active = active;
+        self.lighting.camera_active = active;
         changed
     }
 
@@ -99,34 +120,33 @@ impl AppState {
     #[must_use]
     pub fn light_command_status(&self) -> Option<LightCommandStatus> {
         let key = self.current_record()?.device_key();
-        self.light_command_status
-            .as_ref()
-            .filter(|(status_key, _, _)| *status_key == key)
-            .map(|(_, _, status)| status.clone())
+        self.devices
+            .runtime
+            .get(&key)
+            .and_then(|entry| entry.light.status.as_ref())
+            .map(|(_, status)| status.clone())
     }
 
     fn begin_light_command(&mut self, key: &DeviceKey, online: bool) -> u64 {
-        self.next_light_request_id = self.next_light_request_id.wrapping_add(1);
-        let request_id = self.next_light_request_id;
+        self.lighting.next_request_id = self.lighting.next_request_id.wrapping_add(1);
+        let request_id = self.lighting.next_request_id;
+        let entry = self.devices.runtime.entry(key.clone()).or_default();
         if online {
-            self.device_ui.entry(key.clone()).or_default().light_command =
-                Some(PendingLightCommand {
-                    request_id,
-                    pending: 0,
-                    settings: None,
-                    persistent_key: None,
-                    rollback_settings: LightSettings::default(),
-                    previous_volatile: None,
-                    manual_override_rollback: None,
-                    successful_commands: Vec::new(),
-                    failure: None,
-                    superseded: Vec::new(),
-                });
-            self.light_command_status =
-                Some((key.clone(), request_id, LightCommandStatus::Pending));
+            entry.light.pending = Some(PendingLightCommand {
+                request_id,
+                pending: 0,
+                settings: None,
+                persistent_key: None,
+                rollback_settings: LightSettings::default(),
+                previous_volatile: None,
+                manual_override_rollback: None,
+                successful_commands: Vec::new(),
+                failure: None,
+                superseded: Vec::new(),
+            });
+            entry.light.status = Some((request_id, LightCommandStatus::Pending));
         } else {
-            self.light_command_status =
-                Some((key.clone(), request_id, LightCommandStatus::Offline));
+            entry.light.status = Some((request_id, LightCommandStatus::Offline));
         }
         request_id
     }
@@ -139,9 +159,10 @@ impl AppState {
         command: LightCommand,
     ) {
         if let Some(pending) = self
-            .device_ui
+            .devices
+            .runtime
             .get_mut(key)
-            .and_then(|entry| entry.light_command.as_mut())
+            .and_then(|entry| entry.light.pending.as_mut())
             && pending.request_id == request_id
         {
             pending.pending = pending.pending.saturating_add(1);
@@ -163,9 +184,10 @@ impl AppState {
 
     fn supersede_light_command(&mut self, key: &DeviceKey) -> Vec<SupersededLightCommand> {
         let Some(pending) = self
-            .device_ui
+            .devices
+            .runtime
             .get_mut(key)
-            .and_then(|entry| entry.light_command.take())
+            .and_then(|entry| entry.light.pending.take())
         else {
             return Vec::new();
         };
@@ -191,9 +213,10 @@ impl AppState {
     ) -> bool {
         let key = DeviceKey::from(key);
         let Some(pending) = self
-            .device_ui
+            .devices
+            .runtime
             .get_mut(&key)
-            .and_then(|entry| entry.light_command.as_mut())
+            .and_then(|entry| entry.light.pending.as_mut())
         else {
             return false;
         };
@@ -228,12 +251,24 @@ impl AppState {
         }
 
         let Some(pending) = self
-            .device_ui
+            .devices
+            .runtime
             .get_mut(&key)
-            .and_then(|entry| entry.light_command.take())
+            .and_then(|entry| entry.light.pending.take())
         else {
             return false;
         };
+        self.finish_light_command(key, request_id, pending);
+        true
+    }
+
+    /// Reconcile one fully settled light request with runtime and persisted state.
+    fn finish_light_command(
+        &mut self,
+        key: DeviceKey,
+        request_id: u64,
+        pending: PendingLightCommand,
+    ) {
         let failure = pending.failure.clone().or_else(|| {
             pending
                 .superseded
@@ -249,51 +284,63 @@ impl AppState {
         let manual_override_rollback = pending.manual_override_rollback;
         if let Some(error) = failure {
             if successful_commands.is_empty() {
-                self.device_ui
+                self.devices
+                    .runtime
                     .entry(key.clone())
                     .or_default()
-                    .volatile_light = pending.previous_volatile;
-                restore_manual_override(&mut self.device_ui, &key, manual_override_rollback);
+                    .light
+                    .volatile_settings = pending.previous_volatile;
+                restore_manual_override(&mut self.devices.runtime, &key, manual_override_rollback);
             } else {
                 let mut accepted = pending.rollback_settings;
                 for &command in &successful_commands {
                     apply_light_command(&mut accepted, command);
                 }
                 if let Some(persistent_key) = pending.persistent_key {
-                    if let Some(entry) = self.device_ui.get_mut(&key) {
-                        entry.volatile_light = None;
+                    if let Some(entry) = self.devices.runtime.get_mut(&key) {
+                        entry.light.volatile_settings = None;
                     }
-                    self.config.set_light(&persistent_key, accepted);
+                    self.config
+                        .edit(|config| config.set_light(&persistent_key, accepted));
                     self.persist_and_reload("partial light");
                 } else {
-                    self.device_ui
+                    self.devices
+                        .runtime
                         .entry(key.clone())
                         .or_default()
-                        .volatile_light = Some(accepted);
+                        .light
+                        .volatile_settings = Some(accepted);
                 }
                 if !successful_commands
                     .iter()
                     .any(|command| matches!(command, LightCommand::Power(_)))
                 {
-                    restore_manual_override(&mut self.device_ui, &key, manual_override_rollback);
+                    restore_manual_override(
+                        &mut self.devices.runtime,
+                        &key,
+                        manual_override_rollback,
+                    );
                 }
             }
-            self.light_command_status = Some((key, request_id, LightCommandStatus::Failed(error)));
+            self.devices.runtime.entry(key).or_default().light.status =
+                Some((request_id, LightCommandStatus::Failed(error)));
         } else {
             if let (Some(settings), Some(persistent_key)) =
                 (pending.settings, pending.persistent_key)
             {
-                self.config.set_light(&persistent_key, settings);
-                if let Some(entry) = self.device_ui.get_mut(&key) {
-                    entry.volatile_light = None;
+                self.config
+                    .edit(|config| config.set_light(&persistent_key, settings));
+                if let Some(entry) = self.devices.runtime.get_mut(&key) {
+                    entry.light.volatile_settings = None;
                 }
                 self.persist_and_reload("light");
             }
             // Successful writes are reflected by the controls themselves; do
             // not leave a persistent success banner in the panel.
-            self.light_command_status = None;
+            if let Some(entry) = self.devices.runtime.get_mut(&key) {
+                entry.light.status = None;
+            }
         }
-        true
     }
 
     /// The standalone-light settings for the active device, or defaults when
@@ -309,9 +356,10 @@ impl AppState {
     /// The standalone-light settings for any persistent or runtime device key.
     #[must_use]
     pub fn light_for(&self, key: &DeviceKey) -> LightSettings {
-        self.device_ui
+        self.devices
+            .runtime
             .get(key)
-            .and_then(|entry| entry.volatile_light)
+            .and_then(|entry| entry.light.volatile_settings)
             .or_else(|| self.config.light(key.as_str()))
             .unwrap_or_default()
     }
@@ -325,16 +373,18 @@ impl AppState {
         key: &DeviceKey,
         fallback: LightSettings,
     ) -> (LightSettings, Option<LightSettings>) {
-        self.device_ui
+        self.devices
+            .runtime
             .get(key)
-            .and_then(|entry| entry.light_command.as_ref())
+            .and_then(|entry| entry.light.pending.as_ref())
             .map_or_else(
                 || {
                     (
                         fallback,
-                        self.device_ui
+                        self.devices
+                            .runtime
                             .get(key)
-                            .and_then(|entry| entry.volatile_light),
+                            .and_then(|entry| entry.light.volatile_settings),
                     )
                 },
                 |pending| (pending.rollback_settings, pending.previous_volatile),
@@ -350,16 +400,18 @@ impl AppState {
         key: &DeviceKey,
         camera_mode_changed: bool,
     ) -> Option<ManualOverrideRollback> {
-        self.device_ui
+        self.devices
+            .runtime
             .get(key)
-            .and_then(|entry| entry.light_command.as_ref())
+            .and_then(|entry| entry.light.pending.as_ref())
             .and_then(|pending| pending.manual_override_rollback)
             .or_else(|| {
                 camera_mode_changed.then(|| ManualOverrideRollback {
                     previous: self
-                        .device_ui
+                        .devices
+                        .runtime
                         .get(key)
-                        .and_then(|entry| entry.manual_light_override),
+                        .and_then(|entry| entry.light.manual_override),
                 })
             })
     }
@@ -387,7 +439,7 @@ impl AppState {
             cfg!(target_os = "macos") && previous.auto_camera != light.auto_camera;
         let effective_enabled = if camera_policy_applies(light) {
             if camera_mode_changed {
-                self.camera_active
+                self.lighting.camera_active
             } else {
                 self.light_enabled_for(&runtime_key)
             }
@@ -396,8 +448,8 @@ impl AppState {
         };
         let manual_override_rollback =
             self.light_mode_override_rollback(&runtime_key, camera_mode_changed);
-        if camera_mode_changed && let Some(entry) = self.device_ui.get_mut(&runtime_key) {
-            entry.manual_light_override = None;
+        if camera_mode_changed && let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
+            entry.light.manual_override = None;
         }
         let mut effective = light;
         effective.enabled = effective_enabled;
@@ -408,10 +460,12 @@ impl AppState {
         // back to the last accepted value—not to the superseded pending value.
         let (rollback_settings, previous_volatile) =
             self.light_write_rollback(&runtime_key, previous);
-        self.device_ui
+        self.devices
+            .runtime
             .entry(runtime_key.clone())
             .or_default()
-            .volatile_light = Some(light);
+            .light
+            .volatile_settings = Some(light);
         if !commands.is_empty() {
             let can_apply = online && route.is_some();
             let superseded = if can_apply {
@@ -422,9 +476,10 @@ impl AppState {
             let request_id = self.begin_light_command(&runtime_key, can_apply);
             if can_apply && let Some(route) = route {
                 if let Some(pending) = self
-                    .device_ui
+                    .devices
+                    .runtime
                     .get_mut(&runtime_key)
-                    .and_then(|entry| entry.light_command.as_mut())
+                    .and_then(|entry| entry.light.pending.as_mut())
                 {
                     pending.settings = Some(light);
                     pending.persistent_key.clone_from(&key);
@@ -440,16 +495,18 @@ impl AppState {
             }
         }
         if let Some(key) = key {
-            if let Some(entry) = self.device_ui.get_mut(&runtime_key) {
-                entry.volatile_light = None;
+            if let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
+                entry.light.volatile_settings = None;
             }
-            self.config.set_light(&key, light);
+            self.config.edit(|config| config.set_light(&key, light));
             self.persist_and_reload("light");
         } else {
-            self.device_ui
+            self.devices
+                .runtime
                 .entry(runtime_key)
                 .or_default()
-                .volatile_light = Some(light);
+                .light
+                .volatile_settings = Some(light);
         }
     }
 
@@ -482,9 +539,9 @@ impl AppState {
         let manual_override_rollback = self.light_mode_override_rollback(&runtime_key, true);
         light.enabled = enabled;
         {
-            let entry = self.device_ui.entry(runtime_key.clone()).or_default();
-            entry.manual_light_override = Some(enabled);
-            entry.volatile_light = Some(light);
+            let entry = self.devices.runtime.entry(runtime_key.clone()).or_default();
+            entry.light.manual_override = Some(enabled);
+            entry.light.volatile_settings = Some(light);
         }
 
         let can_apply = online && route.is_some();
@@ -496,9 +553,10 @@ impl AppState {
         let request_id = self.begin_light_command(&runtime_key, can_apply);
         if can_apply && let Some(route) = route {
             if let Some(pending) = self
-                .device_ui
+                .devices
+                .runtime
                 .get_mut(&runtime_key)
-                .and_then(|entry| entry.light_command.as_mut())
+                .and_then(|entry| entry.light.pending.as_mut())
             {
                 pending.pending = 1;
                 pending.settings = Some(light);
@@ -525,10 +583,10 @@ impl AppState {
         }
 
         if let Some(key) = key {
-            if let Some(entry) = self.device_ui.get_mut(&runtime_key) {
-                entry.volatile_light = None;
+            if let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
+                entry.light.volatile_settings = None;
             }
-            self.config.set_light(&key, light);
+            self.config.edit(|config| config.set_light(&key, light));
             self.persist_and_reload("manual light power");
         }
     }
@@ -548,14 +606,15 @@ fn apply_light_command(settings: &mut LightSettings, command: LightCommand) {
 }
 
 fn restore_manual_override(
-    device_ui: &mut BTreeMap<DeviceKey, DeviceUiState>,
+    runtime: &mut BTreeMap<DeviceKey, DeviceRuntimeState>,
     key: &DeviceKey,
     rollback: Option<ManualOverrideRollback>,
 ) {
     if let Some(rollback) = rollback {
-        device_ui
+        runtime
             .entry(key.clone())
             .or_default()
-            .manual_light_override = rollback.previous;
+            .light
+            .manual_override = rollback.previous;
     }
 }

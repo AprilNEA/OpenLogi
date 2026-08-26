@@ -19,18 +19,25 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-D warnings"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # PR caches are isolated to refs/pull/*/merge and still consume the repo's
+  # 10 GB allowance. Let PRs reuse master's compiler objects without filling
+  # the cache with entries no other PR can read.
+  SCCACHE_GHA_RW_MODE: ${{ (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && 'READ_WRITE' || 'READ_ONLY' }}
 
-# rust-cache policy (see PR description for measured rationale):
-# - prefix-key v1-rust: bust the thrashing v0-rust multi-GB entries (~21 GB).
-# - shared-key groups jobs that share OS + rustc channel + debug profile.
-# - save-if master/main only: PRs restore base-branch caches without writing
-#   new multi-GB keys that evict Windows/MSRV under the 10 GB soft limit.
+# Cache policy:
+# - rust-cache keeps Cargo's registry/git inputs only; caching target/ produced
+#   0.8-1.4 GB archives whose transfer often cost more than the cache saved.
+# - sccache stores compiler outputs individually, so jobs fetch only objects
+#   they need and can share unchanged dependencies across Cargo commands.
+# - only master/main writes CI caches; PR-scoped entries cannot warm other PRs.
 jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -40,7 +47,7 @@ jobs:
     name: typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: crate-ci/typos@8a48f81b6c64dcfea44b3633223084c4be58ac5f # v1.49.0
         with:
           config: .config/typos.toml
@@ -49,12 +56,16 @@ jobs:
     name: publish closure
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: linux-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - run: cargo xtask release check-publish
 
@@ -67,7 +78,7 @@ jobs:
     name: shell
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: shellcheck,shfmt
@@ -82,14 +93,18 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: linux-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - run: |
           sudo apt-get update
@@ -122,13 +137,17 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           # Host OS splits Linux vs macOS; the rustc version is already in the key.
           shared-key: msrv-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - if: runner.os == 'Linux'
         run: |
@@ -148,14 +167,18 @@ jobs:
     name: rustdoc (non-GUI crates)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           # Share debug deps with clippy/test-linux; RUSTDOCFLAGS is step-scoped
           # below so it does not fork the rust-cache env hash.
           shared-key: linux-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - run: |
           sudo apt-get update
@@ -185,12 +208,16 @@ jobs:
     name: tests (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: linux-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - run: |
           sudo apt-get update
@@ -213,13 +240,17 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           # Host triple already splits arm64 vs x86_64 in the final cache key.
           shared-key: macos-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
@@ -228,8 +259,12 @@ jobs:
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    env:
+      # cargo-deny calls `rustc -vV` through cargo metadata but does not compile.
+      # This job deliberately skips the sccache setup used by compilation jobs.
+      RUSTC_WRAPPER: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Prebuilt binary install is faster than cargo-deny-action's bootstrap path
       # (~100s observed); advisory DB is still fetched by `cargo deny check`.
       - uses: taiki-e/install-action@v2
@@ -248,14 +283,18 @@ jobs:
     name: clippy (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: windows-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       # Whole workspace, matching the Linux jobs — GPUI's DirectX backend
       # covers the GUI on Windows. clippy subsumes `cargo check` and
@@ -269,14 +308,20 @@ jobs:
     name: wasm (portable crates)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: wasm-stable-debug
+          prefix-key: v2-cargo
+          # Only Cargo inputs are cached, so the host's stable registry/git
+          # cache is reusable even though rustc emits wasm objects via sccache.
+          shared-key: linux-stable-debug
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       # A portability gate, not a deliverable: nothing here is built for the
       # browser. `wasm32-unknown-unknown` has no OS under it, so a crate that

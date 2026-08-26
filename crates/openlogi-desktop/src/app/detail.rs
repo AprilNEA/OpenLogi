@@ -2,7 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
@@ -16,13 +16,10 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::config::ScrollResolution;
-use openlogi_core::device::{BatteryStatus, DeviceKind};
+use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
 
-use super::widgets::{
-    back_button, battery_charging_no_reading, battery_summary, kind_label, route_label,
-    sidebar_action, status_badge,
-};
+use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
 use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
@@ -35,11 +32,12 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::{ProfileIconCache, profile_scope_bar};
+use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
-    ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
+    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
 
 const CAMERA_PREVIEW_W: Rems = rems(32.125);
@@ -53,38 +51,14 @@ const POINTER_CARD_MIN_W: Rems = rems(20.75);
 /// the device name and status here.
 pub(super) fn detail_header(
     record: Option<&DeviceRecord>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
     let online = record.map(|r| r.online);
-    let battery = record.and_then(|r| r.battery.as_ref()).map(|battery| {
-        let icon = if matches!(
-            battery.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow
-        ) {
-            IconName::BatteryCharging
-        } else if battery.percentage < 20 {
-            IconName::BatteryLow
-        } else if battery.percentage < 60 {
-            IconName::BatteryMedium
-        } else {
-            IconName::BatteryFull
-        };
-        let label = if battery_charging_no_reading(battery) {
-            tr!("Charging").to_string()
-        } else {
-            format!("{}%", battery.percentage)
-        };
-        h_flex()
-            .items_center()
-            .gap_1()
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(Icon::new(icon).size_4())
-            .child(label)
-            .into_any_element()
-    });
+    let battery = record
+        .and_then(|r| r.battery.as_ref())
+        .map(BatteryIndicator::inline);
     h_flex()
         .h(px(HEADER_H))
         .flex_shrink_0()
@@ -126,32 +100,33 @@ pub(super) struct DetailPanels<'a> {
 /// device's tab set.
 pub(super) fn detail_content(
     panels: &DetailPanels<'_>,
-    profile_icons: &mut ProfileIconCache,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
     tabs: &[DetailTab],
     active: DetailTab,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
     let content = match active {
         DetailTab::Buttons => {
-            buttons_tab(panels.mouse_model, profile_icons, pal, cx).into_any_element()
+            buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, pal, cx).into_any_element()
+            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
-        DetailTab::Light => light_tab(panels.light_panel, pal, cx).into_any_element(),
-        DetailTab::Device => device_tab(pal, cx).into_any_element(),
+        DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
+        DetailTab::Device => device_tab(cx).into_any_element(),
     };
-    let navigation = detail_navigation(tabs, active, pal, cx).into_any_element();
+    let navigation = detail_navigation(tabs, active, cx);
     v_flex()
         .flex_1()
         .min_h_0()
@@ -194,9 +169,9 @@ pub(super) fn detail_content(
 fn detail_navigation(
     tabs: &[DetailTab],
     active: DetailTab,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     v_flex()
         .w(px(DETAIL_RAIL_W))
         .h_full()
@@ -272,15 +247,15 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
 /// binding inspector.
 fn buttons_tab(
     mouse_model: &gpui::Entity<MouseModelView>,
-    profile_icons: &mut ProfileIconCache,
-    pal: Palette,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     v_flex()
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(pal, profile_icons, cx))
+        .children(profile_scope_bar(profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
 }
 
@@ -294,7 +269,7 @@ fn tab_body(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p(SCREEN_PAD)
+        .p(SCREEN_PAD.rems())
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
@@ -314,9 +289,9 @@ fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     tab_body(
         ContentWidth::Large,
         h_flex()
@@ -365,13 +340,14 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, inversion_supported, resolution, hires_supported) = AppState::try_read(cx)
-        .map_or((false, false, None, false), |state| {
+    let (inverted, inversion_supported, resolution, hires_supported, hires_elsewhere) =
+        AppState::try_read(cx).map_or((false, false, None, false, false), |state| {
             (
                 state.current_invert_scroll(),
                 state.current_scroll_inversion_supported(),
                 state.current_scroll_resolution(),
                 state.current_hires_wheel_supported(),
+                state.hires_wheel_supported_on_another_link(),
             )
         });
     let inversion_description = if inversion_supported {
@@ -421,6 +397,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                 tr!("Detects finer movement between ratchet steps.")
             }
         }
+    } else if hires_elsewhere {
+        tr!("This device supports wheel resolution on its other connection, but not this one.")
     } else {
         tr!("This device does not support wheel resolution control.")
     };
@@ -445,15 +423,11 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     PanelCard::new(
         tr!("Scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
-        v_flex()
-            .gap_4()
-            .child(inversion_row)
-            .child(resolution_row)
-            .into_any_element(),
+        v_flex().gap_4().child(inversion_row).child(resolution_row),
     )
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> AnyElement {
+fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -493,7 +467,6 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
                 }
             });
         })
-        .into_any_element()
 }
 
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
@@ -554,9 +527,9 @@ fn camera_tab(
 /// Standalone-light controls in a separate panel from HID++ keyboard RGB.
 fn light_tab(
     light_panel: &gpui::Entity<LightPanel>,
-    pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let pal = theme::palette(cx);
     let (asset, online, enabled, settings) = AppState::try_read(cx).map_or_else(
         || {
             (
@@ -598,7 +571,8 @@ fn light_tab(
 }
 
 /// Device tab: device details and configuration cards stacked.
-fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
+    let pal = theme::palette(cx);
     tab_body(
         ContentWidth::Small,
         v_flex()
@@ -632,7 +606,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                         pal,
                     ))
                     .when_some(record.battery.as_ref(), |this, battery| {
-                        this.child(battery_summary(battery, pal))
+                        this.child(BatteryIndicator::summary(battery))
                     })
                     .child(device_description_list(record))
                     .into_any_element()
@@ -655,7 +629,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
             || (0, 0, 0, tr!("Default profile").to_string()),
             |state| {
                 (
-                    state.button_bindings.len(),
+                    state.button_bindings().len(),
                     // Device-level, not scope-level: this card describes the
                     // device, and a per-app profile holds no gestures at all.
                     state.device_gesture_binding_count(),
@@ -733,8 +707,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         }
                     },
                 )),
-        )
-        .into_any_element();
+        );
 
     PanelCard::new(tr!("Configuration"), Icon::new(IconName::Folder), content)
 }

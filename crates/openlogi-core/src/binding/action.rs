@@ -178,6 +178,15 @@ pub enum Action {
     ShowActionsRing,
     /// Open an application, folder, filesystem path, or platform URL.
     OpenApplication(ApplicationTarget),
+    /// Hold an arbitrary recorded key chord for the lifetime of its physical
+    /// button press. This is the push-to-talk counterpart to
+    /// [`Action::CustomShortcut`], which emits an immediate down/up pair.
+    ///
+    /// Lifecycle-aware runtimes emit the chord's down edge when the press
+    /// starts and its up edge for every terminal outcome, including capture
+    /// cancellation and shutdown. Dispatchers without a release context must
+    /// degrade this action to a balanced tap rather than leave keys held.
+    HoldShortcut(KeyCombo),
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -303,6 +312,7 @@ macro_rules! derive_action_core {
                     Action::RunShellCommand(_) => "Run Command".into(),
                     Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
                     Action::OpenApplication(target) => format!("Open {}", target.display_name()),
+                    Action::HoldShortcut(combo) => format!("Hold {}", combo.rendered_label()),
                 }
             }
 
@@ -317,7 +327,8 @@ macro_rules! derive_action_core {
                     | Action::TypeText(_)
                     | Action::RunAppleScript(_)
                     | Action::RunShellCommand(_)
-                    | Action::Workflow(_) => Category::Editing,
+                    | Action::Workflow(_)
+                    | Action::HoldShortcut(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
                 }
@@ -348,3 +359,15 @@ macro_rules! derive_action_core {
 }
 
 for_each_unit_action!(derive_action_core);
+
+impl Action {
+    /// The chord whose output must remain down until the originating press
+    /// ends, or `None` for an instantaneous action.
+    #[must_use]
+    pub fn held_combo(&self) -> Option<&KeyCombo> {
+        match self {
+            Self::HoldShortcut(combo) => Some(combo),
+            _ => None,
+        }
+    }
+}

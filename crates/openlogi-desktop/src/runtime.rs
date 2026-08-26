@@ -90,14 +90,14 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                         persistence,
                         ipc_commands,
                     );
-                    state.reads.connect(swr.clone(), swr_runtime.clone());
+                    state.connect_device_reads(swr.clone(), swr_runtime.clone());
                     state
                 });
                 AppState::set_global(state, cx);
                 AppState::load_current_device_reads(cx);
             } else {
                 AppState::update(cx, |state, _| {
-                    state.reads.connect(swr.clone(), swr_runtime);
+                    state.connect_device_reads(swr.clone(), swr_runtime);
                 });
             }
             windows::main_window::open(&[], cx);

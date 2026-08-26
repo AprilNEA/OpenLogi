@@ -216,43 +216,46 @@ impl Render for LightPanel {
         let effective_enabled = AppState::try_read(cx).is_some_and(AppState::light_enabled);
         let power = capabilities.is_some_and(|caps| caps.power);
 
-        let mut panel = v_flex().gap_4().w_full();
-        if power {
-            panel = panel.child(light_hero(&device_name, online, effective_enabled, pal));
-            #[cfg(target_os = "macos")]
-            {
-                panel = panel.child(camera_automation(settings, pal));
-            }
-            panel = panel.child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)));
-        }
-        if let (Some(range), Some(slider)) = (self.brightness_range, &self.brightness) {
-            let value = range
-                .native_for_percent(settings.brightness_percent)
-                .unwrap_or_else(|| range.min());
-            panel = panel.child(control_well(
-                tr!("Brightness"),
-                format_light_value(value, range.unit()),
-                format_range_endpoints(range),
-                Slider::new(slider).horizontal(),
-                pal,
-            ));
-        }
-        if let (Some(range), Some(slider)) = (self.temperature_range, &self.temperature) {
-            let value = settings
-                .temperature_kelvin
-                .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin));
-            panel = panel.child(control_well(
-                tr!("Colour temperature"),
-                format_light_value(value, range.unit()),
-                format_range_endpoints(range),
-                Slider::new(slider).horizontal(),
-                pal,
-            ));
-        }
-        if let Some(status) = AppState::try_read(cx).and_then(AppState::light_command_status) {
-            panel = panel.child(light_command_status(status, pal));
-        }
-        panel
+        let brightness = self.brightness_range.zip(self.brightness.as_ref());
+        let temperature = self.temperature_range.zip(self.temperature.as_ref());
+        let status = AppState::try_read(cx).and_then(AppState::light_command_status);
+
+        v_flex()
+            .gap_4()
+            .w_full()
+            .when(power, |panel| {
+                let panel = panel.child(light_hero(&device_name, online, effective_enabled, pal));
+                #[cfg(target_os = "macos")]
+                let panel = panel.child(camera_automation(settings, pal));
+                panel.child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)))
+            })
+            .when_some(brightness, |panel, (range, slider)| {
+                let value = range
+                    .native_for_percent(settings.brightness_percent)
+                    .unwrap_or_else(|| range.min());
+                panel.child(control_well(
+                    tr!("Brightness"),
+                    format_light_value(value, range.unit()),
+                    format_range_endpoints(range),
+                    Slider::new(slider).horizontal(),
+                    pal,
+                ))
+            })
+            .when_some(temperature, |panel, (range, slider)| {
+                let value = settings
+                    .temperature_kelvin
+                    .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin));
+                panel.child(control_well(
+                    tr!("Colour temperature"),
+                    format_light_value(value, range.unit()),
+                    format_range_endpoints(range),
+                    Slider::new(slider).horizontal(),
+                    pal,
+                ))
+            })
+            .when_some(status, |panel, status| {
+                panel.child(light_command_status(status, pal))
+            })
     }
 }
 

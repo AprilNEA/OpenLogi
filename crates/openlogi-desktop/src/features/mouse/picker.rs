@@ -3,9 +3,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
-    svg,
+    App, InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement as _,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::binding::{Action, Category};
@@ -87,7 +86,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) | Action::TypeText(_) => "action-icons/keyboard.svg",
+        Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
+            "action-icons/keyboard.svg"
+        }
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }
@@ -98,7 +99,7 @@ pub(crate) fn action_rows(
     current: Option<&Action>,
     on_pick: &PickFn,
     pal: Palette,
-) -> Vec<AnyElement> {
+) -> Vec<gpui::Div> {
     action_rows_matching(id_prefix, current, "", on_pick, pal)
 }
 
@@ -109,10 +110,10 @@ pub(crate) fn action_rows_matching(
     query: &str,
     on_pick: &PickFn,
     pal: Palette,
-) -> Vec<AnyElement> {
+) -> Vec<gpui::Div> {
     let query = query.trim().to_lowercase();
     let mut catalog_index = 0usize;
-    let mut children: Vec<AnyElement> = Vec::new();
+    let mut sections = Vec::new();
     for (category, actions) in grouped_catalog() {
         let category_label = rust_i18n::t!(category.label());
         let category_matches = category_label.to_lowercase().contains(&query);
@@ -137,44 +138,44 @@ pub(crate) fn action_rows_matching(
         if actions.is_empty() {
             continue;
         }
-        children.push(editor_section(category_label.into_owned(), pal));
-        for (action_key, action) in actions {
-            let selected = current == Some(&action);
-            let label = tr!(action.label());
-            let accessible_label = label.clone();
-            let icon_path = action_icon_path(&action);
-            let on_pick = on_pick.clone();
-            children.push(
-                MenuRow::new((id_prefix, action_key))
-                    .selected(selected)
-                    .role(Role::MenuItem)
-                    .aria_label(accessible_label)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                svg()
-                                    .path(icon_path)
-                                    .size_4()
-                                    .flex_none()
-                                    .text_color(pal.text_muted),
-                            )
-                            .child(div().child(label)),
-                    )
-                    .when(selected, |row| {
-                        row.child(
-                            Icon::new(IconName::Check)
-                                .size_3()
-                                .text_color(rgb(ACCENT_BLUE)),
+        sections.push(
+            v_flex()
+                .child(editor_section(category_label.into_owned(), pal))
+                .children(actions.into_iter().map(|(action_key, action)| {
+                    let selected = current == Some(&action);
+                    let label = tr!(action.label());
+                    let accessible_label = label.clone();
+                    let icon_path = action_icon_path(&action);
+                    let on_pick = on_pick.clone();
+                    MenuRow::new((id_prefix, action_key))
+                        .selected(selected)
+                        .role(Role::MenuItem)
+                        .aria_label(accessible_label)
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path(icon_path)
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(div().child(label)),
                         )
-                    })
-                    .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
-                    .into_any_element(),
-            );
-        }
+                        .when(selected, |row| {
+                            row.child(
+                                Icon::new(IconName::Check)
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
+                            )
+                        })
+                        .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
+                })),
+        );
     }
-    children
+    sections
 }
 
 /// Shared card surface for compact binding panels and menus.
@@ -189,13 +190,8 @@ pub(crate) fn compact_panel(pal: Palette) -> gpui::Div {
 }
 
 /// A group heading inset to line up with the rows under it.
-pub(crate) fn editor_section(label: impl Into<gpui::SharedString>, pal: Palette) -> AnyElement {
-    section_label(label, pal)
-        .w_full()
-        .px_2()
-        .pt_2()
-        .pb_0p5()
-        .into_any_element()
+pub(crate) fn editor_section(label: impl Into<gpui::SharedString>, pal: Palette) -> gpui::Div {
+    section_label(label, pal).w_full().px_2().pt_2().pb_0p5()
 }
 
 /// Compact editor title.
@@ -214,7 +210,10 @@ pub(crate) fn divider(pal: Palette) -> impl IntoElement {
 }
 
 /// Height-capped scroll region for compact editor rows.
-pub(crate) fn editor_scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
+pub(crate) fn editor_scroll_list(
+    id: &'static str,
+    rows: impl IntoIterator<Item = impl IntoElement>,
+) -> impl IntoElement {
     div()
         .id(id)
         .max_h(px(EDITOR_LIST_MAX_H))

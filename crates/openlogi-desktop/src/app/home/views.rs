@@ -1,14 +1,16 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
+    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
     IconName, Sizable as _,
     button::{Toggle, ToggleVariants as _},
     h_flex,
+    menu::ContextMenuExt as _,
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -16,12 +18,13 @@ use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
 
 use super::{
-    AppView, battery_view, connection_summary, connection_view, device_card,
-    device_identity_subtitle, device_image, device_ring, keyboard_glow, rename_device_button,
+    AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
+    device_menu, device_menu_button, device_ring, keyboard_glow, kind_badge,
 };
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
@@ -70,12 +73,12 @@ pub(super) fn device_view_switcher(
     ])
 }
 
-/// Gap between gallery cards, in pixels.
-const GALLERY_GAP: f32 = 16.;
+/// Gap between gallery cards.
+const GALLERY_GAP: Rems = rems(1.);
 /// Fixed carousel width: three cards plus navigation fit the default window.
-const CAROUSEL_CARD_W: f32 = 340.;
+const CAROUSEL_CARD_W: Rems = rems(21.25);
 /// Maximum width of the grid: three cards at their maximum width plus gaps.
-const GALLERY_MAX_W: f32 = theme::GALLERY_CARD_MAX_W * 3. + GALLERY_GAP * 2.;
+const GALLERY_MAX_W: Rems = rems(77.9375);
 
 /// Render the persisted Home layout. All three modes share ordering, metadata,
 /// accessibility, and active-device semantics; only spatial density changes.
@@ -84,9 +87,9 @@ pub(in crate::app) fn device_gallery(cx: &mut Context<AppView>) -> AnyElement {
         state.app_settings().device_view_mode
     });
     match mode {
-        DeviceViewMode::Grid => device_grid(cx),
-        DeviceViewMode::List => device_list(cx),
-        DeviceViewMode::Carousel => device_carousel(cx),
+        DeviceViewMode::Grid => device_grid(cx).into_any_element(),
+        DeviceViewMode::List => device_list(cx).into_any_element(),
+        DeviceViewMode::Carousel => device_carousel(cx).into_any_element(),
     }
 }
 
@@ -98,21 +101,19 @@ pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<us
     indices
 }
 
-fn device_grid(cx: &mut Context<AppView>) -> AnyElement {
+fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        ordered_device_indices(&state.device_list)
+        let active_idx = state.selected_device_index().unwrap_or(0);
+        ordered_device_indices(state.devices())
             .into_iter()
             .map(|idx| {
                 device_card_element(state, idx, active_idx, view.clone(), pal)
-                    .min_w(px(theme::GALLERY_CARD_MIN_W))
-                    .max_w(px(theme::GALLERY_CARD_MAX_W))
+                    .min_w(theme::GALLERY_CARD_MIN_W)
+                    .max_w(theme::GALLERY_CARD_MAX_W)
                     .flex_1()
-                    .into_any_element()
+                    .context_menu(device_menu(&state.devices()[idx]))
             })
             .collect()
     });
@@ -127,25 +128,25 @@ fn device_grid(cx: &mut Context<AppView>) -> AnyElement {
         .child(
             h_flex()
                 .w_full()
-                .max_w(px(GALLERY_MAX_W))
+                .max_w(GALLERY_MAX_W)
                 .items_stretch()
                 .flex_wrap()
-                .gap(px(GALLERY_GAP))
+                .gap(GALLERY_GAP)
                 .children(cards),
         )
-        .into_any_element()
 }
 
-fn device_list(cx: &mut Context<AppView>) -> AnyElement {
+fn device_list(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
     let rows = AppState::try_read(cx).map_or_else(Vec::new, |state| {
-        let active_idx = state
-            .current_device
-            .min(state.device_list.len().saturating_sub(1));
-        ordered_device_indices(&state.device_list)
+        let active_idx = state.selected_device_index().unwrap_or(0);
+        ordered_device_indices(state.devices())
             .into_iter()
-            .map(|idx| device_list_row(state, idx, active_idx, view.clone(), pal))
+            .map(|idx| {
+                device_list_row(state, idx, active_idx, view.clone(), pal)
+                    .context_menu(device_menu(&state.devices()[idx]))
+            })
             .collect()
     });
 
@@ -163,18 +164,15 @@ fn device_list(cx: &mut Context<AppView>) -> AnyElement {
                 .gap_2()
                 .children(rows),
         )
-        .into_any_element()
 }
 
-fn device_carousel(cx: &mut Context<AppView>) -> AnyElement {
+fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let (order, selected) = AppState::try_read(cx).map_or_else(
         || (Vec::new(), 0),
         |state| {
-            let active_idx = state
-                .current_device
-                .min(state.device_list.len().saturating_sub(1));
-            let order = ordered_device_indices(&state.device_list);
+            let active_idx = state.selected_device_index().unwrap_or(0);
+            let order = ordered_device_indices(state.devices());
             let selected = order.iter().position(|idx| *idx == active_idx).unwrap_or(0);
             (order, selected)
         },
@@ -182,46 +180,36 @@ fn device_carousel(cx: &mut Context<AppView>) -> AnyElement {
     let render_order = order.clone();
     let select_order = order.clone();
 
-    v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .child(
-            Carousel::new("device-carousel", px(CAROUSEL_CARD_W))
-                .len(order.len())
-                .selected(selected)
-                .gap(px(GALLERY_GAP))
-                .render_item(move |position, _, _, cx| {
-                    let pal = theme::palette(cx);
-                    let Some(state) = AppState::try_read(cx) else {
-                        return div().into_any_element();
-                    };
-                    let Some(&idx) = render_order.get(position) else {
-                        return div().into_any_element();
-                    };
-                    let active_idx = state
-                        .current_device
-                        .min(state.device_list.len().saturating_sub(1));
-                    device_card_element(state, idx, active_idx, view.clone(), pal)
-                        .into_any_element()
-                })
-                .on_select(cx.listener(move |_, position: &usize, _, cx| {
-                    let Some(&idx) = select_order.get(*position) else {
-                        return;
-                    };
-                    AppState::global(cx).update(cx, |state, cx| {
-                        if state.current_device == idx || idx >= state.device_list.len() {
-                            return;
-                        }
-                        state.set_current_device(idx);
-                        cx.emit(StateEvent::DeviceSelected(
-                            state.device_list[idx].device_key(),
-                        ));
-                    });
-                    AppState::load_current_device_reads(cx);
-                })),
-        )
-        .into_any_element()
+    v_flex().flex_1().w_full().min_h_0().child(
+        Carousel::new("device-carousel", CAROUSEL_CARD_W)
+            .len(order.len())
+            .selected(selected)
+            .gap(GALLERY_GAP)
+            .render_item(move |position, _, _, cx| {
+                let pal = theme::palette(cx);
+                let Some(state) = AppState::try_read(cx) else {
+                    return div().into_any_element();
+                };
+                let Some(&idx) = render_order.get(position) else {
+                    return div().into_any_element();
+                };
+                let active_idx = state.selected_device_index().unwrap_or(0);
+                device_card_element(state, idx, active_idx, view.clone(), pal)
+                    .context_menu(device_menu(&state.devices()[idx]))
+                    .into_any_element()
+            })
+            .on_select(cx.listener(move |_, position: &usize, _, cx| {
+                let Some(&idx) = select_order.get(*position) else {
+                    return;
+                };
+                AppState::global(cx).update(cx, |state, cx| {
+                    if let Some(key) = state.set_current_device(idx) {
+                        cx.emit(StateEvent::DeviceSelected(key));
+                    }
+                });
+                AppState::load_current_device_reads(cx);
+            })),
+    )
 }
 
 fn device_card_element(
@@ -231,7 +219,7 @@ fn device_card_element(
     view: gpui::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
-    let record = &state.device_list[idx];
+    let record = &state.devices()[idx];
     let active = idx == active_idx;
     let record_key = record.record_key();
     let enabled = state.device_enabled(&record.config_key);
@@ -240,27 +228,19 @@ fn device_card_element(
     let light_settings = state.light_for(&record.device_key());
     let glow = keyboard_glow(state, record);
 
-    device_card(
-        record,
-        enabled,
-        active,
-        glow,
-        light_enabled,
-        light_settings,
-        pal,
-    )
-    .active(gpui::Styled::shadow_2xs)
-    .accessibility_label(record.display_name.clone())
-    .aria_description(device_accessibility_description(record))
-    .aria_selected(active)
-    .cursor_pointer()
-    .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .on_click(move |_, _, cx| {
-        view.update(cx, |this, cx| {
-            this.open_device(record_key.clone(), cx);
-        });
-    })
+    device_card(record, enabled, glow, light_enabled, light_settings, pal)
+        .active(gpui::Styled::shadow_2xs)
+        .accessibility_label(record.display_name.clone())
+        .aria_description(device_accessibility_description(record))
+        .aria_selected(active)
+        .cursor_pointer()
+        .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.open_device(record_key.clone(), cx);
+            });
+        })
 }
 
 fn device_list_row(
@@ -269,8 +249,8 @@ fn device_list_row(
     active_idx: usize,
     view: gpui::Entity<AppView>,
     pal: Palette,
-) -> AnyElement {
-    let record = &state.device_list[idx];
+) -> BaseButton {
+    let record = &state.devices()[idx];
     let active = idx == active_idx;
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
@@ -279,7 +259,7 @@ fn device_list_row(
     let glow = keyboard_glow(state, record);
     let record_key = record.record_key();
 
-    BaseButton::new(format!("device-list-row-{record_key}"))
+    BaseButton::new((ElementId::from("device-list-row"), record_key.clone()))
         .w_full()
         .min_h(px(96.))
         .flex()
@@ -289,10 +269,9 @@ fn device_list_row(
         .py_2()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(device_ring(enabled, active))
+        .border_color(device_ring(enabled))
         .bg(pal.panel)
         .shadow_xs()
-        .selected_fill(active)
         .child(
             div()
                 .relative()
@@ -315,39 +294,40 @@ fn device_list_row(
                 .min_w_0()
                 .gap_1p5()
                 .child(
-                    div()
-                        .truncate()
-                        .text_subheading()
-                        .child(record.display_name.clone()),
+                    h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_subheading()
+                                .child(record.display_name.clone()),
+                        )
+                        .child(kind_badge(record.kind, pal)),
                 )
-                .child(
-                    div()
-                        .truncate()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(device_identity_subtitle(record)),
-                )
+                .when_some(custom_model_subtitle(record), |column, model| {
+                    column.child(
+                        div()
+                            .truncate()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(model),
+                    )
+                })
                 .child(connection_view(record, pal)),
         )
         .child(
             v_flex()
-                .min_w(px(132.))
+                .min_w(rems(8.25))
                 .flex_none()
                 .items_end()
                 .gap_2()
-                .when(active, |this| {
-                    this.child(
-                        div()
-                            .text_caption()
-                            .text_color(theme::accent())
-                            .child(tr!("Active device")),
-                    )
-                })
                 .when_some(record.battery.as_ref(), |this, battery| {
-                    this.child(battery_view(battery, record.online, pal))
+                    this.child(BatteryIndicator::status(battery, record.online))
                 })
                 .when(record.persistent, |this| {
-                    this.child(rename_device_button(record, pal))
+                    this.child(device_menu_button(record, pal))
                 }),
         )
         .active(gpui::Styled::shadow_2xs)
@@ -362,7 +342,6 @@ fn device_list_row(
                 this.open_device(record_key.clone(), cx);
             });
         })
-        .into_any_element()
 }
 
 fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
@@ -378,7 +357,14 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     };
     let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
     if let Some(battery) = record.battery.as_ref() {
-        format!("{metadata} {} {}%.", tr!("Battery"), battery.percentage).into()
+        let battery = if battery_charging_no_reading(battery) {
+            tr!("Charging").to_string()
+        } else if record.online {
+            format!("{} {}%", tr!("Battery"), battery.percentage)
+        } else {
+            format!("{} {}%", tr!("Last known battery"), battery.percentage)
+        };
+        format!("{metadata} {battery}.").into()
     } else {
         metadata.into()
     }

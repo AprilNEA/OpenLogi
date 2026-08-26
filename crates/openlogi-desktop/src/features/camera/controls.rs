@@ -12,11 +12,12 @@
 //! a single batched device-open.
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
@@ -706,7 +707,7 @@ impl Render for CameraControlsPanel {
             self.uid = None;
             self.sliders.clear();
             self.autos.clear();
-            return div().into_any_element();
+            return div();
         };
         self.ensure_built(&key, &uid, cx);
 
@@ -714,8 +715,7 @@ impl Render for CameraControlsPanel {
             return div()
                 .text_body()
                 .text_color(pal.text_muted)
-                .child(tr!("This camera exposes no adjustable image controls."))
-                .into_any_element();
+                .child(tr!("This camera exposes no adjustable image controls."));
         }
 
         let lens: Vec<usize> = section_indices(&self.sliders, true);
@@ -726,15 +726,15 @@ impl Render for CameraControlsPanel {
             panel = panel.child(section_label(tr!("Lens"), pal).mt_1());
         }
         for ix in lens {
-            panel = panel.child(control_row(self, ix, cx, pal));
+            panel = panel.child(control_row(self, ix, cx));
         }
         if !image.is_empty() && self.sliders.len() != image.len() {
             panel = panel.child(section_label(tr!("Image"), pal).mt_1());
         }
         for ix in image {
-            panel = panel.child(control_row(self, ix, cx, pal));
+            panel = panel.child(control_row(self, ix, cx));
         }
-        panel.child(reset_button(pal, cx)).into_any_element()
+        panel.child(reset_button(cx))
     }
 }
 
@@ -755,7 +755,7 @@ fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usize> {
 }
 
 /// The one-click profile chips: built-ins, saved customs, then Save.
-fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
+fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
     let state = AppState::try_read(cx);
     let active = state.and_then(|s| s.camera_active_profile(key));
     let customs: Vec<String> = state
@@ -797,7 +797,7 @@ fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> AnyElement 
             },
         )),
     );
-    row.into_any_element()
+    row
 }
 
 /// One compact control line: label · slider · live value (· Auto chip when the
@@ -806,8 +806,8 @@ fn control_row(
     panel: &CameraControlsPanel,
     ix: usize,
     cx: &Context<CameraControlsPanel>,
-    pal: Palette,
-) -> AnyElement {
+) -> gpui::Stateful<gpui::Div> {
+    let pal = theme::palette(cx);
     let slider = &panel.sliders[ix];
     if slider.control == CameraControl::PowerLineFrequency
         && [1, 2, 3]
@@ -883,8 +883,11 @@ fn control_row(
     {
         let accent = rgb(ACCENT_BLUE);
         auto_cell = auto_cell.child(
-            div()
-                .id(("camera-control-auto", ix))
+            BaseButton::new((ElementId::from("camera-control-auto"), toggle.name()))
+                .role(Role::CheckBox)
+                .selected(on)
+                .accessibility_label(tr!("Auto"))
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .px_1p5()
                 .py_0p5()
                 .rounded_full()
@@ -897,13 +900,8 @@ fn control_row(
                 } else {
                     pal.control
                 })
-                .hover(move |s| {
-                    s.bg(if on {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .hover(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
                 .child(tr!("Auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
@@ -912,7 +910,7 @@ fn control_row(
     }
     row = row.child(auto_cell);
 
-    row.into_any_element()
+    row
 }
 
 fn frequency_row(
@@ -920,24 +918,32 @@ fn frequency_row(
     ix: usize,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
     let current = from_slider(slider.state.read(cx).value().start());
     let mut choices = h_flex().flex_1().justify_end().gap_1();
-    for (choice_ix, (value, label)) in [
-        (1, SharedString::from("50 Hz")),
-        (2, SharedString::from("60 Hz")),
-        (3, tr!("Auto")),
+    for (value, id, label) in [
+        (1, 1_u32, SharedString::from("50 Hz")),
+        (2, 2_u32, SharedString::from("60 Hz")),
+        (3, 3_u32, tr!("Auto")),
     ]
     .into_iter()
-    .filter(|(value, _)| slider.range.supports(*value))
-    .enumerate()
+    .filter(|(value, _, _)| slider.range.supports(*value))
     {
         let active = value == current;
         let accent = rgb(ACCENT_BLUE);
+        let accessibility_label = label.clone();
         choices = choices.child(
-            div()
-                .id(("camera-frequency", choice_ix))
+            BaseButton::new(("camera-frequency", id))
+                .role(Role::RadioButton)
+                .selected(active)
+                .accessibility_label(accessibility_label)
+                .aria_toggled(if active {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                })
+                .aria_selected(active)
                 .px_1p5()
                 .py_0p5()
                 .rounded_full()
@@ -954,13 +960,8 @@ fn frequency_row(
                 } else {
                     pal.control
                 })
-                .hover(move |s| {
-                    s.bg(if active {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .hover(move |s| s.bg(chip_hover_fill(active, pal)))
+                .focus_visible(move |s| s.bg(chip_hover_fill(active, pal)))
                 .child(label)
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -989,7 +990,6 @@ fn frequency_row(
                 .child(slider.label.clone()),
         )
         .child(choices)
-        .into_any_element()
 }
 
 fn binary_control_row(
@@ -997,7 +997,7 @@ fn binary_control_row(
     ix: usize,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
     let on = from_slider(slider.state.read(cx).value().start()) != 0;
     let accent = rgb(ACCENT_BLUE);
@@ -1017,8 +1017,11 @@ fn binary_control_row(
         )
         .child(div().flex_1())
         .child(
-            div()
-                .id("camera-low-light")
+            BaseButton::new("camera-low-light")
+                .role(Role::CheckBox)
+                .selected(on)
+                .accessibility_label(tr!("Low light compensation"))
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .px_1p5()
                 .py_0p5()
                 .rounded_full()
@@ -1031,13 +1034,8 @@ fn binary_control_row(
                 } else {
                     pal.control
                 })
-                .hover(move |s| {
-                    s.bg(if on {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .hover(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
                 .child(if on { tr!("On") } else { tr!("Off") })
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -1056,31 +1054,36 @@ fn binary_control_row(
                     );
                 })),
         )
-        .into_any_element()
 }
 
-fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyElement {
-    h_flex()
-        .w_full()
-        .justify_end()
-        .child(
-            div()
-                .id("camera-controls-reset")
-                .px_2p5()
-                .py_0p5()
-                .rounded_md()
-                .border_1()
-                .border_color(pal.border)
-                .bg(pal.control)
-                .hover(|s| s.bg(pal.control_hover))
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("Reset to defaults"))
-                .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
-                    panel.reset(window, cx);
-                })),
-        )
-        .into_any_element()
+fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
+    let pal = theme::palette(cx);
+    h_flex().w_full().justify_end().child(
+        BaseButton::new("camera-controls-reset")
+            .accessibility_label(tr!("Reset to defaults"))
+            .px_2p5()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .bg(pal.control)
+            .hover(|s| s.bg(pal.control_hover))
+            .focus_visible(|s| s.bg(pal.control_hover))
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!("Reset to defaults"))
+            .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
+                panel.reset(window, cx);
+            })),
+    )
+}
+
+fn chip_hover_fill(selected: bool, pal: Palette) -> gpui::Hsla {
+    if selected {
+        theme::accent_tint_hover()
+    } else {
+        pal.control_hover
+    }
 }
 
 fn builtin_label(id: &str) -> SharedString {

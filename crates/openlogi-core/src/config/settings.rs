@@ -190,6 +190,20 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
+    /// Whether ordinary mouse-wheel input is replaced with a finite smooth
+    /// scroll animation. **Off by default**: while enabled the OS hook
+    /// suppresses eligible physical wheel events only after its non-blocking
+    /// scroll worker accepts them. Trackpad and other continuous pixel input
+    /// remains native. Windows' low-level hook cannot attribute wheel messages
+    /// to a device, so the preference applies to every traditional mouse-wheel
+    /// message there.
+    #[serde(default)]
+    pub smooth_scroll: bool,
+    /// Distance multiplier for traditional vertical mouse-wheel input.
+    /// [`VerticalScrollSensitivity::DEFAULT`] means 1×; trackpad and other
+    /// continuous pixel input is never scaled.
+    #[serde(default)]
+    pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
     /// Which app icon the user picked. Applied at launch, and whenever it
     /// changes, by whichever process owns a surface showing one — on macOS the
     /// GUI hands the choice to the Dock and writes it onto the bundle (so the
@@ -223,10 +237,10 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Thumb-wheel responsiveness. It scales both the speed of the wheel's
-    /// continuous horizontal scroll and how few rotation increments a custom
-    /// wheel action needs to fire. [`ThumbwheelSensitivity::DEFAULT`] means 1×
-    /// scroll speed; the wheel is only diverted from native scrolling once
-    /// this leaves the default.
+    /// continuous horizontal or remapped vertical scroll and how few rotation
+    /// increments a custom wheel action needs to fire.
+    /// [`ThumbwheelSensitivity::DEFAULT`] means 1× scroll speed; the wheel is
+    /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
     /// Light/dark appearance preference. Defaults to following the OS.
@@ -253,10 +267,86 @@ pub struct AppSettings {
     pub ui_radius: Option<u8>,
 }
 
+const SENSITIVITY_MIN: u8 = 1;
+const SENSITIVITY_MAX: u8 = 100;
+const SENSITIVITY_DEFAULT: u8 = 14;
+
+/// Traditional vertical mouse-wheel responsiveness on OpenLogi's `1..=100`
+/// scale.
+///
+/// This is deliberately distinct from [`ThumbwheelSensitivity`]: vertical
+/// sensitivity changes only scroll distance and never changes a custom action
+/// threshold.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct VerticalScrollSensitivity(u8);
+
+impl VerticalScrollSensitivity {
+    /// Lowest selectable sensitivity.
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum vertical scroll sensitivity"),
+    };
+    /// Highest selectable sensitivity.
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum vertical scroll sensitivity"),
+    };
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1×.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default vertical scroll sensitivity"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = rounded_sensitivity(value);
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped vertical scroll sensitivity is always valid");
+        };
+        value
+    }
+
+    /// Vertical scroll-distance multiplier relative to [`Self::DEFAULT`].
+    #[must_use]
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
+    }
+}
+
+impl Default for VerticalScrollSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<VerticalScrollSensitivity> for f32 {
+    fn from(sensitivity: VerticalScrollSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
 /// Thumb-wheel responsiveness on OpenLogi's `1..=100` scale.
 #[nutype(
     const_fn,
-    validate(greater_or_equal = 1, less_or_equal = 100),
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
     derive(
         Debug,
         Clone,
@@ -276,18 +366,18 @@ pub struct ThumbwheelSensitivity(u8);
 
 impl ThumbwheelSensitivity {
     /// Lowest selectable sensitivity.
-    pub const MIN: Self = match Self::try_new(1) {
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
         Ok(value) => value,
         Err(_) => panic!("valid minimum thumb-wheel sensitivity"),
     };
     /// Highest selectable sensitivity.
-    pub const MAX: Self = match Self::try_new(100) {
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
         Ok(value) => value,
         Err(_) => panic!("valid maximum thumb-wheel sensitivity"),
     };
-    /// Out-of-the-box sensitivity. At this value horizontal scrolling runs at
-    /// 1× and remains native unless a thumb-wheel binding is customized.
-    pub const DEFAULT: Self = match Self::try_new(14) {
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1× and
+    /// remains native unless a thumb-wheel binding is customized.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
         Ok(value) => value,
         Err(_) => panic!("valid default thumb-wheel sensitivity"),
     };
@@ -295,15 +385,7 @@ impl ThumbwheelSensitivity {
     /// Round and clamp a floating-point slider value into the valid range.
     #[must_use]
     pub fn from_rounded(value: f32) -> Self {
-        let value = if value.is_nan() {
-            f32::from(Self::MIN)
-        } else {
-            value
-        };
-        let raw = value
-            .clamp(f32::from(Self::MIN), f32::from(Self::MAX))
-            .round()
-            .saturating_as::<u8>();
+        let raw = rounded_sensitivity(value);
         let Ok(value) = Self::try_new(raw) else {
             unreachable!("clamped thumb-wheel sensitivity is always valid");
         };
@@ -312,8 +394,8 @@ impl ThumbwheelSensitivity {
 
     /// Continuous-scroll speed multiplier relative to [`Self::DEFAULT`].
     #[must_use]
-    pub fn scroll_multiplier(self) -> f32 {
-        f32::from(self) / f32::from(Self::DEFAULT)
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
     }
 
     /// Rotation increments required to fire a discrete thumb-wheel action.
@@ -341,6 +423,18 @@ impl From<ThumbwheelSensitivity> for i32 {
     }
 }
 
+fn rounded_sensitivity(value: f32) -> u8 {
+    let value = if value.is_nan() {
+        f32::from(SENSITIVITY_MIN)
+    } else {
+        value
+    };
+    value
+        .clamp(f32::from(SENSITIVITY_MIN), f32::from(SENSITIVITY_MAX))
+        .round()
+        .saturating_as::<u8>()
+}
+
 impl AppSettings {
     /// `skip_serializing_if` helper: true when nothing diverges from the
     /// default, so empty settings don't clutter `config.toml`.
@@ -359,6 +453,8 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             capture_mouse_events: true,
+            smooth_scroll: false,
+            vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
@@ -698,6 +794,23 @@ mod tests {
         assert_eq!(
             ThumbwheelSensitivity::from_rounded(f32::INFINITY),
             ThumbwheelSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn floating_vertical_scroll_sensitivity_rounds_and_saturates_into_the_domain() {
+        assert_eq!(u8::from(VerticalScrollSensitivity::from_rounded(49.6)), 50);
+        assert_eq!(
+            VerticalScrollSensitivity::from_rounded(f32::NAN),
+            VerticalScrollSensitivity::MIN
+        );
+        assert_eq!(
+            VerticalScrollSensitivity::from_rounded(f32::NEG_INFINITY),
+            VerticalScrollSensitivity::MIN
+        );
+        assert_eq!(
+            VerticalScrollSensitivity::from_rounded(f32::INFINITY),
+            VerticalScrollSensitivity::MAX
         );
     }
 }

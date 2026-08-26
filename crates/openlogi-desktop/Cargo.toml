@@ -17,6 +17,7 @@ name = "openlogi-desktop"
 path = "src/main.rs"
 
 [dependencies]
+appcatalog = "0.1.1"
 openlogi-core = { path = "../openlogi-core" }
 openlogi-ui = { path = "../openlogi-ui" }
 openlogi-camera = { path = "../openlogi-camera" }
@@ -64,8 +65,8 @@ embed-resource = "3.0.9"
 # Window chrome, host OS string, and installed-app icon lookup only — the
 # menu-bar status item lives in the agent, not here.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance", "NSBitmapImageRep", "NSWorkspace", "NSImage", "NSImageRep"] }
-objc2-foundation = { workspace = true, features = ["NSData", "NSDictionary", "NSProcessInfo", "NSString", "NSURL"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
 
 [lints]
 workspace = true

@@ -15,13 +15,12 @@
 )]
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px, svg,
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants},
     h_flex,
-    input::Input,
     input::InputState,
     v_flex,
 };
@@ -31,8 +30,8 @@ use openlogi_core::config::KeyTrigger;
 use super::function_row::FunctionRowView;
 use crate::features::mouse::picker::{compact_panel, divider, editor_scroll_list, title};
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::components::MenuRow;
-use crate::ui::theme::{Palette, Typography as _};
+use crate::ui::components::{MenuRow, control_input};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Which power-user editor is showing for the selected key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -87,16 +86,14 @@ pub fn editor_card(
     workflow_draft: Vec<WorkflowStep>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-    cx: &mut Context<FunctionRowView>,
-) -> AnyElement {
+) -> gpui::Div {
     match kind {
-        PowerUserKind::Workflow => workflow_editor_card(trigger, workflow_draft, view, pal, cx),
+        PowerUserKind::Workflow => workflow_editor_card(trigger, workflow_draft, view, pal),
         _ => match text_state {
-            Some(state) => text_editor_card(trigger, kind, state, view, pal, cx),
+            Some(state) => text_editor_card(trigger, kind, state, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
-                .child(title(tr!("Editor unavailable"), pal))
-                .into_any_element(),
+                .child(title(tr!("Editor unavailable"), pal)),
         },
     }
 }
@@ -109,8 +106,7 @@ fn text_editor_card(
     text_state: Entity<InputState>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-    cx: &mut Context<FunctionRowView>,
-) -> AnyElement {
+) -> gpui::Div {
     let heading = kind.heading();
     let key_name = trigger.to_string();
 
@@ -125,10 +121,9 @@ fn text_editor_card(
             v_flex()
                 .p_2()
                 .gap_2()
-                .child(div().child(Input::new(&text_state).cleanable(true)))
-                .child(editor_action_row(trigger, kind, view, pal, cx)),
+                .child(div().child(control_input(&text_state).cleanable(true)))
+                .child(editor_action_row(trigger, kind, view)),
         )
-        .into_any_element()
 }
 
 /// Cancel (back to list) + Save (commit the drafted text).
@@ -136,9 +131,7 @@ fn editor_action_row(
     trigger: KeyTrigger,
     kind: PowerUserKind,
     view: &Entity<FunctionRowView>,
-    _pal: Palette,
-    _cx: &mut Context<FunctionRowView>,
-) -> AnyElement {
+) -> impl IntoElement {
     let view_save = view.clone();
     let trigger_save = trigger.clone();
     let view_cancel = view.clone();
@@ -180,7 +173,6 @@ fn editor_action_row(
                     view_save.update(cx, |v, vcx| v.close_editor(vcx));
                 }),
         )
-        .into_any_element()
 }
 
 /// The Workflow editor: a list of steps with add/remove.
@@ -189,14 +181,17 @@ fn workflow_editor_card(
     steps: Vec<WorkflowStep>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-    cx: &mut Context<FunctionRowView>,
-) -> AnyElement {
+) -> gpui::Div {
     let key_name = trigger.to_string();
 
-    let mut rows: Vec<AnyElement> = Vec::new();
-    for (idx, step) in steps.iter().enumerate() {
-        rows.push(workflow_step_row(idx, step.clone(), view, pal, cx));
-    }
+    let rows = steps
+        .into_iter()
+        .enumerate()
+        .map(|(idx, step)| WorkflowStepRow {
+            idx,
+            step,
+            view: view.clone(),
+        });
 
     compact_panel(pal)
         .w(px(320.))
@@ -247,60 +242,62 @@ fn workflow_editor_card(
                         }),
                 ),
         )
-        .into_any_element()
 }
 
 /// One Workflow step row: type chip + payload preview + remove button.
-fn workflow_step_row(
+#[derive(IntoElement)]
+struct WorkflowStepRow {
     idx: usize,
     step: WorkflowStep,
-    view: &Entity<FunctionRowView>,
-    pal: Palette,
-    _cx: &mut Context<FunctionRowView>,
-) -> AnyElement {
-    let (type_label, glyph): (&'static str, &'static str) = match &step {
-        WorkflowStep::TypeText(_) => ("Type Text", "action-icons/keyboard.svg"),
-        WorkflowStep::PressKey(_) => ("Press Key", "action-icons/keyboard.svg"),
-        WorkflowStep::Delay { .. } => ("Delay", "action-icons/chevrons-right.svg"),
-        WorkflowStep::RunAppleScript(_) => ("AppleScript", "action-icons/terminal.svg"),
-        WorkflowStep::RunShellCommand(_) => ("Shell", "action-icons/terminal.svg"),
-    };
-    let view_remove = view.clone();
-
-    MenuRow::new(("wf-step", idx))
-        .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .child(
-                    svg()
-                        .path(glyph)
-                        .size_4()
-                        .flex_none()
-                        .text_color(pal.text_muted),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(pal.text_muted)
-                        .child(type_label),
-                )
-                .child(div().flex_1().child(step_preview(&step, pal))),
-        )
-        .child(
-            Icon::new(IconName::Close)
-                .size_3()
-                .text_color(pal.text_muted),
-        )
-        .on_click(move |_e, _w, cx| {
-            view_remove.update(cx, |v, vcx| v.remove_workflow_step(idx, vcx));
-        })
-        .into_any_element()
+    view: Entity<FunctionRowView>,
 }
 
-fn step_preview(step: &WorkflowStep, pal: Palette) -> AnyElement {
+impl RenderOnce for WorkflowStepRow {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (type_label, glyph): (&'static str, &'static str) = match &self.step {
+            WorkflowStep::TypeText(_) => ("Type Text", "action-icons/keyboard.svg"),
+            WorkflowStep::PressKey(_) => ("Press Key", "action-icons/keyboard.svg"),
+            WorkflowStep::Delay { .. } => ("Delay", "action-icons/chevrons-right.svg"),
+            WorkflowStep::RunAppleScript(_) => ("AppleScript", "action-icons/terminal.svg"),
+            WorkflowStep::RunShellCommand(_) => ("Shell", "action-icons/terminal.svg"),
+        };
+        let pal = theme::palette(cx);
+        let view_remove = self.view;
+
+        MenuRow::new(("wf-step", self.idx))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path(glyph)
+                            .size_4()
+                            .flex_none()
+                            .text_color(pal.text_muted),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(pal.text_muted)
+                            .child(type_label),
+                    )
+                    .child(div().flex_1().child(step_preview(&self.step, pal))),
+            )
+            .child(
+                Icon::new(IconName::Close)
+                    .size_3()
+                    .text_color(pal.text_muted),
+            )
+            .on_click(move |_e, _w, cx| {
+                view_remove.update(cx, |v, vcx| v.remove_workflow_step(self.idx, vcx));
+            })
+    }
+}
+
+fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
     let text: String = match step {
         WorkflowStep::TypeText(s) => {
             if s.is_empty() {
@@ -323,7 +320,6 @@ fn step_preview(step: &WorkflowStep, pal: Palette) -> AnyElement {
         .text_caption()
         .text_color(pal.text_primary)
         .child(text)
-        .into_any_element()
 }
 
 fn key_combo_preview(combo: &KeyCombo) -> String {

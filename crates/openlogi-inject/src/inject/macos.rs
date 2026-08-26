@@ -1,5 +1,7 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
+use std::sync::{LazyLock, Mutex};
+
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
     ScrollEventUnit,
@@ -11,6 +13,22 @@ use core_foundation::base::TCFType as _;
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::scroll::ScrollDelta;
+
+use super::{
+    HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
+};
+
+static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+
+// `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
+const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
+const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -31,7 +49,7 @@ pub(super) fn execute(action: &Action) {
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
         Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
-        Effect::Key(combo) => post_keycombo(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => post_keycombo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -226,24 +244,25 @@ fn tag_synthetic(ev: &CGEvent) {
     );
 }
 
-/// Post a key-down + key-up pair for `vk` with `flags` set.
-fn post_key(vk: u16, flags: CGEventFlags) {
+/// Post one keyboard edge for `vk` with `flags` set.
+fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
         return;
     };
-    let Ok(down) = CGEvent::new_keyboard_event(src.clone(), vk, true) else {
-        tracing::warn!("CGEvent::new_keyboard_event(down) failed");
+    let down = phase == KeyPhase::Down;
+    let Ok(event) = CGEvent::new_keyboard_event(src, vk, down) else {
+        tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
         return;
     };
-    down.set_flags(flags);
-    down.post(CGEventTapLocation::HID);
-    let Ok(up) = CGEvent::new_keyboard_event(src, vk, false) else {
-        tracing::warn!("CGEvent::new_keyboard_event(up) failed");
-        return;
-    };
-    up.set_flags(flags);
-    up.post(CGEventTapLocation::HID);
+    event.set_flags(flags);
+    event.post(CGEventTapLocation::HID);
+}
+
+/// Post a key-down + key-up pair for `vk` with `flags` set.
+fn post_key(vk: u16, flags: CGEventFlags) {
+    post_key_phase(vk, flags, KeyPhase::Down);
+    post_key_phase(vk, flags, KeyPhase::Up);
 }
 
 /// Type an arbitrary unicode string by emitting one key event per character,
@@ -269,6 +288,85 @@ fn post_unicode(text: &str) {
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
 fn post_keycombo(combo: &KeyCombo) {
+    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
+        post_key(vk, combo_flags(combo));
+    } else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no macOS mapping"
+        );
+    }
+}
+
+/// Emit the physical-key edges whose shared ownership changed, preserving the
+/// aggregate synthetic modifier state on every event.
+pub(super) fn hold_keys(
+    keys: &[HeldKey],
+    phase: KeyPhase,
+    mut modifiers: HeldModifiers,
+) -> HeldModifiers {
+    match phase {
+        KeyPhase::Down => {
+            for &key in keys {
+                post_held_key(key, phase, &mut modifiers);
+            }
+        }
+        KeyPhase::Up => {
+            for &key in keys.iter().rev() {
+                post_held_key(key, phase, &mut modifiers);
+            }
+        }
+    }
+    modifiers
+}
+
+fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
+    let Some((vk, flags)) = held_key_event(key, phase, modifiers) else {
+        if let HeldKey::Key(usage) = key {
+            tracing::warn!(
+                usage = usage.code(),
+                "held shortcut usage has no macOS mapping — edge ignored"
+            );
+        }
+        return;
+    };
+    post_key_phase(vk, flags, phase);
+}
+
+fn held_key_event(
+    key: HeldKey,
+    phase: KeyPhase,
+    modifiers: &mut HeldModifiers,
+) -> Option<(u16, CGEventFlags)> {
+    modifiers.set(key, phase == KeyPhase::Down);
+    let vk = match key {
+        HeldKey::Command => Some(0x37),
+        HeldKey::Shift => Some(0x38),
+        HeldKey::Alt => Some(0x3a),
+        HeldKey::Control => Some(0x3b),
+        HeldKey::Key(usage) => hid_usage_to_macos(usage.code()),
+    }?;
+    Some((vk, held_modifier_flags(*modifiers)))
+}
+
+fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    if modifiers.contains(HeldKey::Command) {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    if modifiers.contains(HeldKey::Shift) {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if modifiers.contains(HeldKey::Control) {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if modifiers.contains(HeldKey::Alt) {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    flags
+}
+
+fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if combo.has_command() {
         flags |= CGEventFlags::CGEventFlagCommand;
@@ -282,14 +380,7 @@ fn post_keycombo(combo: &KeyCombo) {
     if combo.has_option() {
         flags |= CGEventFlags::CGEventFlagAlternate;
     }
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
-        post_key(vk, flags);
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
-        );
-    }
+    flags
 }
 
 /// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.
@@ -339,9 +430,11 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use core_graphics::event::CGEventFlags;
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, hid_usage_to_macos};
+    use super::{combo, held_key_event, hid_usage_to_macos};
+    use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
     #[test]
     fn hid_usages_map_to_macos_virtual_keys() {
@@ -377,6 +470,30 @@ mod tests {
                 "{shortcut:?} table entry has no macOS virtual-key mapping"
             );
         }
+    }
+
+    #[test]
+    fn held_edges_carry_the_aggregate_modifier_state() {
+        let mut modifiers = HeldModifiers::default();
+        let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers)
+            .expect("Command has a macOS virtual-key mapping");
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (_, flags) = held_key_event(HeldKey::Control, KeyPhase::Down, &mut modifiers)
+            .expect("Control has a macOS virtual-key mapping");
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+
+        let key = combo(Shortcut::Copy).key();
+        let (_, flags) = held_key_event(HeldKey::Key(key), KeyPhase::Up, &mut modifiers)
+            .expect("Copy's key has a macOS virtual-key mapping");
+        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+
+        let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Up, &mut modifiers)
+            .expect("Command has a macOS virtual-key mapping");
+        assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
+        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
     }
 }
 
@@ -501,19 +618,106 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     ev.post(CGEventTapLocation::HID);
 }
 
-/// Post a horizontal scroll of `delta` lines (wheel2 axis). Line units suit
-/// the thumb wheel's ratchet-like increments better than pixels.
-pub(super) fn post_horizontal_scroll(delta: i32) {
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let (quantizer, unit) = match delta {
+        ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
+        ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
+    };
+    let Ok(mut quantizer) = quantizer.lock() else {
+        tracing::warn!("macOS scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, 1.0);
+    drop(quantizer);
+    if delta == QuantizedScroll::default() {
+        return;
+    }
+
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for thumbwheel scroll");
+        tracing::warn!("CGEventSource::new failed for precise scroll");
         return;
     };
-    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::LINE, 2, 0, delta, 0) else {
-        tracing::warn!("CGEvent::new_scroll_event failed for thumbwheel");
+    let Ok(ev) = CGEvent::new_scroll_event(src, unit, 2, delta.y, delta.x, 0) else {
+        tracing::warn!("CGEvent::new_scroll_event failed for precise scroll");
         return;
     };
+    if unit == ScrollEventUnit::PIXEL {
+        set_continuous_scroll_fields(&ev, delta);
+    }
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
+}
+
+pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
+    const POINTS_PER_WHEEL_TICK: f64 = 10.0;
+
+    let units_per_input = match delta {
+        ScrollDelta::Pixels { .. } => 1.0,
+        ScrollDelta::WheelTicks { .. } => POINTS_PER_WHEEL_TICK,
+    };
+    let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
+        tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, units_per_input);
+    drop(quantizer);
+
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for smooth scroll");
+        return;
+    };
+    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, delta.y, delta.x, 0)
+    else {
+        tracing::warn!("CGEvent::new_scroll_event failed for smooth scroll");
+        return;
+    };
+    set_continuous_scroll_fields(&ev, delta);
+    ev.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
+    ev.set_integer_value_field(MOMENTUM_PHASE, 0);
+    tag_synthetic(&ev);
+    ev.post(CGEventTapLocation::HID);
+}
+
+const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {
+    match phase {
+        SmoothScrollPhase::Began => 1,
+        SmoothScrollPhase::Changed => 2,
+        SmoothScrollPhase::Ended => 4,
+        SmoothScrollPhase::Cancelled => 8,
+    }
+}
+
+fn set_continuous_scroll_fields(event: &CGEvent, delta: QuantizedScroll) {
+    event.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+    set_continuous_axis(
+        event,
+        delta.y,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+    );
+    set_continuous_axis(
+        event,
+        delta.x,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+    );
+}
+
+fn set_continuous_axis(
+    event: &CGEvent,
+    points: i32,
+    line_field: u32,
+    fixed_field: u32,
+    point_field: u32,
+) {
+    const POINTS_PER_LINE: i64 = 10;
+    const FIXED_POINT_SCALE: i64 = 1 << 16;
+    let points = i64::from(points);
+    event.set_integer_value_field(point_field, points);
+    event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
+    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
 }
 
 /// Raw FFI surface for the AXUIElement/CF calls used by [`ax_browser_navigate`]

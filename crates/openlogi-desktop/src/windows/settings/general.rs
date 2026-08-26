@@ -1,19 +1,52 @@
 //! General settings page.
 
 use super::{
-    AnyElement, App, AppState, Entity, FluentBuilder, IconName, IntoElement, ParentElement,
-    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
-    ThumbwheelSensitivity, div, h_flex, px, theme, v_flex,
+    App, AppState, Entity, FluentBuilder, IconName, ParentElement, SettingField, SettingGroup,
+    SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled, ThumbwheelSensitivity,
+    VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
-pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
+pub(super) fn general_page(
+    vertical_scroll_sensitivity_slider: Entity<SliderState>,
+    thumbwheel_sensitivity_slider: Entity<SliderState>,
+) -> SettingPage {
     let group = SettingGroup::new()
+        .item(
+            SettingItem::new(
+                tr!("Smooth scrolling"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll)
+                    },
+                    |enabled, cx| {
+                        AppState::update(cx, move |state, cx| {
+                            state.set_smooth_scroll(enabled);
+                            cx.emit(StateEvent::SettingsChanged);
+                        });
+                    },
+                ),
+            )
+            .description(tr!(
+                "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Vertical Scroll Sensitivity"),
+                SettingField::render(move |_, _, cx| {
+                    vertical_scroll_sensitivity_field(&vertical_scroll_sensitivity_slider, cx)
+                }),
+            )
+            .description(tr!(
+                "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
+            )),
+        )
         .item(
             SettingItem::new(
                 tr!("Thumb Wheel Sensitivity"),
                 SettingField::render(move |_, _, cx| {
-                    sensitivity_field(&sensitivity_slider, cx)
+                    thumbwheel_sensitivity_field(&thumbwheel_sensitivity_slider, cx)
                 }),
             )
             .description(tr!(
@@ -83,9 +116,32 @@ pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPa
         .group(group)
 }
 
-fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
+fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
-    let is_default = value == ThumbwheelSensitivity::DEFAULT;
+    sensitivity_field(
+        slider,
+        value.to_string(),
+        value == ThumbwheelSensitivity::DEFAULT,
+        cx,
+    )
+}
+
+fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = VerticalScrollSensitivity::from_rounded(slider.read(cx).value().start());
+    sensitivity_field(
+        slider,
+        value.to_string(),
+        value == VerticalScrollSensitivity::DEFAULT,
+        cx,
+    )
+}
+
+fn sensitivity_field(
+    slider: &Entity<SliderState>,
+    value: String,
+    is_default: bool,
+    cx: &mut App,
+) -> gpui::Div {
     let pal = theme::palette(cx);
     v_flex()
         .flex_shrink_0()
@@ -100,7 +156,7 @@ fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
                         .w(px(72.))
                         .text_body()
                         .text_color(pal.text_muted)
-                        .child(value.to_string()),
+                        .child(value),
                 ),
         )
         .when(is_default, |this| {
@@ -112,5 +168,4 @@ fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
                     .child(format!("({})", rust_i18n::t!("Default"))),
             )
         })
-        .into_any_element()
 }

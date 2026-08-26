@@ -5,16 +5,49 @@
 //! builders.
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement, Interactivity, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
     ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
     Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Disableable, Icon, IconName, Selectable, Sizable, Size, h_flex, switch::Switch, v_flex,
+    Disableable, Icon, IconName, Selectable, Sizable, Size, h_flex,
+    input::{Input, InputState},
+    searchable_list::SearchableListDelegate,
+    select::{Select, SelectState},
+    switch::Switch,
+    v_flex,
 };
 
 use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
+
+/// A gpui-component button at the house control height.
+///
+/// gpui-component's size ladder (20/24/32/44 px) has no step at the app's
+/// 30 px control rhythm, and this rev's custom `Size::Size` is broken for
+/// heights (`input_h` falls through to 24 px, and the text scales with the
+/// size). Standalone form controls therefore take `.small()` typography and
+/// pin [`theme::CONTROL_H`] explicitly — construct them through these
+/// helpers; a bare `.small()` on one is a bug. Ghost and link affordances,
+/// pills, and icon-only toggles stay on the stock ladder on purpose.
+pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button::Button {
+    gpui_component::button::Button::new(id)
+        .small()
+        .h(px(theme::CONTROL_H))
+}
+
+/// A single-line input at the house control height; see [`control_button`].
+/// Pins via `min_h` because the inherent `Input::h` is multi-line-only.
+pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
+    Input::new(state).small().min_h(px(theme::CONTROL_H))
+}
+
+/// A select trigger at the house control height; see [`control_button`].
+pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
+    state: &Entity<SelectState<D>>,
+) -> Select<D> {
+    Select::new(state).small().min_h(px(theme::CONTROL_H))
+}
 
 /// A controlled on/off switch with a compact state label.
 #[derive(IntoElement)]
@@ -165,10 +198,10 @@ impl RenderOnce for PanelCard {
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)
-            .p(theme::CARD_PAD)
+            .p(theme::CARD_PAD.rems())
             .child(
                 v_flex()
-                    .gap(theme::CARD_GAP)
+                    .gap(theme::CARD_GAP.rems())
                     .when(!self.title.is_empty(), |this| {
                         this.child(
                             h_flex()

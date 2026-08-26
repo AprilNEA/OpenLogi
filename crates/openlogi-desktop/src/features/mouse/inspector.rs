@@ -4,17 +4,13 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _,
-    button::Button,
-    h_flex,
-    input::{Input, InputState},
-    scroll::ScrollableElement as _,
-    v_flex,
+    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -23,10 +19,11 @@ use super::picker::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
 };
 use super::thumbwheel::ThumbwheelPreset;
-use super::view::{MouseModelView, localized_action_label};
+use super::view::MouseModelView;
 use crate::state::AppState;
-use crate::ui::components::MenuRow;
-use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::action::localized_action_label;
+use crate::ui::components::{MenuRow, control_button, control_input};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -52,9 +49,9 @@ pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     action_search: &Entity<InputState>,
     view: &Entity<MouseModelView>,
-    pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
+    let pal = theme::palette(cx);
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,
@@ -93,10 +90,9 @@ pub(super) fn binding_inspector(
                 .p_4()
                 .child(body),
         )
-        .into_any_element()
 }
 
-fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> AnyElement {
+fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui::Div {
     let summary = match (app, override_count) {
         (Some(app), 0) => tr!(
             "No overrides yet. Select a button to customize for %{app}.",
@@ -117,7 +113,6 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> An
         .gap_3()
         .child(inspector_heading(tr!("Button inspector"), None, pal))
         .child(div().text_body().text_color(pal.text_muted).child(summary))
-        .into_any_element()
 }
 
 fn button_inspector(
@@ -126,7 +121,7 @@ fn button_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let gesture_map = data.gesture_maps.get(&button);
     let overridden = data
         .overridden
@@ -174,8 +169,7 @@ fn button_inspector(
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
-                Button::new("inspector-use-default")
-                    .small()
+                control_button("inspector-use-default")
                     .w_full()
                     .icon(IconName::Undo)
                     .label(tr!("Use the default profile"))
@@ -196,8 +190,7 @@ fn button_inspector(
             |panel| {
                 let observer = picker.view.clone();
                 panel.child(
-                    Button::new("inspector-use-gestures")
-                        .small()
+                    control_button("inspector-use-gestures")
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
                         .label(tr!("Use gestures"))
@@ -223,7 +216,6 @@ fn button_inspector(
                 cx,
             ))
         })
-        .into_any_element()
 }
 
 fn inherited_gesture_inspector(
@@ -232,7 +224,7 @@ fn inherited_gesture_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::update_bindings(cx, |state| state.commit_binding(button, action));
@@ -277,7 +269,6 @@ fn inherited_gesture_inspector(
                 cx,
             ))
         })
-        .into_any_element()
 }
 
 fn gesture_inspector(
@@ -287,7 +278,7 @@ fn gesture_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> gpui::Div {
     let direction = selected_direction.unwrap_or(GestureDirection::Click);
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
@@ -318,8 +309,7 @@ fn gesture_inspector(
         ))
         .child(current_action_card(&current, picker, pal))
         .child(
-            Button::new("inspector-single-action")
-                .small()
+            control_button("inspector-single-action")
                 .w_full()
                 .label(tr!("Use a single action"))
                 .on_click(move |_, _, cx| {
@@ -342,7 +332,6 @@ fn gesture_inspector(
                 cx,
             ))
         })
-        .into_any_element()
 }
 
 fn gesture_directions(
@@ -351,7 +340,7 @@ fn gesture_directions(
     button: ButtonId,
     view: &Entity<MouseModelView>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     v_flex()
         .gap_1()
         .child(editor_section(tr!("Direction"), pal))
@@ -397,7 +386,6 @@ fn gesture_directions(
                         })
                 }),
         )
-        .into_any_element()
 }
 
 fn thumbwheel_inspector(
@@ -406,7 +394,7 @@ fn thumbwheel_inspector(
     overridden: Option<&BTreeMap<ButtonId, Action>>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> AnyElement {
+) -> gpui::Div {
     let backward = bindings
         .get(&ButtonId::ThumbwheelScrollDown)
         .cloned()
@@ -503,14 +491,13 @@ fn thumbwheel_inspector(
                     }),
             )
         })
-        .into_any_element()
 }
 
 fn inspector_heading(
     title: gpui::SharedString,
     status: Option<gpui::SharedString>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     v_flex()
         .gap_1()
         .child(div().text_heading().child(title))
@@ -520,14 +507,13 @@ fn inspector_heading(
                 .text_color(pal.text_muted)
                 .child(status)
         }))
-        .into_any_element()
 }
 
 fn current_action_card(
     action: &Action,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     selection_card(
         "inspector-current-action",
         tr!("Current action"),
@@ -538,7 +524,7 @@ fn current_action_card(
     )
 }
 
-fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> AnyElement {
+fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
         tr!("Current action"),
@@ -556,7 +542,7 @@ fn selection_card(
     value: gpui::SharedString,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> AnyElement {
+) -> impl IntoElement {
     let toggle = picker.view.clone();
     let search = picker.search.clone();
     let opening = !picker.open;
@@ -621,7 +607,6 @@ fn selection_card(
                 cx.notify();
             });
         })
-        .into_any_element()
 }
 
 fn action_library(
@@ -631,14 +616,14 @@ fn action_library(
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> AnyElement {
+) -> impl IntoElement {
     let query = action_search.read(cx).value();
     let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("Actions"), pal))
-        .child(Input::new(action_search).small().cleanable(true))
+        .child(control_input(action_search).cleanable(true))
         .child(
             v_flex()
                 .gap_0p5()
@@ -653,7 +638,6 @@ fn action_library(
                 })
                 .children(rows),
         )
-        .into_any_element()
 }
 
 fn gesture_action(

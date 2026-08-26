@@ -6,9 +6,10 @@
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px, rgb,
+    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{
     Selectable as _, h_flex,
     slider::{Slider, SliderEvent, SliderState},
@@ -115,10 +116,9 @@ impl Render for LightingPanel {
                 .update(cx, |slider, cx| slider.set_value(value, window, cx));
         }
 
-        let swatches: Vec<AnyElement> = PALETTE
+        let swatches: Vec<_> = PALETTE
             .iter()
-            .enumerate()
-            .map(|(idx, &color)| swatch(idx, color, &lighting, pal))
+            .map(|&color| swatch(color, &lighting, pal))
             .collect();
 
         v_flex()
@@ -173,10 +173,18 @@ impl Render for LightingPanel {
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
-fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
+fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
     let selected = current.enabled && current.color == color;
-    div()
-        .id(("light-swatch", idx))
+    BaseButton::new(("light-swatch", color.packed()))
+        .role(Role::RadioButton)
+        .selected(selected)
+        .accessibility_label(format!("{} #{:06X}", tr!("Lighting"), color.packed()))
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .aria_selected(selected)
         .size(px(SWATCH))
         .rounded(pal.control_radius)
         .border_2()
@@ -187,6 +195,7 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
         })
         .bg(rgb(color.packed()))
         .cursor_pointer()
+        .focus_visible(|style| style.border_color(theme::accent()))
         .on_click(move |_event, _window, cx| {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);
@@ -199,7 +208,6 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
                 }
             });
         })
-        .into_any_element()
 }
 
 /// Snap a raw slider read to a 0–100 brightness percent.

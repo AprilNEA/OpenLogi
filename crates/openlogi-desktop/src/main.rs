@@ -61,6 +61,12 @@ use crate::ui::theme;
 fn main() -> Result<()> {
     init_tracing();
 
+    #[cfg(debug_assertions)]
+    if std::env::var_os("OPENLOGI_COMPONENT_GALLERY").is_some_and(|value| value == "1") {
+        ui::gallery::run();
+        return Ok(());
+    }
+
     let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
         Ok(g) => g,
         Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {

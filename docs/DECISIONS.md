@@ -4,6 +4,43 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-08: Device settings are keyed by identity, not by transport
+
+A device's config key was derived from how it was reached, so the same mouse
+on a receiver and on a cable became two devices: two entries, two carousel
+cards, settings left behind on whichever link set them. The correlating value
+was already read on both paths and thrown away — `DeviceStableId::from_parts`
+took `serial` and `unit_id` and discarded both for receiver routes.
+
+- Keys are now `unit:<hex>` or `serial:<s>`, with a persisted `links` table
+  naming the routes the device has been seen on. That table is also the index
+  that identifies a sleeping device when only its route is known, which is why
+  it is stored rather than recomputed. It fixes a second bug in passing:
+  unpairing mouse A from a slot and pairing B into it no longer hands B all of
+  A's bindings, because the key is no longer the slot. Not retroactively,
+  though — a pre-upgrade config records nothing about which device wrote a slot
+  entry, so the first sighting after the upgrade still folds it into whatever
+  now occupies the slot. Only from that point on is the entry keyed by unit and
+  the slot empty.
+- A device whose unit id reads all-zero keeps its route key and never
+  correlates — degradation, not an assumption about hardware we cannot sample.
+- Capabilities are measured per link, because they genuinely differ per link:
+  a G502 LIGHTSPEED publishes `0x2121 HiResWheel` over its receiver and
+  `0x00c2 DfuControlSigned` over USB, same firmware image either way (#660).
+  The probe was never wrong; one device simply could not own both readings.
+  Each link's capabilities are rewritten from the sighting that reached it, so
+  the table describes the hardware rather than whatever a migration happened to
+  leave behind. Settings that disagree between links become per-link overrides
+  rather than one link overwriting the other.
+- Migration is two-phase because a v4 direct key carries the unit id in the key
+  string while a receiver key says nothing about the device: schema 4 → 5
+  renames direct keys mechanically at load, and receiver entries fold into
+  their canonical entry on the next online sighting. Until that sighting the
+  legacy entry stays orphaned. Closing that window at load time by matching
+  entries on identical `model_ids` was rejected — model ids are model-scoped,
+  so two identical mice, one on a receiver and one cabled, would merge into one
+  device. That is the property slot-keying protected, and it must not regress.
+
 ## 2026-08: Suppressions are `expect`, and tests are exempt by config
 
 A sweep of every lint suppression in the tree (207 attributes, 247 lints) found

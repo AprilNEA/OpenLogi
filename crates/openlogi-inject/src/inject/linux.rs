@@ -15,6 +15,20 @@ use zbus::blocking::Connection as DbusConn;
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::scroll::ScrollDelta;
+
+use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+
+const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
+
+#[derive(Default)]
+struct ScrollOutput {
+    high_resolution: ScrollQuantizer,
+    legacy: ScrollQuantizer,
+}
+
+static SCROLL_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
+    LazyLock::new(|| Mutex::new(ScrollOutput::default()));
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.
@@ -25,7 +39,7 @@ pub(super) fn execute(action: &Action) {
         // buttons ("back"/"forward") browsers handle natively.
         Effect::Click(button) => click(mouse_button_code(button)),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
-        Effect::Key(combo) => press_combo(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
@@ -101,6 +115,14 @@ fn press_combo(combo: &KeyCombo) {
         return;
     };
     press_key(&modifiers_to_keycodes(combo), key);
+}
+
+/// Emit one edge for the physical keys whose ownership changed.
+pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let keys: Vec<_> = keys.iter().filter_map(|key| held_keycode(*key)).collect();
+    if !keys.is_empty() {
+        emit(&held_key_events(&keys, phase));
+    }
 }
 
 /// MPRIS targets the running media player; XF86 volume keys go to the
@@ -274,7 +296,12 @@ fn build() -> io::Result<VirtualDevice> {
     // which can otherwise cause injected key/wheel events to be grabbed by
     // pointer-grabbing X11 clients or routed oddly by some Wayland compositors.
     let mut axes = AttributeSet::<RelativeAxisCode>::default();
-    for a in [RelativeAxisCode::REL_WHEEL, RelativeAxisCode::REL_HWHEEL] {
+    for a in [
+        RelativeAxisCode::REL_WHEEL,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+    ] {
         axes.insert(a);
     }
 
@@ -319,23 +346,32 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
 fn press_key(mods: &[KeyCode], key: KeyCode) {
-    // Down phase.
-    let mut down: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
-    for &m in mods {
-        down.push(key_ev(m, 1));
-    }
-    down.push(key_ev(key, 1));
-    down.push(syn());
-    emit(&down);
+    emit(&key_phase_events(mods, key, KeyPhase::Down));
+    emit(&key_phase_events(mods, key, KeyPhase::Up));
+}
 
-    // Up phase.
-    let mut up: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
-    up.push(key_ev(key, 0));
-    for &m in mods.iter().rev() {
-        up.push(key_ev(m, 0));
+/// Build one `SYN_REPORT` frame. Down order is modifiers then key; up order
+/// is the exact reverse so the ordinary key never escapes as an unmodified
+/// release.
+fn key_phase_events(mods: &[KeyCode], key: KeyCode, phase: KeyPhase) -> Vec<InputEvent> {
+    let mut keys = Vec::with_capacity(mods.len() + 1);
+    keys.extend_from_slice(mods);
+    keys.push(key);
+    held_key_events(&keys, phase)
+}
+
+fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
+    let mut events = Vec::with_capacity(keys.len() + 1);
+    match phase {
+        KeyPhase::Down => {
+            events.extend(keys.iter().map(|key| key_ev(*key, 1)));
+        }
+        KeyPhase::Up => {
+            events.extend(keys.iter().rev().map(|key| key_ev(*key, 0)));
+        }
     }
-    up.push(syn());
-    emit(&up);
+    events.push(syn());
+    events
 }
 
 /// Inject a button-down in one SYN frame and button-up in a second.
@@ -345,8 +381,56 @@ fn click(button: KeyCode) {
 }
 
 /// Inject a single relative-axis delta followed by `SYN_REPORT`.
-pub(super) fn scroll(axis: RelativeAxisCode, value: i32) {
+fn scroll(axis: RelativeAxisCode, value: i32) {
     emit(&[rel_ev(axis, value), syn()]);
+}
+
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Linux");
+        return;
+    };
+    let Ok(mut output) = SCROLL_OUTPUT.lock() else {
+        tracing::warn!("Linux scroll quantizer mutex poisoned");
+        return;
+    };
+    let high_resolution = output
+        .high_resolution
+        .quantize(delta, HIGH_RES_UNITS_PER_TICK);
+    let legacy = output.legacy.quantize(delta, 1.0);
+    drop(output);
+
+    let mut events = Vec::with_capacity(5);
+    push_scroll_axes(
+        &mut events,
+        high_resolution,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+    );
+    push_scroll_axes(
+        &mut events,
+        legacy,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL,
+    );
+    if !events.is_empty() {
+        events.push(syn());
+        emit(&events);
+    }
+}
+
+fn push_scroll_axes(
+    events: &mut Vec<InputEvent>,
+    delta: QuantizedScroll,
+    horizontal: RelativeAxisCode,
+    vertical: RelativeAxisCode,
+) {
+    if delta.x != 0 {
+        events.push(rel_ev(horizontal, delta.x));
+    }
+    if delta.y != 0 {
+        events.push(rel_ev(vertical, delta.y));
+    }
 }
 
 /// Force the virtual device to initialise (if it hasn't already) and return
@@ -387,6 +471,24 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
         modifiers.push(KeyCode::KEY_LEFTALT);
     }
     modifiers
+}
+
+fn held_keycode(key: HeldKey) -> Option<KeyCode> {
+    match key {
+        HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
+        HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
+        HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
+        HeldKey::Key(usage) => {
+            let key = hid_usage_to_linux(usage.code());
+            if key.is_none() {
+                tracing::warn!(
+                    usage = usage.code(),
+                    "held shortcut usage has no Linux mapping — edge ignored"
+                );
+            }
+            key
+        }
+    }
 }
 
 /// Map a platform-neutral USB HID keyboard usage to evdev.
@@ -611,7 +713,31 @@ mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, modifiers_to_keycodes};
+    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use crate::inject::KeyPhase;
+
+    #[test]
+    fn held_chord_edges_use_inverse_key_order() {
+        let modifiers = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT];
+        assert_eq!(
+            key_phase_events(&modifiers, KeyCode::KEY_P, KeyPhase::Down),
+            vec![
+                key_ev(KeyCode::KEY_LEFTCTRL, 1),
+                key_ev(KeyCode::KEY_LEFTSHIFT, 1),
+                key_ev(KeyCode::KEY_P, 1),
+                syn(),
+            ]
+        );
+        assert_eq!(
+            key_phase_events(&modifiers, KeyCode::KEY_P, KeyPhase::Up),
+            vec![
+                key_ev(KeyCode::KEY_P, 0),
+                key_ev(KeyCode::KEY_LEFTSHIFT, 0),
+                key_ev(KeyCode::KEY_LEFTCTRL, 0),
+                syn(),
+            ]
+        );
+    }
 
     #[test]
     fn modifiers_map_to_linux_without_duplicate_control() {

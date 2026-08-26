@@ -112,7 +112,7 @@ fn collect_receivers(state: &AppState) -> Vec<ReceiverDiag> {
 fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
     let inventories = state.last_inventory();
     state
-        .device_list
+        .devices()
         .iter()
         .map(|record| {
             let paired = find_paired(&record.model_key, inventories);
@@ -125,7 +125,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
-                dpi: dpi_summary(state.reads.dpi_load(&record.device_key()).cloned()),
+                dpi: dpi_summary(state.dpi_load_for(&record.device_key()).cloned()),
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),

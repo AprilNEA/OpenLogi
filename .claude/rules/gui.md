@@ -28,6 +28,15 @@ paths:
   surfaces) and gpui-component's `cx.theme()` (widget chrome). Only the `ThemeMode` is
   shared between them. A "white box under dark UI" or a surface that doesn't flip with
   the OS appearance is a ThemeMode wiring bug — fix that, not per-element `bg()`.
+- The same split exists for sizing: gpui-component's size ladder (xs 20 / sm 24 /
+  md 32 / lg 44 px) has no step at the app's 30 px control rhythm
+  (`theme::CONTROL_H`), and its custom `Size::Size` heights are broken (`input_h`
+  falls through to 24 px, text scales with the size). Build standalone form
+  controls — filled/outline buttons, single-line inputs, selects — with
+  `ui::components::{control_button, control_input, control_select}`, which take
+  `.small()` typography and pin `CONTROL_H`. A bare `.small()` on one of those is
+  the "squashed control" bug; ghost/link affordances, `.compact()` inline buttons,
+  pills, and icon-only toggles stay on the stock ladder deliberately.
 - Trait imports must be unconditional for cross-platform widgets: a
   `#[cfg(target_os = "macos")]`-gated `use gpui::StatefulInteractiveElement as _;`
   compiles fine locally but breaks the Linux/Windows CI jobs the moment an ungated
@@ -45,6 +54,9 @@ paths:
   a genuinely heterogeneous branch, collection, callback, or stored field requires
   `AnyElement`. Prefer one typed `.when()` / `.when_some()` / `.children()` pipeline to
   branching early and erasing each result.
+- Key dynamic `ElementId`s by a stable domain identity, not a filtered position or a
+  formatted display label. Derive reusable-component child IDs from the component's
+  caller-provided root ID so multiple instances cannot share focus or scroll state.
 - A view, entity, or app service owns every `Task` and `Subscription` whose work belongs
   to its lifetime. Use `.detach()` only for true process-lifetime work or bounded
   one-shots whose completion is safe after the initiating view disappears.

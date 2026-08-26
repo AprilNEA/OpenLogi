@@ -43,6 +43,9 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
+- `smooth_scroll` toggles finite animation for traditional mouse-wheel input
+- `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
+  continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
@@ -58,7 +61,8 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
-- `bindings`: a button maps either to one action or to a gesture-direction map.
+- `bindings`: a button maps to one action, an independent short/long action
+  pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
   stays inert unless bound here, because the wheel reports taps from incidental
   thumb contact as well as from deliberate ones
@@ -87,8 +91,29 @@ Payload actions use a one-key inline table:
 
 ```toml
 Back = { CustomShortcut = "Cmd+Shift+P" }
+Forward = { HoldShortcut = "Ctrl+Space" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
+DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
+
+`CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
+the chord down until the originating physical button is released, and also
+releases it if capture is interrupted, the binding becomes invalid, or the
+agent shuts down. Use it for push-to-talk and other hold-to-activate controls.
+
+A `{ short = ..., long = ... }` binding waits for the button's outcome instead
+of firing on press. Releasing before 500 ms fires `short`; keeping the button
+down for 500 ms fires `long` exactly once, and the later release does not also
+fire `short`. If capture is interrupted, the binding changes, or the agent
+shuts down before either outcome, neither action fires. A source that can only
+report an instantaneous button pulse falls back to `short`. `long` may itself
+be a `HoldShortcut`, in which case its chord stays down from the 500 ms
+threshold until the physical release.
+
+Long-press pairs currently apply to global device `bindings` and are authored
+in TOML. The GUI presents their `short` action; changing that button in the GUI
+replaces the whole pair with the selected single action. `per_app_bindings` and
+`keyboard.bindings` remain single-action maps.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

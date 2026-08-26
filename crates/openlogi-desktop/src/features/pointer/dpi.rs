@@ -140,7 +140,7 @@ impl DpiPanel {
                         debug!(%dpi, "slider change → AppState.dpi");
                         AppState::update(cx, |state, cx| {
                             let key = state.current_record().map(DeviceRecord::device_key);
-                            state.dpi = dpi;
+                            state.set_dpi_preview(dpi);
                             if let Some(key) = key {
                                 cx.emit(StateEvent::DpiChanged(key));
                             }
@@ -196,7 +196,7 @@ impl Render for DpiPanel {
         // Highlight at most one chip: when several presets snap to the same
         // supported value as the current DPI, only the first is "active".
         let mut already_highlighted = false;
-        let preset_chips: Vec<AnyElement> = snapshot
+        let preset_chips: Vec<_> = snapshot
             .presets
             .iter()
             .enumerate()
@@ -271,9 +271,9 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             let record = s.current_record()?;
             let device_key = record.device_key();
             Some(DpiPanelSnapshot {
-                status: s.reads.dpi_status(&device_key),
+                status: s.dpi_status_for(&device_key),
                 device_key,
-                dpi: s.dpi,
+                dpi: s.dpi(),
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
             })
@@ -359,7 +359,7 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> AnyElement {
+fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
     PresetChip::new(("dpi-preset-chip", idx))
         .selected(active)
@@ -409,11 +409,10 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> AnyElem
                     });
                 }),
         )
-        .into_any_element()
 }
 
 /// "+" chip that snapshots `AppState.dpi` as a new preset.
-fn add_preset_chip() -> AnyElement {
+fn add_preset_chip() -> impl IntoElement {
     Button::new("dpi-preset-add")
         .compact()
         .outline()
@@ -427,12 +426,11 @@ fn add_preset_chip() -> AnyElement {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);
                 let mut presets = state.dpi_presets();
-                presets.push(state.dpi);
+                presets.push(state.dpi());
                 state.commit_dpi_presets(presets);
                 if let Some(key) = key {
                     cx.emit(StateEvent::DpiChanged(key));
                 }
             });
         })
-        .into_any_element()
 }

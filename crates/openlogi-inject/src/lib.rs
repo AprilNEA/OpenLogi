@@ -2,7 +2,10 @@
 
 mod inject;
 
-pub use inject::{SYNTHETIC_EVENT_USER_DATA, ax_navigate_browser, execute, post_horizontal_scroll};
+pub use inject::{
+    SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute, post_scroll,
+    post_smooth_scroll, press_hold, release_hold, replace_hold,
+};
 
 #[cfg(target_os = "linux")]
 pub use inject::action_device_path;

@@ -5,7 +5,8 @@ use std::borrow::Borrow;
 /// Identifies one device across [`AppState`](super::AppState)'s per-device UI
 /// caches: the DPI/SmartShift query state
 /// ([`DeviceReads`](crate::services::device_reads::DeviceReads)) and the consolidated
-/// per-device row ([`DeviceUiState`](super::device_ui::DeviceUiState)).
+/// per-device row
+/// ([`DeviceRuntimeState`](super::device_runtime::DeviceRuntimeState)).
 ///
 /// Wraps a device's config key — see
 /// [`DeviceRecord::device_key`](super::devices::DeviceRecord::device_key) —

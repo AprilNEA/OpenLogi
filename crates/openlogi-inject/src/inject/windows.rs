@@ -2,6 +2,7 @@
 #![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
 use std::mem::size_of;
+use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -13,8 +14,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::scroll::ScrollDelta;
+
+use super::{HeldKey, KeyPhase, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
+const WHEEL_DELTA_F64: f64 = 120.0;
+
+static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -50,7 +58,7 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
-        Effect::Key(combo) => post_custom_shortcut(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => post_custom_shortcut(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
@@ -236,14 +244,28 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-pub(super) fn post_horizontal_scroll(delta: i32) {
-    if delta == 0 {
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Windows");
         return;
+    };
+    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
+        tracing::warn!("Windows scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, WHEEL_DELTA_F64);
+    drop(quantizer);
+
+    let mut inputs = Vec::with_capacity(2);
+    if delta.y != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
     }
-    send_inputs(&[mouse_input(
-        MOUSEEVENTF_HWHEEL,
-        delta.saturating_mul(WHEEL_DELTA),
-    )]);
+    if delta.x != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, delta.x));
+    }
+    if !inputs.is_empty() {
+        send_inputs(&inputs);
+    }
 }
 
 fn post_custom_shortcut(combo: &KeyCombo) {
@@ -256,6 +278,10 @@ fn post_custom_shortcut(combo: &KeyCombo) {
         return;
     };
 
+    post_key(vk, &combo_modifiers(combo));
+}
+
+fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
         modifiers.push(VK_CONTROL);
@@ -269,7 +295,39 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     if combo.has_option() {
         modifiers.push(VK_MENU);
     }
-    post_key(vk, &modifiers);
+    modifiers
+}
+
+/// Emit one edge for the physical keys whose ownership changed.
+pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let keys: Vec<_> = keys
+        .iter()
+        .filter_map(|key| held_virtual_key(*key))
+        .collect();
+    let key_up = phase == KeyPhase::Up;
+    let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
+    if key_up {
+        inputs.reverse();
+    }
+    send_inputs(&inputs);
+}
+
+fn held_virtual_key(key: HeldKey) -> Option<u16> {
+    match key {
+        HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::Shift => Some(VK_SHIFT),
+        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Key(usage) => {
+            let key = super::hid_usage_to_windows(usage.code());
+            if key.is_none() {
+                tracing::warn!(
+                    usage = usage.code(),
+                    "held shortcut usage has no Windows mapping — edge ignored"
+                );
+            }
+            key
+        }
+    }
 }
 
 fn send_inputs(inputs: &[INPUT]) {

@@ -8,8 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Keep rust-cache's environment hash aligned with CI.
+  # Keep Cargo/sccache inputs aligned with CI.
   RUSTFLAGS: "-D warnings"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_RW_MODE: READ_WRITE
 
 jobs:
   release-pr:
@@ -22,15 +25,19 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: linux-stable-debug
+          cache-targets: false
           save-if: false
       - name: Install Linux build deps
         run: |
@@ -54,7 +61,7 @@ jobs:
       # release-plz skips release=false app crates; git-cliff covers the whole repo.
       - name: Find current release PR
         id: open_release_pr
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -88,7 +95,7 @@ jobs:
         run: cargo build -p xtask
       - name: Check out release PR
         if: steps.open_release_pr.outputs.branch != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.open_release_pr.outputs.branch }}
           fetch-depth: 0
@@ -118,7 +125,7 @@ jobs:
       # OpenLogi's whole-repo changelog is the release PR body.
       - name: Replace release PR body with changelog
         if: steps.open_release_pr.outputs.number != ''
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_PR_NUMBER: ${{ steps.open_release_pr.outputs.number }}
         with:
@@ -159,20 +166,25 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      # Restore Cargo inputs before compiling the xtask that selects the
+      # version-bump commit. Compiler outputs come from sccache across commits.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: linux-stable-debug
+          cache-targets: false
+          save-if: false
       - name: Check out the version-bump commit
         id: release_commit
         run: cargo xtask release checkout-version-bump
-      - uses: Swatinem/rust-cache@v2
-        if: steps.release_commit.outputs.skip != 'true'
-        with:
-          prefix-key: v1-rust
-          shared-key: linux-stable-debug
-          save-if: false
       - name: Install Linux build deps
         if: steps.release_commit.outputs.skip != 'true'
         run: |

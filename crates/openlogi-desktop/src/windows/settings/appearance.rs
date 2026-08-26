@@ -1,18 +1,19 @@
 //! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
-use gpui::img;
+use gpui::{ElementId, img};
 use openlogi_core::config::AppIcon;
 
 use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
-    IconName, Input, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc,
-    SelectState, Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
-    SharedString, Sizable, StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor,
-    ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme,
-    v_flex,
+    IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
+    Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
+    StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
+    ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
 use crate::platform::app_icon;
+use crate::ui::choice_card::ChoiceCard;
+use crate::ui::components::control_input;
 use crate::ui::theme::Typography as _;
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
@@ -23,7 +24,6 @@ pub(super) fn appearance_page(
     filter: ThemeFilter,
     theme_search: Entity<InputState>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
-    pal: Palette,
 ) -> SettingPage {
     // Titled groups so the sidebar shows them as sub-items (gpui-component
     // renders a page's groups as nested sidebar entries once there's more than
@@ -33,7 +33,7 @@ pub(super) fn appearance_page(
         .item(
             SettingItem::new(
                 tr!("Appearance mode"),
-                SettingField::render(move |_, _, cx| mode_segment(pal, cx)),
+                SettingField::render(move |_, _, cx| mode_segment(cx)),
             )
             .layout(Axis::Vertical)
             .description(tr!(
@@ -44,7 +44,7 @@ pub(super) fn appearance_page(
             SettingItem::new(
                 tr!("Color theme"),
                 SettingField::render(move |_, _, cx| {
-                    theme_picker(&view, &theme_search, filter, pal, cx)
+                    theme_picker(&view, &theme_search, filter, cx)
                 }),
             )
             .layout(Axis::Vertical),
@@ -56,7 +56,7 @@ pub(super) fn appearance_page(
         theme_group = theme_group.item(
             SettingItem::new(
                 tr!("App icon"),
-                SettingField::render(move |_, _, cx| icon_picker(pal, cx)),
+                SettingField::render(move |_, _, cx| icon_picker(cx)),
             )
             .layout(Axis::Vertical)
             .description(tr!(
@@ -135,7 +135,8 @@ fn set_scale(cx: &mut App, scale: UiScale) {
 
 /// The Light / Dark / Follow-system appearance picker — three macOS-style
 /// preview thumbnails, each with a radio + label, mirroring System Settings.
-fn mode_segment(pal: Palette, cx: &App) -> gpui::Div {
+fn mode_segment(cx: &App) -> gpui::Div {
+    let pal = theme::palette(cx);
     let current = appearance_of(cx);
     let accent = cx.theme().primary;
     h_flex().gap_4().items_start().children([
@@ -221,11 +222,12 @@ fn mode_card(
             ),
         });
 
-    v_flex()
-        .id(id)
+    ChoiceCard::new(id, label.clone())
+        .selected(selected)
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
+        .focus_visible(move |style| style.text_color(pal.text_primary))
         .child(thumb)
         .child(
             h_flex()
@@ -240,7 +242,8 @@ fn mode_card(
 /// The app-icon picker: one card per icon, each showing a render of the
 /// compiled icon rather than its artwork, so the choice looks like what macOS
 /// will draw.
-fn icon_picker(pal: Palette, cx: &App) -> gpui::Div {
+fn icon_picker(cx: &App) -> gpui::Div {
+    let pal = theme::palette(cx);
     let current =
         AppState::try_read(cx).map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
     let accent = cx.theme().primary;
@@ -254,11 +257,12 @@ fn icon_picker(pal: Palette, cx: &App) -> gpui::Div {
 /// the app is wearing.
 fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
     let preview = app_icon::preview(icon);
-    v_flex()
-        .id(SharedString::from(icon.to_string()))
+    ChoiceCard::new(SharedString::from(icon.to_string()), icon_label(icon))
+        .selected(selected)
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
+        .focus_visible(move |style| style.text_color(pal.text_primary))
         .child(
             div()
                 .size(px(80.))
@@ -409,7 +413,7 @@ fn scale_segment(cx: &App) -> ButtonGroup {
     ButtonGroup::new("interface-scale")
         .outline()
         .children(UiScale::ALL.map(|scale| {
-            Button::new(format!("interface-scale-{}", scale.percent()))
+            Button::new(("interface-scale", u32::from(scale.percent())))
                 .label(format!("{}%", scale.percent()))
                 .selected(current == scale)
         }))
@@ -431,9 +435,9 @@ fn theme_picker(
     view: &Entity<SettingsView>,
     theme_search: &Entity<InputState>,
     filter: ThemeFilter,
-    pal: Palette,
     cx: &App,
 ) -> gpui::Div {
+    let pal = theme::palette(cx);
     let active = cx.theme().theme_name().clone();
     let query = theme_search.read(cx).value().trim().to_lowercase();
     // Collect just the preview colours per theme (small + `Copy`), so the 1.8 KB
@@ -472,15 +476,10 @@ fn theme_picker(
             grid.flex()
                 .flex_wrap()
                 .gap_2()
-                .children(
-                    themes
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (name, mode, swatch))| {
-                            let selected = name == active;
-                            theme_card(i, name, mode, swatch, selected, pal)
-                        }),
-                )
+                .children(themes.into_iter().map(|(name, mode, swatch)| {
+                    let selected = name == active;
+                    theme_card(name, mode, swatch, selected, pal)
+                }))
         });
 
     v_flex()
@@ -528,8 +527,7 @@ fn theme_picker(
                 )
                 .child(
                     div().w(px(200.)).flex_shrink_0().child(
-                        Input::new(theme_search)
-                            .small()
+                        control_input(theme_search)
                             .cleanable(true)
                             .prefix(IconName::Search),
                     ),
@@ -564,7 +562,6 @@ struct Swatch {
 }
 
 fn theme_card(
-    index: usize,
     name: SharedString,
     mode: ThemeMode,
     swatch: Swatch,
@@ -573,8 +570,8 @@ fn theme_card(
 ) -> impl IntoElement {
     let dark = mode.is_dark();
     let stored = name.clone();
-    v_flex()
-        .id(("theme", index))
+    ChoiceCard::new((ElementId::from("theme"), name.clone()), name.clone())
+        .selected(selected)
         .w(px(132.))
         .p(px(8.))
         .gap_2()
@@ -592,6 +589,7 @@ fn theme_card(
                 style.border_color(pal.text_muted)
             }
         })
+        .focus_visible(move |style| style.border_color(swatch.primary).shadow_sm())
         .active(gpui::Styled::shadow_2xs)
         .child(
             v_flex()
@@ -674,8 +672,8 @@ fn filter_chip(
 ) -> impl IntoElement {
     let selected = value == current;
     let view = view.clone();
-    div()
-        .id(id)
+    ChoiceCard::new(id, label.clone())
+        .selected(selected)
         .px_3()
         .py_1()
         .rounded_full()
@@ -690,6 +688,7 @@ fn filter_chip(
                 this.border_color(pal.border)
                     .text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
+                    .focus_visible(|h| h.border_color(pal.text_muted))
             }
         })
         .child(label)

@@ -1,14 +1,17 @@
 //! Device-list construction and selection helpers for [`super::AppState`].
 
-use std::collections::HashSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashSet};
 
 use openlogi_camera::Camera;
-use openlogi_core::config::{Config, DeviceIdentity};
+use openlogi_core::config::{Config, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, StandaloneDevice,
 };
-use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
+use openlogi_core::device_order::{
+    DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
+};
 use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
 
@@ -23,17 +26,33 @@ use crate::services::assets::{AssetResolver, ResolvedAsset};
 /// The `kind` / `slot` / `online` / `battery` fields mirror the source
 /// [`PairedDevice`](openlogi_core::device::PairedDevice) so the gallery can
 /// render straight from the device list — the list is the single source of
-/// truth for "which devices exist", keeping gallery order aligned with
-/// [`super::AppState::current_device`].
+/// truth for "which devices exist", keeping gallery order aligned with the
+/// active selection in [`super::device_store::DeviceStore`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
     /// Key used for persisted hardware settings. A serial-less camera uses a
     /// model-scoped key here, so use [`Self::record_key`] when one user-facing
     /// record must be distinguished from another.
     pub config_key: String,
-    /// Whether `config_key` is safe to write to configuration. False for a
-    /// direct/routeless all-zero unit identity.
+    /// The key this device's settings ultimately belong under — derived from
+    /// the device's own identity, not from the route it was reached on.
+    ///
+    /// Usually equal to [`Self::config_key`]. They differ for exactly as long
+    /// as the settings still live under a pre-schema-5 route key that the
+    /// load migration could not rename (`receiver:`, `raw:`): `config_key`
+    /// then names where they are *now* and this names where
+    /// [`Config::adopt_route`] will move them. `None` for a record with no
+    /// identity-derived key of its own — a camera, an offline placeholder, a
+    /// transient probe, the dev-only demo keyboard.
+    pub(crate) canonical_key: Option<String>,
+    /// Whether `config_key` identifies one physical device and may be written
+    /// to configuration. False for a direct/routeless all-zero unit identity.
     pub(crate) persistent: bool,
+    /// Key of the route this record was reached by — [`DeviceStableId::route_key`].
+    /// A record with no route of its own (a camera, an offline placeholder,
+    /// or the dev-only demo keyboard) repeats [`Self::config_key`] here
+    /// instead.
+    pub route_key: String,
     /// Stable model key used only for asset/model lookup and diagnostics.
     pub model_key: String,
     /// Hardware model name, unaffected by the user's per-device alias.
@@ -172,10 +191,17 @@ pub(super) fn build_device_list(
                 serial_number.as_deref(),
                 unit_id,
             );
-            let (config_key, persistent) = stable_id.physical_key().map_or_else(
-                || (stable_id.runtime_key(), false),
-                |key| (key.into_string(), true),
-            );
+            let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+            let (config_key, persistent) = config
+                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+                .map_or_else(
+                    || (stable_id.runtime_key(), false),
+                    |key| (key.into_string(), true),
+                );
+            let canonical_key =
+                canonical_device_key(&stable_id, paired.online.then_some(&identity))
+                    .map(PhysicalDeviceKey::into_string);
+            let route_key = stable_id.route_key();
 
             let display_name = asset
                 .as_ref()
@@ -185,7 +211,9 @@ pub(super) fn build_device_list(
             let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
+                canonical_key,
                 persistent,
+                route_key,
                 model_key,
                 model_name: display_name.clone(),
                 display_name,
@@ -207,7 +235,7 @@ pub(super) fn build_device_list(
             });
         }
     }
-    append_standalone(&mut list, standalone, cache);
+    append_standalone(&mut list, standalone, cache, config);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
@@ -222,6 +250,7 @@ pub(super) fn build_device_list(
         config.known_identities(),
         cache,
         &present_receivers,
+        config,
     );
     // Cameras are UVC, not HID++, so they come from a parallel discovery path
     // (AVFoundation on macOS) rather than the receiver inventory. The caller
@@ -261,12 +290,20 @@ fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
 /// [`DeviceModelInfo`] from the USB pid.
 fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
     let config_key = camera.config_key();
+    // Cameras are UVC, not HID++, so they carry no `DeviceStableId` route of
+    // their own — the config key doubles as the route key.
+    let route_key = config_key.clone();
     let model_info = camera_model_info(camera);
     let asset = cache.resolve(&model_info, Some(&camera.name));
     DeviceRecord {
         model_key: format!("{:04x}", camera.product_id),
         config_key,
+        // A camera is UVC, not HID++: it never resolves through
+        // `Config::resolve_device_key`, so it has no identity-derived key
+        // distinct from the one it already uses.
+        canonical_key: None,
         persistent: true,
+        route_key,
         model_name: camera.name.clone(),
         display_name: camera.name.clone(),
         asset,
@@ -305,6 +342,7 @@ fn append_standalone(
     list: &mut Vec<DeviceRecord>,
     devices: &[StandaloneDevice],
     cache: &AssetResolver,
+    config: &Config,
 ) {
     for device in devices {
         let route = Some(DeviceRoute::RawHid {
@@ -320,10 +358,16 @@ fn append_standalone(
             device.serial_number.as_deref(),
             device.unit_id,
         );
-        let (config_key, persistent) = stable_id.physical_key().map_or_else(
-            || (stable_id.runtime_key(), false),
-            |key| (key.into_string(), true),
-        );
+        let identity = RouteIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
+        let (config_key, persistent) = config
+            .resolve_device_key(&stable_id, device.online.then_some(&identity))
+            .map_or_else(
+                || (stable_id.runtime_key(), false),
+                |key| (key.into_string(), true),
+            );
+        let canonical_key = canonical_device_key(&stable_id, device.online.then_some(&identity))
+            .map(PhysicalDeviceKey::into_string);
+        let route_key = stable_id.route_key();
         let asset = device
             .registry_model_id
             .as_deref()
@@ -337,7 +381,9 @@ fn append_standalone(
             );
         list.push(DeviceRecord {
             config_key,
+            canonical_key,
             persistent,
+            route_key,
             // The registry id is presentation metadata, not a replacement for
             // the raw-device model identity used before registry integration.
             model_key: format!("raw:{:04x}", device.address.product_id),
@@ -369,9 +415,9 @@ fn append_standalone(
 /// physical identity:
 /// - an exact physical key match against a live record — the device is already
 ///   in the list;
-/// - a `receiver:` key whose receiver is not plugged in — its paired devices
-///   are unreachable until that receiver returns (e.g. the work receiver's
-///   mouse while at home);
+/// - every route the entry could be reached by names a receiver that is not
+///   plugged in — its paired devices are unreachable until that receiver
+///   returns (e.g. the work receiver's mouse while at home);
 /// - a historical direct/routeless all-zero unit key, which never identified a
 ///   physical device;
 /// - for legacy model-scoped keys only, a model/PID already visible live or as
@@ -382,6 +428,7 @@ fn append_offline_known<'a>(
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
     cache: &AssetResolver,
     present_receivers: &HashSet<String>,
+    config: &Config,
 ) {
     let mut present_keys: HashSet<String> = list
         .iter()
@@ -398,7 +445,7 @@ fn append_offline_known<'a>(
         if PhysicalDeviceKey::is_transient(key) {
             continue;
         }
-        if receiver_uid_of(key).is_some_and(|uid| !present_receivers.contains(&uid)) {
+        if entry_is_unreachable(key, config, present_receivers) {
             continue;
         }
         if present_keys.contains(key) {
@@ -437,9 +484,48 @@ fn receiver_uid_of(key: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// Whether every receiver-shaped route this entry could be reached by names a
+/// receiver that is not currently plugged in.
+///
+/// Checks the entry key itself — the legacy shape for a device never adopted
+/// since Task 6 (`migrate_transport_scoped_keys` deliberately leaves a
+/// `receiver:` key as-is; it is only folded into its transport-free entry at
+/// runtime by `Config::adopt_route`) — plus every route recorded in the
+/// entry's persisted `links` table, since an adopted device's entry key may
+/// now be its own identity (`unit:…`) rather than `receiver:<uid>:slot:<n>`.
+/// A device with no receiver-shaped route at all (never receiver-paired, or
+/// never adopted) is never considered unreachable by this check — nor is a
+/// device with a mix of routes, one of them a non-receiver (direct/raw) link:
+/// a recorded direct route might still reach it, so only an entry whose
+/// *every* route is receiver-shaped is judged by receiver presence alone.
+fn entry_is_unreachable(key: &str, config: &Config, present_receivers: &HashSet<String>) -> bool {
+    let linked_routes: Vec<&str> = config
+        .devices
+        .get(key)
+        .into_iter()
+        .flat_map(|device| device.links.keys().map(String::as_str))
+        .collect();
+    // A linked route that is not receiver-shaped (a direct/raw route) means
+    // the device might still be reachable that way, so its presence alone
+    // keeps the entry reachable regardless of any receiver-shaped route's
+    // presence — only when *every* linked route names a receiver does
+    // that receiver's absence matter.
+    if linked_routes
+        .iter()
+        .any(|route| receiver_uid_of(route).is_none())
+    {
+        return false;
+    }
+    let mut receiver_uids = std::iter::once(key)
+        .chain(linked_routes)
+        .filter_map(receiver_uid_of)
+        .peekable();
+    receiver_uids.peek().is_some() && receiver_uids.all(|uid| !present_receivers.contains(&uid))
+}
+
 /// The record's wire product id, used to suppress legacy same-model duplicate
 /// cards without conflating physical device keys.
-fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
+pub(super) fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
     match record.model_info.as_ref().map(|m| m.model_ids[0]) {
         Some(pid) if pid != 0 => Some(format!("{pid:04x}")),
         // A degenerate `model_ids[0] == 0` falls through to `None` (no PID dedup);
@@ -492,7 +578,12 @@ fn offline_record(
         );
     DeviceRecord {
         config_key: config_key.to_string(),
+        // Nothing was probed this session: the persisted key is all there is.
+        canonical_key: None,
         persistent: true,
+        // No live route: the offline placeholder was never reached on any
+        // particular route this session, so its route key is its config key.
+        route_key: config_key.to_string(),
         model_key,
         model_name: display_name.clone(),
         display_name,
@@ -545,7 +636,10 @@ pub(super) fn direct_key_prefix(key: &str) -> Option<&str> {
 pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -> DeviceRecord {
     DeviceRecord {
         config_key: known.config_key.clone(),
+        canonical_key: live.canonical_key.or_else(|| known.canonical_key.clone()),
         persistent: true,
+        // The live probe supplies the route this sighting came in on.
+        route_key: live.route_key,
         model_key: known.model_key.clone(),
         model_name: known.model_name.clone(),
         display_name: known.display_name.clone(),
@@ -571,6 +665,40 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         online: live.online,
         battery: live.battery.or_else(|| known.battery.clone()),
     }
+}
+
+/// Collapse records that resolve the same [`DeviceRecord::inventory_key`] into
+/// one, which is how a device sighted on two routes in the same snapshot
+/// becomes a single card.
+///
+/// **An online record always wins.** The surviving record carries the route
+/// every HID++ write goes to, so picking the sleeping one leaves the UI
+/// writing into a dead link while the device is in active use. Leaving that to
+/// sort order would be right only by luck: `sort_device_list` orders by
+/// [`DeviceStableId`], whose derived `Ord` puts `Bolt` before `Direct`, so the
+/// direct record wins whether or not it is the live one — right for the
+/// headline case (cable live, receiver asleep), wrong for an already-adopted
+/// but disconnected Bluetooth-direct node beside a live receiver link.
+///
+/// Between two records of equal liveness the later one in sort order wins, as
+/// it always has.
+pub(super) fn fold_by_inventory_key(
+    list: impl IntoIterator<Item = DeviceRecord>,
+) -> BTreeMap<String, DeviceRecord> {
+    let mut by_key: BTreeMap<String, DeviceRecord> = BTreeMap::new();
+    for record in list {
+        match by_key.entry(record.inventory_key()) {
+            Entry::Vacant(slot) => {
+                slot.insert(record);
+            }
+            Entry::Occupied(mut slot) => {
+                if record.online || !slot.get().online {
+                    slot.insert(record);
+                }
+            }
+        }
+    }
+    by_key
 }
 
 /// Order the gallery by physical route. HID enumeration order can change as
@@ -603,7 +731,9 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
 fn demo_keyboard() -> DeviceRecord {
     DeviceRecord {
         config_key: "demo-g513".to_string(),
+        canonical_key: None,
         persistent: true,
+        route_key: "demo-g513".to_string(),
         model_key: "demo-g513".to_string(),
         model_name: "Logitech G513".to_string(),
         display_name: "Logitech G513".to_string(),
@@ -698,7 +828,7 @@ fn prettify_codename(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::config::Config;
+    use openlogi_core::config::{Config, DeviceConfig, LinkConfig};
     use openlogi_core::device::{
         DeviceInventory, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
     };
@@ -710,8 +840,10 @@ mod tests {
     use super::{
         Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
         DeviceTransports, append_offline_known, build_device_list, direct_key_prefix,
-        effective_kind, offline_record, pick_initial_device,
+        effective_kind, fold_by_inventory_key, offline_record, pick_initial_device,
     };
+    use crate::state::inventory::adopt_routes;
+    use openlogi_core::hid::Dpi;
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
         PairedDevice {
@@ -759,10 +891,99 @@ mod tests {
         }
     }
 
+    /// The same mouse, paired to a Bolt receiver — reachable by receiver UID
+    /// and slot. Shares `unit_id` and `online: true` with [`cabled_inventory`]
+    /// so both routes resolve to the same physical device.
+    fn receiver_inventory() -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Bolt Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("82839805".into()),
+            },
+            paired: vec![PairedDevice {
+                slot: 1,
+                codename: Some("MX Master 3S".into()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [0x6b, 0xe9, 0xd3, 0x00],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            }],
+        }
+    }
+
+    /// The same mouse, attached directly over a cable — reachable by its own
+    /// vendor/product id. Shares `unit_id` and `online: true` with
+    /// [`receiver_inventory`] so both routes resolve to the same physical
+    /// device.
+    fn cabled_inventory() -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "MX Master 3S".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc08d,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
+                codename: Some("MX Master 3S".into()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [0x6b, 0xe9, 0xd3, 0x00],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xc08d, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            }],
+        }
+    }
+
+    /// Build the device list and fold it the way
+    /// [`super::super::AppState::merge_inventory_snapshot`] does on every
+    /// refresh. This calls the real [`fold_by_inventory_key`] that method
+    /// uses, so the two cannot drift; the rest of that method (transient
+    /// adoption, miss grace, prior-selection carry-over) is deliberately not
+    /// reproduced. Folding alone is enough to prove [`build_device_list`]
+    /// resolves one config key for a device sighted on two routes in the same
+    /// snapshot.
+    fn records_from(config: &Config, inventories: &[DeviceInventory]) -> Vec<DeviceRecord> {
+        let cache = AssetResolver::new();
+        let list = build_device_list(inventories, &[], &cache, config, &[]);
+        fold_by_inventory_key(list).into_values().collect()
+    }
+
+    #[test]
+    fn one_mouse_on_two_routes_is_one_record() {
+        // The user-visible symptom: the same mouse listed twice, once offline
+        // on its receiver and once live on the cable.
+        let config = Config::default();
+        let records = records_from(&config, &[receiver_inventory(), cabled_inventory()]);
+        assert_eq!(records.len(), 1, "got {records:#?}");
+        assert_eq!(records[0].config_key, "unit:6be9d300");
+    }
+
     fn online_record(key: &str) -> DeviceRecord {
         DeviceRecord {
             config_key: key.to_string(),
+            canonical_key: None,
             persistent: true,
+            route_key: key.to_string(),
             model_key: key.to_string(),
             model_name: format!("live {key}"),
             display_name: format!("live {key}"),
@@ -782,6 +1003,85 @@ mod tests {
             online: true,
             battery: None,
         }
+    }
+
+    #[test]
+    fn folding_two_records_of_one_device_keeps_the_online_one() {
+        // The surviving record carries the route every HID++ write goes to.
+        // Picking the sleeping one writes into a dead link while the device is
+        // in active use — and the UI shows it offline while the user is using
+        // it. Insertion order must not decide this, so both are tried.
+        for live_first in [true, false] {
+            let live = online_record("unit:6be9d300");
+            let mut asleep = online_record("unit:6be9d300");
+            asleep.online = false;
+            asleep.route_key = "direct:046d:c08d".to_string();
+            let list = if live_first {
+                vec![live, asleep]
+            } else {
+                vec![asleep, live]
+            };
+
+            let folded = fold_by_inventory_key(list);
+            let record = &folded["unit:6be9d300"];
+            assert!(record.online, "live_first = {live_first}");
+            assert_eq!(
+                record.route_key, "unit:6be9d300",
+                "the live record's route survives, live_first = {live_first}"
+            );
+        }
+    }
+
+    fn receiver_only_config() -> Config {
+        let mut config = Config::default();
+        config
+            .devices
+            .entry("receiver:82839805:slot:1".to_string())
+            .or_default()
+            .dpi = Some(Dpi::new(3200));
+        config
+    }
+
+    #[test]
+    fn a_receiver_paired_device_still_reads_its_pre_upgrade_entry() {
+        // Straight after the schema-5 upgrade the settings are under the
+        // receiver key the migration deliberately left alone, and only the
+        // GUI ever folds them. Until it does, that key is the answer.
+        let config = receiver_only_config();
+        let records = records_from(&config, &[receiver_inventory()]);
+        assert_eq!(records.len(), 1, "got {records:#?}");
+        assert_eq!(records[0].config_key, "receiver:82839805:slot:1");
+        assert_eq!(
+            records[0].canonical_key.as_deref(),
+            Some("unit:6be9d300"),
+            "the fold target is known even while the settings are elsewhere"
+        );
+    }
+
+    #[test]
+    fn adoption_folds_the_pre_upgrade_entry_and_converges() {
+        // Adoption keys off the record's canonical key, not its current
+        // `config_key`. Folding onto `config_key` would fold the legacy entry
+        // onto itself and nothing would ever move.
+        let mut config = receiver_only_config();
+        let cache = AssetResolver::new();
+        let list = build_device_list(&[receiver_inventory()], &[], &cache, &config, &[]);
+        assert!(adopt_routes(&mut config, &list), "the fold is a change");
+
+        assert_eq!(
+            config.devices["unit:6be9d300"].dpi,
+            Some(Dpi::new(3200)),
+            "the DPI moved to the identity key"
+        );
+        assert!(
+            !config.devices.contains_key("receiver:82839805:slot:1"),
+            "the legacy entry is consumed"
+        );
+        let list = build_device_list(&[receiver_inventory()], &[], &cache, &config, &[]);
+        assert_eq!(
+            list[0].config_key, "unit:6be9d300",
+            "the next build reads the canonical key"
+        );
     }
 
     fn mouse_identity(name: &str) -> DeviceIdentity {
@@ -839,7 +1139,9 @@ mod tests {
         assert_eq!(list[0].driver_id.as_deref(), Some("litra"));
         assert_eq!(list[0].registry_model_id.as_deref(), Some("8c901"));
         assert_eq!(list[0].model_key, "raw:c901");
-        assert_eq!(list[0].config_key, "raw:046d:c901:ff43:0202:serial:beam-1");
+        // Online with a known serial: the device's own identity resolves the
+        // key, transport-free — not the route-embedded `raw:…` runtime key.
+        assert_eq!(list[0].config_key, "serial:beam-1");
         assert!(list[0].asset.is_none());
     }
 
@@ -944,6 +1246,7 @@ mod tests {
             [("A", &a), ("B", &b)].into_iter(),
             &cache,
             &HashSet::new(),
+            &Config::default(),
         );
 
         assert_eq!(list.len(), 2);
@@ -996,6 +1299,7 @@ mod tests {
             [("direct:046d:b023:unit:00000000", &id)].into_iter(),
             &cache,
             &HashSet::new(),
+            &Config::default(),
         );
 
         assert!(list.is_empty());
@@ -1018,6 +1322,7 @@ mod tests {
             .into_iter(),
             &cache,
             &HashSet::new(),
+            &Config::default(),
         );
 
         assert_eq!(list.len(), 2);
@@ -1048,6 +1353,7 @@ mod tests {
             [("receiver:aabb:slot:1", &id)].into_iter(),
             &cache,
             &HashSet::new(),
+            &Config::default(),
         );
         assert!(list.is_empty());
         append_offline_known(
@@ -1055,8 +1361,78 @@ mod tests {
             [("receiver:aabb:slot:1", &id)].into_iter(),
             &cache,
             &HashSet::from(["aabb".to_string()]),
+            &Config::default(),
         );
         assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn adopted_placeholder_is_hidden_when_its_linked_receiver_is_absent() {
+        // Once a Bolt device is adopted its entry key becomes its own
+        // identity (`unit:…`), not `receiver:<uid>:slot:<n>` — reachability
+        // must be resolved through the entry's `links`, not its key, or the
+        // work receiver's mouse haunts the list at home again.
+        let mut config = Config::default();
+        let mut device = DeviceConfig::default();
+        device
+            .links
+            .insert("receiver:aabb:slot:1".to_string(), LinkConfig::default());
+        config.devices.insert("unit:6be9d300".to_string(), device);
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+
+        let mut list = Vec::new();
+        append_offline_known(
+            &mut list,
+            [("unit:6be9d300", &id)].into_iter(),
+            &cache,
+            &HashSet::new(),
+            &config,
+        );
+        assert!(list.is_empty());
+
+        append_offline_known(
+            &mut list,
+            [("unit:6be9d300", &id)].into_iter(),
+            &cache,
+            &HashSet::from(["aabb".to_string()]),
+            &config,
+        );
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn adopted_placeholder_stays_visible_with_a_non_receiver_link_too() {
+        // A device seen both over a receiver and directly by cable is not
+        // unreachable just because its receiver link's receiver is absent —
+        // the recorded direct route might still reach it. Hiding the card
+        // would dent the very "a sleeping device never drops out of the
+        // list" invariant this function exists to uphold.
+        let mut config = Config::default();
+        let mut device = DeviceConfig::default();
+        device
+            .links
+            .insert("receiver:aabb:slot:1".to_string(), LinkConfig::default());
+        device
+            .links
+            .insert("direct:046d:c08d".to_string(), LinkConfig::default());
+        config.devices.insert("unit:cafebabe".to_string(), device);
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+
+        let mut list = Vec::new();
+        append_offline_known(
+            &mut list,
+            [("unit:cafebabe", &id)].into_iter(),
+            &cache,
+            &HashSet::new(),
+            &config,
+        );
+        assert_eq!(
+            list.len(),
+            1,
+            "a recorded direct link keeps the entry reachable even though its receiver link's receiver is absent"
+        );
     }
 
     #[test]
@@ -1075,6 +1451,7 @@ mod tests {
             [("0b034", &id)].into_iter(),
             &cache,
             &HashSet::new(),
+            &Config::default(),
         );
         assert_eq!(list.len(), 1);
     }
@@ -1092,6 +1469,7 @@ mod tests {
             [("0b034", &id_a), ("2b034", &id_b)].into_iter(),
             &cache,
             &HashSet::new(),
+            &Config::default(),
         );
         assert_eq!(list.len(), 1);
     }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 mod device;
 #[cfg(feature = "fs")]
 mod file;
+mod identity;
 mod key_trigger;
 mod settings;
 
@@ -22,29 +23,43 @@ mod settings;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity};
+pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
+pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
     Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity, UiScale, WheelMode,
+    SmartShift, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
     RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
+use crate::device_order::PhysicalDeviceKey;
 use crate::hid::Dpi;
 #[cfg(feature = "fs")]
 use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
+///
+/// v5 also drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
+/// names the mouse *and the cable it was plugged into*, so a device moved to a
+/// different route was silently orphaned from its settings.
+/// [`Config::migrate_transport_scoped_keys`] rewrites such a key to its bare
+/// identity fragment (`unit:6be9d300`) — including `selected_device` and every
+/// `host_switch_targets` entry — and keeps the dropped route as a
+/// [`DeviceConfig::links`] entry. `receiver:` keys are left alone: nothing on
+/// disk says which device occupies a pairing slot, so those are folded at
+/// runtime instead, on the next online sighting (see `adopt_route`).
 ///
 /// v5 adds the app-wide `ui_scale` preference. Older files default to the
 /// standard 100% scale.
@@ -71,7 +86,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,10 +252,11 @@ impl Config {
         {
             return Some(*id);
         }
-        // A dedicated HID++ gesture button explicitly demoted to a single action means gestures off.
+        // A dedicated HID++ gesture button explicitly assigned non-gesture
+        // behavior means gestures were off.
         if matches!(
             bindings.get(&ButtonId::GestureButton),
-            Some(Binding::Single(_))
+            Some(Binding::Single(_) | Binding::LongPress(_))
         ) {
             return None;
         }
@@ -411,6 +427,91 @@ impl Config {
                     .bindings
                     .entry(ButtonId::GestureButton)
                     .or_insert_with(|| Binding::Single(default_binding(ButtonId::GestureButton)));
+            }
+        }
+    }
+
+    /// Rewrite v4 transport-scoped direct keys to identity keys.
+    ///
+    /// `direct:046d:c08d:unit:6be9d300` names one mouse *and the cable it was
+    /// plugged into*; `unit:6be9d300` names the mouse. The route it came from
+    /// is kept as a link so the index survives the rename. Receiver keys are
+    /// left alone — nothing on disk says which device is in a pairing slot, so
+    /// they are folded at runtime instead (see `adopt_route`).
+    ///
+    /// A `direct:` key can appear three ways: as a device's own map key, as
+    /// `selected_device`, or inside another device's `host_switch_targets` —
+    /// and the last of those can name a device with no `[devices.…]` table of
+    /// its own (nothing but the reference survives). The rename is computed
+    /// once over every occurrence so all three are rewritten consistently,
+    /// not just the ones that also own a device entry.
+    ///
+    /// Two entries can rename onto the same key — one mouse reached over both
+    /// USB and Bluetooth-direct has a v4 entry per route — so the second one
+    /// is folded in rather than inserted over the first. That is the one case
+    /// where this pass would otherwise not be lossless.
+    pub fn migrate_transport_scoped_keys(&mut self) {
+        // A v4 direct key is `direct:<vid>:<pid>:<identity-kind>:<identity>`.
+        // Splitting off the two leading id fields recovers the route to keep
+        // and the identity fragment that becomes the new key.
+        let parse_rename = |key: &str| -> Option<(String, String)> {
+            let rest = key.strip_prefix("direct:")?;
+            let mut parts = rest.splitn(3, ':');
+            let vendor = parts.next()?;
+            let product = parts.next()?;
+            let identity = parts.next()?;
+            PhysicalDeviceKey::parse(identity)?;
+            Some((identity.to_string(), format!("direct:{vendor}:{product}")))
+        };
+
+        let renames: BTreeMap<String, (String, String)> = self
+            .devices
+            .keys()
+            .cloned()
+            .chain(self.selected_device.iter().cloned())
+            .chain(
+                self.devices
+                    .values()
+                    .flat_map(|device| device.host_switch_targets.iter().cloned()),
+            )
+            .filter_map(|key| {
+                let renamed = parse_rename(&key)?;
+                Some((key, renamed))
+            })
+            .collect();
+
+        for (old, (new, route)) in &renames {
+            let Some(mut device) = self.devices.remove(old) else {
+                continue;
+            };
+            device.links.entry(route.clone()).or_default();
+            // One device reached on two direct routes — an MX Master 3S over
+            // USB and over Bluetooth-direct — has two v4 entries that rename
+            // to the same identity key. Inserting would drop whichever lost
+            // the `BTreeMap` ordering, bindings and all; folding is what
+            // makes this phase lossless, and it is the same merge adoption
+            // performs at runtime, so the second entry's disagreements land
+            // as overrides on the route they were set for.
+            match self.devices.get_mut(new) {
+                Some(existing) => identity::fold(existing, device, route),
+                None => {
+                    self.devices.insert(new.clone(), device);
+                }
+            }
+        }
+        if let Some(new) = self
+            .selected_device
+            .as_deref()
+            .and_then(|old| renames.get(old))
+            .map(|(new, _)| new.clone())
+        {
+            self.selected_device = Some(new);
+        }
+        for device in self.devices.values_mut() {
+            for target in &mut device.host_switch_targets {
+                if let Some((new, _)) = renames.get(target) {
+                    *target = new.clone();
+                }
             }
         }
     }
@@ -616,6 +717,12 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .identity = Some(identity.without_unit_identifiers());
+    }
+
+    /// Drop everything recorded for `device_key` — identity, custom name, and
+    /// per-device settings. Returns whether an entry existed.
+    pub fn remove_device(&mut self, device_key: &str) -> bool {
+        self.devices.remove(device_key).is_some()
     }
 
     /// The user-assigned name for `device_key`, if one is configured.

@@ -1,7 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
-use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
+use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
@@ -144,11 +144,42 @@ fn fail_open_press_pairs_release() {
 }
 
 #[test]
+fn rejected_key_edges_fail_open() {
+    assert_eq!(queued_event_disposition(true), EventDisposition::Suppress);
+    assert_eq!(
+        queued_event_disposition(false),
+        EventDisposition::PassThrough
+    );
+}
+
+#[test]
+fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads() {
+    let logitech = EventDevice {
+        vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+        product_name: Some("Logitech MX Master".to_string()),
+        ..EventDevice::default()
+    };
+    let trackpad = EventDevice {
+        product_name: Some("Magic Trackpad".to_string()),
+        ..EventDevice::default()
+    };
+
+    assert!(scroll_source_may_intercept(false, Some(&logitech)));
+    assert!(!scroll_source_may_intercept(true, Some(&logitech)));
+    assert!(!scroll_source_may_intercept(false, Some(&trackpad)));
+    assert_eq!(
+        scroll_source_may_intercept(false, None),
+        !cfg!(target_os = "macos"),
+        "only macOS requires callback-time device attribution"
+    );
+}
+
+#[test]
 fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
     let maps = HookMaps {
         bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
+            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
         ]),
         gestures: BTreeMap::new(),
     };
@@ -169,17 +200,26 @@ fn native_thumbwheel_scroll_stays_os_native() {
         bindings: BTreeMap::from([
             (
                 ButtonId::ThumbwheelScrollUp,
-                default_binding(ButtonId::ThumbwheelScrollUp),
+                default_binding(ButtonId::ThumbwheelScrollUp).into(),
             ),
             (
                 ButtonId::ThumbwheelScrollDown,
-                default_binding(ButtonId::ThumbwheelScrollDown),
+                default_binding(ButtonId::ThumbwheelScrollDown).into(),
             ),
         ]),
         gestures: BTreeMap::new(),
     };
     assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
     assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
+}
+
+#[test]
+fn long_press_never_passes_through_as_a_native_click() {
+    let binding = Binding::LongPress(LongPressBinding::new(
+        default_binding(ButtonId::Back),
+        Action::MissionControl,
+    ));
+    assert!(!binding_is_native_click(ButtonId::Back, &binding));
 }
 
 #[test]

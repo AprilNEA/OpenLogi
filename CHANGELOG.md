@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-25
+
+### Added
+
+- *(agent)* dispatch independent long-press actions ([#961](https://github.com/AprilNEA/OpenLogi/pull/961))
+- *(gui)* expose smooth scroll control
+- *(gui)* persist smooth scroll setting
+- *(gui)* add vertical scroll sensitivity control
+- *(agent)* apply vertical wheel sensitivity
+- *(core)* add vertical scroll sensitivity setting
+- *(gui)* rework the card corners and add a device action menu
+- *(gui)* articulate the app picker's catalog section
+- *(agent)* smooth diverted thumbwheel input
+- *(agent)* smooth physical wheel input
+- *(agent)* add finite smooth scroll runtime
+- *(inject)* add phased smooth scroll output
+- *(core)* add smooth scroll preference
+- *(inject)* preserve fractional wheel output
+- *(gui)* add polished battery indicator ([#983](https://github.com/AprilNEA/OpenLogi/pull/983))
+- *(gui)* add installed application catalog picker ([#976](https://github.com/AprilNEA/OpenLogi/pull/976))
+- *(agent)* hold shortcut output until button release
+- *(gui)* add debug component gallery
+- *(gui)* add switchable device gallery views
+- *(gui)* replace device carousel with responsive grid
+- *(core)* persist custom device names
+- *(i18n)* add Turkish (tr) interface locale ([#835](https://github.com/AprilNEA/OpenLogi/pull/835))
+- *(agent)* unify button lifecycle
+- *(gui)* add scalable interface presets
+- *(gui)* make custom controls keyboard-operable ([#916](https://github.com/AprilNEA/OpenLogi/pull/916))
+- *(gui)* redesign device configuration workspace
+- *(gui)* edit per-app button profiles
+- *(gui)* give the binding panels an editing scope
+- *(core)* expose the per-app overlays an editor needs
+- *(gui)* show which per-app profile is in effect
+- *(ipc)* report the foreground application in the agent snapshot
+- *(core)* add the foreground-application type
+- *(core,gui)* make the main wheel's tilt rebindable (MX anywhere 2s,...) ([#902](https://github.com/AprilNEA/OpenLogi/pull/902))
+
+### Changed
+
+- *(agent)* park idle scroll worker
+
+### Fixed
+
+- *(hid)* preserve diverted wheel reporting ([#992](https://github.com/AprilNEA/OpenLogi/pull/992))
+- *(core,gui,agent)* key device settings by identity, not by transport ([#876](https://github.com/AprilNEA/OpenLogi/pull/876))
+- *(gui)* type permission badge elements
+- *(gui)* close macos render lifetime
+- *(gui)* restore rejected scroll sensitivity
+- *(gui)* fail closed when forgetting a device cannot be saved
+- *(gui)* pin small form controls to the 30 px control height
+- *(gui)* drop popover chrome behind the app picker panel
+- *(gui)* resolve app icons asynchronously as raw bitmaps
+- *(agent)* keep saturated scroll cancellation source-local
+- *(agent)* balance concurrent scroll phases
+- *(agent)* preserve fractional thumbwheel distance
+- *(macos)* preserve fractional wheel deltas
+- *(thumbwheel)* scale remapped vertical scrolling ([#925](https://github.com/AprilNEA/OpenLogi/pull/925))
+- *(macos)* retain shared held-key ownership
+- *(hook)* fail open rejected key releases
+- *(agent)* preserve held shortcut lifecycles
+- *(gui)* remove stale macos trait imports
+- *(gui)* make custom controls keyboard accessible
+- *(infra)* speed up orb setup
+- *(i18n)* add Turkish device gallery strings
+- *(gui)* distinguish same-model cameras
+- *(gui)* keep pointer card widths consistent
+- *(gui)* wait for SmartShift confirmation
+- *(hidpp)* read Unifying link encryption from bit 5, not the software-present bit ([#924](https://github.com/AprilNEA/OpenLogi/pull/924))
+- show Windows MSI completion and failure state ([#819](https://github.com/AprilNEA/OpenLogi/pull/819))
+- *(hid)* preserve usage pairs in native handle cache ([#882](https://github.com/AprilNEA/OpenLogi/pull/882))
+- *(macos)* use reliable async-hid report writes ([#889](https://github.com/AprilNEA/OpenLogi/pull/889))
+- *(gui)* adapt profile editors to state events
+- *(gui)* let device summary text fill its row
+- *(gui)* apply semantic colors to custom controls
+- *(gui)* avoid reentering mouse view during render
+- *(hid)* skip the arrival retry on a receiver with no pairings
+- *(hid)* settle a failed notification-flag write as a failed probe
+- *(hid)* honor the arrival event's link status in the Unifying slot probe
+- *(hidpp)* correct 0x41 re-broadcast semantics and expose decoding
+- *(hid)* trust live Unifying arrival events
+- *(hid)* fail fast on unresponsive receivers
+- *(macos)* honor XDG state dir in permission diagnostics ([#915](https://github.com/AprilNEA/OpenLogi/pull/915))
+- *(gui)* restore full-phrase thumb-wheel preset labels ([#913](https://github.com/AprilNEA/OpenLogi/pull/913))
+- *(linux)* restore glibc 2.35 package baseline ([#911](https://github.com/AprilNEA/OpenLogi/pull/911))
+- *(mouse)* compose thumb-wheel preset labels from translated action names ([#910](https://github.com/AprilNEA/OpenLogi/pull/910))
+- *(gui)* update app state through sync context
+- *(gui)* recognize mx ergo wheel tilt metadata ([#905](https://github.com/AprilNEA/OpenLogi/pull/905))
+- *(linux)* install the app icon at every indexed hicolor size ([#837](https://github.com/AprilNEA/OpenLogi/pull/837))
+
 ## [0.7.10] - 2026-08-23
 
 ### Fixed
