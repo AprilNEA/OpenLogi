@@ -15,10 +15,10 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
-/// Minimum time a gesture button must be held before its travel can commit to a
-/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
-/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Middle/Back/Forward).
+/// Historical and default click-versus-swipe gate.
+///
+/// New accumulators use a per-control [`GestureResponseTime`]; this value is the
+/// compatibility-preserving [`GestureResponseTime::BALANCED`] duration.
 pub const GESTURE_HOLD_FOR_SWIPE: Duration = Duration::from_millis(160);
 
 const GESTURE_RESPONSE_MIN_MS: u16 = 80;
@@ -30,9 +30,9 @@ const GESTURE_RESPONSE_DELIBERATE_MS: u16 = 200;
 /// Per-control click-versus-swipe timing in milliseconds.
 ///
 /// The bounded numeric value supports three approachable presets while still
-/// allowing advanced users to set a custom value in `config.toml`. The 160 ms
-/// default preserves OpenLogi's established behavior; lower values react
-/// sooner and higher values filter more click-time pointer drift.
+/// allowing advanced users to set a custom value in `config.toml`. The default
+/// preserves OpenLogi's established behavior; lower values react sooner and
+/// higher values filter more click-time pointer drift.
 #[nutype(
     const_fn,
     validate(
@@ -57,7 +57,7 @@ const GESTURE_RESPONSE_DELIBERATE_MS: u16 = 200;
 pub struct GestureResponseTime(u16);
 
 impl GestureResponseTime {
-    /// Fast preset, hardware-validated on an MX Master 4 Haptic Panel.
+    /// Fast response preset.
     pub const FAST: Self = match Self::try_new(GESTURE_RESPONSE_FAST_MS) {
         Ok(value) => value,
         Err(_) => panic!("valid fast gesture response time"),
@@ -67,7 +67,8 @@ impl GestureResponseTime {
         Ok(value) => value,
         Err(_) => panic!("valid balanced gesture response time"),
     };
-    /// Preset that most strongly filters accidental click-time motion.
+    /// Deliberate preset, which most strongly filters accidental click-time
+    /// motion.
     pub const DELIBERATE: Self = match Self::try_new(GESTURE_RESPONSE_DELIBERATE_MS) {
         Ok(value) => value,
         Err(_) => panic!("valid deliberate gesture response time"),
@@ -95,8 +96,9 @@ impl Default for GestureResponseTime {
 /// The dominant axis must pass [`GESTURE_SWIPE_THRESHOLD`] while the cross axis
 /// stays within `max(`[`GESTURE_SWIPE_DEADZONE`]`, 35% of dominant)`. Callers
 /// fire the bound action the moment this returns `Some` — mid-swipe, like
-/// Options+ — rather than waiting for the button release; a press that never
-/// commits a direction is treated as [`GestureDirection::Click`] on release.
+/// Options+ — while [`SwipeAccumulator::finish`] also classifies qualifying
+/// accumulated travel on release. A press whose travel never qualifies is
+/// treated as [`GestureDirection::Click`].
 ///
 /// Coordinates follow the device's raw-XY convention (`+x` = right, `+y` =
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
@@ -135,13 +137,13 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 }
 
 /// The mid-swipe state machine shared by both gesture-capture paths: the HID++
-/// dedicated gesture button (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
-/// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
-/// button's hold accumulates travel; the instant the dominant axis commits a
-/// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
-/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
-/// that direction exactly once, like Logitech Options+. A hold that never
-/// commits is a plain click, reported by [`Self::end`].
+/// dedicated gesture button (`openlogi-device`'s `0x1b04` raw-XY divert) and the
+/// OS-hook Middle/Back/Forward buttons (`openlogi-agent-core`'s platform hook).
+/// A gesture button's hold accumulates travel; once its configured response-time
+/// gate has elapsed, [`Self::accumulate`] returns a qualifying direction exactly
+/// once, like Logitech Options+. [`Self::finish`] performs the same classification
+/// on release so a held flick does not need a later motion sample. A hold whose
+/// travel never qualifies is a plain click.
 ///
 /// The two paths differ only in *what identifies the held control* (a
 /// [`ButtonId`](super::ButtonId) for the OS hook, a diverted CID for the HID++ gesture control), so each owns
@@ -200,8 +202,8 @@ impl SwipeAccumulator {
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
     /// `Some(direction)` exactly once per hold — the instant travel commits, and
-    /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while
-    /// still too short, already committed, or not holding.
+    /// only after this accumulator's response-time gate — and `None` while still
+    /// too short, already committed, or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         if self.fired || self.held_since.is_none() {
             return None;
@@ -245,7 +247,7 @@ impl SwipeAccumulator {
         Some(GestureDirection::Click)
     }
 
-    /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
+    /// Test-only seam: backdate the current hold so its configured response-time
     /// gate is already satisfied, letting a test exercise a committed swipe
     /// without sleeping. Real code never calls this — [`Self::begin`] records the
     /// true start instant. A no-op when not currently holding.
