@@ -27,7 +27,9 @@ pub enum ServiceStatus {
     /// The framework could not find the service at all — typically a bundle
     /// without the embedded plist (a bare dev binary).
     NotFound,
-    /// Not macOS.
+    /// Not macOS. The variant only exists where it is constructed, so the
+    /// macOS build carries no dead arm.
+    #[cfg(not(target_os = "macos"))]
     Unsupported,
 }
 

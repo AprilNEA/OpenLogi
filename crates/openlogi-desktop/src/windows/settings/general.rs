@@ -55,43 +55,14 @@ pub(super) fn general_page(
                 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger."
             )),
         )
-        .item(
-            SettingItem::new(
-                tr!("Launch at login"),
-                SettingField::switch(
-                    |cx| {
-                        AppState::try_read(cx)
-                            .is_some_and(|s| s.app_settings().launch_at_login)
-                    },
-                    |enabled, cx| {
-                        AppState::update(cx, move |state, cx| {
-                            state.set_launch_at_login(enabled);
-                            cx.emit(StateEvent::SettingsChanged);
-                        });
-                    },
-                ),
-            )
-            .description(if cfg!(target_os = "macos") {
-                tr!("Automatically start OpenLogi when you log in to macOS.")
-            } else {
-                tr!("Automatically start OpenLogi when you log in.")
-            }),
-        );
+        .item(launch_at_login_item());
 
     // Registered but switched off under System Settings › Login Items: the
     // launchd service (crash respawn included) cannot start until the user
     // flips it back on, and only that pane can — surface it instead of
     // letting the switch above claim a state macOS is overriding.
     let group = if login_item_needs_approval {
-        group.item(
-            SettingItem::new(
-                tr!("Login item disabled in System Settings"),
-                SettingField::render(|_, _, cx| open_login_items_button(cx)),
-            )
-            .description(tr!(
-                "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery."
-            )),
-        )
+        group.item(login_item_approval_notice())
     } else {
         group
     };
@@ -188,6 +159,40 @@ fn sensitivity_field(
                     .child(format!("({})", rust_i18n::t!("Default"))),
             )
         })
+}
+
+/// The launch-at-login switch. On macOS the setter also
+/// registers/unregisters the agent's login-item service in place.
+fn launch_at_login_item() -> SettingItem {
+    SettingItem::new(
+        tr!("Launch at login"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().launch_at_login),
+            |enabled, cx| {
+                AppState::update(cx, move |state, cx| {
+                    state.set_launch_at_login(enabled);
+                    cx.emit(StateEvent::SettingsChanged);
+                });
+            },
+        ),
+    )
+    .description(if cfg!(target_os = "macos") {
+        tr!("Automatically start OpenLogi when you log in to macOS.")
+    } else {
+        tr!("Automatically start OpenLogi when you log in.")
+    })
+}
+
+/// The "switched off in System Settings" notice shown while the service
+/// status is `RequiresApproval`.
+fn login_item_approval_notice() -> SettingItem {
+    SettingItem::new(
+        tr!("Login item disabled in System Settings"),
+        SettingField::render(|_, _, cx| open_login_items_button(cx)),
+    )
+    .description(tr!(
+        "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery."
+    ))
 }
 
 /// Deep link to System Settings › Login Items — the only place that can
