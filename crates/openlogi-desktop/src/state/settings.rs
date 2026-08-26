@@ -316,6 +316,9 @@ impl AppState {
         openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
         // Locale lookup is process-global, so every open window must repaint.
         cx.refresh_windows();
-        crate::app::menu::rebuild(cx);
+        // Deferred: the Device menu reads this entity, whose lease is still
+        // held here (callers switch language inside `AppState::update`), and a
+        // re-entrant read panics.
+        cx.defer(crate::app::menu::rebuild);
     }
 }

@@ -18,6 +18,7 @@ use openlogi_core::hid::{
     Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, WriteError,
 };
 
+use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
 use openlogi_ipc::ForegroundApps;
 
@@ -85,6 +86,41 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 
     state.set_smooth_scroll(true);
     assert!(receiver.try_recv().is_err());
+}
+
+/// A live language switch runs inside `AppState::update`, and the menu rebuild
+/// it schedules reads the same entity (the Device menu lists devices). Rebuilt
+/// synchronously that read is re-entrant and panics ("cannot read … while it is
+/// already being updated"), which crashed 0.8.0 on every language change —
+/// `set_language` must defer the rebuild until the update returns the lease.
+#[gpui::test]
+fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock();
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    cx.update(|cx| {
+        AppState::set_global(cx.new(|_| state), cx);
+        AppState::update(cx, |state, cx| {
+            state.set_language(Some("zh-CN".into()), cx);
+        });
+    });
+
+    cx.read(|cx| {
+        assert_eq!(
+            AppState::try_read(cx).and_then(AppState::language),
+            Some("zh-CN")
+        );
+    });
 }
 
 #[test]
