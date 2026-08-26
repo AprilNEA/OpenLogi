@@ -156,6 +156,11 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
     );
+    watchers::flow::spawn(
+        shared.flow_spec.clone(),
+        shared.channel_pool.clone(),
+        shared.receiver_access.clone(),
+    );
     watchers::keyboard::spawn(
         shared.keyboard_spec.clone(),
         shared.keyboard_channel.clone(),

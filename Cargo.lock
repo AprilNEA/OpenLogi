@@ -5618,6 +5618,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-application-services",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "openlogi-core",
  "openlogi-inject",
  "thiserror 2.0.18",

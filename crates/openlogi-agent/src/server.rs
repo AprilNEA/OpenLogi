@@ -19,8 +19,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, HostInfo, LightCommand,
+    ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -265,6 +265,15 @@ impl Agent for AgentServer {
 
     async fn observe_action_ring(self, _: Context, since: Generation) -> RingObservation {
         self.action_ring.observe(since).await
+    }
+
+    async fn read_host_info(self, _: Context, route: DeviceRoute) -> Result<HostInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadHostInfo, |c| async move {
+                openlogi_hid::get_host_info_on(&c).await
+            })
+            .await
     }
 
     async fn action_ring_hover(

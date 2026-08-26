@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HostInfo, LightCommand, PairingError, PasskeyMethod,
+    ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -59,7 +59,9 @@ pub use succession::Identity;
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
-pub const PROTOCOL_VERSION: u32 = 28;
+/// v29: `Capabilities::host_switching` + `HidppOperation::ReadHostInfo`
+///      appended; `read_host_info` appended (Flow tab).
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -533,4 +535,9 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Read which ChangeHost slot `route` is on right now (labels the Flow
+    /// tab's "This computer" card). On-demand rather than part of the
+    /// snapshot: the answer costs HID++ round trips and only matters while a
+    /// Flow tab is open.
+    async fn read_host_info(route: DeviceRoute) -> Result<HostInfo, WriteError>;
 }

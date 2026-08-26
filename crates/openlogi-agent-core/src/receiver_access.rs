@@ -2,23 +2,39 @@
 //!
 //! Long-running HID++ sessions share pooled receiver channels under read leases.
 //! Pairing and coordinated host transitions announce their intent so those
-//! sessions stop, then wait for an exclusive write lease.
+//! sessions stop, then wait for an exclusive write lease. The intent is a
+//! watched value, so lease-holding watchers can react the moment it changes
+//! instead of on their next management tick — the difference between a host
+//! switch feeling instant and it waiting out a one-second poll.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, watch};
 
 /// Coordinates exclusive access to the receiver HID node.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ReceiverAccess {
     inner: Arc<ReceiverAccessInner>,
 }
 
-#[derive(Default)]
 struct ReceiverAccessInner {
     lease: Arc<RwLock<()>>,
-    exclusive_requests: Arc<AtomicU8>,
+    /// Bitmask of [`ExclusiveAccessReason`]s currently waiting or holding.
+    /// A `watch` channel rather than an atomic so watchers can await both
+    /// edges: a filed request (stop sessions now) and a released lease
+    /// (re-arm capture now).
+    exclusive_requests: watch::Sender<u8>,
+}
+
+impl Default for ReceiverAccess {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(ReceiverAccessInner {
+                lease: Arc::new(RwLock::new(())),
+                exclusive_requests: watch::channel(0).0,
+            }),
+        }
+    }
 }
 
 /// Operation requiring sole ownership of a receiver transport.
@@ -54,13 +70,22 @@ impl ReceiverAccess {
     /// Whether any exclusive operation is waiting for or holding receiver access.
     #[must_use]
     pub fn exclusive_requested(&self) -> bool {
-        self.inner.exclusive_requests.load(Ordering::Acquire) != 0
+        *self.inner.exclusive_requests.borrow() != 0
     }
 
     /// Whether `reason` is waiting for or holding receiver access.
     #[must_use]
     pub fn requested(&self, reason: ExclusiveAccessReason) -> bool {
-        self.inner.exclusive_requests.load(Ordering::Acquire) & reason.bit() != 0
+        *self.inner.exclusive_requests.borrow() & reason.bit() != 0
+    }
+
+    /// Subscribe to exclusive-request changes. `changed().await` resolves on
+    /// every request filed *and* every lease released, so a watcher's select
+    /// loop can run its reconcile body immediately instead of waiting for its
+    /// next management tick.
+    #[must_use]
+    pub fn watch_exclusive(&self) -> watch::Receiver<u8> {
+        self.inner.exclusive_requests.subscribe()
     }
 
     /// Try to acquire receiver access for a pooled HID++ session.
@@ -94,7 +119,7 @@ impl ReceiverAccess {
     /// If the returned future is cancelled while waiting, the pairing request is
     /// withdrawn automatically so capture can resume.
     pub async fn acquire_exclusive(&self, reason: ExclusiveAccessReason) -> ExclusiveReceiverLease {
-        let request = ExclusiveRequest::new(Arc::clone(&self.inner.exclusive_requests), reason);
+        let request = ExclusiveRequest::new(self.inner.exclusive_requests.clone(), reason);
         let guard = Arc::clone(&self.inner.lease).write_owned().await;
         ExclusiveReceiverLease {
             _guard: guard,
@@ -104,13 +129,13 @@ impl ReceiverAccess {
 }
 
 struct ExclusiveRequest {
-    requests: Arc<AtomicU8>,
+    requests: watch::Sender<u8>,
     reason: ExclusiveAccessReason,
 }
 
 impl ExclusiveRequest {
-    fn new(requests: Arc<AtomicU8>, reason: ExclusiveAccessReason) -> Self {
-        requests.fetch_or(reason.bit(), Ordering::AcqRel);
+    fn new(requests: watch::Sender<u8>, reason: ExclusiveAccessReason) -> Self {
+        requests.send_modify(|mask| *mask |= reason.bit());
         Self { requests, reason }
     }
 }
@@ -118,7 +143,7 @@ impl ExclusiveRequest {
 impl Drop for ExclusiveRequest {
     fn drop(&mut self) {
         self.requests
-            .fetch_and(!self.reason.bit(), Ordering::AcqRel);
+            .send_modify(|mask| *mask &= !self.reason.bit());
     }
 }
 
@@ -214,5 +239,34 @@ mod tests {
         waiting
             .await
             .expect("bounded io must acquire its lease once the host transition releases");
+    }
+
+    #[tokio::test]
+    async fn watchers_are_woken_on_both_request_edges() {
+        let access = ReceiverAccess::default();
+        let mut rx = access.watch_exclusive();
+        rx.mark_unchanged();
+
+        let lease = access
+            .acquire_exclusive(ExclusiveAccessReason::HostTransition)
+            .await;
+        rx.changed()
+            .await
+            .expect("the sender lives inside ReceiverAccess");
+        assert_ne!(
+            *rx.borrow_and_update(),
+            0,
+            "request edge must be observable"
+        );
+
+        drop(lease);
+        rx.changed()
+            .await
+            .expect("the sender lives inside ReceiverAccess");
+        assert_eq!(
+            *rx.borrow_and_update(),
+            0,
+            "release edge must be observable"
+        );
     }
 }

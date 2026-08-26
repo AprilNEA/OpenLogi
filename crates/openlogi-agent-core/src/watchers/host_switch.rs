@@ -54,9 +54,17 @@ async fn manage(
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionCompletion>();
     let mut next_generation = 0_u64;
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    // Exclusive requests must not wait out the management tick: an edge on
+    // either side pulls the next tick forward so armed sessions stop (or
+    // re-arm) immediately.
+    let mut exclusive_rx = receiver_access.watch_exclusive();
+    let mut exclusive_open = true;
 
     loop {
         tokio::select! {
+            changed = exclusive_rx.changed(), if exclusive_open => {
+                super::pull_tick_forward(changed.is_ok(), &mut ticker, &mut exclusive_open);
+            }
             _ = ticker.tick() => {
                 let wanted = if receiver_access.exclusive_requested() {
                     Vec::new()

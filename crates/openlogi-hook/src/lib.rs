@@ -45,6 +45,32 @@ pub struct CursorPosition {
     pub y: f64,
 }
 
+/// One display's global geometry, in the same top-left-origin global
+/// coordinate space that [`cursor_position`] reports.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayBounds {
+    /// Native display identifier — stable for as long as the display stays
+    /// connected, but not across replug or platform: the `CGDirectDisplayID`
+    /// on macOS, the `HMONITOR` handle value on Windows, the RANDR monitor
+    /// name atom under X11.
+    pub id: u64,
+    /// Global origin (top-left corner) of the display.
+    pub origin: (f64, f64),
+    /// Display size, in the same units as [`Self::origin`].
+    pub size: (f64, f64),
+}
+
+impl DisplayBounds {
+    /// Whether the global point `(x, y)` lies inside this display.
+    #[must_use]
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.origin.0
+            && x < self.origin.0 + self.size.0
+            && y >= self.origin.1
+            && y < self.origin.1 + self.size.1
+    }
+}
+
 /// Best-effort identity for the physical device that produced an OS event.
 ///
 /// Platform hooks fill the stable fields they can read cheaply from the native
@@ -361,6 +387,17 @@ trait HookBackend {
     fn cursor_position() -> Option<CursorPosition> {
         None
     }
+
+    /// See [`crate::displays`]. Empty where the platform exposes no global
+    /// display geometry.
+    fn displays() -> Vec<DisplayBounds> {
+        Vec::new()
+    }
+
+    /// See [`crate::control_held`]. `None` where modifier state is unknowable.
+    fn control_held() -> Option<bool> {
+        None
+    }
 }
 
 /// The backend for a platform with no hook: every default, and a
@@ -520,6 +557,27 @@ pub fn frontmost_application() -> Option<ForegroundApp> {
 #[must_use]
 pub fn cursor_position() -> Option<CursorPosition> {
     Backend::cursor_position()
+}
+
+/// Return every active display's global bounds, in the coordinate space of
+/// [`cursor_position`], without installing an input hook.
+///
+/// Empty on unsupported platforms and on native Wayland, which exposes neither
+/// a global cursor position nor the global layout to match it against.
+#[must_use]
+pub fn displays() -> Vec<DisplayBounds> {
+    Backend::displays()
+}
+
+/// Whether a Control key is currently held, read without installing an input
+/// hook.
+///
+/// Best-effort: `None` on unsupported platforms and on native Wayland, where
+/// no global keyboard state is readable. Needs no privacy permission on any
+/// platform.
+#[must_use]
+pub fn control_held() -> Option<bool> {
+    Backend::control_held()
 }
 
 #[cfg(target_os = "macos")]

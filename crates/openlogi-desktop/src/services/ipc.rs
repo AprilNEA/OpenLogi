@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HostInfo, LightCommand, ReceiverSelector, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
@@ -103,6 +104,9 @@ pub enum Command {
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
     ),
+    /// Read the device's current ChangeHost slot (the Flow tab's
+    /// "This computer" label).
+    ReadHostInfo(DeviceRoute, oneshot::Sender<Result<HostInfo, WriteError>>),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
@@ -499,6 +503,9 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
+        Command::ReadHostInfo(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_host_info(ctx, route).await)?);
+        }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
             // is still a reload that did not happen — and the file on disk has
@@ -615,6 +622,9 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadHostInfo(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

@@ -30,9 +30,9 @@ use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptio
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, ForegroundApp,
-    HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
-    TapLocation,
+    ButtonId, CursorPosition, DisplayBounds, EventDevice, EventDisposition, EventTapInfo,
+    ForegroundApp, HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent,
+    ScrollDelta, TapLocation,
 };
 use watchdog::{
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, RearmBudget,
@@ -695,6 +695,47 @@ impl HookBackend for Backend {
             x: point.x,
             y: point.y,
         })
+    }
+
+    /// Poll the held modifier flags from the HID system state — a stateless
+    /// CoreGraphics read that needs no tap and no permission. Fully qualified:
+    /// this file already imports the classic `core-graphics` crate's event
+    /// types (the tap), and these are the `objc2-core-graphics` twins.
+    fn control_held() -> Option<bool> {
+        let flags = objc2_core_graphics::CGEventSource::flags_state(
+            objc2_core_graphics::CGEventSourceStateID::HIDSystemState,
+        );
+        Some(flags.contains(objc2_core_graphics::CGEventFlags::MaskControl))
+    }
+
+    /// Enumerate active displays via CoreGraphics, whose bounds share the
+    /// top-left-origin global point space `cursor_position` reports. Needs no
+    /// permission.
+    fn displays() -> Vec<DisplayBounds> {
+        use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
+
+        const MAX_DISPLAYS: u32 = 32;
+        let mut ids = [0u32; MAX_DISPLAYS as usize];
+        let mut count = 0u32;
+        // SAFETY: the list write is bounded by the capacity we pass; `count`
+        // reports how many entries were actually filled.
+        let result =
+            unsafe { CGGetActiveDisplayList(MAX_DISPLAYS, ids.as_mut_ptr(), &raw mut count) };
+        if result != 0 {
+            return Vec::new();
+        }
+        ids.iter()
+            .take(count as usize)
+            .map(|&id| {
+                // SAFETY: side-effect-free C getter on an id from the active list.
+                let bounds = unsafe { CGDisplayBounds(id) };
+                DisplayBounds {
+                    id: u64::from(id),
+                    origin: (bounds.origin.x, bounds.origin.y),
+                    size: (bounds.size.width, bounds.size.height),
+                }
+            })
+            .collect()
     }
 }
 

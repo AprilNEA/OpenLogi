@@ -144,6 +144,37 @@ fn dispatch_input(
     }
 }
 
+/// Dispatch one captured key edge, or cancel it when it arrived from a stale
+/// session (superseded epoch, exclusive receiver use, or a spec that no
+/// longer matches the running target).
+fn on_input(
+    input: &KeyboardInput,
+    current: Option<&RunningKeyboardSession>,
+    spec: &SharedKeyboardSpec,
+    receiver_access: &ReceiverAccess,
+    dispatcher: &ActionDispatcher,
+) {
+    let Some(running) = current else {
+        return;
+    };
+    let live_spec = spec.read().ok().and_then(|guard| guard.clone());
+    let current_target = live_spec
+        .as_ref()
+        .is_some_and(|live| running.target.matches(live));
+    if input.session != running.id || receiver_access.exclusive_requested() || !current_target {
+        dispatcher.cancel_hidpp_session(&input.session);
+        debug!(
+            epoch = input.session.epoch(),
+            "input from a stale keyboard session — ignored"
+        );
+        return;
+    }
+    let Some(live_spec) = live_spec else {
+        return;
+    };
+    dispatch_input(&input.session, input.input, &live_spec, dispatcher);
+}
+
 /// Snapshot the keyboard session target unless pairing currently owns capture.
 fn wanted_session(
     receiver_access: &ReceiverAccess,
@@ -176,27 +207,19 @@ async fn manage(
     // are ignored — same pacing/starvation reasoning as the gesture watcher.
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<HidppSessionId>();
     let mut epoch: u64 = 0;
+    // Exclusive requests must not wait out the management tick: an edge on
+    // either side pulls the next tick forward so the session releases (or
+    // re-arms) immediately.
+    let mut exclusive_rx = receiver_access.watch_exclusive();
+    let mut exclusive_open = true;
 
     loop {
         tokio::select! {
+            changed = exclusive_rx.changed(), if exclusive_open => {
+                super::pull_tick_forward(changed.is_ok(), &mut ticker, &mut exclusive_open);
+            }
             Some(input) = rx.recv() => {
-                let Some(running) = current.as_ref() else {
-                    continue;
-                };
-                let live_spec = spec.read().ok().and_then(|guard| guard.clone());
-                let current_target = live_spec.as_ref().is_some_and(|live| running.target.matches(live));
-                if input.session != running.id
-                    || receiver_access.exclusive_requested()
-                    || !current_target
-                {
-                    dispatcher.cancel_hidpp_session(&input.session);
-                    debug!(epoch = input.session.epoch(), "input from a stale keyboard session — ignored");
-                    continue;
-                }
-                let Some(live_spec) = live_spec else {
-                    continue;
-                };
-                dispatch_input(&input.session, input.input, &live_spec, &dispatcher);
+                on_input(&input, current.as_ref(), &spec, &receiver_access, &dispatcher);
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release the capture

@@ -317,6 +317,7 @@ mod tests {
             capture_rearm_generation: Arc::new(0.into()),
             receiver_access: ReceiverAccess::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            flow_spec: Arc::new(RwLock::new(None)),
         }
     }
 

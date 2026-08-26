@@ -9,7 +9,12 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
@@ -26,10 +31,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
+use windows_sys::core::BOOL;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
+    ButtonId, CursorPosition, DisplayBounds, EventDisposition, ForegroundApp, HookBackend,
+    HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
 const WHEEL_DELTA: f64 = 120.0;
@@ -173,6 +179,82 @@ impl HookBackend for Backend {
             x: f64::from(point.x),
             y: f64::from(point.y),
         })
+    }
+
+    fn control_held() -> Option<bool> {
+        Some(key_held(VK_CONTROL))
+    }
+
+    /// Enumerate monitors via `EnumDisplayMonitors`, whose virtual-screen
+    /// coordinates are the space `GetCursorPos` reports.
+    fn displays() -> Vec<DisplayBounds> {
+        /// `MONITORENUMPROC`: append one entry per monitor to the `Vec`
+        /// behind `lparam`.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "MONITORINFO is 40 bytes; its size fits cbSize by definition"
+        )]
+        unsafe extern "system" fn collect(
+            monitor: HMONITOR,
+            _hdc: HDC,
+            _clip: *mut RECT,
+            lparam: LPARAM,
+        ) -> BOOL {
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                rcMonitor: RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+                rcWork: RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+                dwFlags: 0,
+            };
+            // SAFETY: `monitor` is the live handle the enumeration handed us;
+            // `info` is a valid MONITORINFO with `cbSize` filled in.
+            if unsafe { GetMonitorInfoW(monitor, &raw mut info) } != 0 {
+                // SAFETY: `lparam` is the address of the `Vec` passed to
+                // `EnumDisplayMonitors` below; the enumeration is synchronous,
+                // so the `Vec` outlives every callback invocation.
+                let list = unsafe {
+                    &mut *(std::ptr::with_exposed_provenance_mut::<Vec<DisplayBounds>>(
+                        lparam.cast_unsigned(),
+                    ))
+                };
+                let bounds = info.rcMonitor;
+                list.push(DisplayBounds {
+                    id: monitor.addr() as u64,
+                    origin: (f64::from(bounds.left), f64::from(bounds.top)),
+                    size: (
+                        f64::from(bounds.right - bounds.left),
+                        f64::from(bounds.bottom - bounds.top),
+                    ),
+                });
+            }
+            1
+        }
+
+        let mut list: Vec<DisplayBounds> = Vec::new();
+        // SAFETY: a null hdc/clip pair enumerates every display monitor;
+        // `collect` runs only during this synchronous call, so the exposed
+        // address of `list` stays valid for every use.
+        unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(collect),
+                std::ptr::from_mut(&mut list)
+                    .expose_provenance()
+                    .cast_signed(),
+            );
+        }
+        list
     }
 }
 

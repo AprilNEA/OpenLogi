@@ -128,6 +128,10 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// The device can re-pair its radio to another host on command — HID++
+    /// `0x1814 ChangeHost`. Drives the Flow tab.
+    #[serde(default)]
+    pub host_switching: bool,
 }
 
 impl Capabilities {
@@ -153,6 +157,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            host_switching: ids.contains(&0x1814),
         }
     }
 
@@ -173,6 +178,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +484,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    host_switching: false,
                 }),
             }],
         }
@@ -545,6 +552,7 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -561,6 +569,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: false,
             }
         );
         // No driving features → nothing offered.
