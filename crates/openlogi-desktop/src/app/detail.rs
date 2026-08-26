@@ -353,6 +353,27 @@ struct ScrollingFacts {
     hires: HiresWheel,
 }
 
+/// Host-side horizontal-scroll state for the selected device on macOS.
+#[cfg(target_os = "macos")]
+struct HorizontalScrollingFacts {
+    sensitivity: HorizontalScrollSensitivity,
+    inverted: bool,
+    supported: bool,
+    visible: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Default for HorizontalScrollingFacts {
+    fn default() -> Self {
+        Self {
+            sensitivity: HorizontalScrollSensitivity::DEFAULT,
+            inverted: false,
+            supported: false,
+            visible: false,
+        }
+    }
+}
+
 /// Where the device offers hi-res wheel control.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum HiresWheel {
@@ -387,60 +408,23 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         },
     });
     #[cfg(target_os = "macos")]
-    let (horizontal_sensitivity, horizontal_inverted, horizontal_supported, horizontal_visible) =
-        AppState::try_read(cx).map_or(
-            (HorizontalScrollSensitivity::DEFAULT, false, false, false),
-            |state| {
-                (
-                    state.current_horizontal_scroll_sensitivity(),
-                    state.current_invert_horizontal_scroll(),
-                    state.current_horizontal_scroll_supported(),
-                    state
-                        .current_record()
-                        .and_then(|record| record.asset.as_ref())
-                        .is_some_and(asset_has_main_wheel_tilt),
-                )
-            },
-        );
-    let inversion_description = if inversion_supported {
-        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
-    } else {
-        tr!("This device does not report native HID++ scroll inversion support.")
-    };
-    let inversion_row = h_flex()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("Invert scroll direction")),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(inversion_description),
-                ),
-        )
-        .child(
-            Toggle::new("invert-scroll-toggle")
-                .selected(inverted)
-                .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("Unavailable")))
-                .on_change(|inverted, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_invert_scroll(*inverted);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DeviceConfigChanged(key));
-                        }
-                    });
-                }),
-        );
+    let HorizontalScrollingFacts {
+        sensitivity: horizontal_sensitivity,
+        inverted: horizontal_inverted,
+        supported: horizontal_supported,
+        visible: horizontal_visible,
+    } = AppState::try_read(cx).map_or_else(HorizontalScrollingFacts::default, |state| {
+        HorizontalScrollingFacts {
+            sensitivity: state.current_horizontal_scroll_sensitivity(),
+            inverted: state.current_invert_horizontal_scroll(),
+            supported: state.current_horizontal_scroll_supported(),
+            visible: state
+                .current_record()
+                .and_then(|record| record.asset.as_ref())
+                .is_some_and(asset_has_main_wheel_tilt),
+        }
+    });
+    let inversion_row = scroll_inversion_row(inverted, inversion_supported, pal);
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
             None => tr!("OpenLogi does not change the wheel resolution."),
@@ -490,6 +474,48 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         Icon::empty().path("action-icons/mouse.svg"),
         content,
     )
+}
+
+fn scroll_inversion_row(inverted: bool, supported: bool, pal: Palette) -> impl IntoElement {
+    let description = if supported {
+        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+    } else {
+        tr!("This device does not report native HID++ scroll inversion support.")
+    };
+    h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("Invert scroll direction")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("invert-scroll-toggle")
+                .selected(inverted)
+                .disabled(!supported)
+                .label((!supported).then(|| tr!("Unavailable")))
+                .on_change(|inverted, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_invert_scroll(*inverted);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        )
 }
 
 /// Host-side controls for physical tilt wheels and other native Axis 2 input.
