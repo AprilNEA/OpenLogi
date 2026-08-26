@@ -1,15 +1,17 @@
 //! General settings page.
 
 use super::{
-    App, AppState, Entity, FluentBuilder, IconName, ParentElement, SettingField, SettingGroup,
-    SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled, ThumbwheelSensitivity,
-    VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
+    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
+    ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
+use gpui_base::Button as BaseButton;
 
 pub(super) fn general_page(
     vertical_scroll_sensitivity_slider: Entity<SliderState>,
     thumbwheel_sensitivity_slider: Entity<SliderState>,
+    login_item_needs_approval: bool,
 ) -> SettingPage {
     let group = SettingGroup::new()
         .item(
@@ -75,6 +77,24 @@ pub(super) fn general_page(
                 tr!("Automatically start OpenLogi when you log in.")
             }),
         );
+
+    // Registered but switched off under System Settings › Login Items: the
+    // launchd service (crash respawn included) cannot start until the user
+    // flips it back on, and only that pane can — surface it instead of
+    // letting the switch above claim a state macOS is overriding.
+    let group = if login_item_needs_approval {
+        group.item(
+            SettingItem::new(
+                tr!("Login item disabled in System Settings"),
+                SettingField::render(|_, _, cx| open_login_items_button(cx)),
+            )
+            .description(tr!(
+                "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery."
+            )),
+        )
+    } else {
+        group
+    };
 
     // The same `show_in_menu_bar` setting drives the macOS status item and
     // the Windows notification-area icon (the agent honors it on both; next
@@ -168,4 +188,25 @@ fn sensitivity_field(
                     .child(format!("({})", rust_i18n::t!("Default"))),
             )
         })
+}
+
+/// Deep link to System Settings › Login Items — the only place that can
+/// re-enable a service the user switched off there. Same visual recipe as the
+/// permission pane's "Open" buttons.
+fn open_login_items_button(cx: &App) -> BaseButton {
+    let pal = theme::palette(cx);
+    BaseButton::new("open-login-items")
+        .accessibility_label(tr!("Open Login Items"))
+        .px_2()
+        .py_1()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(pal.border)
+        .text_caption()
+        .cursor_pointer()
+        .bg(pal.control)
+        .hover(move |s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.bg(pal.control_hover))
+        .child(tr!("Open Login Items"))
+        .on_click(|_, _, _| crate::platform::login_item::open_login_items_settings())
 }

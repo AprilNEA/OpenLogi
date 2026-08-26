@@ -119,6 +119,36 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // dead bytes. Off-thread so it never delays the first paint.
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
+        // Reconcile the agent's login-item registration with the setting
+        // (macOS; a no-op elsewhere): a fresh install registers on its first
+        // GUI launch, and a setting changed while the GUI wasn't running
+        // catches up here. Only the preference's own gap drives it — a
+        // service the user switched off in System Settings
+        // (RequiresApproval) is respected, never re-registered; the Settings
+        // row surfaces that state instead. Skipped for dev profiles: a login
+        // item pointing into a `target/` build goes stale on the next `cargo
+        // clean`, so dev registration stays an explicit toggle in the dev
+        // GUI. Off-thread — registration is an XPC round-trip that must not
+        // delay the first paint.
+        let launch_at_login = cx.update(|cx| {
+            AppState::try_global(cx).map(|state| state.read(cx).app_settings().launch_at_login)
+        });
+        if let Some(enabled) = launch_at_login
+            && !openlogi_core::paths::is_dev_profile()
+        {
+            std::thread::spawn(move || {
+                use crate::platform::login_item::{self, ServiceStatus};
+                let register = match (enabled, login_item::status()) {
+                    (true, ServiceStatus::NotRegistered) => true,
+                    (false, ServiceStatus::Enabled | ServiceStatus::RequiresApproval) => false,
+                    _ => return,
+                };
+                if let Err(error) = login_item::sync_registration(register) {
+                    tracing::warn!(error, register, "startup login-item reconcile failed");
+                }
+            });
+        }
+
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
         let mut rt = Runtime::new(cams, sync_tx, swr);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
