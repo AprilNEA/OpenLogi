@@ -116,7 +116,7 @@ impl Agent for AgentServer {
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
-                crate::launch_agent::reconcile(launch_at_login);
+                crate::autostart::reconcile(launch_at_login);
                 // So does the app icon, and the menu-bar item is ours to
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]

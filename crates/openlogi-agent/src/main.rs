@@ -15,8 +15,8 @@
     windows_subsystem = "windows"
 )]
 
+mod autostart;
 mod binary_watch;
-mod launch_agent;
 mod logging;
 mod overlay;
 mod pairing;
@@ -457,7 +457,7 @@ async fn run(
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
-    launch_agent::reconcile(config.app_settings.launch_at_login);
+    autostart::reconcile(config.app_settings.launch_at_login);
 
     // Read the hook kill-switch before `config` moves into the orchestrator.
     // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
