@@ -143,8 +143,8 @@ fn dispatch_native(native: NativeAction) {
             post_key(vk, cmd | ctrl | extra);
         }
         // Screenshot = Cmd+Shift+3, same fallback pattern. Shift is already
-        // part of this shortcut's own flags, so it's a mandatory base for
-        // the lookup too (Greptile review on #948).
+        // part of this shortcut's own flags, so it's passed as the lookup's
+        // search preference too.
         NativeAction::Screenshot => {
             let (vk, extra) = resolve_or('3', 0x14, true, false);
             post_key(vk, cmd | shift | extra);
@@ -389,9 +389,8 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
 /// keyboard layout, plus any extra Shift/Option flags needed to reach it
 /// (e.g. digits sitting behind Shift on AZERTY — issue #343 follow-up).
 /// `base_shift`/`base_option` are modifiers the caller already holds
-/// regardless (e.g. Screenshot's own Shift) — see
-/// [`keyboard_layout::resolve_char_with_base`] for why the lookup must
-/// treat those as mandatory rather than searching in isolation. Falls back
+/// regardless (e.g. Screenshot's own Shift) and are tried as a search
+/// preference — see [`keyboard_layout::resolve_char_with_base`]. Falls back
 /// to `(fallback_vk, no extra flags)`, matching the pre-#343 positional
 /// behavior, when the layout lookup can't resolve one.
 fn resolve_or(
@@ -420,15 +419,15 @@ fn resolve_or(
 fn post_keycombo(combo: &KeyCombo) {
     let mut flags = combo_flags(combo);
     // Layout-aware lookup first (issue #343): resolve the vk that currently
-    // produces this character under the active layout, searching from the
-    // combo's own Shift/Option as a mandatory base — those are held
-    // throughout the real key press, so a vk found ignoring them may not
-    // reproduce this character once they're folded in (Greptile review on
-    // #948: e.g. Cmd+Option+1 posted on the isolated Shift layer for '1'
-    // becomes Option+Shift once the combo's own Option is added, which
-    // isn't guaranteed to still be '1'). ORs in any extra Shift/Option
-    // beyond that base needed to reach it. Falls back to the static
-    // positional table when the key isn't a single ASCII character
+    // produces this character under the active layout, preferring the
+    // combo's own Shift/Option layer but always falling back to whichever
+    // layer the layout actually puts the character on — `ascii_char()` is
+    // always the *unshifted* character, so a Shift/Option shortcut (e.g.
+    // Cmd+Shift+Z) must still be able to find it at the unshifted layer, not
+    // just the layer matching the combo's own modifiers (Greptile review on
+    // #948, "Base modifiers defeat layout lookup"). ORs in whatever
+    // Shift/Option the layer was actually found under. Falls back to the
+    // static positional table when the key isn't a single ASCII character
     // (function/arrow/editing keys — unaffected by layout switches) or when
     // TIS/UCKeyTranslate can't resolve one (e.g. no active console session).
     let vk = match combo
@@ -595,32 +594,27 @@ mod tests {
         }
     }
 
-    /// Regression test for the Greptile review on PR #948: `post_keycombo`
-    /// and `resolve_or` used to resolve a character with `resolve_char`,
-    /// which always searches Shift/Option in isolation from any modifier
-    /// the caller already holds (a combo's own Option, or
-    /// Screenshot/CaptureRegion's own Shift) — so the vk it returned was
-    /// only proven to reproduce the character *without* that modifier, not
-    /// once it's folded in for the real key press. `resolve_char_with_base`
-    /// must always report the caller's base as part of `needs_shift`/
-    /// `needs_option` rather than silently drop it: every layer this
-    /// function probes now includes the base, so a result can never claim a
-    /// mandatory modifier wasn't needed.
+    /// Regression test for the Greptile review on PR #948 ("Base modifiers
+    /// defeat layout lookup"): an earlier revision treated the caller's own
+    /// Shift/Option (e.g. `post_keycombo` passing `combo.has_shift()` for a
+    /// Cmd+Shift+Z shortcut) as a *mandatory* floor for every probed layer.
+    /// But `ascii_char()` is always the key's unshifted character, and
+    /// holding Shift changes what a key produces — so a mandatory Shift
+    /// base meant the unshifted layer, where 'z' actually lives, was never
+    /// searched at all, and the lookup fell through to `None` for every
+    /// Shift/Option shortcut on a printable key. `base_shift`/`base_option`
+    /// must be a search *preference*: a letter has to resolve (with no
+    /// extra modifier reported) even when the caller passes a base that
+    /// doesn't match where the layout actually places it.
     #[test]
-    fn resolve_char_with_base_never_drops_a_mandatory_base_modifier() {
-        for ch in ['!', '@', '#', '$', '%', 'a'] {
-            if let Some(resolved) = resolve_char_with_base(ch, false, true) {
-                assert!(
-                    resolved.needs_option,
-                    "resolved {ch:?} without the mandatory base Option"
-                );
-            }
-            if let Some(resolved) = resolve_char_with_base(ch, true, true) {
-                assert!(
-                    resolved.needs_shift && resolved.needs_option,
-                    "resolved {ch:?} without both mandatory base modifiers"
-                );
-            }
+    fn resolve_char_with_base_still_finds_unshifted_letters() {
+        for (base_shift, base_option) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let resolved = resolve_char_with_base('a', base_shift, base_option)
+                .expect("no key produces 'a' under the active layout even with a base");
+            assert!(!resolved.needs_shift);
+            assert!(!resolved.needs_option);
         }
     }
 
@@ -1684,15 +1678,13 @@ mod keyboard_layout {
     const MOD_OPTION: u32 = 0x08;
 
     /// A character's key press under the active keyboard layout: which
-    /// physical key produces it, and whether Shift and/or Option must be
-    /// held to select that character's layer (e.g. digits sit behind Shift
-    /// on AZERTY) — inclusive of whatever base the caller already asked
-    /// [`resolve_char_with_base`] to hold. The caller ORs these into
-    /// whatever modifiers the shortcut itself already wants; because the
-    /// base is folded in before the layout search runs (not after), the
-    /// result is proven to actually reproduce the target character under
-    /// the combined modifier state the real key press uses, not just under
-    /// each modifier searched in isolation.
+    /// physical key produces it, and which of Shift/Option must be held to
+    /// select that character's layer (e.g. digits sit behind Shift on
+    /// AZERTY). These are the *exact* modifiers the layer was found under —
+    /// never a superset of some caller-supplied base — so the caller ORing
+    /// them into whatever modifiers the shortcut itself already wants is
+    /// proven to still reproduce the target character, not just "probably
+    /// harmless" if the two happen to agree.
     pub(super) struct ResolvedKey {
         pub(super) vk: u16,
         pub(super) needs_shift: bool,
@@ -1700,20 +1692,22 @@ mod keyboard_layout {
     }
 
     /// Resolve `target` to the vk that currently produces it under the
-    /// active keyboard layout. `base_shift`/`base_option` name modifiers
-    /// the caller is already going to hold regardless of what this lookup
-    /// finds (e.g. a shortcut's own Option, or `post_keycombo`'s
-    /// `combo.has_option()`). Those are mandatory throughout the real key
-    /// press, so every layer probed here includes them — searching without
-    /// the base could return a vk that only reproduces `target` in the
-    /// base's absence, and once the base modifiers are folded in for the
-    /// actual `CGEvent`, the character reaching the target app can be
-    /// something else entirely (Greptile review on #948: Cmd+Option+1 with
-    /// '1' behind an isolated Shift search becomes Option+Shift once the
-    /// combo's own Option is added, which is not guaranteed to still
-    /// produce '1'). Returns `None` if it can't be determined (no active
-    /// layout/console session, or no key on any layer that still includes
-    /// the base produces this character).
+    /// active keyboard layout. `target` is always the key's *unshifted*
+    /// character (see `KeyboardUsage::ascii_char`), independent of what
+    /// modifiers the caller's shortcut wants held — a Cmd+Shift+Z shortcut
+    /// must still resolve plain 'z', which typically lives at the unshifted
+    /// layer, not the Shift layer. `base_shift`/`base_option` are only a
+    /// *search preference*: if the caller already holds Shift/Option for
+    /// other reasons (a combo's own modifier, or Screenshot/CaptureRegion's
+    /// own Shift) and the layout happens to place `target` exactly there
+    /// too, trying that layer first avoids reporting a spurious extra
+    /// modifier requirement. Every other layer is still tried afterward,
+    /// unfiltered by the base, precisely so a base that doesn't match where
+    /// the layout actually puts the character (the common case for
+    /// Shift/Option shortcuts on printable keys) doesn't defeat the lookup
+    /// (Greptile review on #948, "Base modifiers defeat layout lookup").
+    /// Returns `None` if it can't be determined (no active layout/console
+    /// session, or no key on any layer produces this character).
     pub(super) fn resolve_char_with_base(
         target: char,
         base_shift: bool,
@@ -1752,22 +1746,28 @@ mod keyboard_layout {
         // SAFETY: LMGetKbdType has no preconditions.
         let kbd_type = u32::from(unsafe { LMGetKbdType() });
 
-        // Every probed layer ORs the base in — base_shift/base_option are
-        // mandatory, not optional extras to search around.
-        let base_state =
-            (if base_shift { MOD_SHIFT } else { 0 }) | (if base_option { MOD_OPTION } else { 0 });
-        for &(extra_state, extra_shift, extra_option) in &[
-            (0, false, false),
-            (MOD_SHIFT, true, false),
-            (MOD_OPTION, false, true),
-            (MOD_SHIFT | MOD_OPTION, true, true),
+        // Try the caller's own modifiers first: if the layout happens to
+        // place `target` exactly where the shortcut already holds
+        // Shift/Option, no extra modifier needs to be added at all. But
+        // `target` is `ascii_char()`'s *unshifted* character regardless of
+        // what the caller wants held (Cmd+Shift+Z must still find plain
+        // 'z', which lives at the unshifted layer, not the Shift layer) —
+        // so the base is a search preference, never a filter: every
+        // standard layer is tried after it, unfiltered by the base.
+        for &(shift, option) in &[
+            (base_shift, base_option),
+            (false, false),
+            (true, false),
+            (false, true),
+            (true, true),
         ] {
-            let modifier_state = base_state | extra_state;
+            let modifier_state =
+                (if shift { MOD_SHIFT } else { 0 }) | (if option { MOD_OPTION } else { 0 });
             if let Some(vk) = find_vk(layout_ptr, kbd_type, modifier_state, target) {
                 return Some(ResolvedKey {
                     vk,
-                    needs_shift: base_shift || extra_shift,
-                    needs_option: base_option || extra_option,
+                    needs_shift: shift,
+                    needs_option: option,
                 });
             }
         }
