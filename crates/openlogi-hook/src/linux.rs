@@ -38,12 +38,12 @@ use evdev::{
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
-use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
+use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, KeyButMask, Window};
 use x11rb::rust_connection::RustConnection;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    LOGITECH_VENDOR_ID, MouseEvent,
+    ButtonId, CursorPosition, DisplayBounds, EventDisposition, ForegroundApp, HookBackend,
+    HookError, HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
 };
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
@@ -144,6 +144,49 @@ impl HookBackend for Backend {
             y: f64::from(reply.root_y),
         })
     }
+
+    /// Enumerate monitors through X11 RANDR, whose root-window coordinates are
+    /// the space `query_pointer` reports. Empty on native Wayland, matching
+    /// `cursor_position` — there is no global layout to match a position
+    /// nobody can read.
+    fn displays() -> Vec<DisplayBounds> {
+        x11_displays().unwrap_or_default()
+    }
+
+    /// Read the Control-key state from the same X11 `query_pointer` reply the
+    /// cursor read uses. `None` on native Wayland.
+    fn control_held() -> Option<bool> {
+        let source = X11Source::connect()?;
+        let reply = source.conn.query_pointer(source.root).ok()?.reply().ok()?;
+        Some(reply.mask.contains(KeyButMask::CONTROL))
+    }
+}
+
+/// The RANDR 1.5 monitor list of the current X screen, or `None` when no X
+/// server is reachable or the extension query fails.
+fn x11_displays() -> Option<Vec<DisplayBounds>> {
+    use x11rb::protocol::randr::ConnectionExt as _;
+
+    let source = X11Source::connect()?;
+    let monitors = source
+        .conn
+        .randr_get_monitors(source.root, true)
+        .ok()?
+        .reply()
+        .ok()?;
+    Some(
+        monitors
+            .monitors
+            .iter()
+            .map(|monitor| DisplayBounds {
+                // The monitor's name atom: unique among this screen's monitors
+                // and stable while the monitor stays connected.
+                id: u64::from(monitor.name),
+                origin: (f64::from(monitor.x), f64::from(monitor.y)),
+                size: (f64::from(monitor.width), f64::from(monitor.height)),
+            })
+            .collect(),
+    )
 }
 
 fn shutdown(stop: &AtomicBool, pipes: &[OwnedFd], threads: Vec<thread::JoinHandle<()>>) {
