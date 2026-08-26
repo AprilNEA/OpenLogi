@@ -15,6 +15,20 @@
 
 /// Where the agent service stands with launchd, mirroring
 /// `SMAppServiceStatus` plus a cross-platform "not this platform" arm.
+///
+/// Off macOS only [`Self::Unsupported`] is ever constructed, but the macOS
+/// variants stay: cross-platform consumers name them (the settings window
+/// compares [`Self::RequiresApproval`] on every platform). Not `expect`: the
+/// dead-code lint fires only on the non-macOS lanes, so an expectation would
+/// go unfulfilled on macOS.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(clippy::allow_attributes, reason = "see above")
+)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only Unsupported is constructed off macOS")
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceStatus {
     /// Registered and eligible to run — `launchctl kickstart` can start it.
@@ -35,7 +49,10 @@ pub enum ServiceStatus {
 
 /// The launchd service label this process manages: the dev variant inside a
 /// dev-profile bundle, so a dev registration can never collide with the
-/// shipped one.
+/// shipped one. macOS-only like its callers (the service handle and the
+/// kickstart path) — labels mean nothing to other platforms' service
+/// managers.
+#[cfg(target_os = "macos")]
 #[must_use]
 pub fn agent_service_label() -> String {
     if openlogi_core::paths::is_dev_profile() {
@@ -83,6 +100,19 @@ pub fn status() -> ServiceStatus {
 ///
 /// The framework's error description — an unsigned bundle, a missing embedded
 /// plist (bare dev binary), or launchd refusing the operation.
+// Not `expect`: only the macOS arm can fail, so off macOS the wrap looks
+// unnecessary and the lint fires on those lanes alone.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(clippy::allow_attributes, reason = "see above")
+)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "Result is the cross-platform contract; non-macOS arms return Ok"
+    )
+)]
 pub fn sync_registration(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
