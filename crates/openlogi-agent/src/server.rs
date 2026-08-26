@@ -121,6 +121,7 @@ impl Agent for AgentServer {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
+                let language = config.app_settings.language.clone();
                 self.orchestrator.lock().await.reload_config(config);
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
@@ -130,6 +131,13 @@ impl Agent for AgentServer {
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_icon(app_icon);
+                // And the interface language: re-resolve the process locale
+                // (the Windows popup rebuilds per show and picks it up alone)
+                // and rebuild the macOS menu, whose titles were stamped at
+                // install.
+                openlogi_core::locale::activate(language.as_deref());
+                #[cfg(target_os = "macos")]
+                crate::tray::relocalize();
                 Ok(())
             }
             Err(error) => {

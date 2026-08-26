@@ -316,7 +316,9 @@ impl AppState {
         }
         self.config
             .edit(|config| config.app_settings.language = language);
-        self.persist_config("language setting");
+        // Reload, not just persist: the agent renders the menu-bar tray in the
+        // configured language and relocalizes it on config reload.
+        self.persist_and_reload("language setting");
         openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
         // Locale lookup is process-global, so every open window must repaint;
         // localized text cached in view state re-derives on this event.

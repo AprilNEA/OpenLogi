@@ -41,12 +41,20 @@ use tracing::{info, warn};
 
 use crate::status_item;
 
+/// The installed menu-bar item plus the action target its menu items weakly
+/// reference — everything a later config reload needs to restyle the icon or
+/// rebuild the menu in a new language.
+struct TrayState {
+    item: Retained<NSStatusItem>,
+    target: Retained<MenuTarget>,
+}
+
 thread_local! {
-    /// The installed status item, kept where a later config reload can find it.
+    /// The installed tray state, kept where a later config reload can find it.
     /// A `thread_local` rather than a global: everything that touches it runs
     /// on the main thread, which is the same thread that installed it, so the
     /// affinity AppKit demands is the affinity the storage already has.
-    static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
+    static TRAY: RefCell<Option<TrayState>> = const { RefCell::new(None) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -70,9 +78,29 @@ pub fn set_icon(icon: AppIcon) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        STATUS_ITEM.with_borrow(|item| {
-            if let Some(item) = item.as_ref() {
-                status_item::set_png_icon(item, mtm, glyph(icon), "OpenLogi");
+        TRAY.with_borrow(|state| {
+            if let Some(state) = state.as_ref() {
+                status_item::set_png_icon(&state.item, mtm, glyph(icon), "OpenLogi");
+            }
+        });
+    });
+}
+
+/// Rebuild the menu-bar menu with the current locale's titles, after a config
+/// reload switched the interface language. Same shape as [`set_icon`]: the
+/// work hops to the main queue, and a hidden item is a no-op.
+pub fn relocalize() {
+    DispatchQueue::main().exec_async(|| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        TRAY.with_borrow(|state| {
+            if let Some(state) = state.as_ref() {
+                // The status item retains the menu; the fresh one replaces the
+                // old wholesale so titles, order, and key equivalents cannot
+                // drift from `build_menu`.
+                let menu = build_menu(mtm, &state.target);
+                state.item.setMenu(Some(&menu));
             }
         });
     });
@@ -289,14 +317,29 @@ fn install_status_item(
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
     status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
-    STATUS_ITEM.with_borrow_mut(|slot| *slot = Some(status_item.clone()));
+    TRAY.with_borrow_mut(|slot| {
+        *slot = Some(TrayState {
+            item: status_item.clone(),
+            target: target.clone(),
+        });
+    });
+    let menu = build_menu(mtm, &target);
+    status_item.setMenu(Some(&menu));
+
+    info!("menu-bar item installed");
+    (status_item, target, menu)
+}
+
+/// Build the tray menu with the current locale's titles. The one constructor
+/// for both the install and a [`relocalize`] rebuild, so the two cannot drift.
+fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_kit::NSMenu> {
     let menu = status_item::new_menu(mtm);
 
     let show = status_item::new_action_item(
         mtm,
         &rust_i18n::t!("Show Main Window"),
         sel!(openOpenLogi:),
-        &target,
+        target,
         "m",
     );
     menu.addItem(&show);
@@ -306,7 +349,7 @@ fn install_status_item(
         mtm,
         &rust_i18n::t!("Settings…"),
         sel!(openSettings:),
-        &target,
+        target,
         ",",
     );
     menu.addItem(&settings);
@@ -314,7 +357,7 @@ fn install_status_item(
         mtm,
         &rust_i18n::t!("About OpenLogi"),
         sel!(openAbout:),
-        &target,
+        target,
         "",
     );
     menu.addItem(&about);
@@ -322,7 +365,7 @@ fn install_status_item(
         mtm,
         &rust_i18n::t!("Check for Updates…"),
         sel!(checkForUpdates:),
-        &target,
+        target,
         "u",
     );
     menu.addItem(&updates);
@@ -332,7 +375,7 @@ fn install_status_item(
         mtm,
         &rust_i18n::t!("Quit OpenLogi"),
         sel!(quitOpenLogi:),
-        &target,
+        target,
         "q",
     );
     if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
@@ -343,10 +386,7 @@ fn install_status_item(
         quit.setImage(Some(&image));
     }
     menu.addItem(&quit);
-    status_item.setMenu(Some(&menu));
-
-    info!("menu-bar item installed");
-    (status_item, target, menu)
+    menu
 }
 
 #[cfg(test)]
