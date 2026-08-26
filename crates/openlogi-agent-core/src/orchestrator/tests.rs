@@ -31,34 +31,56 @@ fn orchestrator(config: Config) -> Orchestrator {
 
 #[test]
 fn hook_response_times_are_published_for_every_source_device() {
-    let first_key = "serial:mouse-a";
-    let second_key = "serial:mouse-b";
+    let first_key = "serial:7c85dcb1";
+    let second_key = "receiver:aa00:slot:2";
     let mut config = Config::default();
-    for key in [first_key, second_key] {
-        config.set_gesture_mode(key, ButtonId::Back, true);
-    }
+    config.set_gesture_mode(first_key, ButtonId::Back, true);
     config.set_gesture_response_time(first_key, ButtonId::Back, GestureResponseTime::FAST);
     config.set_gesture_response_time(second_key, ButtonId::Back, GestureResponseTime::DELIBERATE);
     let mut orch = orchestrator(config);
     let mut first = dev(first_key, 1, true);
-    first.serial = Some("mouse-a".to_string());
+    first.model_key = "2b034".to_string();
+    first.serial = Some("7C-85-DC-B1".to_string());
     let mut second = dev(second_key, 2, true);
-    second.serial = Some("mouse-b".to_string());
+    second.model_key = "2b034".to_string();
+    second.unit_id = [0x7c, 0x85, 0xdc, 0xb2];
     orch.devices = vec![first, second];
 
     let maps = orch.hook_maps_for(Some(first_key), None);
 
     assert_eq!(
         maps.gesture_response_times_by_source
-            .get(&EventDeviceId::new("mouse-a").unwrap())
+            .get(&EventDeviceId::new("7c85dcb1").unwrap())
             .and_then(|times| times.get(&ButtonId::Back)),
         Some(&GestureResponseTime::FAST)
     );
     assert_eq!(
         maps.gesture_response_times_by_source
-            .get(&EventDeviceId::new("mouse-b").unwrap())
+            .get(&EventDeviceId::new("7c:85:dc:b2").unwrap())
             .and_then(|times| times.get(&ButtonId::Back)),
         Some(&GestureResponseTime::DELIBERATE)
+    );
+}
+
+#[test]
+fn hook_response_times_join_direct_transport_identity() {
+    let config_key = "serial:hidpp-serial";
+    let mut config = Config::default();
+    config.set_gesture_mode(config_key, ButtonId::Back, true);
+    config.set_gesture_response_time(config_key, ButtonId::Back, GestureResponseTime::FAST);
+    let mut inventory = direct_inventory(Some("hidpp-serial"), [1, 2, 3, 4]);
+    inventory.receiver.event_source_id = Some("D5-E4-5F-12-35-49".to_string());
+    let devices = build_devices(&config, &[inventory], &[]);
+    let mut orch = orchestrator(config);
+    orch.devices = devices;
+
+    let maps = orch.hook_maps_for(Some(config_key), None);
+
+    assert_eq!(
+        maps.gesture_response_times_by_source
+            .get(&EventDeviceId::new("d5:e4:5f:12:35:49").unwrap())
+            .and_then(|times| times.get(&ButtonId::Back)),
+        Some(&GestureResponseTime::FAST)
     );
 }
 
@@ -73,6 +95,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         slot,
         serial: None,
         unit_id: [0; 4],
+        event_source_id: None,
         capabilities: None,
         kind: openlogi_core::device::DeviceKind::Mouse,
         light_capabilities: None,
@@ -94,6 +117,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         slot: DIRECT_DEVICE_INDEX,
         serial: Some("glow-1".to_string()),
         unit_id: [0; 4],
+        event_source_id: Some("glow-1".to_string()),
         capabilities: None,
         kind: DeviceKind::Light,
         light_capabilities: Some(openlogi_core::device::LightCapabilities {
@@ -111,6 +135,7 @@ fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInve
             vendor_id: 0x046d,
             product_id: 0xb023,
             unique_id: None,
+            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
@@ -144,6 +169,7 @@ fn direct_inventory_state(
             vendor_id: 0x046d,
             product_id,
             unique_id: None,
+            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
@@ -172,6 +198,7 @@ fn bolt_inventory(unit_id: [u8; 4]) -> DeviceInventory {
             vendor_id: 0x046d,
             product_id: 0xc548,
             unique_id: Some("82839805".to_string()),
+            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: 1,

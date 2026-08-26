@@ -464,7 +464,6 @@ fn device_thread(
     let event_device = EventDevice {
         stable_id: device
             .unique_name()
-            .or_else(|| device.physical_path())
             .and_then(|value| EventDeviceId::new(value.to_owned())),
         vendor_id: Some(u32::from(input_id.vendor())),
         product_id: Some(u32::from(input_id.product())),

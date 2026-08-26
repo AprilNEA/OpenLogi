@@ -234,6 +234,7 @@ mod tests {
                 vendor_id: 0x046d,
                 product_id,
                 unique_id: unique_id.map(str::to_string),
+                event_source_id: None,
             },
             paired: vec![],
         }
