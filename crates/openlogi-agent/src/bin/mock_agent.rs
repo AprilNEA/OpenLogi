@@ -49,9 +49,9 @@ use openlogi_core::device::{
 use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, TunableTorque, WriteError,
+    DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HostInfo,
+    LITRA_GLOW_PRODUCT_ID, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, TunableTorque, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -549,6 +549,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: true,
                     haptic_feedback: true,
                     haptic_panel: true,
+                    host_switching: true,
                 }),
             },
             PairedDevice {
@@ -596,6 +597,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    host_switching: true,
                 }),
             },
         ],
@@ -645,6 +647,7 @@ fn direct_inventory() -> DeviceInventory {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: false,
             }),
         }],
     }
@@ -850,6 +853,18 @@ impl Agent for MockAgent {
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2201,
             })
+    }
+
+    async fn read_host_info(self, _: Context, route: DeviceRoute) -> Result<HostInfo, WriteError> {
+        // Every scripted multi-host device sits on its first slot of three, so
+        // the Flow tab renders (and its host pickers exclude "Host 1") without
+        // hardware.
+        let state = self.state.lock().await;
+        state.settings_for(&route)?;
+        Ok(HostInfo {
+            current_host: 0,
+            host_count: 3,
+        })
     }
 
     async fn read_smartshift(
