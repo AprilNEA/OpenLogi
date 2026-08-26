@@ -175,9 +175,16 @@ fn editor_input(
     window: &mut Window,
     cx: &mut Context<ActionRingPanel>,
 ) -> Entity<InputState> {
+    let placeholder = placeholder.into();
+    let state = state
+        .get_or_insert_with(|| {
+            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.clone()))
+        })
+        .clone();
+    // Callers pass a per-render `tr!` string, so a cached input follows a live
+    // language switch instead of keeping the placeholder it was built with.
+    crate::ui::components::localize_placeholder(&state, placeholder, window, cx);
     state
-        .get_or_insert_with(|| cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)))
-        .clone()
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {

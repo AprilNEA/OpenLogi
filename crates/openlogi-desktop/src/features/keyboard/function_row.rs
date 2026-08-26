@@ -299,7 +299,14 @@ impl Render for FunctionRowView {
                     }
                 }
                 _ => {
-                    if self.text_state.is_none() {
+                    if let Some(state) = self.text_state.clone() {
+                        crate::ui::components::localize_placeholder(
+                            &state,
+                            tr!(text_editor_placeholder(kind)),
+                            window,
+                            cx,
+                        );
+                    } else {
                         self.new_text_state(
                             text_editor_seed(current_action, kind),
                             text_editor_placeholder(kind),

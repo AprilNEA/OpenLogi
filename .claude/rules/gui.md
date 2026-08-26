@@ -64,6 +64,19 @@ paths:
   (device, route, query, selection, or request), capture their identity or generation
   at launch and compare again before committing the result. Cancellation is useful,
   but is not the stale-result fence.
+- Never call a function that reads `AppState` (menu rebuild, most `windows::`/`app::`
+  helpers) from inside an `AppState::update` closure — the entity lease is still held
+  and the re-entrant read panics ("cannot read … while it is already being updated";
+  the 0.8.0 language-switch crash). Run such side effects after the update returns,
+  the way `runtime.rs` orders its rebuilds, or `cx.defer` them from within.
+- A `tr!` string stored in entity state goes stale on a live language switch: an
+  `InputState` placeholder keeps the text it was constructed with, and a cached
+  localized description keeps its old locale. Placeholders re-derive in the owning
+  render via `ui::components::localize_placeholder` (guarded — never call
+  `set_placeholder` bare per render, it notifies unconditionally); other cached
+  localized text recomputes on `StateEvent::LanguageChanged`. Native window titles
+  are restamped by `windows::retitle_open`, already wired into
+  `AppState::set_language`.
 - When changing reusable controls, prefer focused `#[gpui::test]` behavior contracts
   over screenshot coverage: keyboard activation, disabled no-op, controlled selected
   state/callbacks, and independent parent/child interaction targets.
