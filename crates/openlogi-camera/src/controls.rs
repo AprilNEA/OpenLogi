@@ -17,13 +17,15 @@ pub enum CameraControl {
     Contrast,
     Saturation,
     Sharpness,
+    Gain,
+    BacklightCompensation,
     WhiteBalance,
     Tint,
 }
 
 impl CameraControl {
     /// Every control, in the order the UI lists them (lens first, then image).
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Zoom,
         Self::Pan,
         Self::Tilt,
@@ -35,6 +37,8 @@ impl CameraControl {
         Self::Contrast,
         Self::Saturation,
         Self::Sharpness,
+        Self::Gain,
+        Self::BacklightCompensation,
         Self::WhiteBalance,
         Self::Tint,
     ];
@@ -54,6 +58,8 @@ impl CameraControl {
             Self::Contrast => "contrast",
             Self::Saturation => "saturation",
             Self::Sharpness => "sharpness",
+            Self::Gain => "gain",
+            Self::BacklightCompensation => "backlight_compensation",
             Self::WhiteBalance => "white_balance",
             Self::Tint => "tint",
         }

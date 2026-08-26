@@ -27,8 +27,8 @@ pub enum CameraCmd {
     Set {
         /// zoom | pan | tilt | focus | exposure | power_line_frequency |
         /// low_light_compensation | brightness | contrast | saturation |
-        /// sharpness | white_balance | tint, or focus_auto | exposure_auto |
-        /// white_balance_auto
+        /// sharpness | gain | backlight_compensation | white_balance | tint,
+        /// or focus_auto | exposure_auto | white_balance_auto
         control: String,
         value: i32,
     },
