@@ -119,8 +119,9 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
 
 /// Lay labels out evenly down one or both sides of the mouse. A two-sided
 /// layout sends the leftmost half of the hotspots left and the rightmost half
-/// right, then orders each side by hotspot height so its leader lines do not
-/// cross.
+/// right, then orders each side by hotspot height. Back and Forward stay
+/// adjacent when both are on the same side because they form one navigation
+/// pair, even when another marker sits between them.
 #[expect(
     clippy::cast_precision_loss,
     reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
@@ -161,6 +162,20 @@ pub fn labels_from_hotspots(
             .filter_map(|(index, label)| (label.side == side).then_some(index))
             .collect();
         vertical_order.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
+        let back = vertical_order
+            .iter()
+            .position(|&index| labels[index].id == ButtonId::Back.into());
+        let forward = vertical_order
+            .iter()
+            .position(|&index| labels[index].id == ButtonId::Forward.into());
+        if let (Some(back), Some(forward)) = (back, forward) {
+            let first = back.min(forward);
+            let second = back.max(forward);
+            if second > first + 1 {
+                let navigation_button = vertical_order.remove(second);
+                vertical_order.insert(first + 1, navigation_button);
+            }
+        }
         let step = mouse_h / (vertical_order.len() as f32 + 1.);
         for (slot, index) in vertical_order.into_iter().enumerate() {
             labels[index].y = step * (slot as f32 + 1.);
@@ -266,6 +281,46 @@ mod tests {
         ys.sort_by(f32::total_cmp);
         ys.dedup();
         assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
+    }
+
+    #[test]
+    fn navigation_labels_stay_together_when_haptic_marker_sits_between() {
+        let hotspots = [
+            Hotspot {
+                id: ButtonId::Forward.into(),
+                x: 0.,
+                y: 100.,
+                w: 10.,
+                h: 10.,
+            },
+            Hotspot {
+                id: ButtonId::HapticPanel.into(),
+                x: 0.,
+                y: 200.,
+                w: 10.,
+                h: 10.,
+            },
+            Hotspot {
+                id: ButtonId::Back.into(),
+                x: 0.,
+                y: 300.,
+                w: 10.,
+                h: 10.,
+            },
+        ];
+
+        let mut labels =
+            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
+        labels.sort_by(|a, b| a.y.total_cmp(&b.y));
+
+        assert_eq!(
+            labels.iter().map(|label| label.id).collect::<Vec<_>>(),
+            [
+                MouseControlId::Button(ButtonId::Forward),
+                MouseControlId::Button(ButtonId::Back),
+                MouseControlId::Button(ButtonId::HapticPanel),
+            ]
+        );
     }
 
     #[test]
