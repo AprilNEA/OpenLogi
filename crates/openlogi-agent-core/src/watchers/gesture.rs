@@ -267,9 +267,17 @@ async fn manage(
     // tasks share it through an `Arc`; the manager keeps only a `Weak` so the
     // lease frees itself when the last session exits (letting pairing proceed).
     let mut lease: std::sync::Weak<SessionReceiverLease> = std::sync::Weak::new();
+    // Exclusive requests (pairing, host transitions) must not wait out the
+    // management tick: an edge on either side pulls the next tick forward so
+    // sessions release (or re-arm) immediately.
+    let mut exclusive_rx = receiver_access.watch_exclusive();
+    let mut exclusive_open = true;
 
     loop {
         tokio::select! {
+            changed = exclusive_rx.changed(), if exclusive_open => {
+                super::pull_tick_forward(changed.is_ok(), &mut ticker, &mut exclusive_open);
+            }
             Some(event) = rx.recv() => {
                 let key = event.session.device_key();
                 let live = sessions.get(key);
