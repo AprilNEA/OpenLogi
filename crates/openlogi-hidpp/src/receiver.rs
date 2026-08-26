@@ -77,4 +77,9 @@ pub enum ReceiverError {
     /// Indicates that a HID++1.0 register access resulted in an error.
     #[error("a HID++1.0 error occurred")]
     Protocol(#[from] Hidpp10Error),
+
+    /// Indicates that a receiver slot outside its supported 1-based range was
+    /// requested.
+    #[error("invalid receiver device index {0}; expected 1 through 6")]
+    InvalidDeviceIndex(u8),
 }

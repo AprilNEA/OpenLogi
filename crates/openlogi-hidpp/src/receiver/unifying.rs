@@ -4,9 +4,9 @@
 //! 2.4 GHz eQuad radio protocol. It uses HID++ 1.0 registers for receiver
 //! control; paired devices speak HID++ 2.0 once addressed via their slot index.
 //!
-//! The register layout for device enumeration (`0xB5/0x5N`, `0xB5/0x6N`) is
-//! identical to Bolt's. The device-kind encoding differs from Bolt at values 5+
-//! (see [`DeviceKind`]).
+//! Device enumeration follows the Unifying-specific `0xB5/0x2N` pairing,
+//! `0xB5/0x3N` extended-pairing, and `0xB5/0x4N` name sub-registers. Unlike
+//! Bolt's `0x5N`/`0x6N` layout, `N=0` addresses receiver slot 1.
 
 use std::sync::Arc;
 
@@ -52,19 +52,17 @@ pub enum InfoSubRegister {
     /// slot count).
     ReceiverInfo = 0x03,
 
-    /// Provides information about a specific paired device. The device index
-    /// (4 bits) must be added to this base address to form the actual
-    /// sub-register: `0x50 | (device_index & 0x0f)`.
-    DevicePairingInformation = 0x50,
+    /// Provides information about a specific paired device. Add the zero-based
+    /// slot number: `0x20 + (device_index - 1)`.
+    DevicePairingInformation = 0x20,
 
-    /// Provides the codename of a specific paired device. The device index (4
-    /// bits) must be added: `0x60 | (device_index & 0x0f)`.
-    ///
-    /// NOTE: `0x60` is the *Bolt* base. Wire-verified Unifying receivers store
-    /// names at base `0x40 + (n-1)` instead, so name reads go directly through
-    /// `read_codename_unifying` in `inventory.rs` rather than this constant —
-    /// don't reuse `DeviceCodename` for Unifying name reads.
-    DeviceCodename = 0x60,
+    /// Provides the stable serial number and report types for a paired device.
+    /// Add the zero-based slot number: `0x30 + (device_index - 1)`.
+    DeviceExtendedPairingInformation = 0x30,
+
+    /// Provides the codename of a specific paired device. Add the zero-based
+    /// slot number: `0x40 + (device_index - 1)`.
+    DeviceCodename = 0x40,
 }
 
 /// Implements the Unifying wireless receiver.
@@ -208,28 +206,40 @@ impl Receiver {
         &self,
         device_index: u8,
     ) -> Result<DevicePairingInformation, ReceiverError> {
+        let sub_register =
+            device_info_sub_register(InfoSubRegister::DevicePairingInformation, device_index)?;
         let response = self
             .chan
             .read_long_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                [sub_register, 0x00, 0x00],
             )
             .await?;
 
-        Ok(DevicePairingInformation {
-            wpid: u16::from_le_bytes([response[2], response[3]]),
-            // Kind is identity-only: an unrecognised nibble folds to
-            // `Unknown` instead of failing the whole pairing-info read.
-            kind: DeviceKind::from(response[1] & 0x0f),
-            encrypted: response[1] & (1 << 5) != 0,
-            online: response[1] & (1 << 6) == 0,
-            unit_id: [response[4], response[5], response[6], response[7]],
-        })
+        Ok(parse_device_pairing_information(&response))
+    }
+
+    /// Retrieves the stable serial number and report types for one paired
+    /// device from the Unifying extended-pairing sub-register.
+    pub async fn get_device_extended_pairing_information(
+        &self,
+        device_index: u8,
+    ) -> Result<DeviceExtendedPairingInformation, ReceiverError> {
+        let sub_register = device_info_sub_register(
+            InfoSubRegister::DeviceExtendedPairingInformation,
+            device_index,
+        )?;
+        let response = self
+            .chan
+            .read_long_register(
+                RECEIVER_DEVICE_INDEX,
+                Register::ReceiverInfo.into(),
+                [sub_register, 0x00, 0x00],
+            )
+            .await?;
+
+        Ok(parse_device_extended_pairing_information(&response))
     }
 
     /// Provides the unique ID of the receiver (serial number).
@@ -308,19 +318,25 @@ pub struct DevicePairingInformation {
     pub wpid: u16,
     /// Device kind reported by the receiver.
     pub kind: DeviceKind,
-    /// Whether the link is encrypted.
-    pub encrypted: bool,
-    /// Whether the device is currently online.
-    pub online: bool,
-    /// Device unit ID.
+}
+
+/// Extended identity retained by a Unifying receiver for one paired device.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct DeviceExtendedPairingInformation {
+    /// Stable device serial number, also exposed by HID++ 2.0 as the unit ID.
     pub unit_id: [u8; 4],
+    /// HID report-type bitmap stored by the receiver.
+    pub report_types: [u8; 4],
+    /// Physical location of the device power switch (low nibble, per HID++
+    /// 1.0).
+    pub power_switch_location: u8,
 }
 
 /// Represents the kind of a device paired to a Unifying receiver.
 ///
-/// The encoding matches Bolt for values 1–4; from 5 onwards Unifying uses a
-/// shifted table (Remote=5, Trackball=6, Touchpad=7) while Bolt reserves those
-/// values and places them at 7–9.
+/// The encoding matches the Unifying HID++ 1.0 pairing and connection tables.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -341,9 +357,36 @@ pub enum DeviceKind {
     /// Remote-control device.
     Remote = 0x05,
     /// Trackball device.
-    Trackball = 0x06,
+    Trackball = 0x08,
     /// Touchpad device.
-    Touchpad = 0x07,
+    Touchpad = 0x09,
+}
+
+fn device_info_sub_register(base: InfoSubRegister, device_index: u8) -> Result<u8, ReceiverError> {
+    let zero_based = device_index
+        .checked_sub(1)
+        .filter(|index| *index < 6)
+        .ok_or(ReceiverError::InvalidDeviceIndex(device_index))?;
+    Ok(u8::from(base) + zero_based)
+}
+
+fn parse_device_pairing_information(response: &[u8; 16]) -> DevicePairingInformation {
+    DevicePairingInformation {
+        wpid: u16::from_be_bytes([response[3], response[4]]),
+        // Kind is identity-only: an unrecognised value folds to `Unknown`
+        // instead of making an otherwise valid occupied slot disappear.
+        kind: DeviceKind::from(response[7]),
+    }
+}
+
+fn parse_device_extended_pairing_information(
+    response: &[u8; 16],
+) -> DeviceExtendedPairingInformation {
+    DeviceExtendedPairingInformation {
+        unit_id: [response[1], response[2], response[3], response[4]],
+        report_types: [response[5], response[6], response[7], response[8]],
+        power_switch_location: response[9] & 0x0f,
+    }
 }
 
 /// Represents a device-connection event fired by the receiver when a paired
@@ -384,11 +427,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        DeviceConnection, DeviceKind, DevicePairingInformation, Event, InfoSubRegister, Receiver,
-        Register, decode_notification, update_wireless_notification_flag,
+        DeviceConnection, DeviceKind, Event, InfoSubRegister, Receiver, Register,
+        decode_notification, device_info_sub_register, parse_device_extended_pairing_information,
+        parse_device_pairing_information, update_wireless_notification_flag,
     };
+    use crate::channel::HidppMessage;
     use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
-    use crate::protocol::v10::{Message, MessageHeader, MessageType};
+    use crate::protocol::v10::{Message, MessageHeader};
+    use crate::receiver::ReceiverError;
 
     /// Builds the long notification the receiver broadcasts, with `payload`
     /// laid out exactly as the 17 bytes following the header.
@@ -400,6 +446,20 @@ mod tests {
             },
             payload,
         )
+    }
+
+    fn long_register_response(register_data: [u8; 16]) -> HidppMessage {
+        let mut payload = [0u8; 17];
+        payload[0] = Register::ReceiverInfo.into();
+        payload[1..].copy_from_slice(&register_data);
+        Message::Long(
+            MessageHeader {
+                device_index: super::RECEIVER_DEVICE_INDEX,
+                sub_id: 0x83,
+            },
+            payload,
+        )
+        .into()
     }
 
     #[test]
@@ -453,61 +513,6 @@ mod tests {
     }
 
     #[test]
-    fn pairing_information_reads_encryption_from_bit_5() {
-        // The pairing register carries the same device-info byte as the 0x41
-        // notification, decoded independently — pin its bits too so the two
-        // paths cannot diverge unnoticed.
-        futures::executor::block_on(async {
-            let (raw, handle) = MockRawHidChannel::new();
-            let chan = Arc::new(channel_with_reader(raw).await);
-            let receiver =
-                Receiver::new(chan).expect("the mock's VID/PID routes as a Unifying receiver");
-
-            // First response: bit 5 + bit 6 — encrypted, offline. Second:
-            // bit 4 only (software present), which must not read as
-            // encryption.
-            for status in [0x62, 0x12] {
-                let mut payload = [0u8; 17];
-                payload[0] = Register::ReceiverInfo.into(); // RAP matches on the address echo
-                payload[1] = u8::from(InfoSubRegister::DevicePairingInformation) | 0x02;
-                payload[2] = status;
-                payload[3] = 0x69; // wpid, little-endian
-                payload[4] = 0x40;
-                payload[5..9].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-                handle.queue_response(
-                    Message::Long(
-                        MessageHeader {
-                            device_index: super::RECEIVER_DEVICE_INDEX,
-                            sub_id: MessageType::GetLongRegister.into(),
-                        },
-                        payload,
-                    )
-                    .into(),
-                );
-            }
-
-            let encrypted_offline = receiver.get_device_pairing_information(2).await.unwrap();
-            assert_eq!(
-                encrypted_offline,
-                DevicePairingInformation {
-                    wpid: 0x4069,
-                    kind: DeviceKind::Mouse,
-                    encrypted: true,
-                    online: false,
-                    unit_id: [0xde, 0xad, 0xbe, 0xef],
-                }
-            );
-
-            let software_present = receiver.get_device_pairing_information(2).await.unwrap();
-            assert!(
-                !software_present.encrypted,
-                "bit 4 is software-present, not encryption"
-            );
-            assert!(software_present.online);
-        });
-    }
-
-    #[test]
     fn bit_6_is_set_when_the_device_is_offline() {
         let mut payload = [0u8; 17];
         payload[1] = 1 << 6;
@@ -534,8 +539,8 @@ mod tests {
         };
 
         assert_eq!(kind(0x05), DeviceKind::Remote);
-        assert_eq!(kind(0x06), DeviceKind::Trackball);
-        assert_eq!(kind(0x07), DeviceKind::Touchpad);
+        assert_eq!(kind(0x08), DeviceKind::Trackball);
+        assert_eq!(kind(0x09), DeviceKind::Touchpad);
     }
 
     #[test]
@@ -579,5 +584,96 @@ mod tests {
                 wpid: 0x4074,
             })
         );
+    }
+
+    #[test]
+    fn unifying_slot_sub_registers_are_zero_based_not_bolt_addresses() {
+        assert_eq!(
+            device_info_sub_register(InfoSubRegister::DevicePairingInformation, 1).unwrap(),
+            0x20
+        );
+        assert_eq!(
+            device_info_sub_register(InfoSubRegister::DeviceExtendedPairingInformation, 6).unwrap(),
+            0x35
+        );
+        assert!(matches!(
+            device_info_sub_register(InfoSubRegister::DevicePairingInformation, 0),
+            Err(ReceiverError::InvalidDeviceIndex(0))
+        ));
+        assert!(matches!(
+            device_info_sub_register(InfoSubRegister::DevicePairingInformation, 7),
+            Err(ReceiverError::InvalidDeviceIndex(7))
+        ));
+    }
+
+    #[test]
+    fn pairing_information_uses_the_unifying_wire_layout() {
+        let mut response = [0u8; 16];
+        response[0] = 0x20;
+        response[3] = 0x40;
+        response[4] = 0x67;
+        response[7] = 0x08;
+
+        let pairing = parse_device_pairing_information(&response);
+
+        assert_eq!(pairing.wpid, 0x4067);
+        assert_eq!(pairing.kind, DeviceKind::Trackball);
+    }
+
+    #[test]
+    fn extended_pairing_information_carries_the_stable_unit_id() {
+        let mut response = [0u8; 16];
+        response[0] = 0x30;
+        response[1..=4].copy_from_slice(&[0x29, 0x16, 0xdb, 0xbe]);
+        response[5..=8].copy_from_slice(&[0x01, 0x02, 0x04, 0x08]);
+        response[9] = 0xb3;
+
+        let extended = parse_device_extended_pairing_information(&response);
+
+        assert_eq!(extended.unit_id, [0x29, 0x16, 0xdb, 0xbe]);
+        assert_eq!(extended.report_types, [0x01, 0x02, 0x04, 0x08]);
+        assert_eq!(extended.power_switch_location, 0x03);
+    }
+
+    #[test]
+    fn receiver_reads_unifying_pairing_and_extended_registers_for_slot_one() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let receiver = Receiver::new(channel).expect("mock is a known Unifying receiver");
+
+            let mut pairing_response = [0u8; 16];
+            pairing_response[0] = 0x20;
+            pairing_response[3] = 0x40;
+            pairing_response[4] = 0x67;
+            pairing_response[7] = 0x08;
+            handle.queue_response(long_register_response(pairing_response));
+
+            let pairing = receiver
+                .get_device_pairing_information(1)
+                .await
+                .expect("pairing information");
+
+            let mut extended_response = [0u8; 16];
+            extended_response[0] = 0x30;
+            extended_response[1..=4].copy_from_slice(&[0x29, 0x16, 0xdb, 0xbe]);
+            handle.queue_response(long_register_response(extended_response));
+
+            let extended = receiver
+                .get_device_extended_pairing_information(1)
+                .await
+                .expect("extended pairing information");
+
+            assert_eq!(pairing.wpid, 0x4067);
+            assert_eq!(pairing.kind, DeviceKind::Trackball);
+            assert_eq!(extended.unit_id, [0x29, 0x16, 0xdb, 0xbe]);
+            assert_eq!(
+                handle.written_reports(),
+                vec![
+                    vec![0x10, 0xff, 0x83, 0xb5, 0x20, 0x00, 0x00],
+                    vec![0x10, 0xff, 0x83, 0xb5, 0x30, 0x00, 0x00],
+                ]
+            );
+        });
     }
 }
