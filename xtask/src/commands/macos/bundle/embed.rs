@@ -146,10 +146,14 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 ///
 /// `BundleProgram` (not `Program`) so launchd resolves the helper relative to
 /// wherever the app bundle lives — the registration survives the user moving
-/// the app. `KeepAlive = {SuccessfulExit: false}` is the supervision contract:
-/// a crash is respawned, the tray's Quit (a clean `exit(0)`) stays down. Per
-/// launchd.plist(5), `SuccessfulExit` implies `RunAtLoad`, so a registered
-/// service also starts at login and immediately upon registration.
+/// the app. The key exists only in the `SMAppService` layer, which supplies
+/// the bundle context: a raw `launchctl bootstrap` of this file fails with
+/// `Input/output error` (verified) — registration through the framework is
+/// the sole loading path. `KeepAlive = {SuccessfulExit: false}` is the
+/// supervision contract: a crash is respawned, the tray's Quit (a clean
+/// `exit(0)`) stays down. Per launchd.plist(5), `SuccessfulExit` implies
+/// `RunAtLoad`, so a registered service also starts at login and immediately
+/// upon registration.
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let helper = HELPERS
         .iter()
