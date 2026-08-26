@@ -675,6 +675,27 @@ mod tests {
         assert!(g502.pointer);
     }
 
+    /// The same derivation on a second gaming mouse, reported on #886: a G705
+    /// over a Lightspeed receiver lists `0x8100`/`0x8110` and nothing in the
+    /// `0x1b0x` family, and `openlogi diag controls` fails against it for the
+    /// same reason it does on a G502. The hidden and engineering entries in that
+    /// dump are omitted here — they touch none of the families this reads.
+    #[test]
+    fn a_second_gaming_mouse_derives_the_same_way() {
+        use super::Capabilities;
+        let g705 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x0007, 0x1d4b, 0x0020, 0x00d0, 0x1004, 0x8081, 0x8071,
+            0x8100, 0x8110, 0x8060, 0x2201, 0x1500, 0x1e00,
+        ]);
+        assert!(g705.buttons, "a gaming control table earns a Buttons panel");
+        assert!(
+            !g705.can_divert_buttons(),
+            "no 0x1b04 means nothing beyond the OS-visible buttons can be diverted"
+        );
+        assert!(g705.pointer, "0x2201 drives the Pointer panel");
+        assert!(g705.lighting, "0x8071 and 0x8081 drive the Lighting panel");
+    }
+
     /// A config or probe cache written before `no_button_diversion` existed has
     /// no key for it, and those builds set `buttons` only for ReprogControls
     /// devices. So absence must read back as "divertable" — otherwise every

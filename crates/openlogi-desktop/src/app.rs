@@ -856,11 +856,18 @@ mod tests {
     /// G502 does, but the function-row remapper has no OS-hook fallback — it
     /// diverts every key over `0x1b04`. Offering Keys here would open a panel
     /// whose capture session bails on the missing feature and re-arms forever.
+    ///
+    /// The feature list is a real G713 dump (#886). It carries `0x8100` without
+    /// `0x8110`, so one gaming table is enough to set `buttons`, and the gate
+    /// that withholds Keys is `can_divert_buttons`, not `buttons`.
     #[test]
     fn gaming_keyboard_gets_no_keys_tab() {
-        let g915 = Capabilities::from_feature_ids(&[0x8100, 0x8110, 0x8070, 0x1001]);
-        assert!(g915.buttons, "the gaming tables must still set `buttons`");
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g915)));
+        let g713 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x0020, 0x8071, 0x8081, 0x1bc0, 0x40a3, 0x4522, 0x4540,
+            0x8010, 0x8040, 0x8100, 0x8060, 0x00c2, 0x00d0,
+        ]);
+        assert!(g713.buttons, "the gaming tables must still set `buttons`");
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g713)));
         assert!(
             !tabs.contains(&DetailTab::Keys),
             "a keyboard that cannot divert its keys must not be offered the remapper"
