@@ -30,7 +30,10 @@ use std::time::Duration;
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute,
+    run_capture_session_with_registry_spec,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -80,6 +83,7 @@ pub fn spawn(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    registry: ChannelRegistry,
     outputs: GestureOutputs,
 ) {
     thread::spawn(move || {
@@ -97,6 +101,7 @@ pub fn spawn(
             capture_plans,
             capture_channel,
             receiver_access,
+            registry,
             outputs,
         ));
     });
@@ -171,6 +176,7 @@ struct SessionChannels {
     inputs: mpsc::UnboundedSender<CapturedEvent>,
     done: mpsc::UnboundedSender<SessionDone>,
     capture: CaptureChannel,
+    registry: ChannelRegistry,
 }
 
 /// What the manager should do with one session-completion report.
@@ -243,6 +249,7 @@ async fn manage(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    registry: ChannelRegistry,
     outputs: GestureOutputs,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
@@ -261,6 +268,7 @@ async fn manage(
         inputs: tx,
         done: done_tx,
         capture: capture_channel,
+        registry,
     };
     let mut epoch: u64 = 0;
     // The capture-vs-pairing arbiter hands out one exclusive lease. All session
@@ -384,16 +392,16 @@ fn spawn_session(
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
     let slot = Arc::clone(&channels.capture);
+    let registry = channels.registry.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        let backend = openlogi_hid::host::backend();
-        if let Err(e) = run_capture_session(
-            &*backend,
+        if let Err(e) = run_capture_session_with_registry_spec(
             session_route,
             session_spec,
             session_tx,
             stop_rx,
             slot,
+            &registry,
         )
         .await
         {

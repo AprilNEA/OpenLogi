@@ -149,6 +149,7 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
         shared.capture_plans.clone(),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
         GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
     );
     watchers::host_switch::spawn(

@@ -41,6 +41,12 @@ const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// happen under pointer load) doesn't churn the session.
 const LIVENESS_PING_STRIKES: u8 = 2;
 
+/// How often a registry-backed capture verifies that inventory still publishes
+/// the exact channel it armed on. This is memory-only and deliberately faster
+/// than the HID++ liveness ping, so a reconnect replaces a stale listener
+/// without waiting for two wire timeouts.
+const REGISTRY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
@@ -202,6 +208,50 @@ pub async fn run_capture_session(
     let chan = open_route_channel(backend, &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
+    let shared = SharedChannel::new(chan, route.clone());
+    run_capture_session_on(route, spec, sink, shutdown, channel_slot, shared, None).await
+}
+
+/// Capture controls through the exact channel currently owned by the Agent's
+/// inventory enumerator.
+///
+/// A registry miss is retried by the watcher after a later inventory
+/// publication; it never opens a competing handle to the same Bluetooth HID
+/// node. If inventory replaces the publication after a reconnect, the session
+/// exits so its watcher can arm against the new generation.
+pub async fn run_capture_session_with_registry_spec(
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+    registry: &crate::ChannelRegistry,
+) -> Result<(), GestureError> {
+    let shared = registry
+        .lookup(&route)
+        .ok_or(GestureError::DeviceNotFound)?;
+    run_capture_session_on(
+        route,
+        spec,
+        sink,
+        shutdown,
+        channel_slot,
+        shared,
+        Some(registry),
+    )
+    .await
+}
+
+async fn run_capture_session_on(
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+    shared: SharedChannel,
+    registry: Option<&crate::ChannelRegistry>,
+) -> Result<(), GestureError> {
+    let chan = Arc::clone(shared.channel());
     let device_index = route.device_index();
     let armed = arm_controls(&chan, device_index, &spec).await?;
 
@@ -256,47 +306,7 @@ pub async fn run_capture_session(
         "control capture active"
     );
 
-    // Liveness watchdog: this session's channel is the sole delivery path for
-    // every diverted control, and a channel whose input-report delivery dies
-    // (observed on macOS with concurrent opens of one node: writes accepted,
-    // replies and events silently routed elsewhere) turns every captured
-    // button to dead air with nothing to notice. Ping the device through this
-    // channel; consecutive all-silent pings mean the channel — not the device
-    // — is gone (a sleeping/unreachable device still gets us an error *reply*,
-    // which proves delivery and resets the count). Exiting lets the manager
-    // re-arm on a fresh channel.
-    let root = <hidpp::feature::root::RootFeature as hidpp::feature::CreatableFeature>::new(
-        Arc::clone(&chan),
-        device_index,
-        0,
-    );
-    let mut shutdown = std::pin::pin!(shutdown);
-    let mut silent_pings = 0u8;
-    let channel_dead = loop {
-        tokio::select! {
-            _ = &mut shutdown => break false,
-            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
-                match root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => {
-                        silent_pings = silent_pings.saturating_add(1);
-                        if silent_pings >= LIVENESS_PING_STRIKES {
-                            warn!(
-                                index = device_index,
-                                "capture channel stopped delivering — restarting session on a fresh channel"
-                            );
-                            break true;
-                        }
-                    }
-                    // Any reply — pong, feature error, unreachable-device
-                    // error — proves the channel still delivers.
-                    _ => silent_pings = 0,
-                }
-            }
-        }
-    };
+    let channel_dead = monitor_channel(&chan, device_index, &shared, registry, shutdown).await;
 
     drop(listener);
     // The slot is one last-writer-wins cell shared by every session, so a
@@ -321,6 +331,63 @@ pub async fn run_capture_session(
     }
     debug!(index = device_index, "control capture stopped");
     Ok(())
+}
+
+/// Wait for shutdown while proving that the capture channel remains the live
+/// inventory publication and still carries HID++ replies.
+async fn monitor_channel(
+    chan: &Arc<HidppChannel>,
+    device_index: u8,
+    shared: &SharedChannel,
+    registry: Option<&crate::ChannelRegistry>,
+    shutdown: oneshot::Receiver<()>,
+) -> bool {
+    // This channel is the sole delivery path for every diverted control. A
+    // channel whose input-report delivery dies turns every captured button to
+    // dead air. Consecutive silent pings mean the channel — not the device —
+    // is gone; a sleeping device still returns an error reply, which proves
+    // delivery and clears the strike.
+    let root = <hidpp::feature::root::RootFeature as hidpp::feature::CreatableFeature>::new(
+        Arc::clone(chan),
+        device_index,
+        0,
+    );
+    let mut shutdown = std::pin::pin!(shutdown);
+    let mut silent_pings = 0u8;
+    let mut registry_checks = tokio::time::interval(REGISTRY_CHECK_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return false,
+            _ = registry_checks.tick(), if registry.is_some() => {
+                if registry.is_some_and(|registry| !registry.is_current(shared)) {
+                    warn!(
+                        index = device_index,
+                        "inventory replaced the capture channel — restarting on the new generation"
+                    );
+                    return true;
+                }
+            }
+            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
+                match root.ping(0x5a).await {
+                    Err(v20::Hidpp20Error::Channel(
+                        hidpp::channel::ChannelError::Timeout
+                        | hidpp::channel::ChannelError::NoResponse,
+                    )) => {
+                        silent_pings = silent_pings.saturating_add(1);
+                        if silent_pings >= LIVENESS_PING_STRIKES {
+                            warn!(
+                                index = device_index,
+                                "capture channel stopped delivering — restarting session on a fresh channel"
+                            );
+                            return true;
+                        }
+                    }
+                    // Any reply proves the channel still delivers.
+                    _ => silent_pings = 0,
+                }
+            }
+        }
+    }
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.

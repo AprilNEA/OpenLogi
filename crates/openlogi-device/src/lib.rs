@@ -50,7 +50,7 @@ pub use pairing::{
 };
 pub use session::gesture::{
     CaptureChannel, CaptureStop, CapturedInput, GestureError, run_capture_session,
-    run_capture_session_with_stop_reason,
+    run_capture_session_with_registry_spec, run_capture_session_with_stop_reason,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
