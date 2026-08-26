@@ -64,9 +64,29 @@ pub enum ButtonId {
     /// (Logi metadata slot `ASSIGNMENT_NAME_SHOW_RADIAL_MENU`, HID++ CID
     /// `0x01a0`). A separate physical control from [`ButtonId::GestureButton`];
     /// captured over HID++ like it, and eligible as the gesture owner.
+    HapticPanel,
+    /// Keyboard "Circle" control (CID `0x01a3`) — one of three generic,
+    /// shape-labeled programmable keys above the numpad on the Alto Keys
+    /// K98M, with no counterpart on the Signature series. Unlike the F-row
+    /// icon keys, these have no fixed function of their own: Logitech's
+    /// control catalog names them after the shape printed on the keycap, not
+    /// a task, and Options+ (like this binding) assigns their meaning in
+    /// software. Name cross-checked against Solaar's `special_keys.py`; the
+    /// CID-to-physical-key correspondence has not been verified against
+    /// hardware — see the PR description before trusting which physical key
+    /// this fires for.
+    KeyCircle,
+    /// Keyboard "Triangle" control (CID `0x01a4`) — see
+    /// [`ButtonId::KeyCircle`] for the shape-labeled-key family and its
+    /// unverified CID-to-physical-key mapping.
+    KeyTriangle,
+    /// Keyboard "Diamond" control (CID `0x01a5`) — see
+    /// [`ButtonId::KeyCircle`] for the shape-labeled-key family and its
+    /// unverified CID-to-physical-key mapping.
+    ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    HapticPanel,
+    KeyDiamond,
 }
 
 impl ButtonId {
@@ -87,11 +107,12 @@ impl ButtonId {
         ButtonId::HapticPanel,
     ];
 
-    /// The divertable keyboard F-row controls, in F-row order. Kept out of
-    /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
-    /// popover trigger list, while keyboard keys stay native unless the user
-    /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    /// The divertable keyboard controls OpenLogi models: the F-row icon keys
+    /// (F-row order) plus the K98M-only action keys above the numpad. Kept
+    /// out of [`ButtonId::ALL`]: that array seeds mouse defaults and the
+    /// mouse popover trigger list, while keyboard keys stay native unless the
+    /// user binds them (an unbound key is never diverted).
+    pub const KEYBOARD_KEYS: [ButtonId; 12] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -101,6 +122,9 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+        ButtonId::KeyCircle,
+        ButtonId::KeyTriangle,
+        ButtonId::KeyDiamond,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -152,6 +176,9 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::KeyCircle => "Circle Key",
+            ButtonId::KeyTriangle => "Triangle Key",
+            ButtonId::KeyDiamond => "Diamond Key",
         }
     }
 }

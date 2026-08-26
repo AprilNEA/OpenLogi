@@ -34,11 +34,14 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::write::SharedChannel;
 
-/// The divertable keyboard F-row controls OpenLogi models, as
-/// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
-/// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+/// The divertable keyboard controls OpenLogi models, as `(0x1b04 control ID,
+/// ButtonId)` pairs. CID values match Logitech's control catalog
+/// (cross-checked against Solaar's `special_keys.py`); the first nine are the
+/// Signature-series F-row layout. The last three (`Circle`/`Triangle`/
+/// `Diamond`) are the Alto Keys K98M's generic, shape-labeled action keys
+/// above the numpad — see [`ButtonId::KeyCircle`] for what "generic" means
+/// here and the caveat on their CID-to-physical-key mapping.
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 12] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
@@ -48,6 +51,9 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
     (0x00e7, ButtonId::KeyMute),
     (0x00e8, ButtonId::KeyVolumeDown),
     (0x00e9, ButtonId::KeyVolumeUp),
+    (0x01a3, ButtonId::KeyCircle),
+    (0x01a4, ButtonId::KeyTriangle),
+    (0x01a5, ButtonId::KeyDiamond),
 ];
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
