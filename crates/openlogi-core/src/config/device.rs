@@ -273,8 +273,8 @@ pub struct DeviceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
     /// Per-control click-versus-swipe timing, so the dedicated Gesture Button
-    /// and Haptic Panel can use different presets. An absent control keeps the
-    /// historical 160 ms default. Added in schema v7.
+    /// and Haptic Panel can use different presets. An absent control uses
+    /// [`GestureResponseTime::default`]. Added in schema v7.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
 }
@@ -608,6 +608,37 @@ mod tests {
         let serialized = toml::to_string(&fast)?;
         assert!(serialized.contains("HapticPanel = 110"));
         assert!(serialized.contains("GestureButton = 200"));
+
+        let custom: DeviceConfig = toml::from_str(
+            "[gesture_response_times]\nHapticPanel = 80\nGestureButton = 137\nBack = 300\n",
+        )?;
+        assert_eq!(
+            custom
+                .gesture_response_times
+                .get(&ButtonId::HapticPanel)
+                .copied()
+                .map(u16::from),
+            Some(80),
+            "the inclusive minimum must be accepted"
+        );
+        assert_eq!(
+            custom
+                .gesture_response_times
+                .get(&ButtonId::GestureButton)
+                .copied()
+                .map(u16::from),
+            Some(137),
+            "a non-preset custom value must be accepted"
+        );
+        assert_eq!(
+            custom
+                .gesture_response_times
+                .get(&ButtonId::Back)
+                .copied()
+                .map(u16::from),
+            Some(300),
+            "the inclusive maximum must be accepted"
+        );
 
         toml::from_str::<DeviceConfig>("[gesture_response_times]\nHapticPanel = 79\n")
             .expect_err("response times below the supported range must be rejected");
