@@ -153,7 +153,11 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// supervision contract: a crash is respawned, the tray's Quit (a clean
 /// `exit(0)`) stays down. Per launchd.plist(5), `SuccessfulExit` implies
 /// `RunAtLoad`, so a registered service also starts at login and immediately
-/// upon registration.
+/// upon registration — and an explicit `RunAtLoad = false` does not override
+/// the implication (verified: the job still runs once at load). Supervision
+/// without login autostart is therefore unrepresentable, which is why
+/// `launch_at_login` maps to registration itself rather than to a key in
+/// this plist.
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let helper = HELPERS
         .iter()
