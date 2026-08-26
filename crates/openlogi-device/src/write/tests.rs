@@ -194,6 +194,15 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
         [Dpi::new(400), Dpi::new(800), Dpi::new(1600)]
     );
 
+    let host = get_host_info_on(&shared).await?;
+    assert_eq!(
+        host,
+        HostInfo {
+            current_host: 1,
+            host_count: 3,
+        }
+    );
+
     let smartshift = get_smartshift_status_on(&shared).await?;
     assert_eq!(smartshift.mode, SmartShiftMode::Ratchet);
     assert_eq!(
@@ -461,6 +470,7 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
                 0x2201 => 0x05,
                 0x2111 => 0x06,
                 0x8080 => 0x07,
+                0x1814 => 0x08,
                 _ => 0x00,
             };
             false
@@ -481,6 +491,11 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         // Enhanced SmartShift status.
         (0x06, 0x01) => {
             payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, 33]);
+            false
+        }
+        // ChangeHost getHostInfo: three RF channels, currently on host 1.
+        (0x08, 0x00) => {
+            payload[..2].copy_from_slice(&[3, 1]);
             false
         }
         // Raw per-key frame commit expects no reply.
