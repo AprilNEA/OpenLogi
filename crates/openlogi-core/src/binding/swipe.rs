@@ -3,7 +3,9 @@
 //! shared by both gesture-capture paths. This is input processing, distinct
 //! from the `Action` vocabulary the parent [`binding`](super) module defines.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use nutype::nutype;
 
 use super::GestureDirection;
 
@@ -17,7 +19,74 @@ pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
 /// pad and the OS-hook Middle/Back/Forward).
-pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+pub const GESTURE_HOLD_FOR_SWIPE: Duration = Duration::from_millis(160);
+
+const GESTURE_RESPONSE_MIN_MS: u16 = 80;
+const GESTURE_RESPONSE_MAX_MS: u16 = 300;
+const GESTURE_RESPONSE_FAST_MS: u16 = 110;
+const GESTURE_RESPONSE_BALANCED_MS: u16 = 160;
+const GESTURE_RESPONSE_DELIBERATE_MS: u16 = 200;
+
+/// Per-control click-versus-swipe timing in milliseconds.
+///
+/// The bounded numeric value supports three approachable presets while still
+/// allowing advanced users to set a custom value in `config.toml`. The 160 ms
+/// default preserves OpenLogi's established behavior; lower values react
+/// sooner and higher values filter more click-time pointer drift.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = GESTURE_RESPONSE_MIN_MS,
+        less_or_equal = GESTURE_RESPONSE_MAX_MS
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct GestureResponseTime(u16);
+
+impl GestureResponseTime {
+    /// Fast preset, hardware-validated on an MX Master 4 Haptic Panel.
+    pub const FAST: Self = match Self::try_new(GESTURE_RESPONSE_FAST_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid fast gesture response time"),
+    };
+    /// Compatibility-preserving preset and default.
+    pub const BALANCED: Self = match Self::try_new(GESTURE_RESPONSE_BALANCED_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid balanced gesture response time"),
+    };
+    /// Preset that most strongly filters accidental click-time motion.
+    pub const DELIBERATE: Self = match Self::try_new(GESTURE_RESPONSE_DELIBERATE_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid deliberate gesture response time"),
+    };
+    /// Presets in user-facing order.
+    pub const PRESETS: [Self; 3] = [Self::FAST, Self::BALANCED, Self::DELIBERATE];
+
+    /// The hold gate represented by this setting.
+    #[must_use]
+    pub fn hold_duration(self) -> Duration {
+        Duration::from_millis(u64::from(self.into_inner()))
+    }
+}
+
+impl Default for GestureResponseTime {
+    fn default() -> Self {
+        Self::BALANCED
+    }
+}
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -79,8 +148,10 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// that and embeds this for the shared travel logic. Keeping the logic in one
 /// place is deliberate: the two copies it replaced had already drifted apart
 /// (one resolved a swipe only on release), which mis-fired the click.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SwipeAccumulator {
+    /// Snapshot of the current gesture control's response time.
+    hold_for_swipe: Duration,
     /// When the current hold began, or `None` when not holding. Gates a
     /// deliberate swipe against a quick click whose cursor happened to move.
     held_since: Option<Instant>,
@@ -93,7 +164,25 @@ pub struct SwipeAccumulator {
     fired: bool,
 }
 
+impl Default for SwipeAccumulator {
+    fn default() -> Self {
+        Self::new(GestureResponseTime::default())
+    }
+}
+
 impl SwipeAccumulator {
+    /// Create an accumulator using one gesture control's response time.
+    #[must_use]
+    pub fn new(response_time: GestureResponseTime) -> Self {
+        Self {
+            hold_for_swipe: response_time.hold_duration(),
+            held_since: None,
+            dx: 0,
+            dy: 0,
+            fired: false,
+        }
+    }
+
     /// Begin a fresh hold, resetting the travel accumulator and commit state.
     pub fn begin(&mut self) {
         self.held_since = Some(Instant::now());
@@ -121,7 +210,7 @@ impl SwipeAccumulator {
         self.dy = self.dy.saturating_add(dy);
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+            .is_some_and(|t| t.elapsed() >= self.hold_for_swipe);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             return Some(dir);
@@ -134,9 +223,26 @@ impl SwipeAccumulator {
     /// action — and `false` when a swipe already fired mid-motion, or when there
     /// was no hold to end (a stray release reports no click).
     pub fn end(&mut self) -> bool {
-        let was_click = self.held_since.is_some() && !self.fired;
-        self.held_since = None;
-        was_click
+        self.finish() == Some(GestureDirection::Click)
+    }
+
+    /// Finish the current hold. A direction that crossed the travel threshold
+    /// before the time gate is classified here on release once the gate has
+    /// elapsed, so a quick flick does not need a redundant motion sample after
+    /// the gate. Returns `Click` for an uncommitted hold, and `None` for a
+    /// swipe that already fired mid-motion or a stray release.
+    pub fn finish(&mut self) -> Option<GestureDirection> {
+        let held_since = self.held_since.take()?;
+        if self.fired {
+            return None;
+        }
+        if held_since.elapsed() >= self.hold_for_swipe
+            && let Some(direction) = detect_swipe(self.dx, self.dy)
+        {
+            self.fired = true;
+            return Some(direction);
+        }
+        Some(GestureDirection::Click)
     }
 
     /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
@@ -146,7 +252,15 @@ impl SwipeAccumulator {
     #[doc(hidden)]
     pub fn backdate_hold_for_test(&mut self) {
         if self.held_since.is_some() {
-            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+            self.held_since = Instant::now().checked_sub(self.hold_for_swipe * 2);
+        }
+    }
+
+    /// Test-only seam: make the active hold appear to have lasted `elapsed`.
+    #[doc(hidden)]
+    pub fn backdate_hold_by_for_test(&mut self, elapsed: Duration) {
+        if self.held_since.is_some() {
+            self.held_since = Instant::now().checked_sub(elapsed);
         }
     }
 }
@@ -236,6 +350,42 @@ mod tests {
         // Once held long enough, the next delta commits.
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn response_time_presets_are_ordered_and_balanced_is_the_default() {
+        assert_eq!(
+            GestureResponseTime::default(),
+            GestureResponseTime::BALANCED
+        );
+        assert!(
+            GestureResponseTime::FAST.hold_duration()
+                < GestureResponseTime::BALANCED.hold_duration()
+        );
+        assert!(
+            GestureResponseTime::BALANCED.hold_duration()
+                < GestureResponseTime::DELIBERATE.hold_duration()
+        );
+    }
+
+    #[test]
+    fn fast_release_commits_travel_that_arrived_before_its_gate() {
+        let mut acc = SwipeAccumulator::new(GestureResponseTime::FAST);
+        acc.begin();
+        acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0);
+        acc.backdate_hold_by_for_test(GestureResponseTime::FAST.hold_duration());
+
+        assert_eq!(acc.finish(), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn balanced_release_before_its_gate_remains_a_click() {
+        let mut acc = SwipeAccumulator::new(GestureResponseTime::BALANCED);
+        acc.begin();
+        acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0);
+        acc.backdate_hold_by_for_test(GestureResponseTime::FAST.hold_duration());
+
+        assert_eq!(acc.finish(), Some(GestureDirection::Click));
     }
 
     #[test]

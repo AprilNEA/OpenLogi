@@ -4,15 +4,18 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
+use gpui_component::button::ButtonGroup;
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
     scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, ButtonId, GestureDirection, GestureResponseTime, default_binding,
+};
 
 use super::hotspots::MouseControlId;
 use super::picker::{
@@ -316,6 +319,7 @@ fn gesture_inspector(
             picker.view,
             pal,
         ))
+        .child(gesture_response_time_control(button, pal, cx))
         .child(current_action_card(&current, picker, pal))
         .child(
             control_button("inspector-single-action")
@@ -341,6 +345,62 @@ fn gesture_inspector(
                 cx,
             ))
         })
+}
+
+/// Per-control response-time presets. Keeping this beside the selected
+/// control's direction bindings makes the scope explicit where the user is
+/// likely to notice gesture latency.
+fn gesture_response_time_control(
+    button: ButtonId,
+    pal: Palette,
+    cx: &Context<MouseModelView>,
+) -> impl IntoElement {
+    let current = AppState::try_read(cx).map_or_else(GestureResponseTime::default, |state| {
+        state.gesture_response_time(button)
+    });
+    let presets = GestureResponseTime::PRESETS;
+    v_flex()
+        .gap_2()
+        .child(editor_section(tr!("actions.gesture_response"), pal))
+        .child(
+            ButtonGroup::new((ElementId::from("gesture-response-time"), button.label()))
+                .w_full()
+                .outline()
+                .children(presets.map(|preset| {
+                    let (id, label) = match preset {
+                        GestureResponseTime::FAST => (0_u64, tr!("actions.gesture_response_fast")),
+                        GestureResponseTime::BALANCED => {
+                            (1_u64, tr!("actions.gesture_response_balanced"))
+                        }
+                        GestureResponseTime::DELIBERATE => {
+                            (2_u64, tr!("actions.gesture_response_deliberate"))
+                        }
+                        _ => unreachable!("only named presets are rendered"),
+                    };
+                    Button::new((button.label(), id))
+                        .flex_1()
+                        .label(label)
+                        .selected(current == preset)
+                }))
+                .on_click(move |indices, _window, cx| {
+                    let Some(preset) = indices
+                        .first()
+                        .and_then(|index| presets.get(*index))
+                        .copied()
+                    else {
+                        return;
+                    };
+                    AppState::update_bindings(cx, |state| {
+                        state.commit_gesture_response_time(button, preset);
+                    });
+                }),
+        )
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("actions.gesture_response_scope_description")),
+        )
 }
 
 fn gesture_directions(

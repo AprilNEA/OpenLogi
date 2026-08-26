@@ -11,7 +11,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GestureDirection, GestureResponseTime, default_binding,
+};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
@@ -170,6 +172,10 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let gesture_response_times = gesture_bindings
+        .keys()
+        .map(|&button| (button, config.gesture_response_time(config_key, button)))
+        .collect();
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -183,6 +189,7 @@ pub fn plan_for_device(
                     .map(|(cid, _)| cid)
                     .collect(),
                 divert_gesture_buttons,
+                gesture_response_times,
                 divert_buttons,
             },
             rearm_generation,
@@ -199,7 +206,7 @@ pub fn plan_for_device(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::{Binding, LongPressBinding};
+    use openlogi_core::binding::{Binding, GestureResponseTime, LongPressBinding};
     use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
 
     use super::*;
@@ -260,6 +267,31 @@ mod tests {
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID || cid == HAPTIC_PANEL_CID),
             "a raw-XY-diverted source must never also be plain-diverted"
+        );
+    }
+
+    #[test]
+    fn plan_carries_each_gesture_controls_response_time() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
+        cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
+        cfg.set_gesture_response_time("2b042", ButtonId::HapticPanel, GestureResponseTime::FAST);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+
+        assert_eq!(
+            plan.target
+                .spec
+                .gesture_response_times
+                .get(&ButtonId::HapticPanel),
+            Some(&GestureResponseTime::FAST)
+        );
+        assert_eq!(
+            plan.target
+                .spec
+                .gesture_response_times
+                .get(&ButtonId::GestureButton),
+            Some(&GestureResponseTime::BALANCED)
         );
     }
 

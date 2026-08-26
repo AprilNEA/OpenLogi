@@ -10,7 +10,9 @@ use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
+use crate::binding::{
+    Action, ActionRingConfig, Binding, ButtonId, GestureDirection, GestureResponseTime,
+};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::Dpi;
 
@@ -270,6 +272,11 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Per-control click-versus-swipe timing, so the dedicated Gesture Button
+    /// and Haptic Panel can use different presets. An absent control keeps the
+    /// historical 160 ms default. Added in schema v7.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
 }
 
 impl DeviceConfig {
@@ -370,6 +377,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            gesture_response_times: BTreeMap::new(),
         }
     }
 }
@@ -454,6 +462,8 @@ struct RawDeviceConfig {
     /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
     #[serde(default)]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    #[serde(default)]
+    gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
     /// Legacy v1 per-button single bindings.
     #[serde(default)]
     button_bindings: BTreeMap<ButtonId, Action>,
@@ -550,6 +560,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            gesture_response_times: raw.gesture_response_times,
         }
     }
 }
@@ -557,6 +568,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 #[cfg(test)]
 mod tests {
     use super::DeviceConfig;
+    use crate::binding::{ButtonId, GestureResponseTime};
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
@@ -573,6 +585,34 @@ mod tests {
         );
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
+        Ok(())
+    }
+
+    #[test]
+    fn gesture_response_time_supports_per_control_values_and_implicit_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let default = DeviceConfig::default();
+        assert!(default.gesture_response_times.is_empty());
+        assert!(!toml::to_string(&default)?.contains("gesture_response_time"));
+
+        let fast: DeviceConfig =
+            toml::from_str("[gesture_response_times]\nHapticPanel = 110\nGestureButton = 200\n")?;
+        assert_eq!(
+            fast.gesture_response_times.get(&ButtonId::HapticPanel),
+            Some(&GestureResponseTime::FAST)
+        );
+        assert_eq!(
+            fast.gesture_response_times.get(&ButtonId::GestureButton),
+            Some(&GestureResponseTime::DELIBERATE)
+        );
+        let serialized = toml::to_string(&fast)?;
+        assert!(serialized.contains("HapticPanel = 110"));
+        assert!(serialized.contains("GestureButton = 200"));
+
+        toml::from_str::<DeviceConfig>("[gesture_response_times]\nHapticPanel = 79\n")
+            .expect_err("response times below the supported range must be rejected");
+        toml::from_str::<DeviceConfig>("[gesture_response_times]\nHapticPanel = 301\n")
+            .expect_err("response times above the supported range must be rejected");
         Ok(())
     }
 }

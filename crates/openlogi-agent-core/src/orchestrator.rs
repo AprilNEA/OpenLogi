@@ -292,9 +292,16 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        let gesture_response_times = key.map_or_else(BTreeMap::new, |key| {
+            gestures
+                .keys()
+                .map(|&button| (button, self.config.gesture_response_time(key, button)))
+                .collect()
+        });
         HookMaps {
             bindings,
             gestures,
+            gesture_response_times,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }

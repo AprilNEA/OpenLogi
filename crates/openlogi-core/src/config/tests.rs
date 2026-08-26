@@ -1299,7 +1299,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivty = 14\n",
+        "schema_version = 7\n[app_settings]\nthumbwheel_sensitivty = 14\n",
     )
     .expect("write typo");
     assert_matches!(
@@ -1309,7 +1309,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
 
     fs::write(
         &path,
-        r#"schema_version = 6
+        r#"schema_version = 7
 [devices.mouse.identity]
 display_name = "Mouse"
 kind = "mouse"
@@ -1324,7 +1324,7 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 
     fs::write(
         &path,
-        "schema_version = 6\n[devices.mouse]\ngesture_owner = \"Off\"\n",
+        "schema_version = 7\n[devices.mouse]\ngesture_owner = \"Off\"\n",
     )
     .expect("write obsolete field");
     assert_matches!(

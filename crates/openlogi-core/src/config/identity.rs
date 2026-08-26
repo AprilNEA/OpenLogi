@@ -6,7 +6,7 @@
 //! known, so the entry's `links` table doubles as a route index.
 
 #[cfg(test)]
-use crate::binding::{Action, ButtonId};
+use crate::binding::{Action, ButtonId, GestureResponseTime};
 use crate::config::{Config, DeviceConfig};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
@@ -394,6 +394,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
     fold_map_field!(camera_profiles);
+    fold_map_field!(gesture_response_times);
 }
 
 #[cfg(test)]
@@ -921,6 +922,44 @@ mod tests {
                 Action::Copy
             )])),
             "the app overlay survives adoption"
+        );
+    }
+
+    #[test]
+    fn gesture_response_times_merge_per_control() {
+        let mut config = Config::default();
+        let legacy = DeviceConfig {
+            gesture_response_times: std::collections::BTreeMap::from([(
+                ButtonId::HapticPanel,
+                GestureResponseTime::FAST,
+            )]),
+            ..DeviceConfig::default()
+        };
+        let canonical_entry = DeviceConfig {
+            gesture_response_times: std::collections::BTreeMap::from([(
+                ButtonId::GestureButton,
+                GestureResponseTime::DELIBERATE,
+            )]),
+            ..DeviceConfig::default()
+        };
+        config
+            .devices
+            .insert("receiver:82839805:slot:1".to_string(), legacy);
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), canonical_entry);
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        config.adopt_route(&canonical, "receiver:82839805:slot:1", None);
+
+        let response_times = &config.devices["unit:6be9d300"].gesture_response_times;
+        assert_eq!(
+            response_times.get(&ButtonId::HapticPanel),
+            Some(&GestureResponseTime::FAST)
+        );
+        assert_eq!(
+            response_times.get(&ButtonId::GestureButton),
+            Some(&GestureResponseTime::DELIBERATE)
         );
     }
 
