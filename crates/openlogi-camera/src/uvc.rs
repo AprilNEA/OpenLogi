@@ -133,8 +133,11 @@ impl CameraControl {
             Self::Contrast => (Processing, 0x03, U16),  // PU_CONTRAST_CONTROL
             Self::Saturation => (Processing, 0x07, U16), // PU_SATURATION_CONTROL
             Self::Sharpness => (Processing, 0x08, U16), // PU_SHARPNESS_CONTROL
+            Self::Gain => (Processing, 0x04, U16),      // PU_GAIN_CONTROL
+            // PU_BACKLIGHT_COMPENSATION_CONTROL
+            Self::BacklightCompensation => (Processing, 0x01, U16),
             Self::WhiteBalance => (Processing, 0x0A, U16), // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
-            Self::Tint => (Processing, 0x06, I16),      // PU_HUE_CONTROL
+            Self::Tint => (Processing, 0x06, I16),         // PU_HUE_CONTROL
         };
         ControlSpec {
             unit,
