@@ -119,35 +119,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // dead bytes. Off-thread so it never delays the first paint.
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
-        // Reconcile the agent's login-item registration with the setting
-        // (macOS; a no-op elsewhere): a fresh install registers on its first
-        // GUI launch, and a setting changed while the GUI wasn't running
-        // catches up here. Only the preference's own gap drives it — a
-        // service the user switched off in System Settings
-        // (RequiresApproval) is respected, never re-registered; the Settings
-        // row surfaces that state instead. Skipped for dev profiles: a login
-        // item pointing into a `target/` build goes stale on the next `cargo
-        // clean`, so dev registration stays an explicit toggle in the dev
-        // GUI. Off-thread — registration is an XPC round-trip that must not
-        // delay the first paint.
-        let launch_at_login = cx.update(|cx| {
-            AppState::try_global(cx).map(|state| state.read(cx).app_settings().launch_at_login)
-        });
-        if let Some(enabled) = launch_at_login
-            && !openlogi_core::paths::is_dev_profile()
-        {
-            std::thread::spawn(move || {
-                use crate::platform::login_item::{self, ServiceStatus};
-                let register = match (enabled, login_item::status()) {
-                    (true, ServiceStatus::NotRegistered) => true,
-                    (false, ServiceStatus::Enabled | ServiceStatus::RequiresApproval) => false,
-                    _ => return,
-                };
-                if let Err(error) = login_item::sync_registration(register) {
-                    tracing::warn!(error, register, "startup login-item reconcile failed");
-                }
-            });
-        }
+        reconcile_login_item_at_startup(cx);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
         let mut rt = Runtime::new(cams, sync_tx, swr);
@@ -194,6 +166,52 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 }
                 else => break,
             }
+        }
+    })
+    .detach();
+}
+
+/// Reconcile the agent's login-item registration with the `launch_at_login`
+/// setting at startup (macOS; a no-op elsewhere): a fresh install registers on
+/// its first GUI launch, and a setting changed while the GUI wasn't running
+/// catches up here. Only the preference's own gap drives it — a service the
+/// user switched off in System Settings (`RequiresApproval`) is respected,
+/// never re-registered; the Settings row surfaces that state instead. Skipped
+/// for dev profiles: a login item pointing into a `target/` build goes stale
+/// on the next `cargo clean`, so dev registration stays an explicit toggle in
+/// the dev GUI.
+///
+/// A detached task, with the XPC round-trips on the background executor, so
+/// nothing here delays the first paint — and the preference is read from the
+/// live [`AppState`] only *after* the slow status read, so a toggle flipped in
+/// a just-opened Settings window wins over whatever the preference was at
+/// spawn (the stale-async-input rule; the toggle's own registration call still
+/// runs last and agrees).
+fn reconcile_login_item_at_startup(cx: &mut gpui::AsyncApp) {
+    if openlogi_core::paths::is_dev_profile() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        use crate::platform::login_item::{self, ServiceStatus};
+        let status = cx
+            .background_executor()
+            .spawn(async { login_item::status() })
+            .await;
+        let enabled = cx.update(|cx| {
+            AppState::try_global(cx).map(|state| state.read(cx).app_settings().launch_at_login)
+        });
+        let Some(enabled) = enabled else { return };
+        let register = match (enabled, status) {
+            (true, ServiceStatus::NotRegistered) => true,
+            (false, ServiceStatus::Enabled | ServiceStatus::RequiresApproval) => false,
+            _ => return,
+        };
+        let result = cx
+            .background_executor()
+            .spawn(async move { login_item::sync_registration(register) })
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(error, register, "startup login-item reconcile failed");
         }
     })
     .detach();
