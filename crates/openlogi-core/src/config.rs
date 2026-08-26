@@ -1034,7 +1034,7 @@ impl Config {
     }
 
     /// The effective gesture response time for one control on `device_key`.
-    /// An unset control retains the 160 ms historical default.
+    /// An unset control retains [`GestureResponseTime::default`].
     #[must_use]
     pub fn gesture_response_time(&self, device_key: &str, button: ButtonId) -> GestureResponseTime {
         self.devices
