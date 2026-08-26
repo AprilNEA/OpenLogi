@@ -15,18 +15,25 @@ impl AppState {
     pub fn app_settings(&self) -> &AppSettings {
         &self.config.app_settings
     }
-    /// Toggle launch-at-login, persist to `config.toml`, and reconcile the
-    /// macOS `LaunchAgent` plist so the change takes effect without a
-    /// restart. No-op when the value is unchanged. Disk failures restore the
-    /// persisted value and surface a configuration error without crashing.
+    /// Toggle launch-at-login, persist to `config.toml`, and apply it: on
+    /// macOS the GUI registers/unregisters the agent's `SMAppService` login
+    /// item right here (only the app owning the bundle can — see
+    /// `platform::login_item`), elsewhere the agent reconciles its autostart
+    /// unit when it reloads the config. No-op when the value is unchanged.
+    /// Disk failures restore the persisted value and surface a configuration
+    /// error without crashing.
     pub fn set_launch_at_login(&mut self, enabled: bool) {
         if self.config.app_settings.launch_at_login == enabled {
             return;
         }
         self.config
             .edit(|config| config.app_settings.launch_at_login = enabled);
-        // The agent owns autostart now; it reconciles its LaunchAgent (which
-        // points at the agent, not the GUI) when it reloads the config.
+        if let Err(error) = crate::platform::login_item::sync_registration(enabled) {
+            // The persisted setting stays authoritative; the Settings row
+            // reads the live status back, so a failed registration shows up
+            // there rather than silently pretending.
+            tracing::warn!(error, enabled, "login-item registration failed");
+        }
         self.persist_and_reload("launch-at-login setting");
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The

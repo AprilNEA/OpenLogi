@@ -305,6 +305,16 @@ fn ticker(period: Duration) -> tokio::time::Interval {
 /// the binary can't be found / started — the user may start it via launchd or by
 /// hand, and the poll loop keeps retrying the connection regardless.
 fn spawn_agent() {
+    // A registered login-item service is launchd's to start: kickstart is
+    // idempotent (a no-op on a running service), the process comes up
+    // *supervised* (crash respawn per the service plist), and launchd makes it
+    // its own TCC responsible process. Every failure falls through to the
+    // legacy direct-launch paths below, so a broken registration degrades to
+    // today's behavior instead of wedging the retry loop.
+    #[cfg(target_os = "macos")]
+    if kickstart_registered_agent() {
+        return;
+    }
     let Some(path) = agent_binary_path() else {
         warn!(
             "agent not reachable and its binary wasn't found next to the GUI — \
@@ -356,6 +366,57 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     // Any other layout (bare dev binary, Windows, Linux): exec the binary
     // directly while disclaiming the GUI's TCC responsibility (#214).
     disclaim::Command::new(path).spawn().map(|_| ())
+}
+
+/// `launchctl kickstart` the agent's registered login-item service. Returns
+/// whether the start was handed to launchd — `false` (not registered, user
+/// switched it off in Login Items, or launchctl itself failed) sends the
+/// caller down the direct-launch paths.
+#[cfg(target_os = "macos")]
+fn kickstart_registered_agent() -> bool {
+    use crate::platform::login_item;
+
+    if login_item::status() != login_item::ServiceStatus::Enabled {
+        return false;
+    }
+    let Some(uid) = current_uid() else {
+        return false;
+    };
+    let target = format!("gui/{uid}/{}", login_item::agent_service_label());
+    match std::process::Command::new("/bin/launchctl")
+        .arg("kickstart")
+        .arg(&target)
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            info!(%target, "agent not running — kickstarted the registered service");
+            true
+        }
+        Ok(out) => {
+            warn!(
+                %target,
+                status = %out.status,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "launchctl kickstart failed — falling back to a direct launch"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(error = %e, "could not run launchctl — falling back to a direct launch");
+            false
+        }
+    }
+}
+
+/// The current user's uid, read from the home directory's owner: `launchctl`
+/// addresses the per-user launchd domain as `gui/<uid>`, and std exposes no
+/// direct getuid.
+#[cfg(target_os = "macos")]
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let home = openlogi_core::paths::home_dir().ok()?;
+    std::fs::metadata(home).ok().map(|meta| meta.uid())
 }
 
 /// The `.app` root of a packaged helper binary, `None` for a bare dev binary.

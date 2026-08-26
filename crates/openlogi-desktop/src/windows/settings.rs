@@ -136,6 +136,12 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Snapshot of the agent service's login-item registration, taken when
+    /// the window opens and after every settings change (the status read is
+    /// an XPC round-trip, so it must not run per frame). Drives the General
+    /// page's "switched off in System Settings" notice; a flip made outside
+    /// the app shows up on the next settings change or reopen.
+    login_item_status: crate::platform::login_item::ServiceStatus,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -153,7 +159,7 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+        let state_obs = cx.subscribe(&AppState::global(cx), |view, _, event: &StateEvent, cx| {
             if matches!(
                 event,
                 StateEvent::AgentChanged
@@ -162,6 +168,12 @@ impl SettingsView {
                     | StateEvent::CameraPermissionChanged
                     | StateEvent::SettingsChanged
             ) {
+                // The launch-at-login toggle registers/unregisters the
+                // login item, so its status snapshot is stale exactly when
+                // a settings change lands.
+                if matches!(event, StateEvent::SettingsChanged) {
+                    view.login_item_status = crate::platform::login_item::status();
+                }
                 cx.notify();
             }
         });
@@ -246,6 +258,7 @@ impl SettingsView {
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
+            login_item_status: crate::platform::login_item::status(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
@@ -442,6 +455,8 @@ impl Render for SettingsView {
             .page(general::general_page(
                 self.vertical_scroll_sensitivity_slider.clone(),
                 self.thumbwheel_sensitivity_slider.clone(),
+                self.login_item_status
+                    == crate::platform::login_item::ServiceStatus::RequiresApproval,
             ))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
