@@ -14,7 +14,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, KeyCombo};
+use openlogi_core::binding::{Action, Binding, ButtonId, HeldAction, KeyCombo};
 use openlogi_hid::{CaptureChannel, ChannelRegistry};
 use tracing::{info, warn};
 
@@ -31,36 +31,71 @@ use crate::{DpiCycleState, DpiCycles};
 enum HoldStart {
     /// The action is instantaneous and belongs to ordinary dispatch.
     NotHeld,
-    /// This press newly owns one held chord.
-    Started(KeyCombo),
+    /// This press newly owns one held output.
+    Started(HeldOutput),
     /// The same press changed its held action.
-    Replaced { old: KeyCombo, new: KeyCombo },
+    Replaced { old: HeldOutput, new: HeldOutput },
 }
 
 /// Held output owned by accepted press capabilities rather than by a capture
 /// backend. Because every [`PressToken`] has exactly one terminal event, this
 /// map gives release, cancellation, invalidation, and shutdown one path.
-#[derive(Default)]
-struct HeldShortcuts {
-    by_press: HashMap<PressToken, KeyCombo>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeldOutput {
+    /// A keyboard chord held through the injector's shared-key ownership.
+    Shortcut(KeyCombo),
+    /// Standard macOS Mouse Button 6.
+    MouseButton6,
 }
 
-impl HeldShortcuts {
+#[derive(Default)]
+struct HeldOutputs {
+    by_press: HashMap<PressToken, HeldOutput>,
+}
+
+impl HeldOutputs {
     fn start(&mut self, press: &PressToken, action: &Action) -> HoldStart {
-        let Some(combo) = action.held_combo() else {
+        let Some(output) = action.held_action().map(|action| match action {
+            HeldAction::Shortcut(combo) => HeldOutput::Shortcut(combo.clone()),
+            HeldAction::MouseButton6 => HeldOutput::MouseButton6,
+        }) else {
             return HoldStart::NotHeld;
         };
-        match self.by_press.insert(press.clone(), combo.clone()) {
-            Some(old) => HoldStart::Replaced {
-                old,
-                new: combo.clone(),
-            },
-            None => HoldStart::Started(combo.clone()),
+        match self.by_press.insert(press.clone(), output.clone()) {
+            Some(old) => HoldStart::Replaced { old, new: output },
+            None => HoldStart::Started(output),
         }
     }
 
-    fn end(&mut self, press: &PressToken) -> Option<KeyCombo> {
+    fn end(&mut self, press: &PressToken) -> Option<HeldOutput> {
         self.by_press.remove(press)
+    }
+}
+
+fn press_held_output(output: &HeldOutput) {
+    match output {
+        HeldOutput::Shortcut(combo) => openlogi_inject::press_hold(combo),
+        HeldOutput::MouseButton6 => openlogi_inject::press_hold_mouse_button6(),
+    }
+}
+
+fn release_held_output(output: &HeldOutput) {
+    match output {
+        HeldOutput::Shortcut(combo) => openlogi_inject::release_hold(combo),
+        HeldOutput::MouseButton6 => openlogi_inject::release_hold_mouse_button6(),
+    }
+}
+
+fn replace_held_output(old: &HeldOutput, new: &HeldOutput) {
+    match (old, new) {
+        (HeldOutput::Shortcut(old), HeldOutput::Shortcut(new)) => {
+            openlogi_inject::replace_hold(old, new);
+        }
+        (HeldOutput::MouseButton6, HeldOutput::MouseButton6) => {}
+        _ => {
+            release_held_output(old);
+            press_held_output(new);
+        }
     }
 }
 
@@ -157,14 +192,14 @@ impl ActionExecutor {
 
 struct ButtonEventHandler {
     executor: ActionExecutor,
-    held: HeldShortcuts,
+    held: HeldOutputs,
 }
 
 impl ButtonEventHandler {
     fn new(executor: ActionExecutor) -> Self {
         Self {
             executor,
-            held: HeldShortcuts::default(),
+            held: HeldOutputs::default(),
         }
     }
 
@@ -179,8 +214,8 @@ impl ButtonEventHandler {
                 self.start_action(press.token(), &action, press.device_key());
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
-                if let Some(combo) = self.held.end(press.token()) {
-                    openlogi_inject::release_hold(&combo);
+                if let Some(output) = self.held.end(press.token()) {
+                    release_held_output(&output);
                 }
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
@@ -199,9 +234,9 @@ impl ButtonEventHandler {
     fn start_action(&mut self, press: &PressToken, action: &Action, device_key: Option<&str>) {
         match self.held.start(press, action) {
             HoldStart::NotHeld => self.executor.dispatch(action, device_key),
-            HoldStart::Started(combo) => openlogi_inject::press_hold(&combo),
+            HoldStart::Started(output) => press_held_output(&output),
             HoldStart::Replaced { old, new } => {
-                openlogi_inject::replace_hold(&old, &new);
+                replace_held_output(&old, &new);
             }
         }
     }
@@ -391,55 +426,76 @@ mod tests {
     }
 
     #[test]
+    fn held_mouse_button6_is_owned_until_its_press_ends() {
+        let token = PressToken::hook_for_test(7, ButtonId::GestureButton);
+        let mut held = HeldOutputs::default();
+
+        assert_eq!(
+            held.start(&token, &Action::HoldMouseButton6),
+            HoldStart::Started(HeldOutput::MouseButton6)
+        );
+        assert_eq!(held.end(&token), Some(HeldOutput::MouseButton6));
+        assert_eq!(held.end(&token), None);
+    }
+
+    #[test]
     fn held_output_is_owned_by_the_exact_press_until_its_terminal_event() {
         let first = PressToken::hook_for_test(1, ButtonId::Back);
         let second = PressToken::hook_for_test(2, ButtonId::Forward);
-        let mut held = HeldShortcuts::default();
+        let mut held = HeldOutputs::default();
 
         assert_eq!(
             held.start(&first, &hold("Ctrl+Space")),
-            HoldStart::Started("Ctrl+Space".parse().expect("valid shortcut"))
+            HoldStart::Started(HeldOutput::Shortcut(
+                "Ctrl+Space".parse().expect("valid shortcut")
+            ))
         );
         assert_eq!(
             held.start(&second, &hold("Alt+F2")),
-            HoldStart::Started("Alt+F2".parse().expect("valid shortcut"))
+            HoldStart::Started(HeldOutput::Shortcut(
+                "Alt+F2".parse().expect("valid shortcut")
+            ))
         );
         assert_eq!(
             held.end(&first),
-            Some("Ctrl+Space".parse().expect("valid shortcut"))
+            Some(HeldOutput::Shortcut(
+                "Ctrl+Space".parse().expect("valid shortcut")
+            ))
         );
         assert_eq!(held.end(&first), None, "a press releases at most once");
         assert_eq!(
             held.end(&second),
-            Some("Alt+F2".parse().expect("valid shortcut"))
+            Some(HeldOutput::Shortcut(
+                "Alt+F2".parse().expect("valid shortcut")
+            ))
         );
     }
 
     #[test]
     fn changing_a_hold_within_one_press_balances_the_previous_chord() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);
-        let mut held = HeldShortcuts::default();
+        let mut held = HeldOutputs::default();
         let old: KeyCombo = "Ctrl+Space".parse().expect("valid shortcut");
         let new: KeyCombo = "Alt+F2".parse().expect("valid shortcut");
 
         assert_eq!(
             held.start(&press, &Action::HoldShortcut(old.clone())),
-            HoldStart::Started(old.clone())
+            HoldStart::Started(HeldOutput::Shortcut(old.clone()))
         );
         assert_eq!(
             held.start(&press, &Action::HoldShortcut(new.clone())),
             HoldStart::Replaced {
-                old,
-                new: new.clone(),
+                old: HeldOutput::Shortcut(old),
+                new: HeldOutput::Shortcut(new.clone()),
             }
         );
-        assert_eq!(held.end(&press), Some(new));
+        assert_eq!(held.end(&press), Some(HeldOutput::Shortcut(new)));
     }
 
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);
-        let mut held = HeldShortcuts::default();
+        let mut held = HeldOutputs::default();
 
         assert_eq!(held.start(&press, &Action::Copy), HoldStart::NotHeld);
         assert_eq!(held.end(&press), None);

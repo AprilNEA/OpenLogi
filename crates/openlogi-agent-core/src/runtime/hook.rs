@@ -408,7 +408,7 @@ fn handle_key(
     };
 
     info!(keycode, action = %action.label(), "key → executing bound action");
-    let queued = if action.held_combo().is_some() {
+    let queued = if action.held_action().is_some() {
         let queued = dispatcher.try_hook_key_down(keycode, &action);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
