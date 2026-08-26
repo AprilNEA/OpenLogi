@@ -4,7 +4,7 @@
 //! through this type. It is the only implementor in the tree today; a scripted
 //! one for tests and a WebHID one under wasm are the reasons the trait exists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
@@ -15,7 +15,9 @@ use openlogi_device::backend::{
     BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter,
 };
 
-use super::{enumerate_devices, is_hidpp_node, open_hidpp_channel, watch_nodes};
+use super::{
+    enumerate_devices, is_hidpp_node, is_vendor_hidpp_node, open_hidpp_channel, watch_nodes,
+};
 
 /// One logical top-level collection exposed by an OS HID node.
 ///
@@ -118,11 +120,22 @@ impl HidBackend for NativeBackend {
     }
 
     async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, BackendError> {
-        Ok(self
-            .refresh()
-            .await?
+        let devices = self.refresh().await?;
+        // On macOS every logical collection of one physical device carries the
+        // same IOKit registry id. Suppress its Generic Desktop fallback only
+        // when that exact physical node also exposes a vendor HID++ collection;
+        // keying by PID alone would hide a second same-model mouse.
+        let vendor_collections: HashSet<(NodeId, u16)> = devices
             .iter()
-            .filter(|device| is_hidpp_node(device))
+            .filter(|device| is_vendor_hidpp_node(device))
+            .map(|device| (super::node_id(device), device.product_id))
+            .collect();
+        Ok(devices
+            .iter()
+            .filter(|device| {
+                let key = (super::node_id(device), device.product_id);
+                is_hidpp_node(device, vendor_collections.contains(&key))
+            })
             .map(|device| super::node_info(device))
             .collect())
     }

@@ -5,7 +5,8 @@
 //! that path by pre-filtering to the Logitech HID++ vendor collections at
 //! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
 //! straight from [`hidpp::channel::RawHidChannel::supports_short_long_hidpp`]: USB / receiver
-//! collections carry both reports; BLE-direct collections are long-only, and the
+//! collections carry both reports; BLE-direct collections and the Generic
+//! Desktop fallback exposed by some MX Ergo devices are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
 #[cfg(not(target_os = "windows"))]
@@ -153,11 +154,27 @@ const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
     (0xff43, 0x0602, false),
 ];
 
+/// Generic Desktop Controls usage page.
+const GENERIC_DESKTOP_PAGE: u16 = 0x0001;
+/// Generic Desktop mouse usage.
+const GENERIC_DESKTOP_MOUSE: u16 = 0x0002;
+
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
 fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
         .iter()
         .any(|&(page, usage, _)| (page, usage) == (usage_page, usage_id))
+}
+
+/// Whether this is the fallback collection used by Logitech Bluetooth mice
+/// that do not publish a separate vendor-defined HID++ collection.
+///
+/// Direct Bluetooth product IDs use the `0xb0xx` family (including MX Ergo
+/// `0xb01d` and MX Ergo S `0xb03e`). Receiver and wired product IDs use other
+/// families, so their ordinary mouse collections remain excluded.
+fn is_bluetooth_mouse_fallback(product_id: u16, usage_page: u16, usage_id: u16) -> bool {
+    product_id & 0xff00 == 0xb000
+        && (usage_page, usage_id) == (GENERIC_DESKTOP_PAGE, GENERIC_DESKTOP_MOUSE)
 }
 
 /// Whether the matched HID++ collection exposes only the long report, so short
@@ -176,10 +193,11 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
         reason = "long-only up-conversion is the non-Windows AsyncHidChannel path"
     )
 )]
-fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
-    HIDPP_LONG_COLLECTIONS
-        .iter()
-        .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
+fn is_long_only_collection(product_id: u16, usage_page: u16, usage_id: u16) -> bool {
+    is_bluetooth_mouse_fallback(product_id, usage_page, usage_id)
+        || HIDPP_LONG_COLLECTIONS
+            .iter()
+            .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
 }
 
 /// Process-wide HID backend, created once and reused for every enumeration.
@@ -230,7 +248,8 @@ pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, Backen
             pid = format_args!("{:04x}", d.product_id),
             usage_page = format_args!("{:#06x}", d.usage_page),
             usage_id = format_args!("{:#06x}", d.usage_id),
-            matched = is_hidpp_long_collection(d.usage_page, d.usage_id),
+            matched = is_hidpp_long_collection(d.usage_page, d.usage_id)
+                || is_bluetooth_mouse_fallback(d.product_id, d.usage_page, d.usage_id),
             "logitech HID node"
         );
     }
@@ -242,14 +261,22 @@ pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, Backen
 ///
 /// Wraps [`is_hidpp_candidate`] with the parts only this backend can answer:
 /// the platform node id needed to recognise a `hid-logitech-dj` child node.
-pub(crate) fn is_hidpp_node(device: &async_hid::Device) -> bool {
-    is_hidpp_candidate(
+pub(crate) fn is_hidpp_node(device: &async_hid::Device, vendor_collection_available: bool) -> bool {
+    is_preferred_hidpp_candidate(
         device.vendor_id,
         device.product_id,
         device.usage_page,
         device.usage_id,
         is_receiver_child_node(&device.id),
+        vendor_collection_available,
     )
+}
+
+/// Whether this node is a vendor-defined HID++ collection rather than the
+/// Generic Desktop fallback used by a subset of Bluetooth mice.
+pub(crate) fn is_vendor_hidpp_node(device: &async_hid::Device) -> bool {
+    device.vendor_id == LOGITECH_VENDOR_ID
+        && is_hidpp_long_collection(device.usage_page, device.usage_id)
 }
 
 /// Whether an enumerated node belongs to the HID++ channel path.
@@ -266,9 +293,24 @@ fn is_hidpp_candidate(
     receiver_child: bool,
 ) -> bool {
     vendor_id == LOGITECH_VENDOR_ID
-        && is_hidpp_long_collection(usage_page, usage_id)
+        && (is_hidpp_long_collection(usage_page, usage_id)
+            || is_bluetooth_mouse_fallback(product_id, usage_page, usage_id))
         && !matches_litra(vendor_id, product_id, usage_page, usage_id)
         && !receiver_child
+}
+
+/// Apply collection preference after the basic HID++ candidate check.
+fn is_preferred_hidpp_candidate(
+    vendor_id: u16,
+    product_id: u16,
+    usage_page: u16,
+    usage_id: u16,
+    receiver_child: bool,
+    vendor_collection_available: bool,
+) -> bool {
+    is_hidpp_candidate(vendor_id, product_id, usage_page, usage_id, receiver_child)
+        && !(vendor_collection_available
+            && is_bluetooth_mouse_fallback(product_id, usage_page, usage_id))
 }
 
 /// Returns `true` when a HID++ node is a virtual per-device interface created by
@@ -393,7 +435,7 @@ pub(crate) async fn open_hidpp_channel(
         let (reader, writer) = dev.open().await.map_err(open_error)?;
         // BLE-direct devices expose only the long HID++ report; flag the channel so
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
-        let long_only = is_long_only_collection(info.usage_page, info.usage_id);
+        let long_only = is_long_only_collection(info.product_id, info.usage_page, info.usage_id);
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {

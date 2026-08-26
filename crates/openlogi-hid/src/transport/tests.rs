@@ -19,10 +19,34 @@ fn litra_ble_collection_is_not_a_hidpp_candidate() {
 
 #[test]
 fn only_ble_collection_is_long_only() {
-    assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
-    assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
-    assert!(!is_long_only_collection(0xff43, 0x0602)); // wired G-series keyboard carries both
-    assert!(!is_long_only_collection(0x0001, 0x0002)); // not a HID++ collection at all
+    assert!(is_long_only_collection(0xb023, 0xff43, 0x0202)); // BLE vendor collection
+    assert!(is_long_only_collection(0xb01d, 0x0001, 0x0002)); // MX Ergo BT fallback
+    assert!(is_long_only_collection(0xb03e, 0x0001, 0x0002)); // MX Ergo S BT fallback
+    assert!(!is_long_only_collection(0xc548, 0xff00, 0x0002)); // receiver has both
+    assert!(!is_long_only_collection(0xc33c, 0xff43, 0x0602)); // wired has both
+    assert!(!is_long_only_collection(0xc548, 0x0001, 0x0002)); // receiver mouse node
+}
+
+#[test]
+fn mx_ergo_bluetooth_mouse_collection_is_a_candidate() {
+    assert!(is_hidpp_candidate(0x046d, 0xb01d, 0x0001, 0x0002, false));
+    assert!(is_hidpp_candidate(0x046d, 0xb03e, 0x0001, 0x0002, false));
+    assert!(!is_hidpp_candidate(0x046d, 0xc548, 0x0001, 0x0002, false));
+    assert!(!is_hidpp_candidate(0x046d, 0xb01d, 0x0001, 0x0006, false));
+    assert!(!is_hidpp_candidate(0x1234, 0xb01d, 0x0001, 0x0002, false));
+}
+
+#[test]
+fn vendor_collection_wins_over_generic_bluetooth_fallback() {
+    assert!(is_preferred_hidpp_candidate(
+        0x046d, 0xb023, 0xff43, 0x0202, false, true,
+    ));
+    assert!(!is_preferred_hidpp_candidate(
+        0x046d, 0xb023, 0x0001, 0x0002, false, true,
+    ));
+    assert!(is_preferred_hidpp_candidate(
+        0x046d, 0xb01d, 0x0001, 0x0002, false, false,
+    ));
 }
 
 #[test]
