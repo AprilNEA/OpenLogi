@@ -10,16 +10,18 @@ paths:
 - The UI stack is GPUI + gpui-component — a settled choice; don't propose alternatives.
 - **Three crates, not one.** `openlogi-desktop` is the settings app; `openlogi-overlay` is
   the Actions Ring helper, a separate process and a pure IPC client; `openlogi-ui` is
-  what they share — ring geometry/icons, the GPUI asset source, locale negotiation.
+  what they share — ring geometry/icons, the GPUI asset source, the locale catalogs.
   The overlay must never depend on `openlogi-desktop`. Before putting anything in
   `openlogi-ui`, check both binaries actually need it: every dependency added there is
   also added to the overlay, which is why `gpui-component` is *not* one of them.
-- One catalog, in `openlogi-ui/locales/`, beside the `locale` module that negotiates
-  over it. `t!` resolves against a backend the invoking crate must generate itself, so
-  each binary still expands its own `rust_i18n::i18n!` over that shared directory by
-  relative path. A wrong path there compiles to an **empty catalog** rather than an
-  error, and every string silently renders as its English key —
-  `the_shared_catalog_is_wired_up` in `openlogi-overlay` is what makes that fail loudly.
+- One catalog, in `openlogi-ui/locales/`; the negotiation over its codes lives in
+  `openlogi_core::locale` (the platform-free core, where the GUI-less agent reaches it
+  for the tray). `t!` resolves against a backend the invoking crate must generate
+  itself, so each localized binary — the app, the overlay, and the agent — expands its
+  own `rust_i18n::i18n!` over that shared directory by relative path. A wrong path
+  there compiles to an **empty catalog** rather than an error, and every string
+  silently renders as its English key — `the_shared_catalog_is_wired_up` in
+  `openlogi-overlay` and `openlogi-agent` is what makes that fail loudly.
 - `gpui`/`gpui_platform` track zed's default branch on purpose; the compatible zed
   commit is pinned **only in `Cargo.lock`**, in lockstep with the `gpui-component` rev.
   After any `cargo add`/`cargo update`, check the pins didn't move; restore with

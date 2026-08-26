@@ -16,9 +16,6 @@ openlogi-core = { path = "../openlogi-core" }
 # dependency added here lands in the overlay helper too, so the widget kit and
 # the artwork only the app draws both stay on the app's side.
 gpui = { workspace = true }
-fluent-langneg = "0.14.2"
-rust-i18n = "4"
-sys-locale = "0.3.2"
 
 [lints]
 workspace = true

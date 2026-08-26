@@ -308,7 +308,7 @@ impl AppState {
         self.config.app_settings.language.as_deref()
     }
     /// Set the UI language (`None` = follow system), persist it, switch the
-    /// process-global locale via [`openlogi_ui::locale`], and repaint open UI.
+    /// process-global locale via [`openlogi_core::locale`], and repaint open UI.
     /// No-op when unchanged.
     pub fn set_language(&mut self, language: Option<String>, cx: &mut Context<Self>) {
         if self.config.app_settings.language == language {
@@ -317,7 +317,7 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.language = language);
         self.persist_config("language setting");
-        openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
+        openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
         // Locale lookup is process-global, so every open window must repaint;
         // localized text cached in view state re-derives on this event.
         cx.emit(StateEvent::LanguageChanged);

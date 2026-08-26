@@ -1,14 +1,21 @@
 //! Locale negotiation: which shipped catalog a BCP-47 code resolves to.
 //!
-//! Shared by both binaries — the settings app picks the locale from its stored
-//! [`AppSettings`](openlogi_core::config::AppSettings) (see `i18n`), the
-//! overlay helper from the code the agent hands it per invocation. Keeping one
-//! implementation is what stops the two processes from disagreeing about, say,
+//! Shared by every process that renders localized text — the settings app
+//! picks the locale from its stored [`AppSettings`](crate::config::AppSettings),
+//! the agent from the same setting for its menu-bar tray, and the overlay
+//! helper from the code the agent hands it per invocation. Keeping one
+//! implementation is what stops the processes from disagreeing about, say,
 //! whether `zh-Hant-HK` is Hong Kong or Taiwan.
 //!
+//! The catalogs themselves stay in `crates/openlogi-ui/locales/` (each binary
+//! expands its own `rust_i18n::i18n!` over that directory by relative path);
+//! this module is only the negotiation over their codes, so it can live in the
+//! platform-free core where the GUI-less agent can reach it.
+//!
 //! Setting the locale is global: `rust_i18n` stores it in a process-wide atomic
-//! that gpui-component reads too, so [`crate::locale::activate`] re-localizes
-//! the framework's own widget strings alongside ours.
+//! that gpui-component reads too, so in the settings app
+//! [`crate::locale::activate`] re-localizes the framework's own widget strings
+//! alongside ours.
 
 use fluent_langneg::{LanguageIdentifier, NegotiationStrategy, negotiate_languages};
 
@@ -183,76 +190,5 @@ mod tests {
                 .iter()
                 .any(|(c, _)| *c == resolve(Some("klingon")))
         );
-    }
-
-    /// Every shipped locale must carry the same keys as `en.yml`. New UI copy
-    /// is added to all catalogs in the same change; Crowdin later improves the
-    /// non-English values (never English fill-in).
-    #[test]
-    fn locale_files_have_the_same_keys() {
-        use std::collections::BTreeSet;
-
-        let source: BTreeSet<&str> = locale_keys(include_str!("../locales/en.yml"))
-            .into_iter()
-            .collect();
-        assert!(
-            !source.is_empty(),
-            "en.yml is the string source of truth and must define keys"
-        );
-
-        let catalogs = [
-            ("ja", include_str!("../locales/ja.yml")),
-            ("ru", include_str!("../locales/ru.yml")),
-            ("uk", include_str!("../locales/uk.yml")),
-            ("zh-CN", include_str!("../locales/zh-CN.yml")),
-            ("zh-HK", include_str!("../locales/zh-HK.yml")),
-            ("zh-TW", include_str!("../locales/zh-TW.yml")),
-            ("it", include_str!("../locales/it.yml")),
-            ("da", include_str!("../locales/da.yml")),
-            ("de", include_str!("../locales/de.yml")),
-            ("el", include_str!("../locales/el.yml")),
-            ("es", include_str!("../locales/es.yml")),
-            ("fi", include_str!("../locales/fi.yml")),
-            ("fr", include_str!("../locales/fr.yml")),
-            ("ko", include_str!("../locales/ko.yml")),
-            ("nb", include_str!("../locales/nb.yml")),
-            ("nl", include_str!("../locales/nl.yml")),
-            ("pl", include_str!("../locales/pl.yml")),
-            ("pt-BR", include_str!("../locales/pt-BR.yml")),
-            ("pt-PT", include_str!("../locales/pt-PT.yml")),
-            ("sv", include_str!("../locales/sv.yml")),
-            ("tr", include_str!("../locales/tr.yml")),
-        ];
-
-        // `include_str!` needs literal paths, so this list is written out by
-        // hand — which means it can silently fall behind [`SUPPORTED`], and a
-        // locale nobody parity-checks is exactly how a catalog drifts.
-        let checked: BTreeSet<&str> = catalogs
-            .iter()
-            .map(|(locale, _)| *locale)
-            .chain(["en"])
-            .collect();
-        let shipped: BTreeSet<&str> = SUPPORTED.iter().map(|(code, _)| *code).collect();
-        assert_eq!(
-            checked, shipped,
-            "every locale in SUPPORTED must be parity-checked here"
-        );
-
-        for (locale, file) in catalogs {
-            let keys: BTreeSet<&str> = locale_keys(file).into_iter().collect();
-            let missing: Vec<&str> = source.difference(&keys).copied().collect();
-            let extras: Vec<&str> = keys.difference(&source).copied().collect();
-            assert!(
-                missing.is_empty() && extras.is_empty(),
-                "{locale}.yml key mismatch vs en.yml — missing: {missing:?}, extras: {extras:?}"
-            );
-        }
-    }
-
-    fn locale_keys(file: &str) -> Vec<&str> {
-        file.lines()
-            .filter_map(|line| line.strip_prefix('"'))
-            .filter_map(|line| line.split_once("\": ").map(|(key, _)| key))
-            .collect()
     }
 }

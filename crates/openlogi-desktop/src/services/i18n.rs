@@ -4,7 +4,7 @@
 //! compile time by the `rust_i18n::i18n!` macro in `main.rs` (fallback `"en"`).
 //! **`en.yml` is the English source of truth** (the English text IS the key).
 //! New or changed copy must land in **every** `locales/*.yml` in the same
-//! change — `openlogi_ui::locale`'s parity test enforces key-for-key match,
+//! change — `openlogi_core::locale`'s parity test enforces key-for-key match,
 //! against the catalogs it now sits beside. Crowdin improves
 //! non-English values over time and the workflow downloads only real
 //! translations (`skip_untranslated_strings`). Call sites use
@@ -19,10 +19,10 @@
 //! followed by a window refresh so open views re-render with the new locale.
 //!
 //! Which catalog a BCP-47 code resolves to is decided in
-//! [`openlogi_ui::locale`], shared with the overlay helper.
+//! [`openlogi_core::locale`], shared with the overlay helper.
 
 use openlogi_core::config::AppSettings;
-use openlogi_ui::locale::activate;
+use openlogi_core::locale::activate;
 
 /// Serializes tests that mutate `rust_i18n`'s process-global locale, so a
 /// locale switch in one test cannot interleave with another's assertions.

@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    openlogi_ui::locale::activate(None);
+    openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let Ipc {
@@ -67,7 +67,7 @@ fn main() -> Result<()> {
                     });
                     continue;
                 };
-                openlogi_ui::locale::activate(invocation.language.as_deref());
+                openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     live_session.clear();
                     for handle in cx.windows() {

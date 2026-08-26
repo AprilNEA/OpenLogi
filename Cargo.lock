@@ -5499,12 +5499,15 @@ dependencies = [
  "atomic-write-file",
  "az",
  "etcetera",
+ "fluent-langneg",
  "num_enum",
  "nutype",
  "openlogi-device-registry",
  "plist",
+ "rust-i18n",
  "serde",
  "strum",
+ "sys-locale",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
@@ -5727,11 +5730,8 @@ dependencies = [
 name = "openlogi-ui"
 version = "0.8.1"
 dependencies = [
- "fluent-langneg",
  "gpui",
  "openlogi-core",
- "rust-i18n",
- "sys-locale",
 ]
 
 [[package]]
