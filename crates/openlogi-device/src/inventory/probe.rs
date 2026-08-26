@@ -143,18 +143,62 @@ pub(super) fn assemble_bolt_probe(
     pairing_count: Option<u8>,
     slot_results: Vec<(PairedDevice, CacheOutcome)>,
 ) -> NodeProbe {
-    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().unzip();
+    // The pairing table can retain the same physical unit in more than one
+    // slot after a re-pair. The receiver still counts both occupied slots, so
+    // keep the raw count for probe health, but publish only one route for a
+    // non-zero unit id. Otherwise the Agent, CLI, and GUI all treat an offline
+    // stale slot as a second device. Prefer the online route; ordered slot
+    // results make the lower slot the stable tie-breaker.
+    let readable_slots = slot_results.len();
+    let mut paired = Vec::<PairedDevice>::with_capacity(readable_slots);
+    let mut outcomes = Vec::with_capacity(readable_slots);
+    let mut by_unit_id = HashMap::<[u8; 4], usize>::new();
+    for (device, outcome) in slot_results {
+        let unit_id = match &outcome {
+            CacheOutcome::Fresh(CacheKey::Bolt { unit_id }, _)
+            | CacheOutcome::Update(CacheKey::Bolt { unit_id }, _)
+            | CacheOutcome::Seen(CacheKey::Bolt { unit_id }) => Some(*unit_id),
+            CacheOutcome::Fresh(..)
+            | CacheOutcome::Update(..)
+            | CacheOutcome::Seen(..)
+            | CacheOutcome::Unkeyed => None,
+        };
+        if let Some(unit_id) = unit_id {
+            if let Some(&existing) = by_unit_id.get(&unit_id) {
+                let kept = &mut paired[existing];
+                if device.online && !kept.online {
+                    debug!(
+                        dropped_slot = kept.slot,
+                        kept_slot = device.slot,
+                        "duplicate Bolt pairing identity — keeping online slot"
+                    );
+                    *kept = device;
+                } else {
+                    debug!(
+                        kept_slot = kept.slot,
+                        dropped_slot = device.slot,
+                        "duplicate Bolt pairing identity — suppressing duplicate slot"
+                    );
+                }
+                outcomes.push(outcome);
+                continue;
+            }
+            by_unit_id.insert(unit_id, paired.len());
+        }
+        paired.push(device);
+        outcomes.push(outcome);
+    }
 
     if let Some(count) = pairing_count
-        && paired.len() != usize::from(count)
+        && readable_slots != usize::from(count)
     {
         warn!(
             expected = count,
-            found = paired.len(),
+            found = readable_slots,
             "paired-device count mismatch — some slots may be unreadable"
         );
     }
-    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
+    let complete = pairing_count.is_some_and(|count| readable_slots == usize::from(count));
 
     NodeProbe {
         inventory: Some(DeviceInventory { receiver, paired }),
