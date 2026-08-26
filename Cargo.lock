@@ -5701,7 +5701,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-monitor"
-version = "0.7.10"
+version = "0.8.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",

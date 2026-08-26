@@ -68,7 +68,7 @@ pub(super) fn monitor_content(pal: Palette, cx: &mut Context<AppView>) -> impl I
         .w_full()
         .overflow_y_scrollbar()
         .items_center()
-        .p(px(SCREEN_PAD))
+        .p(SCREEN_PAD.rems())
         .child(
             v_flex()
                 .w_full()
