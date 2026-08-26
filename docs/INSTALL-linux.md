@@ -101,6 +101,17 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
+Versions before 0.9 installed the rules to `/etc/udev/rules.d`, and a
+same-named file there overrides the vendor copy you just installed, keeping
+newer rules from taking effect. Unless you customized that file as a
+deliberate policy, remove it and reload again:
+
+```sh
+sudo rm -f /etc/udev/rules.d/70-openlogi.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
 Verify access (should open without error):
 
 ```sh
