@@ -8,19 +8,24 @@
 //!
 //! ## macOS
 //!
-//! A `LaunchAgent` plist at `~/Library/LaunchAgents/org.openlogi.agent.plist`
-//! is kept in sync with the running agent executable. `KeepAlive` is
-//! `{SuccessfulExit: false}` — the always-on daemon is respawned after a crash
-//! (mirroring Logi Options+'s own agent), but the tray's "Quit" (a clean
-//! `exit(0)`) is *not* relaunched, so Quit actually stops it until the next
-//! login. No `--minimized`: the agent is always headless.
+//! Registration is not the agent's job on macOS: the GUI maps
+//! `launch_at_login` to an `SMAppService` registration of the app bundle's
+//! embedded `Contents/Library/LaunchAgents` plist (label
+//! [`openlogi_core::brand::AGENT_SERVICE_LABEL`]), which is what supervises
+//! the agent — `KeepAlive = {SuccessfulExit: false}`: a crash respawns, the
+//! tray's Quit (a clean `exit(0)`) stays down. The API resolves the plist
+//! against the *calling* app's bundle, so only the GUI can register it; a
+//! hand-edited `config.toml` therefore takes effect the next time the GUI
+//! runs.
 //!
-//! The legacy `org.openlogi.openlogi` plist (the pre-split GUI autostart) is
-//! removed on every reconcile so the GUI no longer self-launches.
-//!
-//! Production should register via `SMAppService` once the app is signed +
-//! bundled with the plist in `Contents/Library/LaunchAgents`.
-//! TODO(signing): add the `SMAppService` registration path.
+//! What remains here is migration: removing the hand-written
+//! `~/Library/LaunchAgents` plists earlier versions installed — the pre-split
+//! GUI autostart and the agent's own pre-`SMAppService` plist. A running job
+//! loaded from one of those files keeps serving the current session (killing
+//! a live agent for a file migration helps nobody) and disappears at the next
+//! login, when its plist is no longer there to load; if the GUI has
+//! registered the service meanwhile, the freshly started duplicate loses the
+//! singleton lock and exits cleanly.
 //!
 //! ## Linux
 //!
@@ -32,6 +37,8 @@
 //! semantics. A clean `exit(0)` leaves the unit enabled but stopped until the
 //! next session login.
 
+// The macOS arm is migration-only and logs at info/warn.
+#[cfg(not(target_os = "macos"))]
 use tracing::debug;
 
 #[cfg(target_os = "linux")]
@@ -45,21 +52,16 @@ use tracing::warn;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use tracing::{info, warn};
 
-/// Stable launch-agent identifier for the background agent.
-///
-/// Deliberately *not* `brand::AGENT_ID`, though it currently matches: this is a
-/// filesystem key (`~/Library/LaunchAgents/<label>.plist`), so renaming it
-/// orphans the plist already on disk. Following a bundle-id change silently
-/// would leave users with two autostart entries; changing it is a migration,
-/// which is what [`LEGACY_LABEL`] is for.
+/// Labels of the hand-written `~/Library/LaunchAgents` plists earlier
+/// versions installed, removed on migration: the pre-split GUI autostart and
+/// the agent's own pre-`SMAppService` plist. Frozen history — each happens to
+/// match a `brand::` identifier, but if a brand value ever changes these must
+/// not, or the stale plists are never cleaned up. This is also why the
+/// `SMAppService` label ([`openlogi_core::brand::AGENT_SERVICE_LABEL`]) is a
+/// *new* name: reusing a legacy label would make "is this job the old file's
+/// or ours?" unanswerable during migration.
 #[cfg(target_os = "macos")]
-const LABEL: &str = "org.openlogi.agent";
-
-/// The pre-split GUI autostart label, removed on migration. Frozen history —
-/// never link it to `brand::APP_ID`, which it happens to match: if that value
-/// ever changes, this one must not, or the stale plist is never cleaned up.
-#[cfg(target_os = "macos")]
-const LEGACY_LABEL: &str = "org.openlogi.openlogi";
+const LEGACY_LABELS: [&str; 2] = ["org.openlogi.openlogi", "org.openlogi.agent"];
 
 /// Reconcile the agent's autostart state with `enabled`.
 ///
@@ -68,10 +70,10 @@ const LEGACY_LABEL: &str = "org.openlogi.openlogi";
 pub fn reconcile(enabled: bool) {
     #[cfg(target_os = "macos")]
     {
+        // Registration itself is the GUI's SMAppService call (see the module
+        // doc); the agent only migrates the legacy hand-written plists away.
         remove_legacy();
-        if let Err(e) = reconcile_macos(enabled) {
-            warn!(error = %e, enabled, "agent LaunchAgent reconcile failed");
-        }
+        let _ = enabled;
     }
     #[cfg(target_os = "windows")]
     if let Err(e) = reconcile_windows(enabled) {
@@ -92,49 +94,22 @@ pub fn reconcile(enabled: bool) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn reconcile_macos(enabled: bool) -> io::Result<()> {
-    let path = plist_path(LABEL)?;
-    let exe = std::env::current_exe()?;
-    let desired = enabled
-        .then(|| render_plist(&exe.to_string_lossy()))
-        .transpose()?;
-
-    let current = std::fs::read_to_string(&path).ok();
-    match (desired.as_deref(), current.as_deref()) {
-        (Some(want), Some(have)) if want == have => {
-            debug!(path = %path.display(), "agent LaunchAgent already current");
-        }
-        (Some(want), _) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, want)?;
-            info!(path = %path.display(), "agent LaunchAgent installed");
-        }
-        (None, Some(_)) => {
-            std::fs::remove_file(&path)?;
-            info!(path = %path.display(), "agent LaunchAgent removed");
-        }
-        (None, None) => debug!("agent LaunchAgent already absent"),
-    }
-    Ok(())
-}
-
-/// Remove the legacy GUI LaunchAgent so the old `--minimized` GUI no longer
-/// self-launches at login. Best-effort: a present-but-unreadable file is left
-/// alone (logged), and a currently-running old instance survives until logout.
+/// Remove the legacy hand-written LaunchAgent plists (see [`LEGACY_LABELS`]).
+/// Best-effort: a present-but-unremovable file is logged and left alone, and a
+/// job currently loaded from one keeps running until logout.
 #[cfg(target_os = "macos")]
 fn remove_legacy() {
-    let Ok(path) = plist_path(LEGACY_LABEL) else {
-        return;
-    };
-    if !path.exists() {
-        return;
-    }
-    match std::fs::remove_file(&path) {
-        Ok(()) => info!("removed legacy GUI LaunchAgent ({LEGACY_LABEL})"),
-        Err(e) => warn!(error = %e, "could not remove legacy LaunchAgent"),
+    for label in LEGACY_LABELS {
+        let Ok(path) = plist_path(label) else {
+            continue;
+        };
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => info!("removed legacy LaunchAgent ({label})"),
+            Err(e) => warn!(error = %e, label, "could not remove legacy LaunchAgent"),
+        }
     }
 }
 
@@ -146,25 +121,6 @@ fn plist_path(label: &str) -> io::Result<PathBuf> {
         .join("Library")
         .join("LaunchAgents")
         .join(format!("{label}.plist")))
-}
-
-#[cfg(target_os = "macos")]
-fn render_plist(exe: &str) -> io::Result<String> {
-    let mut keep_alive = plist::Dictionary::new();
-    keep_alive.insert("SuccessfulExit".into(), plist::Value::Boolean(false));
-
-    let mut root = plist::Dictionary::new();
-    root.insert("Label".into(), plist::Value::String(LABEL.into()));
-    root.insert(
-        "ProgramArguments".into(),
-        plist::Value::Array(vec![plist::Value::String(exe.into())]),
-    );
-    root.insert("RunAtLoad".into(), plist::Value::Boolean(true));
-    root.insert("KeepAlive".into(), plist::Value::Dictionary(keep_alive));
-
-    let mut bytes = Vec::new();
-    plist::to_writer_xml(&mut bytes, &plist::Value::Dictionary(root)).map_err(io::Error::other)?;
-    String::from_utf8(bytes).map_err(io::Error::other)
 }
 
 /// HKCU autostart subkey + value name for the agent.
@@ -333,53 +289,6 @@ impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[cfg(target_os = "macos")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rendered_plist_targets_the_agent_and_keeps_alive() {
-        let body = render_plist(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        )
-        .expect("render plist");
-        assert!(body.contains(LABEL));
-        assert!(body.contains("openlogi-agent"));
-        assert!(body.contains("RunAtLoad"));
-        // KeepAlive uses SuccessfulExit:false so a crash respawns but the tray's
-        // Quit (a clean exit(0)) is NOT relaunched; no --minimized (always headless).
-        let parsed = plist::Value::from_reader_xml(body.as_bytes()).expect("parse plist");
-        let keep_alive = parsed
-            .as_dictionary()
-            .and_then(|root| root.get("KeepAlive"))
-            .and_then(plist::Value::as_dictionary)
-            .expect("KeepAlive dictionary");
-        assert_eq!(
-            keep_alive
-                .get("SuccessfulExit")
-                .and_then(plist::Value::as_boolean),
-            Some(false)
-        );
-        assert!(!body.contains("--minimized"));
-    }
-
-    #[test]
-    fn render_plist_serializes_xml_metacharacters_in_the_path() {
-        // A home/app path with XML metacharacters (all legal APFS filename chars)
-        // must not produce a malformed plist launchd would reject.
-        let path = "/Users/R&D/Apps/<OpenLogi>/openlogi-agent";
-        let body = render_plist(path).expect("render plist");
-        let parsed = plist::Value::from_reader_xml(body.as_bytes()).expect("parse plist");
-        let args = parsed
-            .as_dictionary()
-            .and_then(|root| root.get("ProgramArguments"))
-            .and_then(plist::Value::as_array)
-            .expect("ProgramArguments array");
-        assert_eq!(args.first().and_then(plist::Value::as_string), Some(path));
-    }
-}
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]
