@@ -275,10 +275,14 @@ struct PreparedFlow {
     followers: Vec<PreparedHostSwitch>,
 }
 
-/// Resolve `spec` into a [`PreparedFlow`]. The pointer must prepare — without
-/// it there is nothing to switch — while a follower that fails (asleep,
-/// mid-reconnect) is skipped with a log: the fire's fallback path re-resolves
-/// everything anyway if the cache turns out stale.
+/// Resolve `spec` into a [`PreparedFlow`]. All-or-nothing: a device that
+/// fails to prepare (asleep, mid-reconnect) aborts the whole cache, so the
+/// paced retry keeps trying and fires meanwhile take the full re-resolving
+/// path. A cache silently missing a follower would fast-fire the pointer and
+/// leave that follower behind on this host — the failure mode Flow exists to
+/// prevent. The spec's followers are all online (the orchestrator filters),
+/// so a persistent refusal here is a transient radio problem, not a device
+/// that will never answer.
 async fn prepare_flow(spec: &FlowSpec, channel_pool: &ChannelPool) -> Option<PreparedFlow> {
     let hosts: Vec<u8> = spec.triggers.iter().map(|trigger| trigger.host).collect();
     let pointer = match prepare_host_switch(&spec.pointer, &hosts, channel_pool).await {
@@ -293,7 +297,8 @@ async fn prepare_flow(spec: &FlowSpec, channel_pool: &ChannelPool) -> Option<Pre
         match prepare_host_switch(route, &hosts, channel_pool).await {
             Ok(prepared) => followers.push(prepared),
             Err(error) => {
-                debug!(%error, route = %route, "flow: follower did not prepare — skipped");
+                debug!(%error, route = %route, "flow: follower did not prepare — will retry");
+                return None;
             }
         }
     }
