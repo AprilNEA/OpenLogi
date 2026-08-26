@@ -26,7 +26,7 @@
 //!
 //! # Available actions
 //!
-//! LeftClick RightClick MiddleClick MouseBack MouseForward
+//! LeftClick RightClick MiddleClick MouseBack MouseForward HoldMouseButton6 (macOS-first balanced click)
 //! Copy Paste Cut Undo Redo SelectAll Find Save
 //! BrowserBack BrowserForward NewTab CloseTab ReopenTab NextTab PrevTab ReloadPage
 //! MissionControl AppExpose PreviousDesktop NextDesktop ShowDesktop LaunchpadShow

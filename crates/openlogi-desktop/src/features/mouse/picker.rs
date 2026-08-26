@@ -46,7 +46,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     match action {
         Action::None => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
-        Action::MiddleClick => "action-icons/mouse.svg",
+        Action::MiddleClick | Action::HoldMouseButton6 => "action-icons/mouse.svg",
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
@@ -219,4 +219,19 @@ pub(crate) fn editor_scroll_list(
         .max_h(px(EDITOR_LIST_MAX_H))
         .overflow_y_scroll()
         .children(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::Action;
+
+    use super::action_icon_path;
+
+    #[test]
+    fn held_button6_uses_the_mouse_icon() {
+        assert_eq!(
+            action_icon_path(&Action::HoldMouseButton6),
+            "action-icons/mouse.svg"
+        );
+    }
 }
