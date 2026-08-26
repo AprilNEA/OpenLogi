@@ -338,7 +338,7 @@ impl ComponentGallery {
                         .accessibility_label("Remove preset")
                         .px_1()
                         .text_color(pal.text_muted)
-                        .child("×"),
+                        .child(Icon::new(IconName::Close).size_3()),
                 ),
             pal,
         )

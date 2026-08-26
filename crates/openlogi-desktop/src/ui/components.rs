@@ -324,6 +324,7 @@ impl RenderOnce for MenuRow {
 pub(crate) struct ProfileTab {
     base: BaseButton,
     label: SharedString,
+    icon: Option<Icon>,
     selected: bool,
     children: Vec<AnyElement>,
     on_click: Option<ClickHandler>,
@@ -335,11 +336,20 @@ impl ProfileTab {
         Self {
             base: BaseButton::new(id).role(Role::Tab),
             label: label.into(),
+            icon: None,
             selected: false,
             children: Vec::new(),
             on_click: None,
             delete: None,
         }
+    }
+
+    /// A mark before the label, for a tab that is an action rather than a
+    /// profile (the one that creates a new profile).
+    #[must_use]
+    pub(crate) fn icon(mut self, icon: impl Into<Icon>) -> Self {
+        self.icon = Some(icon.into());
+        self
     }
 
     #[must_use]
@@ -437,6 +447,7 @@ impl RenderOnce for ProfileTab {
                     })
                     .border_color(accent)
             })
+            .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
             .when_some(self.on_click, |tab, handler| {
@@ -445,13 +456,13 @@ impl RenderOnce for ProfileTab {
             .when_some(self.delete, |tab, (id, handler)| {
                 tab.child(
                     BaseButton::new(id)
-                        .accessibility_label(format!("{label} ×"))
+                        .accessibility_label(tr!("Remove %{name}", name => label.to_string()))
                         .px_0p5()
                         .rounded_full()
                         .text_color(pal.text_muted)
                         .hover(|style| style.text_color(pal.text_primary))
                         .focus_visible(|style| style.text_color(pal.text_primary))
-                        .child("×")
+                        .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
                             handler(event, window, cx);
@@ -592,7 +603,7 @@ mod tests {
                     )
                     .child(
                         BaseButton::new("keyboard-preset-remove")
-                            .child("×")
+                            .child(Icon::new(IconName::Close).size_3())
                             .on_click(move |_, _, _| removals.set(removals.get() + 1)),
                     ),
             )

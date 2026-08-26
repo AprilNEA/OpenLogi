@@ -466,6 +466,7 @@ _version: 1
 "Profile options": "Profil seçenekleri"
 "Remove %{app} profile and its %{count} overrides?": "%{app} profili ve %{count} geçersiz kılması kaldırılsın mı?"
 "Remove %{app} profile and its 1 override?": "%{app} profili ve 1 geçersiz kılması kaldırılsın mı?"
+"Remove %{name}": "%{name} öğesini kaldır"
 "Remove profile": "Profili kaldır"
 "Remove profile…": "Profili kaldır…"
 "Select a button on the device to change what it does.": "Ne yapacağını değiştirmek için cihaz üzerinde bir düğme seçin."

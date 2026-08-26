@@ -13,13 +13,17 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
-/// Vendored [lucide](https://lucide.dev) icons (ISC license) for the binding
-/// menus, embedded so they resolve identically in a packaged `.app` and a dev
-/// build. Served under the `action-icons/` path prefix and rendered by
-/// the settings action picker via `svg().path(..)`. These are
-/// command glyphs (paste / cut / volume / lock / …) plus a couple of About-page
-/// icons (changelog, bug) that gpui-component's bundled `IconName` set does not
-/// cover.
+/// Vendored [lucide](https://lucide.dev) icons (ISC license), embedded so they
+/// resolve identically in a packaged `.app` and a dev build. Served under the
+/// `action-icons/` path prefix and rendered via `svg().path(..)` or
+/// `Icon::empty().path(..)`. Mostly command glyphs for the binding menus
+/// (paste / cut / volume / lock / …), plus the chrome marks gpui-component's
+/// bundled `IconName` set does not cover — About-page icons, and `mouse-left` /
+/// `mouse-right`, which are lucide's `mouse` with one button filled in.
+///
+/// `x.svg` duplicates `IconName::Close` on purpose: the overlay does not depend
+/// on gpui-component, and its ring cancel target has to match the settings-side
+/// preview of the same ring exactly.
 #[rustfmt::skip]
 const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left.svg"))),
@@ -55,7 +59,9 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/list-checks.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/list-checks.svg"))),
     ("action-icons/lock.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/lock.svg"))),
     ("action-icons/monitor.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/monitor.svg"))),
+    ("action-icons/mouse-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-left.svg"))),
     ("action-icons/mouse-pointer-click.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-pointer-click.svg"))),
+    ("action-icons/mouse-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-right.svg"))),
     ("action-icons/mouse.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse.svg"))),
     ("action-icons/move.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/move.svg"))),
     ("action-icons/palette.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/palette.svg"))),
@@ -86,7 +92,13 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/volume-1.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-1.svg"))),
     ("action-icons/volume-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-2.svg"))),
     ("action-icons/volume-x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-x.svg"))),
+    ("action-icons/x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/x.svg"))),
 ];
+
+/// The Actions Ring's centre cancel mark. Both processes draw that target —
+/// the overlay for real, the settings app as a preview — and they have to be
+/// the same mark, so neither side names the asset itself.
+pub const RING_CANCEL_ICON: &str = "action-icons/x.svg";
 
 /// GPUI asset source for the embedded ring glyphs, and nothing else.
 pub struct ActionIcons;
@@ -113,6 +125,17 @@ mod tests {
     use openlogi_core::binding::ActionRingIcon;
 
     use super::*;
+
+    #[test]
+    fn the_shared_ring_cancel_icon_is_embedded() {
+        // Both processes render this path; a rename that missed the array
+        // would blank the overlay's cancel target rather than fail to build.
+        let loaded = ActionIcons.load(RING_CANCEL_ICON);
+        assert!(
+            matches!(loaded, Ok(Some(_))),
+            "{RING_CANCEL_ICON} is missing"
+        );
+    }
 
     #[test]
     fn every_ring_gallery_icon_is_embedded() {

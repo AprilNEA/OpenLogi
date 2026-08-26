@@ -12,6 +12,7 @@ use gpui::{
 };
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::ActionRingInvocation;
+use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 use tokio::sync::mpsc;
 
@@ -187,9 +188,8 @@ impl Render for RingView {
                     .rounded_full()
                     .bg(CANCEL_RESTING)
                     .text_color(CANCEL_GLYPH)
-                    .text_lg()
                     .cursor_pointer()
-                    .child("×")
+                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
