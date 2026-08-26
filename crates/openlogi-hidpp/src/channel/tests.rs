@@ -98,7 +98,7 @@ fn send_times_out_and_removes_pending_message() {
 }
 
 #[test]
-fn timeout_removes_only_its_own_pending_message() {
+fn timeout_does_not_remove_the_next_queued_request() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
         let channel = channel_with_reader(raw).await;
@@ -116,8 +116,8 @@ fn timeout_removes_only_its_own_pending_message() {
             move |candidate| *candidate == slow_response,
             Duration::from_secs(1),
         );
-        // Answer the second request only after the first has timed out, so
-        // a removal that took the wrong entry would fail this test.
+        // Answer the queued request only after the active request has timed
+        // out, so timeout cleanup cannot poison the next transaction.
         let respond_late = async {
             futures_timer::Delay::new(Duration::from_millis(100)).await;
             handle.send_incoming(slow_response).await;
@@ -127,6 +127,83 @@ fn timeout_removes_only_its_own_pending_message() {
 
         assert!(matches!(timed_out.unwrap_err(), ChannelError::Timeout));
         assert_eq!(answered.unwrap(), slow_response);
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn one_channel_has_only_one_request_in_flight() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+        let first_response = short_msg(0x20);
+        let second_response = short_msg(0x21);
+
+        let first = channel.send_with_timeout(
+            short_msg(0x10),
+            move |candidate| *candidate == first_response,
+            Duration::from_secs(1),
+        );
+        let second = channel.send_with_timeout(
+            short_msg(0x11),
+            move |candidate| *candidate == second_response,
+            Duration::from_secs(1),
+        );
+        let respond_in_order = async {
+            wait_for_written_report_count(&handle, 1).await;
+            futures_timer::Delay::new(Duration::from_millis(25)).await;
+            assert_eq!(
+                handle.written_reports().len(),
+                1,
+                "a second request reused the channel software id before the first completed"
+            );
+            handle.send_incoming(first_response).await;
+            wait_for_written_report_count(&handle, 2).await;
+            handle.send_incoming(second_response).await;
+        };
+
+        let (first, second, ()) = futures::join!(first, second, respond_in_order);
+
+        assert_eq!(first.unwrap(), first_response);
+        assert_eq!(second.unwrap(), second_response);
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn queued_request_gets_its_full_wire_timeout_after_the_gate() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+        let first_response = short_msg(0x20);
+        let queued_response = short_msg(0x21);
+
+        let first = channel.send_with_timeout(
+            short_msg(0x10),
+            move |candidate| *candidate == first_response,
+            Duration::from_secs(1),
+        );
+        let queued = channel.send_with_timeout(
+            short_msg(0x11),
+            move |candidate| *candidate == queued_response,
+            Duration::from_millis(25),
+        );
+        let finish_first = async {
+            wait_for_written_report_count(&handle, 1).await;
+            // Keep the first transaction active for far longer than the
+            // queued request's own wire timeout. Queueing is not device
+            // silence, so the second request must still reach the transport.
+            futures_timer::Delay::new(Duration::from_millis(100)).await;
+            handle.send_incoming(first_response).await;
+            wait_for_written_report_count(&handle, 2).await;
+            handle.send_incoming(queued_response).await;
+        };
+
+        let (first, queued, ()) = futures::join!(first, queued, finish_first);
+
+        assert_eq!(first.unwrap(), first_response);
+        assert_eq!(queued.unwrap(), queued_response);
+        assert_eq!(handle.written_reports().len(), 2);
         assert_pending_empty(&channel);
     });
 }
@@ -634,6 +711,18 @@ async fn wait_for_atomic_count(count: &AtomicUsize, expected: usize) {
     }
 
     panic!("timed out waiting for atomic count {expected}");
+}
+
+async fn wait_for_written_report_count(handle: &MockRawHidHandle, expected: usize) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(1) {
+        if handle.written_reports().len() >= expected {
+            return;
+        }
+        futures_timer::Delay::new(Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for written report count {expected}");
 }
 
 fn mock_error() -> Box<dyn Error + Sync + Send> {

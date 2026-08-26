@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{FutureExt, channel::oneshot, select};
+use futures::{FutureExt, channel::oneshot, lock::Mutex as AsyncMutex, select};
 use tracing::trace;
 
 use crate::{nibble::U4, sync::lock};
@@ -89,6 +89,16 @@ pub struct HidppChannel {
 
     /// The request ID assigned to the next pending message.
     pending_message_id: AtomicU64,
+
+    /// Serializes complete request/response transactions on this transport.
+    ///
+    /// Every open channel uses one fixed HID++ software id for its lifetime.
+    /// Allowing two requests to overlap on that id makes identical headers
+    /// indistinguishable and can also overrun receiver firmware while one
+    /// consumer inventories and another audits capture state. Keep the gate
+    /// for the response wait, not only the report write, so exactly one
+    /// transaction is in flight on a physical channel.
+    request_gate: AsyncMutex<()>,
 
     /// Registered listeners that will receive notifications about incoming
     /// messages.
@@ -204,6 +214,7 @@ impl HidppChannel {
             software_id: AtomicU8::new(0x01),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
+            request_gate: AsyncMutex::new(()),
             next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
@@ -317,13 +328,17 @@ impl HidppChannel {
     }
 
     /// Sends a HID++ message across the channel and waits for a response,
-    /// bounding the whole request — the report write plus the wait for a
-    /// matching response — by `timeout`.
+    /// bounding the report write plus the wait for a matching response by
+    /// `timeout` once this request reaches the transport.
     ///
-    /// On elapse the request's pending entry is removed (concurrent in-flight
-    /// requests are unaffected) and [`ChannelError::Timeout`] is returned; a
-    /// response that still arrives later reaches message listeners as an
-    /// unmatched message.
+    /// On elapse the request's pending entry is removed and
+    /// [`ChannelError::Timeout`] is returned; a response that still arrives
+    /// later reaches message listeners as an unmatched message. Requests on
+    /// one channel are serialized because they share one software id. Queue
+    /// time is deliberately separate from the device-response timeout: a
+    /// healthy request waiting behind one slow transaction must not be
+    /// misreported as a dead HID channel before it reaches the wire. Callers
+    /// that need a whole-operation deadline can bound this future externally.
     ///
     /// [`Self::send`] uses this with [`SEND_RESPONSE_TIMEOUT`], which suits
     /// requests to a device that may be asleep. Requests that should fail
@@ -345,6 +360,15 @@ impl HidppChannel {
         // below can name the same request.
         let (dev, feat, func) = msg.header();
         trace!(dev, feat, func, "hidpp request");
+
+        // A fixed software id identifies this open channel. Keep one complete
+        // transaction in flight so two requests with the same HID++ header
+        // cannot consume each other's response and receiver firmware is never
+        // driven concurrently by inventory and live-control maintenance.
+        // The timeout below starts only after this guard is acquired. Counting
+        // queue contention as transport silence made the capture watchdog
+        // retire healthy receiver channels while inventory owned the wire.
+        let _request_guard = self.request_gate.lock().await;
 
         let (sender, receiver) = oneshot::channel::<HidppMessage>();
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
@@ -372,7 +396,7 @@ impl HidppChannel {
         // park `send` forever before the response wait even starts.
         let mut request = std::pin::pin!(
             async {
-                self.send_and_forget(msg).await?;
+                self.write_message_unlocked(msg).await?;
                 receiver.await.map_err(|_| ChannelError::NoResponse)
             }
             .fuse()
@@ -415,6 +439,11 @@ impl HidppChannel {
             return Err(ChannelError::MessageTypeNotSupported);
         }
 
+        let _request_guard = self.request_gate.lock().await;
+        self.write_message_unlocked(msg).await
+    }
+
+    async fn write_message_unlocked(&self, msg: HidppMessage) -> Result<(), ChannelError> {
         let mut buf = [0u8; LONG_REPORT_LENGTH];
         let len = msg.write_raw(&mut buf);
         self.raw_channel
@@ -427,8 +456,10 @@ impl HidppChannel {
     /// Write one raw HID report through this channel's already-owned transport.
     ///
     /// Reports must contain `1..=64` bytes, including their report ID. The
-    /// operation is bounded by [`SEND_RESPONSE_TIMEOUT`] and returns the exact
-    /// byte count reported by the transport. This is intended for HID++ report
+    /// transport write is bounded by [`SEND_RESPONSE_TIMEOUT`] and returns the
+    /// exact byte count reported by the transport. Queue time behind another
+    /// transaction is not transport time; callers may impose an outer deadline
+    /// when needed. This is intended for HID++ report
     /// widths such as the 64-byte `0x12` lighting frame that [`HidppMessage`]
     /// cannot represent.
     pub async fn write_raw_report(&self, report: &[u8]) -> Result<usize, ChannelError> {
@@ -445,6 +476,7 @@ impl HidppChannel {
             return Err(ChannelError::InvalidRawReportLength(report.len()));
         }
 
+        let _request_guard = self.request_gate.lock().await;
         let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
         select! {
             result = write => result.map_err(ChannelError::Implementation),
