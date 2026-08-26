@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, FlowFollow, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
@@ -36,6 +36,7 @@ use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
+use crate::watchers::flow::{FlowSpec, SharedFlowSpec};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
@@ -103,6 +104,8 @@ pub struct SharedRuntime {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// The Flow watcher's armed state, resolved from `[flow]` + inventory.
+    pub flow_spec: SharedFlowSpec,
 }
 
 impl SharedRuntime {
@@ -211,6 +214,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            flow_spec: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
             config,
@@ -342,6 +346,11 @@ impl Orchestrator {
             &self.shared.host_switch_links,
             host_switch_links(&self.config, &self.devices),
             "host_switch_links",
+        );
+        write_value(
+            &self.shared.flow_spec,
+            flow_spec(&self.config, &self.devices),
+            "flow_spec",
         );
         write_value(
             &self.shared.keyboard_spec,
@@ -965,6 +974,81 @@ fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitch
             (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
         })
         .collect()
+}
+
+/// The Flow watcher's armed state, or `None` while no device qualifies as
+/// the Flow pointer.
+///
+/// The pointer is the first (canonical order) online, routed, enabled
+/// pointing-kind device whose measured capabilities include `ChangeHost` and
+/// whose own `[devices."…".flow]` is enabled with at least one mapped side.
+/// The cursor is singular and its source unattributable, so multiple
+/// flow-enabled pointers resolve first-wins (the rest are debug-logged).
+///
+/// Followers come from each other device's `flow_follow`: `Off` never
+/// follows; `Device(key)` follows exactly the named pointer; `Auto` — the
+/// default — follows for keyboards that can switch hosts, which is what
+/// makes a keyboard jump with the mouse without setup. Auto is deliberately
+/// keyboard-only: a second mouse silently dragged to another host would be
+/// surprising, so it must be bound explicitly.
+fn flow_spec(config: &Config, devices: &[AgentDevice]) -> Option<FlowSpec> {
+    let mut candidates = devices.iter().filter(|device| {
+        device.online
+            && device.route.is_some()
+            && is_pointing_kind(device.kind)
+            && config.device_enabled(&device.config_key)
+            && device
+                .capabilities
+                .is_some_and(|capabilities| capabilities.host_switching)
+            && config
+                .devices
+                .get(&device.config_key)
+                .is_some_and(|entry| entry.flow.enabled && !entry.flow.placements.is_empty())
+    });
+    let pointer = candidates.next()?;
+    for skipped in candidates {
+        debug!(
+            key = %skipped.config_key,
+            "flow: another flow-enabled pointer is already active — skipped"
+        );
+    }
+    let pointer_route = pointer.route.clone()?;
+    let pointer_flow = &config.devices.get(&pointer.config_key)?.flow;
+    let followers = devices
+        .iter()
+        .filter(|device| device.config_key != pointer.config_key && device.online)
+        .filter(|device| {
+            let follow = config
+                .devices
+                .get(&device.config_key)
+                .map_or(&FlowFollow::Auto, |entry| &entry.flow_follow);
+            match follow {
+                FlowFollow::Off => false,
+                FlowFollow::Device(key) => *key == pointer.config_key,
+                FlowFollow::Auto => {
+                    device.kind == DeviceKind::Keyboard
+                        && device
+                            .capabilities
+                            .is_some_and(|capabilities| capabilities.host_switching)
+                }
+            }
+        })
+        .filter_map(|device| device.route.clone())
+        .collect();
+    Some(FlowSpec {
+        triggers: crate::watchers::flow::triggers_for(&pointer_flow.placements),
+        trigger_mode: pointer_flow.trigger,
+        pointer: pointer_route,
+        followers,
+    })
+}
+
+/// Whether `kind` drives the on-screen cursor — the device Flow follows.
+fn is_pointing_kind(kind: DeviceKind) -> bool {
+    matches!(
+        kind,
+        DeviceKind::Mouse | DeviceKind::Trackball | DeviceKind::Touchpad
+    )
 }
 
 /// The canonical identity of one device: what the GUI carousel orders by, what
