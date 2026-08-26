@@ -22,7 +22,7 @@ use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 
-use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
+use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
 use super::{
     ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
@@ -57,19 +57,18 @@ pub(super) async fn probe_one(
     info: NodeInfo,
     channel: Arc<HidppChannel>,
     cache: &HashMap<CacheKey, Cached>,
-    tick: u64,
 ) -> NodeProbe {
     match receiver::detect(Arc::clone(&channel)) {
-        Some(Receiver::Bolt(bolt)) => probe_bolt_receiver(channel, info, bolt, cache, tick).await,
+        Some(Receiver::Bolt(bolt)) => probe_bolt_receiver(channel, info, bolt, cache).await,
         Some(Receiver::Unifying(unifying)) => {
-            probe_unifying_receiver(channel, info, unifying, cache, tick).await
+            probe_unifying_receiver(channel, info, unifying, cache).await
         }
         None | Some(_) => {
             // No recognised receiver — this might be a directly-paired device
             // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
             // addresses the device's own features. Probe in case it answers.
             // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-            probe_direct(channel, &info, cache, tick).await
+            probe_direct(channel, &info, cache).await
         }
     }
 }
@@ -79,7 +78,6 @@ async fn probe_bolt_receiver(
     info: NodeInfo,
     bolt: BoltReceiver,
     cache: &HashMap<CacheKey, Cached>,
-    tick: u64,
 ) -> NodeProbe {
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
@@ -113,7 +111,7 @@ async fn probe_bolt_receiver(
     // device list stable across ticks without an explicit sort.
     let slot_results = identities
         .iter()
-        .map(|identity| walk_bolt_slot(&channel, identity, cache, tick))
+        .map(|identity| walk_bolt_slot(&channel, identity, cache))
         .collect::<Vec<_>>()
         .join()
         .await;
@@ -169,7 +167,6 @@ async fn probe_unifying_receiver(
     info: NodeInfo,
     unifying: UnifyingReceiver,
     cache: &HashMap<CacheKey, Cached>,
-    tick: u64,
 ) -> NodeProbe {
     // Pairing count is the health gate for this path: without it the result is
     // settled as a failed probe regardless of any later arrival events. Check
@@ -234,7 +231,7 @@ async fn probe_unifying_receiver(
     };
     let slot_results = connections
         .iter()
-        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, cache, tick))
+        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, cache))
         .collect::<Vec<_>>()
         .join()
         .await;
@@ -352,7 +349,6 @@ async fn walk_bolt_slot(
     channel: &Arc<HidppChannel>,
     identity: &BoltSlotIdentity,
     cache: &HashMap<CacheKey, Cached>,
-    tick: u64,
 ) -> (PairedDevice, CacheOutcome) {
     let &BoltSlotIdentity {
         slot,
@@ -371,7 +367,7 @@ async fn walk_bolt_slot(
     // mirroring the Unifying path (#218).
     let probe_result = timeout(
         BOLT_SLOT_PROBE,
-        probe_or_reuse(channel, slot, id.clone(), cached, online, tick),
+        probe_or_reuse(channel, slot, id.clone(), cached, online),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
@@ -435,14 +431,13 @@ async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,
     cache: &HashMap<CacheKey, Cached>,
-    tick: u64,
 ) -> NodeProbe {
     let id = CacheKey::Direct(info.id.clone());
     let cached = cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
     // treat it as online: reuse the cached probe while fresh, otherwise probe.
     let (probe, outcome) =
-        probe_or_reuse(&channel, DIRECT_DEVICE_INDEX, Some(id), cached, true, tick).await;
+        probe_or_reuse(&channel, DIRECT_DEVICE_INDEX, Some(id), cached, true).await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -622,7 +617,6 @@ pub(super) async fn probe_unifying_slot(
     event: &UnifyingDeviceConnection,
     receiver_uid: &str,
     cache: &HashMap<CacheKey, Cached>,
-    tick: u64,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
     // Cache key: full receiver serial + slot so two Unifying receivers with
@@ -641,10 +635,10 @@ pub(super) async fn probe_unifying_slot(
     // announced itself into "offline" — and don't probe an offline slot at
     // all, which would burn the budget on a link the receiver just reported
     // as not established.
-    let probe_budget = unifying_probe_budget(cached, tick);
+    let probe_budget = unifying_probe_budget(cached, channel);
     let probe_result = timeout(
         probe_budget,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online, tick),
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online),
     )
     .await;
     let (probe, outcome) = if let Ok(result) = probe_result {
@@ -688,10 +682,14 @@ pub(super) async fn probe_unifying_slot(
     Some((device, outcome))
 }
 
-/// A fresh cache hit needs only an optional battery refresh; first-sight and
-/// stale entries retain the larger budget needed for a complete feature walk.
-pub(super) fn unifying_probe_budget(cached: Option<&Cached>, tick: u64) -> std::time::Duration {
-    if cached.is_some_and(|entry| !is_stale(entry, tick)) {
+/// A cache hit needs only an optional battery refresh; first sight retains the
+/// larger budget needed for a complete feature walk. A cache bound to a
+/// replaced channel also gets the full budget for its one validation walk.
+pub(super) fn unifying_probe_budget(
+    cached: Option<&Cached>,
+    channel: &Arc<HidppChannel>,
+) -> std::time::Duration {
+    if cached.is_some_and(|entry| !entry.needs_validation(channel)) {
         UNIFYING_CACHED_SLOT_PROBE
     } else {
         UNIFYING_SLOT_PROBE

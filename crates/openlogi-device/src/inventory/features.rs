@@ -45,7 +45,7 @@ pub(super) struct ProbedFeatures {
     pub(super) identity_incomplete: bool,
     /// A capability read *failed* (vs. the device not having the capability),
     /// so `capabilities` above understates what the device can do. Memoizing
-    /// that would hide a panel in the GUI for `REFRESH_TICKS`.
+    /// that would hide a panel in the GUI for the channel's lifetime.
     pub(super) capabilities_incomplete: bool,
 }
 
@@ -319,9 +319,9 @@ async fn probe_extra_capabilities(
 /// Whether the device exposes a divertable haptic panel, or `None` when a read
 /// failed part-way through the ~40-entry control walk.
 ///
-/// The distinction matters because the answer is memoized for `REFRESH_TICKS`:
-/// reporting a lost reply as `false` hides the Actions Ring binding for half a
-/// minute on a device that has the panel.
+/// The distinction matters because the answer is memoized for the channel's
+/// lifetime: reporting a lost reply as `false` could hide the Actions Ring
+/// binding until the device reconnects.
 async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
     let count = feature.get_count().await.ok()?;
     for index in 0..count {

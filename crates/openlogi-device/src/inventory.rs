@@ -155,7 +155,6 @@ pub struct Enumerator {
     /// Optional publication sink used by the persistent Agent watcher. One-shot
     /// callers keep this `None` and retain the route-opening library behavior.
     registry: Option<ChannelRegistry>,
-    tick: u64,
     /// Where the immutable probe cache is kept across restarts, `None` for a
     /// memory-only enumerator (one-shot CLI calls, tests).
     store: Option<Arc<dyn ProbeCacheStore>>,
@@ -435,7 +434,6 @@ impl Enumerator {
             channels: ChannelCache::default(),
             ledger: NodeLedger::default(),
             registry: None,
-            tick: 0,
             store: None,
             cache_dirty: false,
             open_failures_last_tick: false,
@@ -576,8 +574,6 @@ impl Enumerator {
     async fn enumerate_reporting_completeness(
         &mut self,
     ) -> Result<(Vec<DeviceInventory>, bool, bool), InventoryError> {
-        self.tick = self.tick.wrapping_add(1);
-        let tick = self.tick;
         let backend = Arc::clone(&self.backend);
         let candidates = backend.enumerate_hidpp().await?;
         debug!(count = candidates.len(), "HID++ candidate interfaces");
@@ -611,8 +607,7 @@ impl Enumerator {
                     } else {
                         PROBE_BUDGET
                     };
-                    let probe =
-                        timeout(budget, probe_one(info, Arc::clone(&channel), cache, tick)).await;
+                    let probe = timeout(budget, probe_one(info, Arc::clone(&channel), cache)).await;
                     (node, channel, probe, budget, receiver)
                 })
                 .collect::<Vec<_>>()
@@ -727,7 +722,7 @@ impl Enumerator {
                     self.cache_dirty |= persist::is_persistable(&key);
                     self.cache.insert(key, cached);
                 }
-                CacheOutcome::Update(key, cached) => {
+                CacheOutcome::Update(key, cached) | CacheOutcome::Bind(key, cached) => {
                     seen_keys.insert(key.clone());
                     self.cache.insert(key, cached);
                 }

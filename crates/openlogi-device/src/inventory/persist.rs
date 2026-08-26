@@ -12,10 +12,10 @@
 //! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
 //! different device paired into that slot while the agent is down would
 //! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
-//! is an OS-runtime node id with no cross-boot stability. Loaded entries get
-//! `probed_tick = 0`, so the regular `cache::REFRESH_TICKS`
-//! self-healing pass re-walks them on schedule; until (and unless) that walk
-//! succeeds, the persisted data serves exactly like an in-memory cache hit.
+//! is an OS-runtime node id with no cross-boot stability. Loaded entries have
+//! no runtime channel association. The first live channel adopts them without
+//! repeating the immutable feature-table walk; a replacement channel validates
+//! them once before reuse.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
@@ -175,11 +175,7 @@ impl ProbeCacheSnapshot {
                     Cached {
                         probe: entry.probe,
                         battery: entry.battery,
-                        // Restart the refresh clock: the entry serves
-                        // immediately as a cache hit, and the periodic
-                        // self-healing re-walk decides when it is due for a
-                        // fresh read.
-                        probed_tick: 0,
+                        channel: None,
                     },
                 )
             })
@@ -229,7 +225,7 @@ mod tests {
                     ..Default::default()
                 },
                 battery: Some(BatteryProbe::Unified(9)),
-                probed_tick: 7,
+                channel: None,
             },
         );
         cache.insert(
@@ -240,7 +236,7 @@ mod tests {
             Cached {
                 probe: ProbedFeatures::default(),
                 battery: None,
-                probed_tick: 3,
+                channel: None,
             },
         );
 
@@ -261,9 +257,9 @@ mod tests {
             bolt.probe.battery.is_none(),
             "the battery *reading* is volatile — restoring it would resurrect a stale value"
         );
-        assert_eq!(
-            bolt.probed_tick, 0,
-            "a restored entry restarts the refresh clock"
+        assert!(
+            bolt.channel.is_none(),
+            "a restored entry must not retain a runtime channel"
         );
         assert!(
             !restored.contains_key(&CacheKey::UnifyingSlot {
