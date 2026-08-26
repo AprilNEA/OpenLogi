@@ -110,6 +110,19 @@ House style:
   the lock; restore with `cargo update -p gpui --precise <rev>`).
 - Module layout: a module with its own semantics is `foo.rs` (children in a sibling
   `foo/`); `foo/mod.rs` is only for pure namespace shells. Never both for one module.
+- Platform-divergent code: once more than one function diverges, use one module per
+  OS selected by a single `cfg` at the module declaration, with a thin facade owning
+  the shared types and dispatch — `inject.rs` → `inject/{macos,linux,windows}.rs`,
+  `launch_agent.rs` likewise — not a file interleaved with repeated
+  `#[cfg(target_os = …)]` arms. Each platform file implements the same function
+  names; a missing one fails that platform's compile, which is the same guarantee a
+  trait would give here. Reach for a trait only when implementations genuinely
+  coexist — runtime backend selection, test doubles, or a cross-crate seam
+  (`HidBackend`) — never as ceremony around a compile-time-exclusive choice. A
+  single small divergent function (`platform/os.rs`) stays inline. Splitting does
+  not lift the cross-platform rule: the non-host files are only ever compiled by
+  that platform's CI or a cross-lint, so `.claude/rules/cross-platform.md` applies
+  with full force.
 - Keep files reasonably sized (split around ~500 lines) into real modules — never
   simulate structure with `// ---- section ----` banner comments. But don't
   over-extract either: inline single-use helpers.
