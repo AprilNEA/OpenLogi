@@ -154,10 +154,16 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// `exit(0)`) stays down. Per launchd.plist(5), `SuccessfulExit` implies
 /// `RunAtLoad`, so a registered service also starts at login and immediately
 /// upon registration — and an explicit `RunAtLoad = false` does not override
-/// the implication (verified: the job still runs once at load). Supervision
-/// without login autostart is therefore unrepresentable, which is why
-/// `launch_at_login` maps to registration itself rather than to a key in
-/// this plist.
+/// the implication (verified: the job still runs once at load).
+///
+/// `SuccessfulExit` is deliberate over the narrower `KeepAlive = {Crashed:
+/// true}`: this plist wants the implied autostart anyway, and `SuccessfulExit`
+/// respawns every failure mode — a Rust panic under the default
+/// `panic = "unwind"` is an `exit(101)`, not a signal, which `Crashed` would
+/// leave down (verified live, alongside `Crashed` not respawning SIGKILL).
+/// `Crashed` *does* compose with `RunAtLoad = false`, so a supervised
+/// on-demand variant for `launch_at_login = false` is representable — a
+/// possible second service plist later, not shipped here.
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let helper = HELPERS
         .iter()
