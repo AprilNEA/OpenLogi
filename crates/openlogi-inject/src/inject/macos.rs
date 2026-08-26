@@ -1680,11 +1680,25 @@ mod keyboard_layout {
     /// A character's key press under the active keyboard layout: which
     /// physical key produces it, and which of Shift/Option must be held to
     /// select that character's layer (e.g. digits sit behind Shift on
-    /// AZERTY). These are the *exact* modifiers the layer was found under —
-    /// never a superset of some caller-supplied base — so the caller ORing
-    /// them into whatever modifiers the shortcut itself already wants is
-    /// proven to still reproduce the target character, not just "probably
-    /// harmless" if the two happen to agree.
+    /// AZERTY). These name the layer `target` — always the key's *unshifted*
+    /// identity character — was actually found under; the caller ORs them
+    /// into whatever *other* modifiers the shortcut wants (a combo's own
+    /// Shift/Option, or Command/Control), which can legitimately produce a
+    /// modifier combination never itself run through `UCKeyTranslate`. That
+    /// is not a gap to close: a real physical Cmd+Shift+Z keypress doesn't
+    /// "produce" the character 'z' either (holding Shift changes the vk's
+    /// output to 'Z'), and it reliably triggers Redo regardless — because
+    /// `NSEvent.charactersIgnoringModifiers`, what AppKit's key-equivalent
+    /// matching is built on, explicitly ignores Option and Command and
+    /// honors only Shift, and the standard `NSMenuItem` convention is a
+    /// lowercase/unshifted `keyEquivalent` plus a separate
+    /// `keyEquivalentModifierMask` — not a re-derived shifted character.
+    /// Raw vk+modifier-mask global-hotkey listeners (this codebase's own
+    /// `openlogi-hook` included) don't translate a character at all. Trying
+    /// to verify the full combined state against `target` would reject
+    /// exactly the shortcuts issue #343 exists to fix (Greptile review on
+    /// #948, "Combined modifier layer remains unverified" — not applicable
+    /// for the reasons above; see the PR discussion for the citations).
     pub(super) struct ResolvedKey {
         pub(super) vk: u16,
         pub(super) needs_shift: bool,
@@ -1705,9 +1719,11 @@ mod keyboard_layout {
     /// unfiltered by the base, precisely so a base that doesn't match where
     /// the layout actually puts the character (the common case for
     /// Shift/Option shortcuts on printable keys) doesn't defeat the lookup
-    /// (Greptile review on #948, "Base modifiers defeat layout lookup").
-    /// Returns `None` if it can't be determined (no active layout/console
-    /// session, or no key on any layer produces this character).
+    /// (Greptile review on #948, "Base modifiers defeat layout lookup"). See
+    /// [`ResolvedKey`] for why the layer found here is never re-verified
+    /// against the caller's *other* modifiers. Returns `None` if it can't be
+    /// determined (no active layout/console session, or no key on any layer
+    /// produces this character).
     pub(super) fn resolve_char_with_base(
         target: char,
         base_shift: bool,
