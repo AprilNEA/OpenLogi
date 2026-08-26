@@ -48,6 +48,16 @@ impl AppState {
             .edit(|config| config.app_settings.show_in_menu_bar = enabled);
         self.persist_and_reload("show-in-menu-bar setting");
     }
+    /// Toggle Windows' per-device battery tray icons and apply it immediately.
+    #[cfg(target_os = "windows")]
+    pub fn set_show_device_battery_icons(&mut self, enabled: bool) {
+        if self.config.app_settings.show_device_battery_icons == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.show_device_battery_icons = enabled);
+        self.persist_and_reload("device battery tray icons setting");
+    }
     /// Toggle the opt-in update check and persist it. No immediate side
     /// effect beyond the next launch reading the new value. No-op when
     /// unchanged.

@@ -180,6 +180,11 @@ pub struct AppSettings {
     /// while a window is open). Ignored on Linux.
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
+    /// Whether Windows shows one notification-area battery icon per reporting
+    /// device. The main OpenLogi tray icon is controlled separately by
+    /// [`Self::show_in_menu_bar`]. Ignored outside Windows.
+    #[serde(default = "default_true")]
+    pub show_device_battery_icons: bool,
     /// Whether the agent installs the OS-level mouse hook (CGEventTap /
     /// exclusive `evdev` grab / `WH_MOUSE_LL`) that intercepts mouse events
     /// for button remapping. `true` (default) keeps remapping active;
@@ -452,6 +457,7 @@ impl Default for AppSettings {
             auto_install_updates: false,
             update_prompt_seen: false,
             show_in_menu_bar: true,
+            show_device_battery_icons: true,
             capture_mouse_events: true,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
@@ -471,9 +477,10 @@ impl Default for AppSettings {
 }
 
 /// serde default for the on-by-default [`AppSettings`] toggles
-/// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
-/// [`AppSettings::auto_download_assets`]), so configs predating a field keep the
-/// out-of-the-box behavior.
+/// ([`AppSettings::show_in_menu_bar`],
+/// [`AppSettings::show_device_battery_icons`],
+/// [`AppSettings::capture_mouse_events`], [`AppSettings::auto_download_assets`]),
+/// so configs predating a field keep the out-of-the-box behavior.
 fn default_true() -> bool {
     true
 }

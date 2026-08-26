@@ -869,6 +869,17 @@ fn app_settings_launch_at_login_roundtrips() {
 }
 
 #[test]
+fn device_battery_tray_icons_default_on_and_roundtrip_off() {
+    let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
+    assert!(default.app_settings.show_device_battery_icons);
+
+    let mut cfg = Config::default();
+    cfg.app_settings.show_device_battery_icons = false;
+    let parsed = write_and_read(&cfg);
+    assert!(!parsed.app_settings.show_device_battery_icons);
+}
+
+#[test]
 fn app_settings_smooth_scroll_is_opt_in_and_roundtrips() {
     let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
     assert!(!default.app_settings.smooth_scroll);

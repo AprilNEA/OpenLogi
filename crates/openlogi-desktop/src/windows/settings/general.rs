@@ -110,10 +110,32 @@ pub(super) fn general_page(
         }),
     );
 
+    #[cfg(target_os = "windows")]
+    let group = group.item(device_battery_icons_item());
+
     SettingPage::new(tr!("General"))
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
+}
+
+#[cfg(target_os = "windows")]
+fn device_battery_icons_item() -> SettingItem {
+    SettingItem::new(
+        tr!("Show device battery icons"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().show_device_battery_icons),
+            |enabled, cx| {
+                AppState::update(cx, move |state, cx| {
+                    state.set_show_device_battery_icons(enabled);
+                    cx.emit(StateEvent::SettingsChanged);
+                });
+            },
+        ),
+    )
+    .description(tr!(
+        "Show a separate notification-area battery icon for each connected device."
+    ))
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

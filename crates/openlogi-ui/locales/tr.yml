@@ -133,6 +133,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "OpenLogi simgesini menü çubuğunda tut. Kapalıyken bunun yerine Dock'ta kalır."
 "Show in the notification area": "Bildirim alanında göster"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "OpenLogi simgesini görev çubuğu bildirim alanında tut. Arka plan ajanı bir sonraki başlatıldığında etkinleşir."
+"Show device battery icons": "Show device battery icons"
+"Show a separate notification-area battery icon for each connected device.": "Show a separate notification-area battery icon for each connected device."
 "Assets": "Görseller"
 "Asset source": "Görsel kaynağı"
 "Automatic (recommended)": "Otomatik (önerilen)"

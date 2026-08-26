@@ -14,36 +14,41 @@
 //! first — a surviving GUI's IPC retry loop would immediately respawn the
 //! agent we are quitting — then exits.
 //!
-//! Everything runs on one dedicated thread: the hidden window, its message
-//! pump, and the menu. The icon is re-added when Explorer restarts (the
-//! `TaskbarCreated` broadcast), and the glyph tracks the taskbar theme
-//! (black on a light taskbar, white on a dark one) at install time.
+//! The hidden window, message pump, and menu run on one dedicated thread.
+//! Inventory updates add one battery glyph per reporting device. Every icon
+//! is re-added when Explorer restarts (the `TaskbarCreated` broadcast), and
+//! the glyphs track the taskbar theme at install time.
 
 #![expect(
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
+use openlogi_core::device::{BatteryStatus, DeviceInventory, DeviceKind};
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
-    GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
-    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    AppendMenuW, CW_USEDEFAULT, CreateIcon, CreateIconFromResourceEx, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, EnumWindows,
+    GetCursorPos, GetMessageW, GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic,
+    IsWindowVisible, LR_DEFAULTCOLOR, LoadIconW, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG,
+    RegisterClassW, RegisterWindowMessageW, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP,
+    WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 
 /// Tray callback message the icon posts to the hidden window.
 const WM_TRAY: u32 = WM_APP + 1;
+/// Ask the tray thread to reconcile battery icons with [`DEVICE_TRAY`].
+const WM_SYNC_DEVICE_ICONS: u32 = WM_APP + 2;
 /// Menu command ids returned by `TrackPopupMenu`.
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
@@ -52,6 +57,140 @@ const ID_QUIT: usize = 2;
 /// until then; real ids are never zero (`RegisterWindowMessageW` starts at
 /// 0xC000).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static TRAY_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+#[derive(Clone, PartialEq, Eq)]
+struct TrayDevice {
+    line: String,
+    percentage: u8,
+    charging: bool,
+}
+
+struct DeviceTrayState {
+    enabled: bool,
+    devices: Option<Vec<TrayDevice>>,
+}
+
+static DEVICE_TRAY: Mutex<DeviceTrayState> = Mutex::new(DeviceTrayState {
+    enabled: true,
+    devices: None,
+});
+static DEVICE_ICONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Show or remove the per-device battery icons immediately.
+pub fn set_device_icons_enabled(enabled: bool) {
+    let Ok(mut state) = DEVICE_TRAY.lock() else {
+        return;
+    };
+    if state.enabled == enabled {
+        return;
+    }
+    state.enabled = enabled;
+    drop(state);
+    queue_device_icon_sync();
+}
+
+/// Refresh the device battery text shown on hover and in the context menu.
+pub fn update_devices(inventories: &[DeviceInventory]) {
+    let devices = inventories
+        .iter()
+        .flat_map(|inventory| &inventory.paired)
+        .filter_map(tray_device)
+        .collect();
+    let Ok(mut state) = DEVICE_TRAY.lock() else {
+        return;
+    };
+    if state.devices.as_ref() == Some(&devices) {
+        return;
+    }
+    state.devices = Some(devices);
+    drop(state);
+    queue_device_icon_sync();
+}
+
+fn queue_device_icon_sync() {
+    let hwnd = TRAY_HWND.load(Ordering::Relaxed);
+    if !hwnd.is_null() {
+        // SAFETY: posting is asynchronous; the live tray window processes the
+        // shell calls on its own thread.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd,
+                WM_SYNC_DEVICE_ICONS,
+                0,
+                0,
+            );
+        }
+    }
+}
+
+fn tray_device(device: &openlogi_core::device::PairedDevice) -> Option<TrayDevice> {
+    let battery = device.battery.as_ref()?;
+    let name = device
+        .codename
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .map_or_else(|| format!("Slot {}", device.slot), str::to_owned);
+    Some(TrayDevice {
+        line: format!(
+            "{}: {name} — {}%{}",
+            kind_label(device.kind),
+            battery.percentage,
+            status_suffix(battery.status)
+        ),
+        percentage: battery.percentage,
+        charging: matches!(
+            battery.status,
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow
+        ),
+    })
+}
+
+fn kind_label(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Mouse => "Mouse",
+        DeviceKind::Keyboard => "Keyboard",
+        DeviceKind::Numpad => "Numpad",
+        DeviceKind::Presenter => "Presenter",
+        DeviceKind::Remote => "Remote",
+        DeviceKind::Trackball => "Trackball",
+        DeviceKind::Touchpad => "Touchpad",
+        DeviceKind::Tablet => "Tablet",
+        DeviceKind::Gamepad => "Gamepad",
+        DeviceKind::Joystick => "Joystick",
+        DeviceKind::Headset => "Headset",
+        DeviceKind::Camera => "Camera",
+        DeviceKind::Light => "Light",
+        DeviceKind::Unknown => "Device",
+    }
+}
+
+fn status_suffix(status: BatteryStatus) -> &'static str {
+    match status {
+        BatteryStatus::Discharging | BatteryStatus::Unknown => "",
+        BatteryStatus::Charging => " (charging)",
+        BatteryStatus::ChargingSlow => " (charging slowly)",
+        BatteryStatus::Full => " (charged)",
+        BatteryStatus::Error => " (battery error)",
+    }
+}
+
+fn device_lines() -> Option<Vec<String>> {
+    DEVICE_TRAY.lock().ok().and_then(|state| {
+        state
+            .devices
+            .as_ref()
+            .map(|devices| devices.iter().map(|device| device.line.clone()).collect())
+    })
+}
+
+fn tooltip() -> String {
+    match device_lines() {
+        None => "OpenLogi — scanning for device batteries".to_string(),
+        Some(lines) if lines.is_empty() => "OpenLogi — no device battery data".to_string(),
+        Some(lines) => lines.join("\n"),
+    }
+}
 
 /// Host the tray icon on its own thread. No-op when the user disabled the
 /// menu-bar/tray preference (same `show_in_menu_bar` setting macOS honors;
@@ -59,11 +198,12 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 ///
 /// Failures are logged, never fatal — the agent's real work (hook, HID++,
 /// IPC) must not die because a shell icon couldn't be installed.
-pub fn spawn(show_in_tray: bool) {
+pub fn spawn(show_in_tray: bool, show_device_battery_icons: bool) {
     if !show_in_tray {
         info!("tray icon disabled by preference — agent stays invisible");
         return;
     }
+    set_device_icons_enabled(show_device_battery_icons);
     if let Err(e) = std::thread::Builder::new()
         .name("openlogi-tray".into())
         .spawn(run_tray_loop)
@@ -117,6 +257,7 @@ fn run_tray_loop() {
             warn!("tray window creation failed — no tray icon");
             return;
         }
+        TRAY_HWND.store(hwnd, Ordering::Relaxed);
         TASKBAR_CREATED.store(
             RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             Ordering::Relaxed,
@@ -164,6 +305,13 @@ unsafe extern "system" fn wnd_proc(
             unsafe { add_tray_icon(hwnd) };
             0
         }
+        WM_SYNC_DEVICE_ICONS => {
+            // SAFETY: this is the thread that owns the live tray window.
+            unsafe { sync_device_icons(hwnd, false) };
+            // SAFETY: this is the thread that owns the live tray window.
+            unsafe { update_tooltip(hwnd) };
+            0
+        }
         // SAFETY: handing the system back the message it just delivered,
         // unchanged: `hwnd` is live for the duration of the callback and
         // `wparam`/`lparam` are the payload win32 paired with `msg`, which is
@@ -188,10 +336,165 @@ unsafe fn add_tray_icon(hwnd: HWND) {
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_TRAY;
         nid.hIcon = tray_icon();
-        let tip = wide("OpenLogi");
-        nid.szTip[..tip.len()].copy_from_slice(&tip);
+        write_tip(&mut nid.szTip, &tooltip());
         if Shell_NotifyIconW(NIM_ADD, &raw const nid) == 0 {
             warn!("Shell_NotifyIconW(NIM_ADD) failed — no tray icon");
+        }
+        sync_device_icons(hwnd, true);
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
+unsafe fn sync_device_icons(hwnd: HWND, force_add: bool) {
+    let (enabled, devices) = match DEVICE_TRAY.lock() {
+        Ok(state) => (state.enabled, state.devices.clone()),
+        Err(_) => return,
+    };
+    let devices = if enabled {
+        devices.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let Ok(mut icons) = DEVICE_ICONS.lock() else {
+        return;
+    };
+    if icons.len() < devices.len() {
+        icons.resize(devices.len(), 0);
+    }
+
+    for (index, device) in devices.iter().enumerate() {
+        let Ok(id) = u32::try_from(index + 2) else {
+            break;
+        };
+        // SAFETY: creates an owned HICON from two fixed-size 1-bit masks.
+        let icon = unsafe { battery_icon(device.percentage, device.charging) };
+        if icon.is_null() {
+            warn!(id, "could not create a device battery tray icon");
+            continue;
+        }
+
+        // SAFETY: `nid` is fully initialized, its tooltip is bounded, and
+        // `icon` stays owned until a later replacement or process shutdown.
+        unsafe {
+            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+            nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = hwnd;
+            nid.uID = id;
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+            nid.uCallbackMessage = WM_TRAY;
+            nid.hIcon = icon;
+            write_tip(&mut nid.szTip, &device.line);
+            let operation = if force_add || icons[index] == 0 {
+                NIM_ADD
+            } else {
+                NIM_MODIFY
+            };
+            if Shell_NotifyIconW(operation, &raw const nid) == 0 {
+                DestroyIcon(icon);
+                warn!(id, "could not add or update a device battery tray icon");
+                continue;
+            }
+            if icons[index] != 0 {
+                DestroyIcon(icons[index] as HICON);
+            }
+            icons[index] = icon as usize;
+        }
+    }
+
+    for index in devices.len()..icons.len() {
+        let Ok(id) = u32::try_from(index + 2) else {
+            break;
+        };
+        // SAFETY: removes an icon previously registered under this window/id.
+        unsafe {
+            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+            nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = hwnd;
+            nid.uID = id;
+            Shell_NotifyIconW(NIM_DELETE, &raw const nid);
+            if icons[index] != 0 {
+                DestroyIcon(icons[index] as HICON);
+            }
+        }
+    }
+    icons.truncate(devices.len());
+}
+
+unsafe fn battery_icon(percentage: u8, charging: bool) -> HICON {
+    let (and_mask, xor_mask) = battery_icon_bits(percentage, charging, taskbar_is_light());
+    // SAFETY: both masks contain 16 rows of word-aligned 1-bit pixels, exactly
+    // the format CreateIcon expects for a 16x16 monochrome icon.
+    unsafe {
+        CreateIcon(
+            GetModuleHandleW(std::ptr::null()),
+            16,
+            16,
+            1,
+            1,
+            and_mask.as_ptr(),
+            xor_mask.as_ptr(),
+        )
+    }
+}
+
+fn battery_icon_bits(percentage: u8, charging: bool, light_theme: bool) -> ([u8; 32], [u8; 32]) {
+    let mut and_mask = [u8::MAX; 32];
+    let mut xor_mask = [0; 32];
+    let mut pixel = |x: usize, y: usize| {
+        let byte = y * 2 + x / 8;
+        let bit = 0x80 >> (x % 8);
+        and_mask[byte] &= !bit;
+        if !light_theme {
+            xor_mask[byte] |= bit;
+        }
+    };
+
+    for x in 4..=11 {
+        pixel(x, 3);
+        pixel(x, 14);
+    }
+    for y in 3..=14 {
+        pixel(4, y);
+        pixel(11, y);
+    }
+    pixel(7, 2);
+    pixel(8, 2);
+
+    // Leave one clear interior row above and below even at 100%, so a full
+    // battery remains visually separate from its outline at tray size.
+    let fill_rows = (usize::from(percentage.min(100)) * 8).div_ceil(100);
+    for y in (13 - fill_rows)..13 {
+        for x in 6..=9 {
+            pixel(x, y);
+        }
+    }
+    if charging {
+        for (x, y) in [(13, 4), (12, 5), (13, 5), (14, 5), (13, 6)] {
+            pixel(x, y);
+        }
+    }
+    (and_mask, xor_mask)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
+)]
+unsafe fn update_tooltip(hwnd: HWND) {
+    // SAFETY: `nid` identifies the live icon created by `add_tray_icon`; the
+    // fixed tooltip buffer is NUL-terminated by `write_tip`.
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_TIP;
+        write_tip(&mut nid.szTip, &tooltip());
+        if Shell_NotifyIconW(NIM_MODIFY, &raw const nid) == 0 {
+            warn!("Shell_NotifyIconW(NIM_MODIFY) failed — battery tooltip is stale");
         }
     }
 }
@@ -256,6 +559,30 @@ unsafe fn show_menu(hwnd: HWND) {
         if menu.is_null() {
             return;
         }
+        match device_lines() {
+            None => {
+                AppendMenuW(
+                    menu,
+                    MF_STRING | MF_GRAYED,
+                    0,
+                    wide("Scanning for devices…").as_ptr(),
+                );
+            }
+            Some(lines) if lines.is_empty() => {
+                AppendMenuW(
+                    menu,
+                    MF_STRING | MF_GRAYED,
+                    0,
+                    wide("No device battery data").as_ptr(),
+                );
+            }
+            Some(lines) => {
+                for line in lines {
+                    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide(&line).as_ptr());
+                }
+            }
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_SHOW, wide("Show Main Window").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit OpenLogi").as_ptr());
@@ -445,14 +772,90 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+fn write_tip(destination: &mut [u16], text: &str) {
+    destination.fill(0);
+    let mut written = 0;
+    for character in text.chars() {
+        let mut encoded = [0; 2];
+        let units = character.encode_utf16(&mut encoded);
+        if written + units.len() >= destination.len() {
+            break;
+        }
+        destination[written..written + units.len()].copy_from_slice(units);
+        written += units.len();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_gui_process_name;
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, PairedDevice,
+    };
+
+    use super::{
+        DestroyIcon, battery_icon, battery_icon_bits, is_gui_process_name, tray_device, write_tip,
+    };
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
         assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
+
+    #[test]
+    fn tooltip_truncation_keeps_utf16_valid_and_nul_terminated() {
+        let mut destination = [0; 4];
+        write_tip(&mut destination, "a😀b");
+        assert_eq!(String::from_utf16(&destination[..3]).unwrap(), "a😀");
+        assert_eq!(destination[3], 0);
+    }
+
+    #[test]
+    fn battery_line_identifies_the_device_and_charge_state() {
+        let device = PairedDevice {
+            slot: 1,
+            codename: Some("MX Master 3S".into()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: Some(BatteryInfo {
+                percentage: 36,
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }),
+            model_info: None,
+            capabilities: None,
+        };
+        assert_eq!(
+            tray_device(&device).map(|device| device.line).as_deref(),
+            Some("Mouse: MX Master 3S — 36% (charging)")
+        );
+    }
+
+    #[test]
+    fn battery_glyph_fills_with_charge_and_marks_charging() {
+        let foreground_pixels = |percentage, charging| {
+            let (and_mask, _) = battery_icon_bits(percentage, charging, false);
+            and_mask.iter().map(|byte| byte.count_zeros()).sum::<u32>()
+        };
+        assert!(foreground_pixels(100, false) > foreground_pixels(10, false));
+        assert!(foreground_pixels(50, true) > foreground_pixels(50, false));
+
+        let (full, _) = battery_icon_bits(100, false, false);
+        let is_transparent = |x: usize, y: usize| full[y * 2 + x / 8] & (0x80 >> (x % 8)) != 0;
+        assert!(is_transparent(7, 4), "top interior padding");
+        assert!(is_transparent(7, 13), "bottom interior padding");
+        assert!(!is_transparent(7, 5), "fill begins below top padding");
+        assert!(!is_transparent(7, 12), "fill ends above bottom padding");
+    }
+
+    #[test]
+    fn windows_accepts_the_generated_battery_icon() {
+        // SAFETY: the returned owned icon is checked and destroyed here.
+        let icon = unsafe { battery_icon(36, true) };
+        assert!(!icon.is_null());
+        // SAFETY: `icon` is the live handle created immediately above.
+        unsafe { DestroyIcon(icon) };
     }
 }
