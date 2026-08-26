@@ -25,6 +25,7 @@ use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::flow::FlowPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -89,6 +90,7 @@ pub(super) struct DetailPanels<'a> {
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub flow_panel: &'a gpui::Entity<FlowPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -119,6 +121,7 @@ pub(super) fn detail_content(
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
+        DetailTab::Flow => flow_tab(panels.flow_panel).into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -237,6 +240,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::ActionsRing => "action-icons/layout-grid.svg",
         DetailTab::Keys => "action-icons/keyboard.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
+        DetailTab::Flow => "action-icons/monitor.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
         DetailTab::Device => "action-icons/settings.svg",
@@ -280,6 +284,20 @@ fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement 
 
 fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
     tab_body(ContentWidth::Medium, panel.clone())
+}
+
+/// Flow tab: the arrangement editor (pointing devices) or the follower
+/// choice (keyboards), in one titled card. No `.fill()`: the card must grow
+/// with the arrangement canvas rather than pin to the viewport and clip it.
+fn flow_tab(panel: &gpui::Entity<FlowPanel>) -> impl IntoElement {
+    tab_body(
+        ContentWidth::Medium,
+        PanelCard::new(
+            tr!("Flow"),
+            Icon::empty().path("action-icons/monitor.svg"),
+            panel.clone().into_any_element(),
+        ),
+    )
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
