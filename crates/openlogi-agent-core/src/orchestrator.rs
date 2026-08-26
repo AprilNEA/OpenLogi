@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureResponseTime};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
@@ -26,6 +26,7 @@ use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
+use openlogi_hook::EventDeviceId;
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -298,10 +299,32 @@ impl Orchestrator {
                 .map(|&button| (button, self.config.gesture_response_time(key, button)))
                 .collect()
         });
+        let mut response_times_by_source = BTreeMap::new();
+        let mut product_counts = HashMap::new();
+        for device in &self.devices {
+            if let Some(product_id) = hook_product_id(device) {
+                *product_counts.entry(product_id).or_insert(0usize) += 1;
+            }
+        }
+        let mut response_times_by_product = BTreeMap::new();
+        for device in &self.devices {
+            let times = hook_response_times_for(&self.config, &device.config_key, app);
+            for source_id in hook_source_ids(device) {
+                response_times_by_source.insert(source_id, times.clone());
+            }
+            if let Some(product_id) = hook_product_id(device)
+                && product_counts.get(&product_id) == Some(&1)
+            {
+                response_times_by_product
+                    .insert((openlogi_hook::LOGITECH_VENDOR_ID, product_id), times);
+            }
+        }
         HookMaps {
             bindings,
             gestures,
             gesture_response_times,
+            gesture_response_times_by_source: response_times_by_source,
+            gesture_response_times_by_product: response_times_by_product,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }
@@ -908,6 +931,41 @@ impl Orchestrator {
             }
         }
     }
+}
+
+fn hook_response_times_for(
+    config: &Config,
+    config_key: &str,
+    app: Option<&str>,
+) -> BTreeMap<ButtonId, GestureResponseTime> {
+    oshook_gestures_for(config, Some(config_key), app)
+        .keys()
+        .map(|&button| (button, config.gesture_response_time(config_key, button)))
+        .collect()
+}
+
+fn hook_source_ids(device: &AgentDevice) -> Vec<EventDeviceId> {
+    let mut ids = Vec::new();
+    if let Some(serial) = device.serial.as_deref() {
+        ids.extend(EventDeviceId::new(serial));
+        ids.extend(EventDeviceId::new(format!("serial:{serial}")));
+    }
+    if device.unit_id != [0; 4] {
+        let unit = format!("{:08x}", u32::from_be_bytes(device.unit_id));
+        ids.extend(EventDeviceId::new(unit.clone()));
+        ids.extend(EventDeviceId::new(format!("unit:{unit}")));
+    }
+    ids
+}
+
+fn hook_product_id(device: &AgentDevice) -> Option<u32> {
+    if !matches!(device.kind, DeviceKind::Mouse | DeviceKind::Trackball) {
+        return None;
+    }
+    let suffix = device
+        .model_key
+        .get(device.model_key.len().checked_sub(4)?..)?;
+    u32::from_str_radix(suffix, 16).ok()
 }
 
 /// Resolve the two independently-gated HiResWheel settings for one device.

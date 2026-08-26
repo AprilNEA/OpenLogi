@@ -151,6 +151,46 @@ fn fast_preset_classifies_completed_travel_on_release() {
 }
 
 #[test]
+fn os_hook_response_time_is_resolved_from_the_source_device() {
+    let first_id = EventDeviceId::new("mouse-a").unwrap();
+    let second_id = EventDeviceId::new("mouse-b").unwrap();
+    let maps = HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        gesture_response_times: BTreeMap::from([(ButtonId::Back, GestureResponseTime::FAST)]),
+        gesture_response_times_by_source: BTreeMap::from([
+            (
+                first_id.clone(),
+                BTreeMap::from([(ButtonId::Back, GestureResponseTime::FAST)]),
+            ),
+            (
+                second_id.clone(),
+                BTreeMap::from([(ButtonId::Back, GestureResponseTime::DELIBERATE)]),
+            ),
+        ]),
+        ..HookMaps::default()
+    };
+    let first = EventDevice {
+        stable_id: Some(first_id),
+        vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+        ..EventDevice::default()
+    };
+    let second = EventDevice {
+        stable_id: Some(second_id),
+        vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+        ..EventDevice::default()
+    };
+
+    assert_eq!(
+        maps.gesture_response_time_for(Some(&first), ButtonId::Back),
+        Some(GestureResponseTime::FAST)
+    );
+    assert_eq!(
+        maps.gesture_response_time_for(Some(&second), ButtonId::Back),
+        Some(GestureResponseTime::DELIBERATE)
+    );
+}
+
+#[test]
 fn resolve_gesture_click_prefers_explicit_then_falls_back_to_default() {
     let gestures = BTreeMap::from([(
         ButtonId::Back,
