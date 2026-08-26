@@ -14,7 +14,14 @@ use crate::windows;
 pub fn dispatch(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;
     match command {
-        Cmd::Quit => cx.quit(),
+        // The tray sends Quit right before the agent exits: flag the IPC
+        // client first, or its unreachable→spawn reflex can resurrect the
+        // agent while this process is still tearing down (observed live —
+        // Quit, then the agent back four seconds later).
+        Cmd::Quit => {
+            crate::services::ipc::mark_suite_quitting();
+            cx.quit();
+        }
         // Always route Show through `main_window::open`: it re-focuses (and
         // deminiaturizes) an existing window or opens a fresh one, so the tray's
         // "Show Main Window" works whether or not a window is already up.
