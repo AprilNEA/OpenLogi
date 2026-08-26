@@ -303,6 +303,22 @@ jobs:
       # and the agent's HKCU-Run autostart) that the Linux/macOS clippy jobs
       # never compile.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The same docs the Linux `rustdoc` job builds, built again here because
+      # a `cfg`-gated doc target can exist on Linux and macOS yet be missing on
+      # Windows — an intra-doc link that then resolves everywhere CI looked.
+      # That is neither a compile error nor a clippy lint, so without this step
+      # nothing stands between such a break and a Windows contributor finding
+      # it by hand, which is how `PermissionStatus::Unknown` (fixed in this PR)
+      # reached master.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --workspace --no-deps --document-private-items \
+            --exclude openlogi-ui \
+            --exclude openlogi-desktop \
+            --exclude openlogi-overlay \
+            --exclude openlogi-agent
 
   wasm:
     name: wasm (portable crates)
