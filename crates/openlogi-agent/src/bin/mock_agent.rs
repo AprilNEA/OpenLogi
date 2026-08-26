@@ -565,6 +565,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
             vendor_id: LOGITECH_VENDOR_ID,
             product_id: 0xc548,
             unique_id: Some(RECEIVER_UID.to_string()),
+            event_source_id: None,
         },
         paired: vec![
             PairedDevice {
@@ -658,6 +659,7 @@ fn direct_inventory() -> DeviceInventory {
             vendor_id: LOGITECH_VENDOR_ID,
             product_id: DIRECT_PID,
             unique_id: None,
+            event_source_id: Some("090a0b0c".to_string()),
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,

@@ -54,9 +54,6 @@ pub struct HookMaps {
     /// Click-versus-swipe timing keyed by a stable native event-source id.
     pub gesture_response_times_by_source:
         BTreeMap<EventDeviceId, BTreeMap<ButtonId, GestureResponseTime>>,
-    /// Click-versus-swipe timing keyed by a uniquely present Logitech model.
-    pub gesture_response_times_by_product:
-        BTreeMap<(u32, u32), BTreeMap<ButtonId, GestureResponseTime>>,
 }
 
 impl HookMaps {
@@ -65,26 +62,22 @@ impl HookMaps {
         device: Option<&EventDevice>,
         button: ButtonId,
     ) -> Option<GestureResponseTime> {
-        let Some(device) = device else {
-            return self.gesture_response_times.get(&button).copied();
-        };
-        if let Some(times) = device
-            .stable_id
-            .as_ref()
-            .and_then(|id| self.gesture_response_times_by_source.get(id))
-        {
-            return times.get(&button).copied();
+        if !self.gestures.contains_key(&button) {
+            return None;
         }
-        if let Some(times) = device
-            .vendor_id
-            .zip(device.product_id)
-            .and_then(|key| self.gesture_response_times_by_product.get(&key))
-        {
-            return times.get(&button).copied();
-        }
-        self.gestures
-            .contains_key(&button)
-            .then_some(GestureResponseTime::BALANCED)
+        let selected = self
+            .gesture_response_times
+            .get(&button)
+            .copied()
+            .unwrap_or_default();
+        Some(
+            device
+                .and_then(|device| device.stable_id.as_ref())
+                .and_then(|source| self.gesture_response_times_by_source.get(source))
+                .and_then(|times| times.get(&button))
+                .copied()
+                .unwrap_or(selected),
+        )
     }
 }
 

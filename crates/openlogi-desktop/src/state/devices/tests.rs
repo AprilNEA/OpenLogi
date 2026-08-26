@@ -35,6 +35,7 @@ fn inventory_with(devices: Vec<PairedDevice>) -> DeviceInventory {
             vendor_id: 0x046d,
             product_id: 0xc52b,
             unique_id: Some("DA2699E1".into()),
+            event_source_id: None,
         },
         paired: devices,
     }
@@ -47,6 +48,7 @@ fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
             vendor_id: 0x046d,
             product_id: 0xb023,
             unique_id: None,
+            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
@@ -71,6 +73,7 @@ fn receiver_inventory() -> DeviceInventory {
             vendor_id: 0x046d,
             product_id: 0xc548,
             unique_id: Some("82839805".into()),
+            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: 1,
@@ -103,6 +106,7 @@ fn cabled_inventory() -> DeviceInventory {
             vendor_id: 0x046d,
             product_id: 0xc08d,
             unique_id: None,
+            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
