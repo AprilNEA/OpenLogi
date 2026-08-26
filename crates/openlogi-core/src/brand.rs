@@ -30,6 +30,21 @@ pub const AGENT_ID: &str = "org.openlogi.agent";
 /// The Actions Ring overlay's bundle identifier, the second nested login item.
 pub const OVERLAY_ID: &str = "org.openlogi.overlay";
 
+/// The agent's macOS launchd service label: the `Label` in the app bundle's
+/// embedded `Contents/Library/LaunchAgents/<label>.plist`, what `SMAppService`
+/// registers, and the name `launchctl` addresses (`gui/<uid>/<label>`). Dev
+/// bundles use [`dev_id`] of this, so a dev registration can never collide
+/// with the shipped one.
+///
+/// A launchd label is a *namespace key*, not a TCC identity — deliberately not
+/// [`AGENT_ID`], although the two look related: `org.openlogi.agent` is the
+/// frozen label of the legacy hand-written `~/Library/LaunchAgents` plist
+/// (see `openlogi-agent/src/launch_agent.rs`), and reusing a legacy label
+/// would make the migration's "is this job ours or the old file's?" question
+/// unanswerable. Once shipped, this value is frozen the same way: renaming it
+/// orphans the registration users already approved in Login Items.
+pub const AGENT_SERVICE_LABEL: &str = "org.openlogi.agent.service";
+
 /// What a dev build appends to every identifier above, so a local build can
 /// never claim a shipped TCC grant and System Settings shows which of the two
 /// installed copies a row belongs to.
