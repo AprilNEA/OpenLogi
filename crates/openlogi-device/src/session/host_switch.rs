@@ -177,7 +177,8 @@ pub async fn run_host_switch_session(
 /// while that pairing exists — a device that switches away and returns comes
 /// back on the same slot. The held channel keeps the pooled transport open
 /// and can still die on unplug or a transport error, so callers invalidate
-/// (and fall back to [`switch_linked_hosts`]) when [`Self::switch_to`] fails.
+/// (and fall back to [`switch_linked_hosts_strict`]) when [`Self::switch_to`]
+/// fails.
 pub struct PreparedHostSwitch {
     feature: Arc<ChangeHostFeature>,
     route: DeviceRoute,
@@ -260,6 +261,54 @@ impl PreparedHostSwitch {
         debug!(route = %self.route, host, "prepared host switch fired");
         Ok(true)
     }
+}
+
+/// Move `primary` and every follower to `host`, all-or-nothing: each
+/// follower must prepare *and* apply before the primary moves, and any
+/// failure aborts with an error before the primary is touched. Where
+/// [`switch_linked_hosts`] deliberately tolerates follower failures — its
+/// primary is a keyboard whose host key the user physically pressed, which
+/// must honor the press — Flow's primary is the pointing device, and moving
+/// it while a sleepy follower stays behind splits the set across two
+/// computers. Aborting instead is self-healing: the failed attempt's own
+/// HID++ traffic wakes the device, so the user's next edge push succeeds.
+///
+/// A failure while *applying* a later follower cannot recall an earlier one
+/// (`setCurrentHost` is fire-and-forget), but apply-stage failures are
+/// transport-level sends on a channel that just prepared successfully — the
+/// sleepy-device case this guards against fails in the prepare stage, before
+/// anything moved.
+///
+/// Returns whether the primary actually changed hosts.
+pub async fn switch_linked_hosts_strict(
+    primary: &DeviceRoute,
+    followers: &[DeviceRoute],
+    host: u8,
+    channel_pool: &ChannelPool,
+) -> Result<bool, HostSwitchError> {
+    let channel = open_channel(channel_pool, primary, "opening primary channel")
+        .await?
+        .ok_or(HostSwitchError::KeyboardNotFound)?;
+    strict_transition_on(&channel, primary, followers, host, channel_pool).await
+}
+
+/// [`switch_linked_hosts_strict`] on the primary's already-open channel.
+async fn strict_transition_on(
+    channel: &Arc<HidppChannel>,
+    primary: &DeviceRoute,
+    followers: &[DeviceRoute],
+    host: u8,
+    channel_pool: &ChannelPool,
+) -> Result<bool, HostSwitchError> {
+    let primary_change = prepare_host_change_on(channel, primary.device_index(), host).await?;
+    let mut prepared = Vec::with_capacity(followers.len());
+    for target in followers {
+        prepared.push(prepare_host_change(target, host, primary, channel, channel_pool).await?);
+    }
+    for change in prepared {
+        apply_host_change(change).await?;
+    }
+    apply_host_change(primary_change).await
 }
 
 /// Move reachable targets to `host`, then move the keyboard last.
@@ -624,9 +673,11 @@ mod tests {
     use super::{
         ArmedControl, HostSwitchError, ReportingMode, event_host, host_change_required,
         host_channel, prepare_host_change_on, prepare_host_switch_on, restoration_change,
-        shares_channel,
+        shares_channel, strict_transition_on,
     };
+    use crate::ChannelPool;
     use crate::DeviceRoute;
+    use crate::channel::scripted::ScriptedBackend;
     use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
     use crate::reprog_controls::{
         AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
@@ -719,6 +770,99 @@ mod tests {
     async fn scripted_channel(responder: crate::channel::scripted::Responder) -> Arc<HidppChannel> {
         let (raw, _handle) = ScriptedRawHidChannel::with_responder(responder);
         crate::channel::scripted::scripted_channel(raw).await
+    }
+
+    /// The scripted keyboard for every device index except slot 2, which has
+    /// no ChangeHost feature at all — a follower that cannot prepare.
+    fn keyboard_with_a_featureless_follower(request: &[u8]) -> Option<Vec<u8>> {
+        if request.len() >= 7 && matches!(request[0], 0x10 | 0x11) && request[1] == 0x02 {
+            let mut response = vec![0u8; 7];
+            response[0] = 0x10;
+            response[1..4].copy_from_slice(&request[1..4]);
+            match (request[2], request[3] >> 4) {
+                // Root ping works — the follower is present…
+                (0x00, 0x01) => response[4] = 4,
+                // …but every feature lookup, 0x1814 included, reports index 0.
+                (0x00, 0x00) => {}
+                _ => return None,
+            }
+            return Some(response);
+        }
+        scripted_keyboard(request, SlotStatus::Reported)
+    }
+
+    /// Whether `report` is a `setCurrentHost` write (ChangeHost function 1).
+    fn is_set_current_host(report: &[u8]) -> bool {
+        report.len() >= 4 && report[2] == CHANGE_HOST_INDEX && report[3] >> 4 == 1
+    }
+
+    #[tokio::test]
+    async fn strict_switch_aborts_before_the_primary_when_a_follower_cannot_prepare() {
+        // The whole point of the strict variant: a follower that cannot be
+        // switched must keep the primary here too, or the set splits across
+        // two computers.
+        let (raw, handle) =
+            ScriptedRawHidChannel::with_responder(keyboard_with_a_featureless_follower);
+        let channel = crate::channel::scripted::scripted_channel(raw).await;
+        let primary = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        };
+        let follower = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 2,
+        };
+        // Shared-transport routes never touch the pool; the empty backend
+        // proves it.
+        let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+
+        let result = strict_transition_on(&channel, &primary, &[follower], 1, &pool).await;
+
+        assert!(
+            result.is_err(),
+            "a follower without ChangeHost must abort the strict transition"
+        );
+        assert!(
+            !handle
+                .written_reports()
+                .iter()
+                .any(|r| is_set_current_host(r)),
+            "nothing may be switched when the transition aborts"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_switch_moves_followers_before_the_primary() {
+        let (raw, handle) =
+            ScriptedRawHidChannel::with_responder(keyboard_with_an_empty_third_slot);
+        let channel = crate::channel::scripted::scripted_channel(raw).await;
+        let primary = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        };
+        let follower = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 2,
+        };
+        let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+
+        let switched = strict_transition_on(&channel, &primary, &[follower], 1, &pool)
+            .await
+            .expect("a fully-paired transition must succeed");
+
+        assert!(switched);
+        let switch_targets: Vec<u8> = handle
+            .written_reports()
+            .iter()
+            .filter(|report| is_set_current_host(report))
+            .map(|report| report[1])
+            .collect();
+        assert_eq!(
+            switch_targets,
+            [0x02, 0x01],
+            "the follower must leave before the primary — after the primary \
+             leaves, nothing can command a device sharing its receiver"
+        );
     }
 
     #[tokio::test]

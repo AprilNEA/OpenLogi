@@ -54,7 +54,7 @@ pub use session::gesture::{
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchStopReason, PreparedHostSwitch, prepare_host_switch,
-    run_host_switch_session, switch_linked_hosts,
+    run_host_switch_session, switch_linked_hosts, switch_linked_hosts_strict,
 };
 pub use session::keyboard::{
     KEYBOARD_KEY_CIDS, run_keyboard_capture_session, run_keyboard_capture_session_with_registry,

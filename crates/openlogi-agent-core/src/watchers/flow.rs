@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::FlowTriggerMode;
 use openlogi_hid::{
-    ChannelPool, DeviceRoute, PreparedHostSwitch, prepare_host_switch, switch_linked_hosts,
+    ChannelPool, DeviceRoute, PreparedHostSwitch, prepare_host_switch, switch_linked_hosts_strict,
 };
 use openlogi_hook::DisplayBounds;
 use tracing::{debug, info, warn};
@@ -345,6 +345,13 @@ async fn fast_switch(prepared: &PreparedFlow, host: u8) -> bool {
 
 /// Apply the switch under the already-acquired exclusive lease, then release
 /// it immediately so capture re-arms while the device departs.
+///
+/// All-or-nothing: a follower that cannot come along keeps the pointer here
+/// too, rather than splitting the set across two computers. The abort is
+/// self-healing — its own HID++ traffic wakes a sleeping follower, and the
+/// spent latch means the user's next edge push retries the whole set — but
+/// it reads as a dead edge push in the moment, so it warns rather than
+/// debug-logs.
 async fn switch(
     spec: &FlowSpec,
     host: u8,
@@ -352,12 +359,14 @@ async fn switch(
     lease: ExclusiveReceiverLease,
 ) {
     info!(host, route = %spec.pointer, "flow: edge trigger fired");
-    match switch_linked_hosts(&spec.pointer, &spec.followers, host, channel_pool).await {
+    match switch_linked_hosts_strict(&spec.pointer, &spec.followers, host, channel_pool).await {
         Ok(true) => info!(host, route = %spec.pointer, "flow: devices switched host"),
         Ok(false) => {
             debug!(host, route = %spec.pointer, "flow: device already on the requested host");
         }
-        Err(error) => debug!(%error, route = %spec.pointer, host, "flow: host switch failed"),
+        Err(error) => {
+            warn!(%error, route = %spec.pointer, host, "flow: switch aborted — no device moved");
+        }
     }
     drop(lease);
 }
