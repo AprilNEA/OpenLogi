@@ -320,8 +320,17 @@ impl DiagnosticsReport {
             );
             let caps = match d.capabilities {
                 Some(c) => format!(
-                    "buttons={}, pointer={}, lighting={}",
+                    // The restriction is called out only when it applies: it is
+                    // the first thing to check on a "my extra button does
+                    // nothing" report, and noise on every other device would
+                    // bury it.
+                    "buttons={}{}, pointer={}, lighting={}",
                     yes_no(c.buttons),
+                    if c.no_button_diversion {
+                        " (no ReprogControls — cannot divert)"
+                    } else {
+                        ""
+                    },
                     yes_no(c.pointer),
                     yes_no(c.lighting),
                 ),
@@ -591,6 +600,7 @@ mod tests {
                     battery: None,
                     capabilities: Some(Capabilities {
                         buttons: true,
+                        no_button_diversion: false,
                         pointer: true,
                         lighting: false,
                         scroll_inversion: false,

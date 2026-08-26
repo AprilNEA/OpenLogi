@@ -578,6 +578,7 @@ fn device_identity_roundtrips_and_is_iterable() {
         kind: DeviceKind::Mouse,
         capabilities: Capabilities {
             buttons: true,
+            no_button_diversion: false,
             pointer: true,
             lighting: false,
             scroll_inversion: false,

@@ -100,8 +100,30 @@ impl DeviceKind {
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
 )]
 pub struct Capabilities {
-    /// Reprogrammable buttons — HID++ `0x1b00`–`0x1b04` (ReprogControls).
+    /// The device has buttons worth showing a Buttons panel for. True for HID++
+    /// ReprogControls (`0x1b00`–`0x1b04`) and for the gaming control tables
+    /// (`0x8100` OnboardProfiles / `0x8110` MouseButtonFilter), whose
+    /// OS-visible middle/back/forward the input hook remaps host-side.
     pub buttons: bool,
+    /// This device has no ReprogControls to divert controls through — a
+    /// G-series mouse, which carries the gaming control tables instead. Panels
+    /// use it to narrow what they offer; whether a panel appears at all is
+    /// [`Self::buttons`].
+    ///
+    /// Scoped to *diversion* specifically, and deliberately not phrased as
+    /// "only the OS hook can remap this". The hook is the only remaining path
+    /// today, but it is not the only conceivable one: writing the device's
+    /// onboard button map over `0x8100` OnboardProfiles would be another, and
+    /// this flag must stay true for such a device even then — the absence of
+    /// `0x1b04` is what it records.
+    ///
+    /// Phrased as a restriction, not as a capability, so that a config or cache
+    /// written before this field existed reads back as the world those builds
+    /// described: they set `buttons` only for ReprogControls devices, which are
+    /// exactly the ones diversion *does* work on. See
+    /// [`Self::can_divert_buttons`] for the positive form.
+    #[serde(default)]
+    pub no_button_diversion: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
     /// Solid-colour RGB the lighting panel can actually drive — HID++
@@ -131,11 +153,31 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// Whether controls beyond the OS-visible middle/back/forward can be
+    /// diverted over HID++ and rebound — the positive reading of
+    /// [`Self::no_button_diversion`], which is what every caller actually wants
+    /// to ask.
+    ///
+    /// "Divert" is the same sense the agent's capture plan uses: a diverted
+    /// control stops emitting its native HID event and arrives as a HID++
+    /// notification instead.
+    #[must_use]
+    pub const fn can_divert_buttons(&self) -> bool {
+        self.buttons && !self.no_button_diversion
+    }
+
     /// Derive capabilities from the set of HID++ feature IDs a device reports.
     /// Membership of a driving feature ID flips the corresponding flag.
     #[must_use]
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
+        // Gaming control tables. G-series mice expose no ReprogControls at all
+        // — a G502 LIGHTSPEED carries 0x8100/0x8110 and nothing in the 0x1b0x
+        // family, over the receiver and over USB alike. Their middle/back/
+        // forward are still ordinary HID buttons the input hook can remap, so
+        // they earn the panel; `no_button_diversion` records that nothing beyond
+        // those three can be diverted.
+        const GAMING_BUTTONS: [u16; 2] = [0x8100, 0x8110];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
         // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
         // (0x8080) — all three driven by `set_keyboard_color`, which prefers
@@ -145,7 +187,8 @@ impl Capabilities {
         const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
-            buttons: has(&BUTTONS),
+            buttons: has(&BUTTONS) || has(&GAMING_BUTTONS),
+            no_button_diversion: !has(&BUTTONS) && has(&GAMING_BUTTONS),
             pointer: has(&POINTER),
             lighting: has(&LIGHTING),
             scroll_inversion: false,
@@ -166,6 +209,9 @@ impl Capabilities {
         match kind {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
+                // Optimistic, like `buttons`: an unprobed mouse keeps the full
+                // model until a real feature table says otherwise.
+                no_button_diversion: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -471,6 +517,7 @@ mod tests {
                 }),
                 capabilities: Some(Capabilities {
                     buttons: true,
+                    no_button_diversion: false,
                     pointer: true,
                     lighting: false,
                     scroll_inversion: false,
@@ -538,6 +585,7 @@ mod tests {
             mouse,
             Capabilities {
                 buttons: true,
+                no_button_diversion: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -554,6 +602,7 @@ mod tests {
             keyboard,
             Capabilities {
                 buttons: false,
+                no_button_diversion: false,
                 pointer: false,
                 lighting: true,
                 scroll_inversion: false,
@@ -604,6 +653,78 @@ mod tests {
         assert!(!capabilities.thumbwheel);
         assert!(capabilities.scroll_inversion);
         Ok(())
+    }
+
+    /// A G-series mouse exposes `0x8100` OnboardProfiles (and `0x8110`) and no
+    /// ReprogControls at all — verified on a G502 LIGHTSPEED over both the
+    /// Lightspeed receiver and USB. It still has middle/back/forward for the OS
+    /// hook to remap, so it earns a Buttons panel; it just cannot divert
+    /// anything beyond them (#392, #730, #877).
+    #[test]
+    fn gaming_mouse_has_buttons_but_cannot_divert() {
+        use super::Capabilities;
+        let g502 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x1001, 0x8070, 0x1300, 0x8100, 0x8110, 0x8060, 0x2201,
+            0x2121,
+        ]);
+        assert!(g502.buttons, "a gaming control table earns a Buttons panel");
+        assert!(
+            !g502.can_divert_buttons(),
+            "no 0x1b04 means nothing beyond the OS-visible buttons can be diverted"
+        );
+        assert!(g502.pointer);
+    }
+
+    /// The same derivation on a second gaming mouse, reported on #886: a G705
+    /// over a Lightspeed receiver lists `0x8100`/`0x8110` and nothing in the
+    /// `0x1b0x` family, and `openlogi diag controls` fails against it for the
+    /// same reason it does on a G502. The hidden and engineering entries in that
+    /// dump are omitted here — they touch none of the families this reads.
+    #[test]
+    fn a_second_gaming_mouse_derives_the_same_way() {
+        use super::Capabilities;
+        let g705 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x0007, 0x1d4b, 0x0020, 0x00d0, 0x1004, 0x8081, 0x8071,
+            0x8100, 0x8110, 0x8060, 0x2201, 0x1500, 0x1e00,
+        ]);
+        assert!(g705.buttons, "a gaming control table earns a Buttons panel");
+        assert!(
+            !g705.can_divert_buttons(),
+            "no 0x1b04 means nothing beyond the OS-visible buttons can be diverted"
+        );
+        assert!(g705.pointer, "0x2201 drives the Pointer panel");
+        assert!(g705.lighting, "0x8071 and 0x8081 drive the Lighting panel");
+    }
+
+    /// A config or probe cache written before `no_button_diversion` existed has
+    /// no key for it, and those builds set `buttons` only for ReprogControls
+    /// devices. So absence must read back as "divertable" — otherwise every
+    /// stored MX Master loses its DPI, gesture and thumb-wheel hotspots on the
+    /// first launch after upgrading, before the device is next probed.
+    ///
+    /// This is why the field is stored as a restriction rather than as a
+    /// capability: `#[serde(default)]` then lands on the old behaviour by
+    /// itself, with no migration pass to run.
+    #[test]
+    fn capabilities_from_before_the_field_existed_stay_divertable() {
+        use super::Capabilities;
+        let stored: Capabilities = toml::from_str(
+            "buttons = true\npointer = true\nlighting = false\nscroll_inversion = false\n",
+        )
+        .expect("a pre-field capability table must still deserialize");
+        assert!(
+            stored.can_divert_buttons(),
+            "an absent no_button_diversion must not silently demote a stored MX mouse"
+        );
+    }
+
+    /// A mouse with real ReprogControls keeps both bits — the panel and the
+    /// full set of divertable controls behind it.
+    #[test]
+    fn reprogcontrols_mouse_can_divert() {
+        use super::Capabilities;
+        let mx = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x2121]);
+        assert!(mx.buttons && mx.can_divert_buttons());
     }
 
     #[test]
