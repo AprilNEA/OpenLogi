@@ -113,7 +113,7 @@ House style:
 - Platform-divergent code: once more than one function diverges, use one module per
   OS selected by a single `cfg` at the module declaration, with a thin facade owning
   the shared types and dispatch — `inject.rs` → `inject/{macos,linux,windows}.rs`,
-  `launch_agent.rs` likewise — not a file interleaved with repeated
+  `autostart.rs` likewise — not a file interleaved with repeated
   `#[cfg(target_os = …)]` arms. Each platform file implements the same function
   names; a missing one fails that platform's compile, which is the same guarantee a
   trait would give here. Reach for a trait only when implementations genuinely

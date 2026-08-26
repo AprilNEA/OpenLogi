@@ -51,8 +51,8 @@ only wraps its PNG bytes into a `gpui::Image`.
 
 The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
 carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
-`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `launch_agent.rs` (plist
-via `std::fs`).
+`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `autostart/macos.rs`
+(legacy-plist cleanup via `std::fs`).
 
 ## Ownership: `Retained<T>`, never raw `id`
 

@@ -20,7 +20,7 @@ When the diff touches any of:
 
 - `crates/openlogi-hook/src/linux.rs` / `windows.rs`
 - `crates/openlogi-inject/src/inject/linux.rs` / `windows.rs`
-- `crates/openlogi-agent/src/launch_agent/linux.rs` / `windows.rs`
+- `crates/openlogi-agent/src/autostart/linux.rs` / `windows.rs`
 - `crates/openlogi-camera/src/capture_linux.rs`, `capture_windows.rs`,
   `com_windows.rs`, `uvc_windows.rs`, `uvc_linux.rs`, `linux.rs`
 - `crates/openlogi-hid/src/channel/transport.rs` (has `#[cfg]` branches)

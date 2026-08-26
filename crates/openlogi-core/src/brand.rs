@@ -39,7 +39,7 @@ pub const OVERLAY_ID: &str = "org.openlogi.overlay";
 /// A launchd label is a *namespace key*, not a TCC identity — deliberately not
 /// [`AGENT_ID`], although the two look related: `org.openlogi.agent` is the
 /// frozen label of the legacy hand-written `~/Library/LaunchAgents` plist
-/// (see `openlogi-agent/src/launch_agent.rs`), and reusing a legacy label
+/// (see `openlogi-agent/src/autostart/macos.rs`), and reusing a legacy label
 /// would make the migration's "is this job ours or the old file's?" question
 /// unanswerable. Once shipped, this value is frozen the same way: renaming it
 /// orphans the registration users already approved in Login Items.

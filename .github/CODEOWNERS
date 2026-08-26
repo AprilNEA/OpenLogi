@@ -18,7 +18,7 @@
 # auxiliary-window registry (Settings, Add Device), not Win32 code.
 #
 # Windows-only branches living in multi-platform files (openlogi-agent's
-# main.rs / launch_agent.rs / binary_watch/ / takeover.rs, hid/transport.rs,
+# main.rs / autostart.rs / binary_watch/ / takeover.rs, hid/transport.rs,
 # hook/lib.rs, …) stay with the maintainer: CODEOWNERS scopes by path, so it
 # cannot hand out ownership of a single `#[cfg(windows)]` branch.
 #

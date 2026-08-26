@@ -7,7 +7,7 @@
 //! launchd in charge — start at login, respawn after a crash
 //! (`KeepAlive = {SuccessfulExit: false}`), a visible row under System
 //! Settings › Login Items — and the `launch_at_login` setting maps onto
-//! register/unregister here. The agent's own `launch_agent` module keeps only
+//! register/unregister here. The agent's own `autostart` module keeps only
 //! the migration away from the legacy hand-written plists.
 //!
 //! Everything is a no-op off macOS (the agent reconciles its autostart there)
