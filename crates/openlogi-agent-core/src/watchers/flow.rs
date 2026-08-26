@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::FlowTriggerMode;
 use openlogi_hid::{
-    ChannelPool, DeviceRoute, PreparedHostSwitch, prepare_host_switch, switch_linked_hosts_strict,
+    ChannelPool, DeviceRoute, PreparedHostSwitch, prepare_host_switch, switch_linked_hosts,
+    switch_linked_hosts_strict,
 };
 use openlogi_hook::DisplayBounds;
 use tracing::{debug, info, warn};
@@ -225,18 +226,30 @@ async fn watch(spec: SharedFlowSpec, channel_pool: ChannelPool, receiver_access:
                     lease.release();
                 } else {
                     let held = lease.take_for_fire(&receiver_access).await;
-                    let fast = match &prepared {
+                    let outcome = match &prepared {
                         Some(cache) if cache.spec == current => fast_switch(cache, host).await,
-                        _ => false,
+                        _ => FastOutcome::AbortedCleanly,
                     };
-                    if fast {
-                        drop(held);
-                    } else {
-                        // No cache, a stale cache, or a dead transport under
-                        // it: invalidate and take the full re-resolving path.
-                        prepared = None;
-                        prepare_attempted_at = None;
-                        switch(&current, host, &channel_pool, held).await;
+                    match outcome {
+                        FastOutcome::Switched => drop(held),
+                        // No cache, a stale cache, or a failure before any
+                        // write was accepted: nothing has moved, so the
+                        // strict all-or-nothing path is safe. Invalidate and
+                        // re-resolve.
+                        FastOutcome::AbortedCleanly => {
+                            prepared = None;
+                            prepare_attempted_at = None;
+                            switch(&current, host, &channel_pool, held).await;
+                        }
+                        // Past the commit point: a follower already departed,
+                        // so aborting would split the set. Press forward
+                        // tolerantly to bring the pointer (and whoever is
+                        // still here) across to it.
+                        FastOutcome::Committed => {
+                            prepared = None;
+                            prepare_attempted_at = None;
+                            switch_forward(&current, host, &channel_pool, held).await;
+                        }
                     }
                 }
             }
@@ -314,37 +327,64 @@ async fn prepare_flow(spec: &FlowSpec, channel_pool: &ChannelPool) -> Option<Pre
     })
 }
 
+/// How a prepared fire ended, and therefore which fallback is safe. The
+/// fire-and-forget writes are a commit point: an accepted follower write
+/// cannot be recalled, so everything after the first one must converge on
+/// the target host rather than abort.
+enum FastOutcome {
+    /// Every device switched (or was already on the target host).
+    Switched,
+    /// Nothing was told to move; the strict all-or-nothing fallback is safe.
+    AbortedCleanly,
+    /// At least one follower departed before a later failure. Aborting now
+    /// would split the set — the caller must press forward instead.
+    Committed,
+}
+
 /// The prepared fire: one pre-validated write per follower, then the pointer
 /// last (once the pointer leaves, nothing else can be commanded through a
-/// shared receiver). Returns `false` when the caller must fall back to the
-/// full re-resolving path — a follower's or the pointer's transport died, or
-/// the host was rejected by the cached verdicts.
-async fn fast_switch(prepared: &PreparedFlow, host: u8) -> bool {
+/// shared receiver). A failure before any write is accepted aborts cleanly;
+/// after one, the remaining followers are still attempted (they can only
+/// converge) and the outcome reports the commit so the caller pushes the
+/// pointer forward rather than stranding it behind a departed follower.
+async fn fast_switch(prepared: &PreparedFlow, host: u8) -> FastOutcome {
     info!(host, route = %prepared.spec.pointer, "flow: edge trigger fired (prepared)");
+    let mut departed = false;
     for follower in &prepared.followers {
-        if let Err(error) = follower.switch_to(host).await {
-            debug!(%error, host, "flow: prepared follower switch failed — falling back");
-            return false;
+        match follower.switch_to(host).await {
+            Ok(switched) => departed |= switched,
+            Err(error) if !departed => {
+                debug!(%error, host, "flow: prepared follower switch failed — falling back");
+                return FastOutcome::AbortedCleanly;
+            }
+            Err(error) => {
+                warn!(%error, host, "flow: follower failed after another departed — pressing on");
+            }
         }
     }
     match prepared.pointer.switch_to(host).await {
         Ok(true) => {
             info!(host, route = %prepared.spec.pointer, "flow: devices switched host");
-            true
+            FastOutcome::Switched
         }
         Ok(false) => {
             debug!(host, route = %prepared.spec.pointer, "flow: device already on the requested host");
-            true
+            FastOutcome::Switched
+        }
+        Err(error) if departed => {
+            warn!(%error, host, "flow: pointer write failed after a follower departed");
+            FastOutcome::Committed
         }
         Err(error) => {
             debug!(%error, host, "flow: prepared pointer switch failed — falling back");
-            false
+            FastOutcome::AbortedCleanly
         }
     }
 }
 
 /// Apply the switch under the already-acquired exclusive lease, then release
-/// it immediately so capture re-arms while the device departs.
+/// it immediately so capture re-arms while the device departs. Only safe
+/// while nothing has moved yet — the caller guarantees it.
 ///
 /// All-or-nothing: a follower that cannot come along keeps the pointer here
 /// too, rather than splitting the set across two computers. The abort is
@@ -366,6 +406,28 @@ async fn switch(
         }
         Err(error) => {
             warn!(%error, route = %spec.pointer, host, "flow: switch aborted — no device moved");
+        }
+    }
+    drop(lease);
+}
+
+/// The past-the-commit-point recovery: a follower has already departed, so
+/// converging on the target host is the only move that reunites the set.
+/// Re-resolves through the *tolerant* transition — a departed follower fails
+/// its prepare and is skipped (it is already there), anything else still
+/// reachable comes along, and the pointer moves regardless.
+async fn switch_forward(
+    spec: &FlowSpec,
+    host: u8,
+    channel_pool: &ChannelPool,
+    lease: ExclusiveReceiverLease,
+) {
+    match switch_linked_hosts(&spec.pointer, &spec.followers, host, channel_pool).await {
+        Ok(_) => {
+            info!(host, route = %spec.pointer, "flow: pointer pushed through to the departed followers");
+        }
+        Err(error) => {
+            warn!(%error, route = %spec.pointer, host, "flow: pointer could not follow its departed followers");
         }
     }
     drop(lease);
