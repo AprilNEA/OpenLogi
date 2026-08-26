@@ -225,6 +225,8 @@ lint (shellcheck + shfmt) are separate CI jobs. Reproduce those with
 
 ```sh
 cargo run -p xtask -- macos package    # → target/release/OpenLogi.dmg
+# Cross-compile a distribution DMG (aarch64 or x86_64):
+cargo run -p xtask -- macos package --target x86_64-apple-darwin
 ```
 
 Environment overrides:

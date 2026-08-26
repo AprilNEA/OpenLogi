@@ -52,9 +52,10 @@ package anything but a production bundle once it is given a signing identity, so
 a dev build cannot reach users. That check is what releases 0.6.24–0.6.26 lacked
 when the release workflow shipped `.dev` identifiers.
 
-The raw DMG emitted by `cargo-bundle` is deleted during `macos bundle` because it
-is created before xtask embeds and signs the helpers; use `macos package` when
-you need a DMG.
+`macos bundle` asks `cargo-bundle` for the base `.app` only, then embeds and signs
+the helpers. Use `macos package` when you need the final DMG. The package command
+also accepts `--target aarch64-apple-darwin` or `--target x86_64-apple-darwin` so
+CI can cross-compile either distribution architecture.
 
 ### The dev bundle
 

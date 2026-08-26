@@ -24,8 +24,8 @@ paths:
   copy called `AppIcon.icon`; it ships with Xcode (not the command line tools)
   and has to be **Xcode 26 or newer**, since that is where Icon Composer
   documents arrived. `OPENLOGI_DEVELOPER_DIR` picks which Xcode every macOS
-  build command runs under — `build.yml` sets it per leg, because the Intel
-  runner image still defaults to Xcode 16.
+  build command runs under — `build.yml` pins it so both native and
+  cross-compiled distribution targets use the same Icon Composer-capable SDK.
   `design/icon/openlogi.png` stays the master for Linux packaging and the GUI's
   embedded logo, and `openlogi.ico` for the Windows executables. The icon set
   itself lives in `xtask/src/icon.rs` (`AppIcon` plus the `IconPipeline` trait a

@@ -22,7 +22,7 @@ pub(crate) enum Command {
     Dmg(dmg::Args),
     /// Build the app bundle for distribution, optionally sign it, and package
     /// the branded DMG.
-    Package(dmg::Args),
+    Package(PackageArgs),
 }
 
 #[derive(Parser)]
@@ -34,6 +34,15 @@ pub(crate) struct BundleArgs {
     channel: Channel,
 }
 
+#[derive(Parser)]
+pub(crate) struct PackageArgs {
+    #[command(flatten)]
+    dmg: dmg::Args,
+    /// Rust target to package. Omit it for the host architecture.
+    #[arg(long, value_enum)]
+    target: Option<bundle::DistributionTarget>,
+}
+
 pub(crate) fn run(command: Command) -> Result<()> {
     match command {
         Command::Icon => AppBundle.compile(),
@@ -41,8 +50,8 @@ pub(crate) fn run(command: Command) -> Result<()> {
         Command::DevBundle(args) => dev_bundle::run(&args),
         Command::Dmg(args) => dmg::run(&args),
         Command::Package(args) => {
-            bundle::run_for_distribution(args.sign_identity.as_deref())?;
-            dmg::run(&args)
+            bundle::run_for_distribution(args.dmg.sign_identity.as_deref(), args.target)?;
+            dmg::run(&args.dmg)
         }
     }
 }
