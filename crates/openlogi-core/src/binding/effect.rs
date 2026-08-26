@@ -42,6 +42,10 @@ pub enum Effect<'a> {
     /// runtime. A one-shot executor treats this as [`Effect::Key`] so direct
     /// dispatch remains balanced when no matching release can arrive.
     HeldKey(&'a KeyCombo),
+    /// Standard macOS Mouse Button 6 whose output is held by a
+    /// lifecycle-aware runtime. A one-shot executor treats this as a balanced
+    /// click so it cannot leave a button held down.
+    HeldMouseButton6,
     /// Synthesise one scroll tick. `dx`/`dy` are unit direction (-1/0/1);
     /// each backend applies its own tick magnitude.
     Scroll {
@@ -275,6 +279,7 @@ impl Action {
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
             Action::HoldShortcut(combo) => Effect::HeldKey(combo),
+            Action::HoldMouseButton6 => Effect::HeldMouseButton6,
 
             Action::TypeText(text) => Effect::Text(text),
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),

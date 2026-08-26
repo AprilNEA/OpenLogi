@@ -109,13 +109,17 @@ pub enum RingActionError {
     /// A ring cannot recursively open itself.
     #[error("Show Actions Ring cannot be assigned inside an Actions Ring")]
     RecursiveTrigger,
+    /// A ring slot has no physical press lifecycle to own this action.
+    #[error("Button 6 (Hold) requires a physical press lifecycle")]
+    HeldMouseButton,
 }
 
 /// An action that is valid inside an Actions Ring.
 ///
 /// Construction and deserialization reject actions that would make the ring's
-/// state ambiguous (`None`) or recursively invoke another ring
-/// (`ShowActionsRing`).
+/// state ambiguous (`None`), recursively invoke another ring
+/// (`ShowActionsRing`), or require a physical press lifecycle
+/// (`HoldMouseButton6`).
 #[nutype(
     validate(with = validate_ring_action, error = RingActionError),
     derive(Clone, Debug, PartialEq, Eq, Hash, AsRef, TryFrom, Into, Serialize, Deserialize),
@@ -145,6 +149,7 @@ fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
     match action {
         Action::None => Err(RingActionError::EmptyAction),
         Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        Action::HoldMouseButton6 => Err(RingActionError::HeldMouseButton),
         _ => Ok(()),
     }
 }
@@ -361,6 +366,10 @@ mod tests {
         assert_eq!(
             RingAction::new(Action::ShowActionsRing),
             Err(RingActionError::RecursiveTrigger)
+        );
+        assert_eq!(
+            RingAction::new(Action::HoldMouseButton6),
+            Err(RingActionError::HeldMouseButton)
         );
     }
 
