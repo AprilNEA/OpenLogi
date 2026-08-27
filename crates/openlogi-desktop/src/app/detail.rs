@@ -32,7 +32,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
+use crate::features::profiles::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};

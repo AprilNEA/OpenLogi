@@ -25,7 +25,7 @@ use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as pain
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
+use crate::features::profiles::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
