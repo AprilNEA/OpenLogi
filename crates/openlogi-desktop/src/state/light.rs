@@ -59,6 +59,25 @@ struct PendingLightCommand {
     superseded: Vec<SupersededLightCommand>,
 }
 
+/// Everything a fresh [`PendingLightCommand`] carries beyond its request id,
+/// gathered by the caller *before* [`AppState::begin_light_command`] so the
+/// pending entry is inserted fully formed. The insert-then-patch shape this
+/// replaces kept a placeholder with factory-default rollback settings between
+/// the two phases — an early return slipped in between would have persisted
+/// those defaults to config.toml as the "rollback".
+struct PendingLightSetup {
+    /// Commands already counted as in flight when the entry lands: the
+    /// manual-power path dispatches its single command itself, while the
+    /// settings path queues each one (counting them) afterwards.
+    in_flight: u16,
+    settings: LightSettings,
+    persistent_key: Option<String>,
+    rollback_settings: LightSettings,
+    previous_volatile: Option<LightSettings>,
+    manual_override_rollback: Option<ManualOverrideRollback>,
+    superseded: Vec<SupersededLightCommand>,
+}
+
 #[derive(Debug)]
 struct SupersededLightCommand {
     request_id: u64,
@@ -127,26 +146,32 @@ impl AppState {
             .map(|(_, status)| status.clone())
     }
 
-    fn begin_light_command(&mut self, key: &DeviceKey, online: bool) -> u64 {
+    /// Allocate the next request id and record the command: a full
+    /// [`PendingLightSetup`] becomes the pending entry in one step, while
+    /// `None` (device offline / no route) records only the Offline status.
+    fn begin_light_command(&mut self, key: &DeviceKey, setup: Option<PendingLightSetup>) -> u64 {
         self.lighting.next_request_id = self.lighting.next_request_id.wrapping_add(1);
         let request_id = self.lighting.next_request_id;
         let entry = self.devices.runtime.entry(key.clone()).or_default();
-        if online {
-            entry.light.pending = Some(PendingLightCommand {
-                request_id,
-                pending: 0,
-                settings: None,
-                persistent_key: None,
-                rollback_settings: LightSettings::default(),
-                previous_volatile: None,
-                manual_override_rollback: None,
-                successful_commands: Vec::new(),
-                failure: None,
-                superseded: Vec::new(),
-            });
-            entry.light.status = Some((request_id, LightCommandStatus::Pending));
-        } else {
-            entry.light.status = Some((request_id, LightCommandStatus::Offline));
+        match setup {
+            Some(setup) => {
+                entry.light.pending = Some(PendingLightCommand {
+                    request_id,
+                    pending: setup.in_flight,
+                    settings: Some(setup.settings),
+                    persistent_key: setup.persistent_key,
+                    rollback_settings: setup.rollback_settings,
+                    previous_volatile: setup.previous_volatile,
+                    manual_override_rollback: setup.manual_override_rollback,
+                    successful_commands: Vec::new(),
+                    failure: None,
+                    superseded: setup.superseded,
+                });
+                entry.light.status = Some((request_id, LightCommandStatus::Pending));
+            }
+            None => {
+                entry.light.status = Some((request_id, LightCommandStatus::Offline));
+            }
         }
         request_id
     }
@@ -467,32 +492,26 @@ impl AppState {
             .light
             .volatile_settings = Some(light);
         if !commands.is_empty() {
-            let can_apply = online && route.is_some();
-            let superseded = if can_apply {
-                self.supersede_light_command(&runtime_key)
-            } else {
-                Vec::new()
-            };
-            let request_id = self.begin_light_command(&runtime_key, can_apply);
-            if can_apply && let Some(route) = route {
-                if let Some(pending) = self
-                    .devices
-                    .runtime
-                    .get_mut(&runtime_key)
-                    .and_then(|entry| entry.light.pending.as_mut())
-                {
-                    pending.settings = Some(light);
-                    pending.persistent_key.clone_from(&key);
-                    pending.rollback_settings = rollback_settings;
-                    pending.previous_volatile = previous_volatile;
-                    pending.manual_override_rollback = manual_override_rollback;
-                    pending.superseded = superseded;
-                }
+            if online && let Some(route) = route {
+                let superseded = self.supersede_light_command(&runtime_key);
+                let request_id = self.begin_light_command(
+                    &runtime_key,
+                    Some(PendingLightSetup {
+                        in_flight: 0,
+                        settings: light,
+                        persistent_key: key.clone(),
+                        rollback_settings,
+                        previous_volatile,
+                        manual_override_rollback,
+                        superseded,
+                    }),
+                );
                 for command in commands {
                     self.queue_light_command(&runtime_key, request_id, route.clone(), command);
                 }
                 return;
             }
+            self.begin_light_command(&runtime_key, None);
         }
         if let Some(key) = key {
             if let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
@@ -544,28 +563,20 @@ impl AppState {
             entry.light.volatile_settings = Some(light);
         }
 
-        let can_apply = online && route.is_some();
-        let superseded = if can_apply {
-            self.supersede_light_command(&runtime_key)
-        } else {
-            Vec::new()
-        };
-        let request_id = self.begin_light_command(&runtime_key, can_apply);
-        if can_apply && let Some(route) = route {
-            if let Some(pending) = self
-                .devices
-                .runtime
-                .get_mut(&runtime_key)
-                .and_then(|entry| entry.light.pending.as_mut())
-            {
-                pending.pending = 1;
-                pending.settings = Some(light);
-                pending.persistent_key.clone_from(&key);
-                pending.rollback_settings = rollback_settings;
-                pending.previous_volatile = previous_volatile;
-                pending.manual_override_rollback = manual_override_rollback;
-                pending.superseded = superseded;
-            }
+        if online && let Some(route) = route {
+            let superseded = self.supersede_light_command(&runtime_key);
+            let request_id = self.begin_light_command(
+                &runtime_key,
+                Some(PendingLightSetup {
+                    in_flight: 1,
+                    settings: light,
+                    persistent_key: key.clone(),
+                    rollback_settings,
+                    previous_volatile,
+                    manual_override_rollback,
+                    superseded,
+                }),
+            );
             if !self.send_ipc(crate::services::ipc::Command::SetLightManualPower(
                 route,
                 enabled,
@@ -581,6 +592,7 @@ impl AppState {
             }
             return;
         }
+        self.begin_light_command(&runtime_key, None);
 
         if let Some(key) = key {
             if let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
