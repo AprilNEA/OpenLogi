@@ -296,8 +296,6 @@ impl Orchestrator {
             bindings,
             gestures,
             selected_device: key.map(str::to_owned),
-            allow_unattributed_browser_buttons: cfg!(target_os = "macos")
-                && app == Some("com.apple.Safari"),
             ..HookMaps::default()
         }
     }

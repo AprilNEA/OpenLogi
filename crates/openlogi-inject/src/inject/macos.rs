@@ -755,9 +755,7 @@ mod ax_nav {
 /// does not grow with the tree depth it searches.
 struct AxAttrs {
     role: core_foundation::string::CFStringRef,
-    description: core_foundation::string::CFStringRef,
     identifier: core_foundation::string::CFStringRef,
-    subrole: core_foundation::string::CFStringRef,
     children: core_foundation::string::CFStringRef,
 }
 
@@ -796,8 +794,7 @@ unsafe fn attr_string(
     Some(s.to_string())
 }
 
-/// Walk the AX tree looking for an AXButton matching `target_id`/`target_subrole`/
-/// `target_desc` (tried in that order — see call site for why). Returns the
+/// Walk the AX tree looking for an AXButton matching one of `target_ids`. Returns the
 /// element pointer (+1 retained via `CFRetain` at the leaf, so the caller owns
 /// it independently of the parent arrays this function releases as it unwinds).
 ///
@@ -807,8 +804,6 @@ unsafe fn attr_string(
 unsafe fn find_button(
     el: ax_nav::AXUIElementRef,
     target_ids: &[&str],
-    target_subrole: &str,
-    target_desc: &str,
     attrs: &AxAttrs,
     depth: u8,
 ) -> Option<ax_nav::AXUIElementRef> {
@@ -833,17 +828,10 @@ unsafe fn find_button(
             return None;
         }
         if role_s == "AXButton" {
-            // 1. AXIdentifier — locale-independent, preferred.
-            // 2. AXSubrole — locale-independent, set on some Safari versions.
-            // 3. AXDescription — locale-dependent last resort.
             // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
             let matches_target = unsafe { attr_string(el, attrs.identifier) }
                 .as_deref()
-                .is_some_and(|identifier| target_ids.contains(&identifier))
-                // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-                || unsafe { attr_string(el, attrs.subrole) }.as_deref() == Some(target_subrole)
-                // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-                || unsafe { attr_string(el, attrs.description) }.as_deref() == Some(target_desc);
+                .is_some_and(|identifier| target_ids.contains(&identifier));
             // CFRetain here (only once, at the leaf) so callers can release the
             // children arrays without dangling.
             // SAFETY: el is a valid AXUIElementRef (CF Get Rule applies).
@@ -873,16 +861,7 @@ unsafe fn find_button(
         }
         // SAFETY: child is a valid AXUIElementRef (CF Get Rule); attrs fields
         // are valid CFStringRefs per this function's own contract.
-        if let Some(f) = unsafe {
-            find_button(
-                child,
-                target_ids,
-                target_subrole,
-                target_desc,
-                attrs,
-                depth - 1,
-            )
-        } {
+        if let Some(f) = unsafe { find_button(child, target_ids, attrs, depth - 1) } {
             found = Some(f);
             break;
         }
@@ -916,26 +895,13 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
     let attr_focused_window = CFString::new("AXFocusedWindow");
     let attr_children = CFString::new("AXChildren");
     let attr_role = CFString::new("AXRole");
-    let attr_description = CFString::new("AXDescription");
     let attr_identifier = CFString::new("AXIdentifier");
-    let attr_subrole = CFString::new("AXSubrole");
     let ax_press = CFString::new("AXPress");
-    // AXIdentifier is locale-independent (Safari sets these stable IDs on its
-    // toolbar navigation buttons). Description ("Go back"/"Go forward") is
-    // locale-dependent and will fail on non-English systems.
     let target_identifiers = if forward {
         ["ForwardButton", "BackForwardToolbarButton_Forward"]
     } else {
         ["BackButton", "BackForwardToolbarButton_Back"]
     };
-    // AXSubrole is also locale-independent and may be set on some Safari versions.
-    let target_subrole = if forward {
-        "AXBackForwardButtonForward"
-    } else {
-        "AXBackForwardButtonBack"
-    };
-    // Last-resort English description fallback for older Safari/macOS versions.
-    let target_desc_en = if forward { "Go forward" } else { "Go back" };
 
     autoreleasepool(|pool| {
         let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication()?;
@@ -965,23 +931,12 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
 
         let attrs = AxAttrs {
             role: attr_role.as_concrete_TypeRef(),
-            description: attr_description.as_concrete_TypeRef(),
             identifier: attr_identifier.as_concrete_TypeRef(),
-            subrole: attr_subrole.as_concrete_TypeRef(),
             children: attr_children.as_concrete_TypeRef(),
         };
         // Find the nav button (borrowed pointer inside the window's tree).
         // SAFETY: win is a valid AXUIElementRef; attrs fields are valid CFStringRefs.
-        let button = unsafe {
-            find_button(
-                win,
-                &target_identifiers,
-                target_subrole,
-                target_desc_en,
-                &attrs,
-                6,
-            )
-        };
+        let button = unsafe { find_button(win, &target_identifiers, &attrs, 6) };
 
         let result = button.map(|btn| {
             // SAFETY: btn is a +1 retained AXUIElement (CFRetain'd by find_button).

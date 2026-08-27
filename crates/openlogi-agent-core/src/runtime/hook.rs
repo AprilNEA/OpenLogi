@@ -47,10 +47,6 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
-    /// Safari does not consume native Back/Forward mouse events on macOS, and
-    /// those events can lack sender attribution. The foreground-app watcher
-    /// enables this narrowly while Safari owns the active profile.
-    pub allow_unattributed_browser_buttons: bool,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -209,14 +205,25 @@ thread_local! {
 fn button_source_may_remap(
     id: ButtonId,
     device: Option<&EventDevice>,
-    allow_unattributed_browser_buttons: bool,
+    safari_is_frontmost: bool,
 ) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
         None if cfg!(target_os = "macos") => {
-            allow_unattributed_browser_buttons && matches!(id, ButtonId::Back | ButtonId::Forward)
+            safari_is_frontmost && matches!(id, ButtonId::Back | ButtonId::Forward)
         }
         None => true,
+    }
+}
+
+fn safari_is_frontmost() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        openlogi_hook::frontmost_application().is_some_and(|app| app.id == "com.apple.Safari")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -270,11 +277,10 @@ fn handle_button(
     if !id.is_os_hook_button() {
         return EventDisposition::PassThrough;
     }
-    let allow_unattributed_browser_buttons = device.is_none()
-        && hooks
-            .try_read()
-            .is_ok_and(|maps| maps.allow_unattributed_browser_buttons);
-    if !button_source_may_remap(id, device, allow_unattributed_browser_buttons) {
+    let live_safari = device.is_none()
+        && matches!(id, ButtonId::Back | ButtonId::Forward)
+        && safari_is_frontmost();
+    if !button_source_may_remap(id, device, live_safari) {
         return EventDisposition::PassThrough;
     }
 
