@@ -10,6 +10,7 @@ fn hook_press(id: u64, button: ButtonId) -> ActivePress {
     ActivePress {
         token: PressToken::hook_for_test(id, button),
         behavior: PressBehavior::Immediate(Action::Copy),
+        target: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn cancellation_is_scoped_to_one_session() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: None,
     };
     let second = ActivePress {
         token: PressToken {
@@ -73,6 +75,7 @@ fn cancellation_is_scoped_to_one_session() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: None,
     };
     state.press(first.clone());
     state.press(second.clone());
@@ -95,6 +98,7 @@ fn hook_cancellation_leaves_hidpp_presses_active() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: None,
     };
     state.press(hook.clone());
     state.press(hidpp.clone());
@@ -142,6 +146,33 @@ fn stale_token_cannot_trigger_after_same_key_repress() {
     };
     assert_eq!(press.token, new);
     assert_eq!(action, Action::Paste);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn queued_actions_retain_the_press_time_safari_target() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let target = ActionDispatchTarget::SafariProcess(417);
+    let token = input
+        .try_hook_down_with_target(ButtonId::Back, None, Some(target))
+        .expect("Safari down should be queued");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("down should start the press lifecycle");
+    };
+    assert_eq!(started.target(), Some(target));
+
+    assert!(input.try_trigger_while_pressed(&token, &Action::BrowserBack));
+    let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+        panic!("queued browser action should retain its originating press");
+    };
+    assert_eq!(press.target(), Some(target));
+    assert_eq!(action, Action::BrowserBack);
     assert!(owner.shutdown());
 }
 
@@ -299,6 +330,7 @@ fn release_before_long_press_threshold_fires_only_the_short_action() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: None,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -337,6 +369,7 @@ fn threshold_fires_long_once_and_suppresses_short_on_release() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: None,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -385,6 +418,7 @@ fn cancellation_never_fires_a_pending_short_or_long_action() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: None,
     };
     state.press(press);
     let mut events = Vec::new();
@@ -493,6 +527,7 @@ fn overdue_long_press_precedes_unrelated_queued_actions() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: None,
     };
     state.press(press.clone());
     commands
@@ -554,6 +589,7 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
             input: ButtonInput::Down(ActivePress {
                 token: PressToken::hook_for_test(1, ButtonId::Back),
                 behavior: PressBehavior::new(Some(&binding), pressed_at),
+                target: None,
             }),
         })
         .expect("test queue should accept the press");

@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
 
+use super::ActionDispatchTarget;
+
 /// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
@@ -168,6 +170,7 @@ impl PressToken {
 pub(crate) struct ActivePress {
     token: PressToken,
     behavior: PressBehavior,
+    target: Option<ActionDispatchTarget>,
 }
 
 /// Runtime-only state of the action semantics attached to one active press.
@@ -250,6 +253,10 @@ impl ActivePress {
 
     pub(crate) fn start_action(&self) -> Option<&Action> {
         self.behavior.start_action()
+    }
+
+    pub(crate) fn target(&self) -> Option<ActionDispatchTarget> {
+        self.target
     }
 
     fn release_action(&self) -> Option<&Action> {
@@ -418,12 +425,22 @@ pub(crate) struct ButtonInputHandle {
 }
 
 impl ButtonInputHandle {
+    #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
         button: ButtonId,
         binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::current_hook(), button, binding)
+        self.try_hook_down_with_target(button, binding, None)
+    }
+
+    pub(crate) fn try_hook_down_with_target(
+        &self,
+        button: ButtonId,
+        binding: Option<&Binding>,
+        target: Option<ActionDispatchTarget>,
+    ) -> Option<PressToken> {
+        self.try_down(ButtonSource::current_hook(), button, binding, target)
     }
 
     pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
@@ -436,6 +453,7 @@ impl ButtonInputHandle {
             PressKey::for_key(ButtonSource::current_hook(), keycode),
             PressBehavior::Immediate(action.clone()),
             generation,
+            None,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -467,7 +485,7 @@ impl ButtonInputHandle {
         button: ButtonId,
         binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::Hidpp(session.clone()), button, binding)
+        self.try_down(ButtonSource::Hidpp(session.clone()), button, binding, None)
     }
 
     pub(crate) fn try_hidpp_up(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -485,6 +503,7 @@ impl ButtonInputHandle {
             PressKey::new(ButtonSource::Hidpp(session.clone()), button),
             PressBehavior::new(binding, Instant::now()),
             generation,
+            None,
         );
         self.try_input(generation, ButtonInput::Pulse(press))
     }
@@ -523,12 +542,14 @@ impl ButtonInputHandle {
         source: ButtonSource,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: Option<ActionDispatchTarget>,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::new(source, button),
             PressBehavior::new(binding, Instant::now()),
             generation,
+            target,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -546,7 +567,13 @@ impl ButtonInputHandle {
         )
     }
 
-    fn new_press(&self, key: PressKey, behavior: PressBehavior, generation: u64) -> ActivePress {
+    fn new_press(
+        &self,
+        key: PressKey,
+        behavior: PressBehavior,
+        generation: u64,
+        target: Option<ActionDispatchTarget>,
+    ) -> ActivePress {
         let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
         ActivePress {
             token: PressToken {
@@ -555,6 +582,7 @@ impl ButtonInputHandle {
                 generation,
             },
             behavior,
+            target,
         }
     }
 

@@ -26,6 +26,13 @@ use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
+/// Application identity captured with a physical press and retained through
+/// asynchronous button dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionDispatchTarget {
+    /// A sender-less macOS browser button accepted specifically for Safari.
+    SafariProcess(i32),
+}
 /// Held output owned by accepted press capabilities rather than by a capture
 /// backend. Because every [`PressToken`] has exactly one terminal event, this
 /// map gives release, cancellation, invalidation, shutdown, and unwinding one
@@ -68,6 +75,15 @@ struct ActionExecutor {
 
 impl ActionExecutor {
     fn dispatch(&self, action: &Action, device_key: Option<&str>) {
+        self.dispatch_to(action, device_key, None);
+    }
+
+    fn dispatch_to(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: Option<ActionDispatchTarget>,
+    ) {
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -112,18 +128,29 @@ impl ActionExecutor {
                 );
                 return;
             }
-            // Safari ignores synthetic browser-navigation shortcuts, so try
-            // its Accessibility toolbar button before the keyboard fallback
+            // Safari ignores synthetic browser-navigation shortcuts, so use
+            // its Accessibility toolbar button. Sender-less Safari presses
+            // retain their press-time PID and never fall back after that target
+            // becomes stale; ordinary sources retain the keyboard fallback
             // used by Chrome and other apps. On devices where one physical
             // press is visible through both capture paths, debounce the shared
             // action before either output so the browser navigates only once.
             Action::BrowserBack | Action::BrowserForward => {
                 if browser_nav_debounce_ok(action) {
-                    dispatch_browser_navigation(
-                        action,
-                        openlogi_inject::ax_navigate_frontmost_browser,
-                        || openlogi_inject::execute(action),
-                    );
+                    match target {
+                        Some(ActionDispatchTarget::SafariProcess(pid)) => {
+                            dispatch_captured_safari_navigation(
+                                action,
+                                pid,
+                                openlogi_inject::ax_navigate_browser,
+                            );
+                        }
+                        None => dispatch_browser_navigation(
+                            action,
+                            openlogi_inject::ax_navigate_frontmost_browser,
+                            || openlogi_inject::execute(action),
+                        ),
+                    }
                 } else {
                     info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
                 }
@@ -170,11 +197,11 @@ impl ButtonEventHandler {
         match event {
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
-                    self.start_action(press.token(), action, press.device_key());
+                    self.start_action(press.token(), action, press.device_key(), press.target());
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
-                self.start_action(press.token(), &action, press.device_key());
+                self.start_action(press.token(), &action, press.device_key(), press.target());
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
@@ -192,9 +219,15 @@ impl ButtonEventHandler {
         }
     }
 
-    fn start_action(&mut self, press: &PressToken, action: &Action, device_key: Option<&str>) {
+    fn start_action(
+        &mut self,
+        press: &PressToken,
+        action: &Action,
+        device_key: Option<&str>,
+        target: Option<ActionDispatchTarget>,
+    ) {
         if !self.held.start(press, action) {
-            self.executor.dispatch(action, device_key);
+            self.executor.dispatch_to(action, device_key, target);
         }
     }
 }
@@ -270,8 +303,10 @@ impl ActionDispatcher {
         &self,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: Option<ActionDispatchTarget>,
     ) -> Option<PressToken> {
-        self.buttons.try_hook_down(button, binding)
+        self.buttons
+            .try_hook_down_with_target(button, binding, target)
     }
 
     /// Queue one OS-hook up edge without blocking the callback.
@@ -387,6 +422,21 @@ fn dispatch_browser_navigation(
     }
 }
 
+/// Dispatch navigation only to the Safari process captured with the physical
+/// press. A failed PID-scoped lookup means the identity is stale or Safari can
+/// no longer satisfy the action; never synthesize a keyboard shortcut into the
+/// application that happens to be frontmost by the time this worker runs.
+fn dispatch_captured_safari_navigation(
+    action: &Action,
+    pid: i32,
+    ax_navigate: impl FnOnce(i32, bool) -> bool,
+) {
+    let forward = matches!(action, Action::BrowserForward);
+    if !ax_navigate(pid, forward) {
+        info!(pid, action = %action.label(), "captured Safari navigation unavailable — keyboard fallback suppressed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +484,18 @@ mod tests {
 
         assert_eq!(direction, Some(false));
         assert!(fell_back);
+    }
+
+    #[test]
+    fn captured_safari_navigation_keeps_press_time_pid_and_never_falls_back() {
+        let mut target = None;
+
+        dispatch_captured_safari_navigation(&Action::BrowserBack, 417, |pid, forward| {
+            target = Some((pid, forward));
+            false
+        });
+
+        assert_eq!(target, Some((417, false)));
     }
 
     #[test]
