@@ -31,6 +31,19 @@ use crate::{DpiCycleState, DpiCycles};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActionDispatchTarget {
     /// A sender-less macOS browser button accepted specifically for Safari.
+    // Not `expect`: production constructs this only on macOS, while the
+    // cross-platform button tests construct it to verify queue retention.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::allow_attributes, reason = "see above")
+    )]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "constructed by macOS production code and cross-platform tests"
+        )
+    )]
     SafariProcess(i32),
 }
 /// Held output owned by accepted press capabilities rather than by a capture
