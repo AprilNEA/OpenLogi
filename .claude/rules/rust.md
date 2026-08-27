@@ -94,6 +94,27 @@ Encode invariants in the type system instead of checking them at runtime:
   surface as **errors** (`UnsupportedResponse`-style), never as silent fallbacks.
 - Replace long parameter lists with Change/Params structs; make illegal combinations
   unrepresentable rather than validated.
+- A `bool` parameter is boolean-blind at its call sites. When only a couple of
+  combinations are ever used, split into intent-named methods
+  (`divert_cid`/`undivert_cid`, not `set_cid_reporting(cid, bool, bool)`).
+  Otherwise name the facts: a struct with named fields when they are independent
+  (`ScanPass { complete, healthy }`), a sum type when they are correlated and
+  some combinations are meaningless (`Inversion { Unsupported, Normal, Inverted }`
+  for what was `(supported, inverted)`). An `Option<bool>` encoding a genuine
+  three-state is the same defect (`HidrawProbe { Accessible, Denied,
+  NonePresent }`). `struct_excessive_bools` firing is the signal to re-type,
+  not to `expect`.
+- When a loop scatters mutable locals that feed one free decision function, fold
+  the state and the rule into a sans-I/O object: events become named methods,
+  the decision method is pure and takes an explicit `now`, and all I/O stays in
+  the loop (`SpawnReflex`, `OneShotScan`; older precedents `RearmBudget`, the
+  haptics `Budget`, `QueryState`). Tests then drive real transitions and cannot
+  construct unreachable states; a total decision function earns one exhaustive
+  truth-table test rather than scattered single-case asserts.
+- Lifecycles are typestate: stages are types, transitions consume `self`
+  (`Booted::arm(self) -> Armed`), and a resource legal in only some stages
+  travels inside the stage that may hold it — a third consumer then cannot
+  exist by construction.
 - Ownership models resources (`Retained<T>` in the ObjC FFI) and thread affinity is
   proven by types (`MainThreadMarker`, `!Send` handles), not by runtime checks.
 - Libraries return `thiserror` types; binaries may use `anyhow`.
