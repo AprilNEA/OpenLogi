@@ -26,7 +26,7 @@ use tokio::{
 use tracing::{debug, info};
 
 use crate::{
-    ChannelPool, DeviceRoute,
+    ChannelPool, DeviceRoute, SharedChannel,
     backend::BackendError,
     reprog_controls::{self, ReprogControlsV4},
 };
@@ -81,6 +81,9 @@ pub enum HostSwitchError {
     /// A required HID++ operation failed.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// The device does not expose the ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
     /// A required HID++ operation did not complete within its budget.
     #[error("HID++ operation timed out while {operation}")]
     TimedOut {
@@ -96,6 +99,14 @@ pub enum HostSwitchError {
     HostSlotEmpty {
         /// The zero-based host slot that has no pairing.
         host: u8,
+    },
+    /// The requested host does not exist on this device.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
     },
 }
 
@@ -202,6 +213,19 @@ pub async fn switch_linked_hosts(
         debug!(host, route = %keyboard, "keyboard host switched");
     }
     Ok(changed)
+}
+
+/// Switch one device on an already-open shared channel to the zero-based `host`.
+///
+/// The device's reported host count is validated before writing, and an
+/// explicitly empty slot is refused when the optional HostsInfo feature can
+/// report one. A `true` result means the fire-and-forget write was issued; it
+/// cannot confirm that the device arrived at the destination because the
+/// device leaves this channel as soon as the write takes effect. `false`
+/// means the device already reported `host` as current, so no write was needed.
+pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
+    let change = prepare_host_change_on(shared.channel(), shared.device_index(), host).await?;
+    apply_host_change(change).await
 }
 
 async fn arm_host_controls(
@@ -363,7 +387,7 @@ async fn prepare_host_change_on(
         device.root().get_feature(ChangeHostFeature::ID),
     )
     .await?
-    .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
@@ -468,9 +492,10 @@ fn host_change_required(
     requested_host: u8,
 ) -> Result<bool, HostSwitchError> {
     if requested_host >= host_count {
-        return Err(HostSwitchError::Hidpp(format!(
-            "host {requested_host} is outside device host count {host_count}"
-        )));
+        return Err(HostSwitchError::HostOutOfRange {
+            host: requested_host,
+            host_count,
+        });
     }
     Ok(current_host != requested_host)
 }
@@ -523,7 +548,7 @@ mod tests {
 
     use super::{
         ArmedControl, HostSwitchError, ReportingMode, event_host, host_change_required,
-        host_channel, prepare_host_change_on, restoration_change, shares_channel,
+        host_channel, prepare_host_change_on, restoration_change, shares_channel, switch_host_on,
     };
     use crate::DeviceRoute;
     use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
@@ -646,6 +671,32 @@ mod tests {
             .expect("a paired slot must be switchable");
 
         assert!(change.required, "host 1 differs from the current host 0");
+    }
+
+    #[tokio::test]
+    async fn switching_one_device_issues_the_fire_and_forget_write() {
+        let (raw, handle) =
+            ScriptedRawHidChannel::with_responder(keyboard_with_an_empty_third_slot);
+        let channel = crate::channel::scripted::scripted_channel(raw).await;
+        let shared = crate::SharedChannel::new(
+            channel,
+            DeviceRoute::Bolt {
+                receiver_uid: "AABB".into(),
+                slot: 1,
+            },
+        );
+
+        let changed = switch_host_on(&shared, 1)
+            .await
+            .expect("a paired slot must be switchable");
+
+        assert!(changed);
+        assert!(handle.written_reports().iter().any(|report| {
+            report.len() >= 5
+                && report[2] == CHANGE_HOST_INDEX
+                && report[3] >> 4 == 1
+                && report[4] == 1
+        }));
     }
 
     #[tokio::test]
@@ -781,10 +832,15 @@ mod tests {
 
     #[test]
     fn host_outside_device_range_is_rejected() {
-        assert!(
-            host_change_required(0, 2, 2).is_err(),
-            "host 2 is outside a device that reports 2 hosts and must be rejected"
-        );
+        let error = host_change_required(0, 2, 2).expect_err("host 2 must be rejected");
+
+        assert!(matches!(
+            error,
+            HostSwitchError::HostOutOfRange {
+                host: 2,
+                host_count: 2
+            }
+        ));
     }
 
     #[test]
