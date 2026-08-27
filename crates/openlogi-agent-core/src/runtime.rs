@@ -352,7 +352,7 @@ impl ActionDispatcher {
     }
 }
 
-/// Minimum time between two BrowserBack (or two BrowserForward) keyboard
+/// Minimum time between two BrowserBack (or two BrowserForward) navigation
 /// dispatches shared across OS-hook and HID++ capture paths.
 const BROWSER_NAV_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -434,5 +434,26 @@ mod tests {
 
         assert_eq!(direction, Some(false));
         assert!(fell_back);
+    }
+
+    #[test]
+    fn browser_navigation_debounce_is_per_direction_and_expires() {
+        let now = Instant::now();
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (Some(now), None);
+
+        assert!(!browser_nav_debounce_ok(&Action::BrowserBack));
+        assert!(browser_nav_debounce_ok(&Action::BrowserForward));
+
+        let expired = Instant::now()
+            .checked_sub(BROWSER_NAV_DEBOUNCE)
+            .expect("the debounce interval fits before the current instant");
+        BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0 = Some(expired);
+
+        assert!(browser_nav_debounce_ok(&Action::BrowserBack));
     }
 }
