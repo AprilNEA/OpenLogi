@@ -17,7 +17,7 @@ use hidpp::{
         },
     },
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::SharedChannel;
 use crate::backend::HidBackend;
@@ -282,12 +282,11 @@ async fn set_color_rgb_effects(
         .map_err(classify_rgb_lighting_error)?;
 
     let result = apply_color_rgb_effects(&feature, index, r, g, b).await;
-    if result.is_err()
-        && let Err(error) = feature
+    if result.is_err() {
+        feature
             .set_sw_control(previous_control.control, previous_control.events)
             .await
-    {
-        warn!(index, ?error, "failed to restore 0x8071 software control");
+            .map_err(classify_rgb_lighting_error)?;
     }
     result
 }

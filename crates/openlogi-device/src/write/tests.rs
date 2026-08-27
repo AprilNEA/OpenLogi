@@ -513,6 +513,40 @@ async fn partial_rgb_effect_support_falls_back_before_writing_and_restores_contr
     Ok(())
 }
 
+#[tokio::test]
+async fn failed_rgb_control_restore_stops_the_fallback() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(
+        partial_rgb_effects_with_restore_failure_scripted_response,
+    );
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc547,
+        },
+    );
+
+    let error = set_keyboard_color_on(&shared, 0x11, 0x22, 0x33)
+        .await
+        .expect_err("a failed control restore must abort the fallback");
+
+    assert!(matches!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8071,
+            kind: HidppFeatureErrorKind::Busy,
+        }
+    ));
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| { !(report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == 0x06) })
+    );
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
@@ -729,6 +763,17 @@ fn rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
 
 /// A device whose first 0x8071 cluster offers a static effect and whose second
 /// does not. Its 0x8081 zones can still be painted by the automatic fallback.
+fn partial_rgb_effects_with_restore_failure_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() >= 7
+        && request[2] == 0x08
+        && request[3] >> 4 == 0x05
+        && request[4..7] == [1, 0, 0]
+    {
+        return Some(feature_error(request, BUSY));
+    }
+    partial_rgb_effects_scripted_response(request)
+}
+
 fn partial_rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
