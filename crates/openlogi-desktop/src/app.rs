@@ -158,6 +158,12 @@ impl DetailTab {
     }
 }
 
+/// Binding chrome this view itself rebuilds. Child panels subscribe on their
+/// own; the profile bar (Buttons) and the configuration card (Device) do not.
+fn root_paints_binding_chrome(tab: DetailTab) -> bool {
+    matches!(tab, DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device)
+}
+
 /// Root application view.
 pub struct AppView {
     focus_handle: FocusHandle,
@@ -246,12 +252,14 @@ impl AppView {
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
                 StateEvent::ForegroundChanged => !on_home,
+                // The Buttons profile bar is painted by this view, not by
+                // `MouseModelView`. Skipping it here leaves add / switch /
+                // remove looking like no-ops: the canvas updates, the tabs
+                // do not. The Device tab's configuration card is the other
+                // root-owned bindings surface.
                 StateEvent::BindingsChanged(key) => {
                     !on_home
-                        && matches!(
-                            view.active_tab,
-                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
-                        )
+                        && root_paints_binding_chrome(view.active_tab)
                         && active_key.as_ref() == Some(key)
                 }
                 StateEvent::DpiChanged(key) => {
@@ -651,7 +659,7 @@ impl Render for AppView {
 #[cfg(test)]
 mod tests {
     use super::home::{connection_icon_path, ordered_device_indices};
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, root_paints_binding_chrome};
     use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
@@ -932,5 +940,14 @@ mod tests {
     fn unprobed_unknown_device_shows_only_device_tab() {
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
         assert_eq!(tabs, vec![DetailTab::Device]);
+    }
+
+    #[test]
+    fn binding_changes_rebuild_the_buttons_profile_bar() {
+        assert!(root_paints_binding_chrome(DetailTab::Buttons));
+        assert!(root_paints_binding_chrome(DetailTab::ActionsRing));
+        assert!(root_paints_binding_chrome(DetailTab::Device));
+        assert!(!root_paints_binding_chrome(DetailTab::Pointer));
+        assert!(!root_paints_binding_chrome(DetailTab::Keys));
     }
 }

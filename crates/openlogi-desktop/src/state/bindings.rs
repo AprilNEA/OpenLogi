@@ -394,9 +394,10 @@ impl AppState {
         self.persist_and_reload("per-app binding");
     }
 
-    /// Delete the open per-app profile outright and fall back to editing the
-    /// device's global bindings.
-    pub fn remove_editing_app_profile(&mut self) {
+    /// Delete `app`'s profile for the active device. If that profile is the
+    /// one this window has open, fall back to editing the device's global
+    /// bindings.
+    pub fn remove_app_profile(&mut self, app: &str) {
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -404,12 +405,11 @@ impl AppState {
         else {
             return;
         };
-        let Some(app) = self.editing_app().map(str::to_string) else {
-            return;
-        };
         self.config
-            .edit(|config| config.remove_app_profile(&key, &app));
-        self.set_editing_app(None);
+            .edit(|config| config.remove_app_profile(&key, app));
+        if self.editing_app() == Some(app) {
+            self.set_editing_app(None);
+        }
         self.persist_and_reload("per-app profile");
     }
 

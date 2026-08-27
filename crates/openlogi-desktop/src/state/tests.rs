@@ -630,6 +630,65 @@ fn clearing_an_override_falls_back_to_the_global_binding() {
 }
 
 #[test]
+fn removing_a_per_app_profile_drops_it_and_returns_to_the_default() {
+    let mut state = state_editing("com.apple.Safari");
+    state.commit_binding(ButtonId::Back, Action::Undo);
+    assert_eq!(
+        state.app_profiles().collect::<Vec<_>>(),
+        vec![("com.apple.Safari", 1)]
+    );
+
+    state.remove_app_profile("com.apple.Safari");
+
+    assert_eq!(
+        state.editing_app(),
+        None,
+        "the editor falls back to Default"
+    );
+    assert!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .is_none(),
+        "the profile must be gone from config, not merely emptied"
+    );
+    assert!(
+        state.app_profiles().next().is_none(),
+        "the tab list must not keep a tombstone"
+    );
+    assert_ne!(
+        state.button_bindings().get(&ButtonId::Back),
+        Some(&Action::Undo),
+        "the canvas must not keep the deleted override"
+    );
+}
+
+#[test]
+fn removing_a_profile_that_is_not_open_leaves_the_editor_scope_alone() {
+    let mut state = state_editing("com.apple.Safari");
+    state.commit_binding(ButtonId::Back, Action::Undo);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.config.edit(|config| {
+        config.set_per_app_binding(
+            KNOWN_MOUSE_KEY,
+            "com.google.Chrome",
+            ButtonId::Back,
+            Some(Action::Copy),
+        );
+    });
+
+    state.remove_app_profile("com.google.Chrome");
+
+    assert_eq!(state.editing_app(), Some("com.apple.Safari"));
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
+    );
+}
+
+#[test]
 fn clearing_a_thumbwheel_override_drops_both_directions() {
     let mut state = state_with_a_known_mouse();
     state.commit_thumbwheel_preset(ThumbwheelPreset::Volume);
