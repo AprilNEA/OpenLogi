@@ -3,17 +3,19 @@
 //! Every process start walks the same ladder, and each state is a type:
 //!
 //! ```text
-//! startup::bootstrap ──► Booted ──gate──► Booted ──arm──► Armed ──run──► exit
-//!         │                 │ (macOS only)                       │
+//! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──run──► exit
+//!         │                 │                                    │
 //!         └─ init failed    └─ dormant start nobody wanted       └─ signal / uninstall
 //! ```
 //!
-//! The moves are the type protection for two contracts: the uninstall
+//! The moves are the type protection for three contracts: the uninstall
 //! receiver travels inside the states (gate consumes it first, then the run
-//! loop — no third consumer can exist), and the demand channel dies at
-//! [`Booted::arm`]. The gate exists only on macOS, where the sunk
-//! launch-at-login switch makes an unwanted login start possible; Windows
-//! and Linux only ever start wanted, so they arm unconditionally.
+//! loop — no third consumer can exist), the demand channel dies at
+//! [`Wanted::arm`], and arming without settling the dormancy question is
+//! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is
+//! the gate. The gate *waits* only on macOS, where the sunk launch-at-login
+//! switch makes an unwanted login start possible; Windows and Linux only ever
+//! start wanted, so their gate passes unconditionally.
 
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -74,14 +76,16 @@ pub(crate) async fn run(
         return;
     };
     #[cfg(target_os = "macos")]
-    let Some(booted) = booted.gate().await else {
+    let Some(wanted) = booted.gate().await else {
         return;
     };
-    booted.arm().run().await;
+    #[cfg(not(target_os = "macos"))]
+    let wanted = booted.gate();
+    wanted.arm().run().await;
 }
 
 /// A bootstrapped, not-yet-armed agent: the IPC socket is serving, nothing
-/// user-visible has happened. The only ways out are [`Self::arm`] and being
+/// user-visible has happened. The only ways out are [`Self::gate`] and being
 /// dropped (exit).
 struct Booted {
     core: Core,
@@ -133,9 +137,9 @@ impl Booted {
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
     #[cfg(target_os = "macos")]
-    async fn gate(mut self) -> Option<Self> {
+    async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
-            return Some(self);
+            return Some(Wanted(self));
         }
         info!("launch_at_login is off — dormant until a client demands arming");
         // The deadline is absolute: a served-but-not-arming client does not
@@ -147,7 +151,7 @@ impl Booted {
                 Some(kind) = self.core.demand.recv() => match kind {
                     ClientKind::Gui => {
                         info!("GUI connected — arming");
-                        return Some(self);
+                        return Some(Wanted(self));
                     }
                     kind => info!(client = ?kind, "served while dormant — not arming"),
                 },
@@ -167,10 +171,24 @@ impl Booted {
         }
     }
 
+    /// Windows and Linux have no login trigger to second-guess: every start
+    /// was asked for, so the gate passes unconditionally.
+    #[cfg(not(target_os = "macos"))]
+    fn gate(self) -> Wanted {
+        Wanted(self)
+    }
+}
+
+/// A booted agent whose dormancy question is settled: somebody wants it
+/// running. [`Booted::gate`] is the only producer, so an agent that never
+/// consulted the gate cannot arm.
+struct Wanted(Booted);
+
+impl Wanted {
     /// The arming point: the tray may show, the overlay may start,
     /// permissions may prompt, devices may open.
     fn arm(self) -> Armed {
-        let Self {
+        let Booted {
             core,
             signals,
             uninstalled,
@@ -180,7 +198,7 @@ impl Booted {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             resume_pending,
             ..
-        } = self;
+        } = self.0;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
         overlay::spawn();
