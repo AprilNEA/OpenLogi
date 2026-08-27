@@ -88,19 +88,44 @@ pub(crate) fn spawn_click_away_dismissal(cx: &mut gpui::App, live: Arc<ClickAway
 #[cfg(not(target_os = "macos"))]
 const fn drop_unused_click_away_monitor(_monitor: Option<platform::ClickAwayMonitor>) {}
 
-/// Cancel the open ring only if it is still the session the click named.
-pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
+/// Close every window showing ring `session_id`, reporting whether any was.
+///
+/// A ring is one window per display on Wayland (see [`crate::ring`]), so
+/// closing "the" ring means closing all of them: the windows the cursor was
+/// not on are transparent, but they still cover their display and would go on
+/// swallowing input after the ring the user interacted with had gone. The
+/// session id is what keeps a late teardown — a timeout, a queued click — from
+/// closing a ring that opened after it.
+pub(crate) fn close_ring_windows(cx: &mut gpui::App, session_id: u64) -> bool {
+    let mut closed = false;
     for handle in cx.windows() {
         let Some(ring) = handle.downcast::<RingView>() else {
             continue;
         };
-        let _ = ring.update(cx, |view, window, _| {
-            if !click_away_targets(session_id, view.session_id()) {
-                return;
+        let removed = ring.update(cx, |view, window, _| {
+            if view.session_id() != session_id {
+                return false;
             }
-            view.cancel();
             window.remove_window();
+            true
         });
+        closed |= removed.unwrap_or(false);
+    }
+    closed
+}
+
+/// Cancel the open ring only if it is still the session the click named.
+pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
+    let target = cx.windows().into_iter().find_map(|handle| {
+        let ring = handle.downcast::<RingView>()?;
+        ring.update(cx, |view, _, _| {
+            click_away_targets(session_id, view.session_id()).then(|| view.cancel())
+        })
+        .ok()
+        .flatten()
+    });
+    if target.is_some() {
+        close_ring_windows(cx, session_id);
     }
 }
 
