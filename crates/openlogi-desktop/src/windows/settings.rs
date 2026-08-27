@@ -471,8 +471,10 @@ impl Render for SettingsView {
                 group_ix: None,
             })
             .page(general::general_page(
-                self.vertical_scroll_sensitivity_slider.clone(),
-                self.thumbwheel_sensitivity_slider.clone(),
+                general::SensitivitySliders {
+                    vertical_scroll: self.vertical_scroll_sensitivity_slider.clone(),
+                    thumbwheel: self.thumbwheel_sensitivity_slider.clone(),
+                },
                 self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));

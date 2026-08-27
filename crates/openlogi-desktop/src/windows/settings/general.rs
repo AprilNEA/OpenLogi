@@ -10,36 +10,28 @@ use gpui_base::Button as BaseButton;
 
 use crate::platform::registration::ServiceStatus;
 
+/// The page's two sensitivity sliders, named so a call site cannot swap two
+/// same-typed `Entity<SliderState>`s without the compiler noticing.
+pub(super) struct SensitivitySliders {
+    pub(super) vertical_scroll: Entity<SliderState>,
+    pub(super) thumbwheel: Entity<SliderState>,
+}
+
 pub(super) fn general_page(
-    vertical_scroll_sensitivity_slider: Entity<SliderState>,
-    thumbwheel_sensitivity_slider: Entity<SliderState>,
+    sliders: SensitivitySliders,
     registration_status: ServiceStatus,
 ) -> SettingPage {
+    let SensitivitySliders {
+        vertical_scroll,
+        thumbwheel,
+    } = sliders;
     let group = SettingGroup::new()
-        .item(
-            SettingItem::new(
-                tr!("Smooth scrolling"),
-                SettingField::switch(
-                    |cx| {
-                        AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll)
-                    },
-                    |enabled, cx| {
-                        AppState::update(cx, move |state, cx| {
-                            state.set_smooth_scroll(enabled);
-                            cx.emit(StateEvent::SettingsChanged);
-                        });
-                    },
-                ),
-            )
-            .description(tr!(
-                "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
-            )),
-        )
+        .item(smooth_scrolling_item())
         .item(
             SettingItem::new(
                 tr!("Vertical Scroll Sensitivity"),
                 SettingField::render(move |_, _, cx| {
-                    vertical_scroll_sensitivity_field(&vertical_scroll_sensitivity_slider, cx)
+                    vertical_scroll_sensitivity_field(&vertical_scroll, cx)
                 }),
             )
             .description(tr!(
@@ -50,7 +42,7 @@ pub(super) fn general_page(
             SettingItem::new(
                 tr!("Thumb Wheel Sensitivity"),
                 SettingField::render(move |_, _, cx| {
-                    thumbwheel_sensitivity_field(&thumbwheel_sensitivity_slider, cx)
+                    thumbwheel_sensitivity_field(&thumbwheel, cx)
                 }),
             )
             .description(tr!(
@@ -105,6 +97,25 @@ pub(super) fn general_page(
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
+}
+
+/// The smooth-scrolling switch.
+fn smooth_scrolling_item() -> SettingItem {
+    SettingItem::new(
+        tr!("Smooth scrolling"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
+            |enabled, cx| {
+                AppState::update(cx, move |state, cx| {
+                    state.set_smooth_scroll(enabled);
+                    cx.emit(StateEvent::SettingsChanged);
+                });
+            },
+        ),
+    )
+    .description(tr!(
+        "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
+    ))
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
