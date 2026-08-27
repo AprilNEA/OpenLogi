@@ -24,12 +24,23 @@ pub fn input_device_access() -> PermissionStatus {
     classify(probe_uinput(), probe_logitech_hidraw())
 }
 
+/// What probing the Logitech `/dev/hidraw*` nodes established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HidrawProbe {
+    /// At least one Logitech hidraw opened read/write.
+    Accessible,
+    /// A Logitech hidraw is present but `open()` was refused.
+    Denied,
+    /// No Logitech hidraw is connected to probe.
+    NonePresent,
+}
+
 /// Split from the probes so it is testable without device nodes.
-pub(crate) fn classify(uinput_ok: bool, hidraw_ok: Option<bool>) -> PermissionStatus {
-    match (uinput_ok, hidraw_ok) {
-        (true, Some(true)) => PermissionStatus::Granted,
-        (false, _) | (_, Some(false)) => PermissionStatus::Denied,
-        (true, None) => PermissionStatus::Unknown,
+pub(crate) fn classify(uinput_ok: bool, hidraw: HidrawProbe) -> PermissionStatus {
+    match (uinput_ok, hidraw) {
+        (true, HidrawProbe::Accessible) => PermissionStatus::Granted,
+        (false, _) | (_, HidrawProbe::Denied) => PermissionStatus::Denied,
+        (true, HidrawProbe::NonePresent) => PermissionStatus::Unknown,
     }
 }
 
@@ -41,13 +52,13 @@ fn probe_uinput() -> bool {
         .is_ok()
 }
 
-/// `Some(true)` — a Logitech hidraw is accessible; `Some(false)` — one is
-/// present but permission is denied; `None` — none connected.
-fn probe_logitech_hidraw() -> Option<bool> {
-    let mut any_accessible = false;
+fn probe_logitech_hidraw() -> HidrawProbe {
     let mut any_denied = false;
 
-    for entry in fs::read_dir("/dev").ok()?.filter_map(Result::ok) {
+    let Ok(entries) = fs::read_dir("/dev") else {
+        return HidrawProbe::NonePresent;
+    };
+    for entry in entries.filter_map(Result::ok) {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
@@ -59,21 +70,16 @@ fn probe_logitech_hidraw() -> Option<bool> {
             .write(true)
             .open(Path::new("/dev").join(&name))
         {
-            Ok(_) => {
-                any_accessible = true;
-                break; // one accessible device is enough
-            }
+            Ok(_) => return HidrawProbe::Accessible, // one accessible device is enough
             Err(e) if matches!(e.kind(), ErrorKind::PermissionDenied) => any_denied = true,
             Err(_) => {} // device gone or other transient error — skip
         }
     }
 
-    if any_accessible {
-        Some(true)
-    } else if any_denied {
-        Some(false)
+    if any_denied {
+        HidrawProbe::Denied
     } else {
-        None
+        HidrawProbe::NonePresent
     }
 }
 
