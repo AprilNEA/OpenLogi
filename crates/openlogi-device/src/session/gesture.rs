@@ -91,36 +91,73 @@ pub enum GestureError {
     Hidpp(String),
 }
 
+/// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
+/// carry no source attribution, so the first held source owns the accumulated
+/// motion until it is released (first hold wins); the per-hold qualifiers live
+/// inside the variant so none can outlive the hold it belongs to.
+#[derive(Default)]
+enum HoldState {
+    /// No armed gesture source is held: raw-XY reports are stray and dropped.
+    #[default]
+    Idle,
+    /// `cid` began the current hold; its events dispatch as `button`. When the
+    /// holder releases, a still-held source takes the hold over.
+    Holding {
+        /// The `0x1b04` control that owns this hold.
+        cid: u16,
+        /// The [`ButtonId`] the hold's gestures dispatch as.
+        button: ButtonId,
+        /// Mid-swipe travel accumulated over this hold.
+        swipe: SwipeAccumulator,
+        /// A second armed source is held alongside the holder. Overlap motion
+        /// could belong to either control — dropped until the overlap ends.
+        overlap: bool,
+        /// The hold's next raw-XY sample must be dropped: the haptic panel's
+        /// first sample after contact is an absolute position jump, not a
+        /// delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
+        skip_first_raw_xy: bool,
+    },
+}
+
+/// Begin a hold for `cid`, its swipe accumulator started fresh.
+fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+    let mut swipe = SwipeAccumulator::default();
+    swipe.begin();
+    HoldState::Holding {
+        cid,
+        button,
+        swipe,
+        overlap,
+        skip_first_raw_xy,
+    }
+}
+
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 struct CaptureAccum {
-    /// Mid-swipe state for the currently held gesture source (raw-XY).
-    swipe: SwipeAccumulator,
-    /// The gesture source that began the current hold, with the [`ButtonId`]
-    /// its events dispatch as. Raw-XY reports carry no source attribution, so
-    /// the first held source owns the accumulated motion until it is released
-    /// (first hold wins). While a second source is held alongside it, motion
-    /// is dropped instead of miscommitted (see [`Self::overlap`]); when the
-    /// holder releases, a still-held source takes the hold over.
-    gesture_source: Option<(u16, ButtonId)>,
-    /// Whether a second armed source is held alongside the holder. Raw-XY
-    /// reports are unattributed on the wire, so overlap motion could belong to
-    /// either control — it is dropped until the overlap ends.
-    overlap: bool,
+    /// The hold owning raw-XY motion, if any (see [`HoldState`]).
+    hold: HoldState,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (the haptic panel's first sample is then a contact jump to discard).
     gestures_down: Vec<u16>,
-    /// Whether the current hold's next raw-XY sample must be dropped: the
-    /// haptic panel's first sample after contact is an absolute position
-    /// jump, not a delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
-    skip_first_raw_xy: bool,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
     /// Diverted standard-button CIDs held in the last event.
     buttons_down: Vec<u16>,
+}
+
+#[cfg(test)]
+impl CaptureAccum {
+    /// Test-only seam mirroring [`SwipeAccumulator::backdate_hold_for_test`]
+    /// for the current hold. A no-op while idle.
+    fn backdate_hold_for_test(&mut self) {
+        if let HoldState::Holding { swipe, .. } = &mut self.hold {
+            swipe.backdate_hold_for_test();
+        }
+    }
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -626,39 +663,51 @@ fn handle_reprog(
                 .filter(|cid| cids.contains(cid))
                 .filter_map(|&cid| gesture_source_button(cid).map(|b| (cid, b)))
                 .collect();
-            match acc.gesture_source {
-                Some((cid, _)) if cids.contains(&cid) => {
-                    // The holder is still down. While a second armed source is
-                    // held alongside it, unattributed raw-XY motion is dropped
-                    // (see `CaptureAccum::overlap`).
-                    acc.overlap = held.len() > 1;
-                }
+            acc.hold = match std::mem::take(&mut acc.hold) {
+                // The holder is still down. While a second armed source is
+                // held alongside it, unattributed raw-XY motion is dropped
+                // (see [`HoldState::Holding::overlap`]).
+                HoldState::Holding {
+                    cid,
+                    button,
+                    swipe,
+                    skip_first_raw_xy,
+                    ..
+                } if cids.contains(&cid) => HoldState::Holding {
+                    cid,
+                    button,
+                    swipe,
+                    overlap: held.len() > 1,
+                    skip_first_raw_xy,
+                },
                 previous => {
                     // No holder, or the holder released: a released hold that
                     // never committed a direction is a plain click...
-                    if let Some((_, button)) = previous {
-                        acc.gesture_source = None;
-                        acc.overlap = false;
-                        if acc.swipe.end() {
-                            debug!(%button, "gesture click");
-                            let _ =
-                                sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
-                        }
+                    if let HoldState::Holding {
+                        button, mut swipe, ..
+                    } = previous
+                        && swipe.end()
+                    {
+                        debug!(%button, "gesture click");
+                        let _ = sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
                     }
                     // ...and the first still-held source begins (or takes
                     // over) the hold. A source not down in the previous event
                     // is a fresh touch, so the panel's contact-jump discard
                     // applies; one that was already held has had its jump
                     // dropped during the overlap.
-                    if let Some(&(cid, button)) = held.first() {
-                        acc.gesture_source = Some((cid, button));
-                        acc.swipe.begin();
-                        acc.overlap = held.len() > 1;
-                        acc.skip_first_raw_xy = cid == reprog_controls::HAPTIC_PANEL_CID
-                            && !acc.gestures_down.contains(&cid);
+                    match held.first() {
+                        Some(&(cid, button)) => begin_hold(
+                            cid,
+                            button,
+                            held.len() > 1,
+                            cid == reprog_controls::HAPTIC_PANEL_CID
+                                && !acc.gestures_down.contains(&cid),
+                        ),
+                        None => HoldState::Idle,
                     }
                 }
-            }
+            };
             // Gesture semantics stay separate from the physical lifecycle:
             // click/swipe remains one completed action, while every armed
             // source also contributes one rising and one falling edge to the
@@ -700,27 +749,34 @@ fn handle_reprog(
         RawControlEvent::RawXy { dx, dy } => {
             // Motion is attributed to the holding source; outside a hold the
             // report is stray and dropped.
-            let Some((_, button)) = acc.gesture_source else {
+            let HoldState::Holding {
+                button,
+                swipe,
+                overlap,
+                skip_first_raw_xy,
+                ..
+            } = &mut acc.hold
+            else {
                 return;
             };
             // While two armed sources are held the report could belong to
             // either control — drop it rather than miscommit a swipe through
             // the holder's map.
-            if acc.overlap {
+            if *overlap {
                 return;
             }
             // The haptic panel's first sample after contact is a position
             // jump; summing it would commit a bogus direction instantly.
-            if acc.skip_first_raw_xy {
-                acc.skip_first_raw_xy = false;
+            if *skip_first_raw_xy {
+                *skip_first_raw_xy = false;
                 return;
             }
             // Commit the instant a clean direction emerges (mid-swipe, once per
             // hold); the accumulator gates on hold duration internally and drops
             // travel that arrives outside a hold.
-            if let Some(direction) = acc.swipe.accumulate(i32::from(dx), i32::from(dy)) {
+            if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
                 debug!(?direction, %button, "gesture committed");
-                let _ = sink.send(CapturedInput::Gesture(button, direction));
+                let _ = sink.send(CapturedInput::Gesture(*button, direction));
             }
         }
     }
