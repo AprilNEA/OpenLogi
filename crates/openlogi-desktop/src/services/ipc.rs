@@ -186,16 +186,15 @@ async fn observe_loop(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
-    let mut client: Option<AgentClient> = None;
+    let mut link: Option<LiveConnection> = None;
+    // Connect counter feeding `LiveConnection::id` — never reused, so a
+    // result from a replaced connection can always be told apart.
+    let mut conn_seq: u64 = 0;
     // The agent is normally started by launchd, but the GUI brings it up when
     // the socket is down (see `launch::spawn_agent`), gated by the reflex.
     let mut reflex = SpawnReflex::new(Instant::now());
     let mut notified_unreachable = false;
     let mut notified_outdated = false;
-    // Generation 0 means "I have seen nothing", so the first answer is the
-    // agent's whole state rather than a wait for the next change. Reset on
-    // every disconnect: the replacement agent numbers its own generations.
-    let mut seen: Generation = 0;
     let mut inflight: Option<ObserveFuture> = None;
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
@@ -203,45 +202,60 @@ async fn observe_loop(
         // it while the others hand it back untouched.
         let mut pending = inflight.take();
         let woken = tokio::select! {
-            observed = maybe(pending.as_mut()) => Woken::Observed(observed),
+            (id, observed) = maybe(pending.as_mut()) => Woken::Observed(id, observed),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
             _ = retry.tick(), if pending.is_none() => Woken::Reconnect,
         };
         match woken {
-            // The poll answered: apply it and arm the next one. `pending` is
-            // finished, so it is deliberately not handed back.
-            Woken::Observed(Ok(observation)) => {
-                reflex.connected();
-                notified_unreachable = false;
-                notified_outdated = false;
-                if observation.generation != seen {
-                    seen = observation.generation;
-                    let _ = update_tx.send(GuiUpdate::Snapshot(observation.snapshot));
+            // The poll answered. `pending` is finished, so it is deliberately
+            // not handed back — the arms below arm a successor instead.
+            Woken::Observed(id, observed) => match link.as_mut() {
+                Some(conn) if conn.id == id => {
+                    if let Ok(observation) = observed {
+                        reflex.connected();
+                        notified_unreachable = false;
+                        notified_outdated = false;
+                        if observation.generation != conn.seen {
+                            conn.seen = observation.generation;
+                            let _ = update_tx.send(GuiUpdate::Snapshot(observation.snapshot));
+                        }
+                        inflight = Some(observe(conn));
+                    } else {
+                        // The connection dropped (agent self-exec on update,
+                        // or a crash). Reconnecting re-reads the whole state,
+                        // so nothing is lost.
+                        link = None;
+                        reflex.lost(Instant::now());
+                    }
                 }
-                if let Some(client) = client.as_ref() {
-                    inflight = Some(observe(client, seen));
+                // A poll from a connection this loop no longer holds — a
+                // command reconnected while it was in flight, or the link is
+                // down. Its result, success or failure, says nothing about
+                // the live connection, so it must neither advance `seen` nor
+                // tear anything down. What it does mean: the live connection
+                // (created mid-command with the old poll still occupying the
+                // slot) has no observe yet — arm its first one.
+                _ => {
+                    if let Some(conn) = link.as_ref() {
+                        inflight = Some(observe(conn));
+                    }
                 }
-            }
-            // The connection dropped (agent self-exec on update, or a crash).
-            // Reconnecting re-reads the whole state, so nothing is lost.
-            Woken::Observed(Err(())) => {
-                client = None;
-                seen = 0;
-                reflex.lost(Instant::now());
-            }
+            },
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             Woken::Command(Some(cmd)) => {
                 inflight = pending;
-                if handle(&mut client, update_tx, cmd).await.is_err() {
-                    client = None;
-                    seen = 0;
+                if handle(&mut link, &mut conn_seq, update_tx, cmd)
+                    .await
+                    .is_err()
+                {
+                    link = None;
                     reflex.lost(Instant::now());
                 }
             }
-            Woken::Reconnect => match ensure(&mut client).await {
-                Ok(client) => {
+            Woken::Reconnect => match ensure(&mut link, &mut conn_seq).await {
+                Ok(conn) => {
                     reflex.connected();
-                    inflight = Some(observe(client, seen));
+                    inflight = Some(observe(conn));
                 }
                 Err(ConnectFailure::Unreachable) => reflex.agent_unreachable(),
                 Err(ConnectFailure::NewerAgent) => {
@@ -358,11 +372,27 @@ impl SpawnReflex {
     }
 }
 
+/// A usable, declared connection, carrying everything that is true only *of
+/// this connection*: the identity that tags its in-flight poll, and the
+/// generation ledger — a replacement agent numbers its own generations, so
+/// `seen` lives and dies with the connection instead of being reset by
+/// discipline at every disconnect site.
+struct LiveConnection {
+    client: AgentClient,
+    /// This connection's slot in the connect sequence. A settled poll tagged
+    /// with another id belongs to a connection already gone, and is dropped.
+    id: u64,
+    /// Latest generation seen on this connection. Starts at 0 — "I have seen
+    /// nothing" — so the first answer is the agent's whole state.
+    seen: Generation,
+}
+
 /// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
 /// after the select ends rather than mutated from inside a borrowed arm.
 enum Woken {
-    /// The long-poll answered, or its connection dropped.
-    Observed(Result<Observation, ()>),
+    /// The long-poll answered, or its connection dropped — tagged with the
+    /// [`LiveConnection::id`] it was armed on.
+    Observed(u64, Result<Observation, ()>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
@@ -370,19 +400,23 @@ enum Woken {
 }
 
 /// A long-poll in flight. Boxed because it is stored across loop turns, and it
-/// owns a clone of the client so the loop can still replace its own `client`
-/// while the poll is outstanding.
-type ObserveFuture = Pin<Box<dyn Future<Output = Result<Observation, ()>> + Send>>;
+/// owns a clone of the client so the loop can still replace its own link
+/// while the poll is outstanding — which is why the output carries the
+/// connection id: the loop must be able to tell whose answer this is.
+type ObserveFuture = Pin<Box<dyn Future<Output = (u64, Result<Observation, ()>)> + Send>>;
 
-/// Ask for the next state newer than `seen`.
-fn observe(client: &AgentClient, seen: Generation) -> ObserveFuture {
-    let client = client.clone();
+/// Ask for the next state newer than what this connection has seen.
+fn observe(conn: &LiveConnection) -> ObserveFuture {
+    let client = conn.client.clone();
+    let id = conn.id;
+    let seen = conn.seen;
     Box::pin(async move {
         let mut ctx = context::current();
         ctx.deadline = Instant::now() + OBSERVE_DEADLINE;
-        client.observe(ctx, seen).await.map_err(|error| {
+        let observed = client.observe(ctx, seen).await.map_err(|error| {
             debug!(%error, "observe failed — reconnecting");
-        })
+        });
+        (id, observed)
     })
 }
 
@@ -416,9 +450,12 @@ enum ConnectFailure {
     NewerAgent,
 }
 
-/// Ensure a live client, connecting on demand.
-async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, ConnectFailure> {
-    if client.is_none() {
+/// Ensure a live connection, connecting — and stamping a fresh id — on demand.
+async fn ensure<'a>(
+    link: &'a mut Option<LiveConnection>,
+    conn_seq: &mut u64,
+) -> Result<&'a LiveConnection, ConnectFailure> {
+    if link.is_none() {
         // The handshake happens before any real RPC: mismatched bincode layouts
         // would otherwise surface only as opaque RpcErrors and a silently empty
         // device list. Refuse with a clear log instead, and report the
@@ -439,7 +476,12 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
                         debug!(%error, "agent dropped during the declare handshake");
                         ConnectFailure::Unreachable
                     })?;
-                *client = Some(connection.client);
+                *conn_seq += 1;
+                *link = Some(LiveConnection {
+                    client: connection.client,
+                    id: *conn_seq,
+                    seen: 0,
+                });
                 debug!("connected to agent IPC socket");
             }
             version if version < PROTOCOL_VERSION => {
@@ -460,23 +502,25 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
             }
         }
     }
-    // `client` is `Some` here (just set, or already was); the `None` arm is
+    // `link` is `Some` here (just set, or already was); the `None` arm is
     // unreachable but keeps this `expect`-free.
-    client.as_ref().ok_or(ConnectFailure::Unreachable)
+    link.as_ref().ok_or(ConnectFailure::Unreachable)
 }
 
 /// Run one device command. `Err` signals a dropped connection so the caller
 /// reconnects; the command's own failure is reported back over its oneshot.
 async fn handle(
-    client: &mut Option<AgentClient>,
+    link: &mut Option<LiveConnection>,
+    conn_seq: &mut u64,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
-    // keep `client` None on connect failure; that's not a dropped live connection
-    let Ok(client) = ensure(client).await else {
+    // keep `link` None on connect failure; that's not a dropped live connection
+    let Ok(conn) = ensure(link, conn_seq).await else {
         reply_disconnected(update_tx, cmd);
         return Ok(());
     };
+    let client = &conn.client;
     let ctx = context::current();
     match cmd {
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
