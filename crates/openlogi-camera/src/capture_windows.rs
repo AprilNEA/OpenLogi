@@ -53,6 +53,27 @@ struct Shared {
     stop: AtomicBool,
 }
 
+/// Cooperative setup cancellation. Media Foundation's setup calls are
+/// synchronous and expose no cancellation handle, so this can stop only at
+/// the resource-safe boundaries between them.
+struct SetupCancellation<'a> {
+    stop: &'a AtomicBool,
+}
+
+impl SetupCancellation<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    fn checkpoint(&self) -> Result<(), CaptureError> {
+        if self.is_cancelled() {
+            Err(CaptureError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// A live preview stream. Holds the reader thread; [`CameraStream::take_frame`]
 /// hands out the most recent frame each time it's polled. Dropping it stops
 /// the camera.
@@ -181,6 +202,11 @@ fn reader_thread(unique_id: &str, shared: &Shared, setup: &mpsc::Sender<Result<(
     // interface built below is a COM object, and releasing one after its
     // apartment closed is exactly the bug these guards exist to prevent.
     let com = ComApartment::enter();
+    let cancellation = SetupCancellation { stop: &shared.stop };
+    if let Err(error) = cancellation.checkpoint() {
+        let _ = setup.send(Err(error));
+        return;
+    }
     let media_foundation = match com.start_media_foundation() {
         Ok(started) => started,
         Err(e) => {
@@ -192,10 +218,17 @@ fn reader_thread(unique_id: &str, shared: &Shared, setup: &mpsc::Sender<Result<(
     // The whole object graph lives in this `match`, so the reader — and with it
     // the media source and every media type — has released by the time the
     // platform guard drops at the end of the function.
-    match open_reader(&media_foundation, unique_id) {
+    let opened = cancellation
+        .checkpoint()
+        .and_then(|()| open_reader(&media_foundation, unique_id, &cancellation));
+    match opened {
         Ok((reader, stride_hint)) => {
-            let _ = setup.send(Ok(()));
-            pump_frames(&reader, shared, stride_hint);
+            // A disconnected receiver means the caller's timeout already won.
+            // Do not enter ReadSample even if the relaxed stop load has not yet
+            // observed that store; dropping the reader shuts the source down.
+            if setup.send(Ok(())).is_ok() {
+                pump_frames(&reader, shared, stride_hint);
+            }
         }
         Err(e) => {
             let _ = setup.send(Err(e));
@@ -259,6 +292,7 @@ struct StrideHint {
 fn open_reader(
     platform: &MediaFoundation<'_>,
     unique_id: &str,
+    cancellation: &SetupCancellation<'_>,
 ) -> Result<(IMFSourceReader, StrideHint), CaptureError> {
     // SAFETY: the `platform` borrow is the precondition every call below needs
     // — Media Foundation started, inside an apartment — and the caller holds
@@ -270,16 +304,29 @@ fn open_reader(
     // against a live interface, and the reader is handed back to the very thread
     // that will pull samples from it.
     unsafe {
-        let source = activate_source(platform, unique_id)?;
-
         let mut reader_attrs = None;
         MFCreateAttributes(&raw mut reader_attrs, 1).map_err(setup_err)?;
         let reader_attrs = reader_attrs.ok_or_else(|| setup_err("MFCreateAttributes"))?;
         reader_attrs
             .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
             .map_err(setup_err)?;
-        let reader = MFCreateSourceReaderFromMediaSource(&source, &reader_attrs)
-            .map_err(|e| access_or_setup(&e))?;
+        cancellation.checkpoint()?;
+
+        let source = activate_source(platform, unique_id, cancellation)?;
+        if let Err(error) = cancellation.checkpoint() {
+            shutdown_source(&source);
+            return Err(error);
+        }
+        let reader = match MFCreateSourceReaderFromMediaSource(&source, &reader_attrs) {
+            Ok(reader) => reader,
+            Err(error) => {
+                // No source reader exists to perform its documented source
+                // shutdown on drop, so balance the successful activation here.
+                shutdown_source(&source);
+                return Err(access_or_setup(&error));
+            }
+        };
+        cancellation.checkpoint()?;
 
         // Prefer the native type closest to the preview's target width, so a
         // 4K-capable camera doesn't stream (and we don't convert) 8x the
@@ -290,7 +337,11 @@ fn open_reader(
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned();
         let mut best: Option<(u32, IMFMediaType)> = None;
         let mut index = 0u32;
-        while let Ok(native) = reader.GetNativeMediaType(stream, index) {
+        loop {
+            cancellation.checkpoint()?;
+            let Ok(native) = reader.GetNativeMediaType(stream, index) else {
+                break;
+            };
             index += 1;
             let convertible = native.GetGUID(&MF_MT_SUBTYPE).is_ok_and(|subtype| {
                 [
@@ -312,6 +363,7 @@ fn open_reader(
                 }
             }
         }
+        cancellation.checkpoint()?;
         // Selecting the native type switches the device to that mode — a size
         // hint on the RGB32 output type alone is quietly dropped (the legacy
         // processor converts but never scales), leaving whatever mode the
@@ -320,6 +372,7 @@ fn open_reader(
             reader
                 .SetCurrentMediaType(stream, None, native)
                 .map_err(setup_err)?;
+            cancellation.checkpoint()?;
         }
 
         let output = MFCreateMediaType().map_err(setup_err)?;
@@ -332,6 +385,7 @@ fn open_reader(
         reader
             .SetCurrentMediaType(stream, None, &output)
             .map_err(setup_err)?;
+        cancellation.checkpoint()?;
 
         // Read the negotiated geometry back — the converter may have kept the
         // native size, and the stride tells us whether rows arrive bottom-up.
@@ -342,6 +396,7 @@ fn open_reader(
         let stride = current
             .GetUINT32(&MF_MT_DEFAULT_STRIDE)
             .map_or_else(|_| width.cast_signed() * 4, u32::cast_signed);
+        cancellation.checkpoint()?;
         Ok((
             reader,
             StrideHint {
@@ -361,6 +416,7 @@ fn open_reader(
 fn activate_source(
     _platform: &MediaFoundation<'_>,
     unique_id: &str,
+    cancellation: &SetupCancellation<'_>,
 ) -> Result<IMFMediaSource, CaptureError> {
     // SAFETY: the `_platform` borrow proves Media Foundation is started inside
     // an apartment on this thread, which is what these MF calls require of it.
@@ -383,6 +439,7 @@ fn activate_source(
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
             )
             .map_err(setup_err)?;
+        cancellation.checkpoint()?;
 
         let (mut devices, mut count) = (std::ptr::null_mut::<Option<IMFActivate>>(), 0u32);
         MFEnumDeviceSources(&enum_attrs, &raw mut devices, &raw mut count).map_err(setup_err)?;
@@ -398,7 +455,7 @@ fn activate_source(
             let Some(activate) = slot.take() else {
                 continue;
             };
-            if chosen.is_some() {
+            if chosen.is_some() || cancellation.is_cancelled() {
                 continue;
             }
             let (mut link, mut len) = (windows::core::PWSTR::null(), 0u32);
@@ -418,14 +475,33 @@ fn activate_source(
                 chosen = Some(activate);
             }
         }
-        let result = match chosen {
-            Some(activate) => activate
-                .ActivateObject::<IMFMediaSource>()
-                .map_err(|e| access_or_setup(&e)),
-            None => Err(CaptureError::NotFound),
+        let result = match cancellation.checkpoint() {
+            Err(error) => Err(error),
+            Ok(()) => match chosen {
+                // ActivateObject is synchronous and provides no cancellation
+                // handle. A timeout while the driver is inside this call can
+                // only be observed after it returns; `open_reader` then shuts
+                // the returned source down before doing any further setup.
+                Some(activate) => activate
+                    .ActivateObject::<IMFMediaSource>()
+                    .map_err(|e| access_or_setup(&e)),
+                None => Err(CaptureError::NotFound),
+            },
         };
         CoTaskMemFree(Some(devices.cast()));
         result
+    }
+}
+
+/// Shut down an activated source when no source reader exists to own that
+/// responsibility. The COM wrapper still drops afterward, before the Media
+/// Foundation and apartment guards in [`reader_thread`].
+fn shutdown_source(source: &IMFMediaSource) {
+    // SAFETY: `source` is a live media source activated on this thread. This
+    // call is the documented teardown for an activated media source that was
+    // not transferred into an IMFSourceReader.
+    if let Err(error) = unsafe { source.Shutdown() } {
+        tracing::warn!(%error, "could not shut down cancelled camera source");
     }
 }
 
@@ -494,13 +570,30 @@ fn access_or_setup(e: &windows::core::Error) -> CaptureError {
 
 #[cfg(test)]
 mod tests {
-    use super::device_instance;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{CaptureError, SetupCancellation, device_instance};
 
     // The same StreamCam function, as DirectShow enumerates it (KSCATEGORY_VIDEO)
     // vs. as Media Foundation enumerates it (KSCATEGORY_VIDEO_CAMERA): identical
     // but for the trailing interface-class GUID.
     const DIRECTSHOW: &str = r"\\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
     const MEDIA_FOUNDATION: &str = r"\\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
+
+    #[test]
+    fn setup_stops_at_the_first_checkpoint_after_cancellation() {
+        let stop = AtomicBool::new(false);
+        let cancellation = SetupCancellation { stop: &stop };
+        cancellation
+            .checkpoint()
+            .expect("setup may continue before cancellation");
+
+        stop.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            cancellation.checkpoint(),
+            Err(CaptureError::Timeout)
+        ));
+    }
 
     #[test]
     fn instance_matches_across_interface_class_guids() {
