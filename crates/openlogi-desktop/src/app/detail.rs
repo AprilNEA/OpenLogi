@@ -604,7 +604,12 @@ fn light_tab(
             .gap_4()
             .flex_wrap()
             .items_start()
-            .child(light_visual::detail(asset, online, enabled, settings, pal))
+            .child(light_visual::detail(
+                asset,
+                light_visual::LightView { online, enabled },
+                settings,
+                pal,
+            ))
             .child(
                 div()
                     .w(LIGHT_CONTROLS_W)

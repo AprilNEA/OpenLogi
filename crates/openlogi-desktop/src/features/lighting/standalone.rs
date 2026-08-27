@@ -2,6 +2,8 @@
 
 use crate::state::{AppState, DeviceRecord, LightCommandStatus, StateEvent};
 use crate::ui::components::Toggle;
+
+use super::visual::LightView;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
     App, AppContext as _, BoxShadow, Context, Entity, Hsla, IntoElement, ParentElement, Render,
@@ -224,7 +226,14 @@ impl Render for LightPanel {
             .gap_4()
             .w_full()
             .when(power, |panel| {
-                let panel = panel.child(light_hero(&device_name, online, effective_enabled, pal));
+                let panel = panel.child(light_hero(
+                    &device_name,
+                    LightView {
+                        online,
+                        enabled: effective_enabled,
+                    },
+                    pal,
+                ));
                 #[cfg(target_os = "macos")]
                 let panel = panel.child(camera_automation(settings, pal));
                 panel.child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)))
@@ -259,12 +268,11 @@ impl Render for LightPanel {
     }
 }
 
-fn light_hero(
-    device_name: &str,
-    online: bool,
-    effective_enabled: bool,
-    pal: Palette,
-) -> impl IntoElement {
+fn light_hero(device_name: &str, view: LightView, pal: Palette) -> impl IntoElement {
+    let LightView {
+        online,
+        enabled: effective_enabled,
+    } = view;
     h_flex()
         .gap_3()
         .items_center()
@@ -275,7 +283,13 @@ fn light_hero(
                 .flex_1()
                 .min_w_0()
                 .child(div().text_heading().child(device_name.to_owned()))
-                .child(light_status(online, effective_enabled, pal)),
+                .child(light_status(
+                    LightView {
+                        online,
+                        enabled: effective_enabled,
+                    },
+                    pal,
+                )),
         )
         .child(
             Toggle::new("standalone-light-toggle")
@@ -379,7 +393,8 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
         )
 }
 
-fn light_status(online: bool, enabled: bool, pal: Palette) -> impl IntoElement {
+fn light_status(view: LightView, pal: Palette) -> impl IntoElement {
+    let LightView { online, enabled } = view;
     let (label, color) = if !online {
         (tr!("Offline"), theme::STATUS_OFFLINE)
     } else if enabled {

@@ -543,8 +543,10 @@ fn device_image(
     if record.kind == DeviceKind::Light {
         return light_visual::gallery(
             record.asset.as_ref(),
-            record.online,
-            light_enabled,
+            light_visual::LightView {
+                online: record.online,
+                enabled: light_enabled,
+            },
             light_settings,
             pal,
         )
