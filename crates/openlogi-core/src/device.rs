@@ -465,7 +465,7 @@ mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
         DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,
-        ReceiverInfo,
+        ReceiverInfo, is_g502_family,
     };
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {

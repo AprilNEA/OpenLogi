@@ -441,6 +441,39 @@ async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteEr
     Ok(())
 }
 
+#[tokio::test]
+async fn a_device_with_only_rgb_effects_can_be_coloured() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(rgb_effects_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc547,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let effect_writes: Vec<_> = written
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x08 && report[3] >> 4 == 0x01)
+        .collect();
+    assert_eq!(effect_writes.len(), 2);
+    for (cluster, report) in effect_writes.into_iter().enumerate() {
+        assert_eq!(report[4], cluster as u8);
+        assert_eq!(
+            report[5], 1,
+            "the discovered static effect must be selected"
+        );
+        assert_eq!(&report[6..9], &[0x11, 0x22, 0x33]);
+        assert_eq!(report[16], 1, "the write must be volatile");
+    }
+    assert!(written.iter().all(|report| report.first() != Some(&0x12)));
+    Ok(())
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
@@ -588,6 +621,60 @@ fn per_key_v2_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         // setRgbZonesSingleValue and frameEnd: echo the request back.
         (0x07, 0x06 | 0x07) => {
             payload[..12].copy_from_slice(&request[4..16]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// A G-series device that exposes `0x8071 RgbEffects` and no other lighting
+/// family. Each of its two clusters advertises a static effect at index 1.
+fn rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x8071) * 0x08;
+            false
+        }
+        // manageSwControl: echo the set request.
+        (0x08, 0x05) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            false
+        }
+        // getInfo: device, cluster, and effect modes share function 0.
+        (0x08, 0x00) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            match (request[4], request[5]) {
+                (0xff, 0xff) => payload[2] = 2,
+                (0 | 1, 0xff) => payload[4] = 2,
+                (0 | 1, effect_index) => {
+                    let effect_id = u16::from(effect_index == 1);
+                    payload[2..4].copy_from_slice(&effect_id.to_be_bytes());
+                }
+                _ => return None,
+            }
+            true
+        }
+        // setRgbClusterEffect: echo the long request.
+        (0x08, 0x01) => {
+            payload.copy_from_slice(&request[4..20]);
             true
         }
         _ => return None,
