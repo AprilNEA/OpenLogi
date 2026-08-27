@@ -108,7 +108,7 @@ Three ways to break the chain, all in the tree
 - registered login item → `launchctl kickstart gui/<uid>/<service label>`
   (launchd spawns it directly: its own responsible process, plus crash
   respawn from the service plist's `KeepAlive`). The registration itself is
-  `SMAppService` in `openlogi-desktop/src/platform/login_item.rs`, driven by
+  `SMAppService` in `openlogi-desktop/src/platform/login_item/macos.rs`, driven by
   the `launch_at_login` setting.
 - packaged helper, not registered → `/usr/bin/open -g -n <bundle>`
   (LaunchServices parents it under launchd, so it is its own responsible
