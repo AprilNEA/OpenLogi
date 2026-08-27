@@ -37,15 +37,20 @@ pub enum LabelDistribution {
 /// is typically narrower than the full image (Logi pads transparent strips on
 /// both sides); sizing by origin causes `ObjectFit::Contain` to letterbox
 /// vertically and pulls every hotspot off the rendered button.
+pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32) -> (f32, f32) {
+    asset_dimensions(asset.png_width, asset.png_height, target_h, max_w)
+}
+
+/// Scale any PNG into a `max_w` × `target_h` box, preserving aspect.
 #[expect(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32) -> (f32, f32) {
-    if asset.png_height == 0 {
+pub fn asset_dimensions(png_width: u32, png_height: u32, target_h: f32, max_w: f32) -> (f32, f32) {
+    if png_height == 0 {
         return MOUSE_MODEL_SIZE;
     }
-    let aspect = (asset.png_width as f32) / (asset.png_height as f32);
+    let aspect = (png_width as f32) / (png_height as f32);
     let w = target_h * aspect;
     if w > max_w {
         (max_w, max_w / aspect)
@@ -57,18 +62,13 @@ pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32
 /// Whether the asset exposes any remappable button markers. Mice do (so the
 /// model reserves a side gutter for their leader-line labels); keyboards and
 /// other label-less devices don't, so the model can hand them the full width.
-pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
-    asset
-        .metadata
-        .assignments()
-        .any(|a| map_slot_name(&a.slot_name).is_some())
-}
-
-/// Convert Logitech's percent-based markers into mouse-local pixel rects,
-/// translating from the metadata's "origin" coord system (the silhouette
-/// bbox) into the actual rendered PNG coord system.
 ///
-/// Logi's markers are percentages of `origin` (the silhouette bbox).
+/// MX-class depots store `marker.{x,y}` as a percentage of `origin`.
+/// G-series depots (G502) store absolute pixels of that origin canvas
+/// (values > 100). Both are translated through the silhouette bbox as
+/// documented below.
+///
+/// Logi's percent markers are fractions of `origin` (the silhouette bbox).
 /// Within the actual PNG, that bbox is centred with equal padding on the
 /// left and right. We render at the *PNG's* full aspect (no letterboxing)
 /// so the marker translation is:
@@ -76,24 +76,48 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
 /// ```text
 /// bbox_w_rendered = mouse_w * origin.width  / png.width
 /// bbox_x_offset   = (mouse_w - bbox_w_rendered) / 2
-/// hotspot.x       = bbox_x_offset + marker.x / 100 * bbox_w_rendered
-/// hotspot.y       = marker.y / 100 * mouse_h     // height ratio is 1:1
+/// hotspot.x       = bbox_x_offset + frac_x * bbox_w_rendered
+/// hotspot.y       = frac_y * mouse_h
 /// ```
 ///
-/// Primary left/right clicks deliberately have no entry — Logi never
-/// exposes them as remappable (and Options+ doesn't either), so we don't
-/// invent markers for them.
+/// Primary left/right clicks are shown when Logi metadata marks them
+/// (G-series G1/G2). MX depots omit those slots, and we do not invent them.
+pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
+    asset_hotspots_for_image(
+        asset,
+        mouse_w,
+        mouse_h,
+        hotspot_image_key(asset),
+        asset.png_width,
+        asset.png_height,
+    )
+}
+
+/// Hotspots for one metadata image key (front vs side on G-series depots).
 #[expect(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
-    let png_w = asset.png_width as f32;
-    let origin_w = asset
+pub fn asset_hotspots_for_image(
+    asset: &ResolvedAsset,
+    mouse_w: f32,
+    mouse_h: f32,
+    image_key: &str,
+    png_width: u32,
+    png_height: u32,
+) -> Vec<Hotspot> {
+    let Some(img) = asset
         .metadata
-        .origin()
-        .map_or(png_w, |o| o.width as f32)
-        .min(png_w);
+        .images
+        .iter()
+        .find(|img| img.key == image_key)
+    else {
+        return Vec::new();
+    };
+    let png_w = png_width as f32;
+    let origin_w = (img.origin.width as f32).min(png_w);
+    let origin_h = img.origin.height.max(1) as f32;
+    let _ = png_height;
     let bbox_w_rendered = if png_w > 0. {
         mouse_w * origin_w / png_w
     } else {
@@ -101,16 +125,16 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
     };
     let bbox_x_offset = (mouse_w - bbox_w_rendered) / 2.;
     let marker_to_canvas = |mx: f32, my: f32| -> (f32, f32) {
-        let cx = bbox_x_offset + mx / 100. * bbox_w_rendered;
-        let cy = my / 100. * mouse_h;
+        let (fx, fy) = marker_fractions(mx, my, origin_w, origin_h);
+        let cx = bbox_x_offset + fx * bbox_w_rendered;
+        let cy = fy * mouse_h;
         (cx, cy)
     };
 
-    let hotspots: Vec<Hotspot> = asset
-        .metadata
-        .assignments()
+    img.assignments
+        .iter()
         .filter_map(|a| {
-            let id = map_slot_name(&a.slot_name)?;
+            let id = map_assignment(a)?;
             let (cx, cy) = marker_to_canvas(a.marker.x, a.marker.y);
             Some(Hotspot {
                 id,
@@ -120,9 +144,52 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
                 h: ASSET_HOTSPOT,
             })
         })
-        .collect();
+        .collect()
+}
 
-    hotspots
+pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
+    asset
+        .metadata
+        .assignments()
+        .any(|a| map_assignment(a).is_some())
+}
+
+/// Which metadata image the current PNG is calibrated against.
+#[must_use]
+pub fn hotspot_image_key(asset: &ResolvedAsset) -> &'static str {
+    if asset
+        .metadata
+        .images
+        .iter()
+        .any(|img| img.key == "device_buttons_image" && !img.assignments.is_empty())
+    {
+        "device_buttons_image"
+    } else {
+        "device_image"
+    }
+}
+
+fn marker_fractions(mx: f32, my: f32, origin_w: f32, origin_h: f32) -> (f32, f32) {
+    if mx > 100. || my > 100. {
+        (
+            if origin_w > 0. {
+                (mx / origin_w).clamp(0., 1.)
+            } else {
+                0.
+            },
+            if origin_h > 0. {
+                (my / origin_h).clamp(0., 1.)
+            } else {
+                0.
+            },
+        )
+    } else {
+        ((mx / 100.).clamp(0., 1.), (my / 100.).clamp(0., 1.))
+    }
+}
+
+fn map_assignment(assignment: &openlogi_assets::Assignment) -> Option<MouseControlId> {
+    map_slot_name(&assignment.slot_name).or_else(|| map_slot_id(&assignment.slot_id))
 }
 
 /// Lay labels out evenly down one or both sides of the mouse. A two-sided
@@ -241,6 +308,26 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         "ASSIGNMENT_NAME_SHOW_RADIAL_MENU" => Some(MouseControlId::Button(ButtonId::HapticPanel)),
         _ => None,
     }
+}
+
+/// G-series `slotId` values such as `g502core_g7_m1` → G7 (DPI up).
+fn map_slot_id(id: &str) -> Option<MouseControlId> {
+    let (_, rest) = id.rsplit_once("_g")?;
+    let number = rest.split('_').next()?.parse::<u8>().ok()?;
+    Some(MouseControlId::Button(match number {
+        1 => ButtonId::LeftClick,
+        2 => ButtonId::RightClick,
+        3 => ButtonId::MiddleClick,
+        4 => ButtonId::Back,
+        5 => ButtonId::Forward,
+        6 => ButtonId::DpiToggle,
+        7 => ButtonId::DpiUp,
+        8 => ButtonId::DpiDown,
+        9 => ButtonId::ProfileCycle,
+        10 => ButtonId::WheelTiltLeft,
+        11 => ButtonId::WheelTiltRight,
+        _ => return None,
+    }))
 }
 
 #[cfg(test)]
@@ -366,5 +453,32 @@ mod tests {
 
         assert!(labels.iter().any(|label| label.side == Side::Left));
         assert!(labels.iter().any(|label| label.side == Side::Right));
+    }
+
+    #[test]
+    fn g502_slot_ids_map_to_g_keys() {
+        assert_eq!(
+            map_slot_id("g502core_g3_m1"),
+            Some(MouseControlId::Button(ButtonId::MiddleClick))
+        );
+        assert_eq!(
+            map_slot_id("g502core_g7_m1"),
+            Some(MouseControlId::Button(ButtonId::DpiUp))
+        );
+        assert_eq!(
+            map_slot_id("g502_spectrum_g10_m1"),
+            Some(MouseControlId::Button(ButtonId::WheelTiltLeft))
+        );
+        assert_eq!(map_slot_id("g502core_g99_m1"), None);
+    }
+
+    #[test]
+    fn pixel_markers_are_fractions_of_origin() {
+        let (fx, fy) = marker_fractions(538., 614., 1391., 2700.);
+        assert!((fx - 538. / 1391.).abs() < 0.0001);
+        assert!((fy - 614. / 2700.).abs() < 0.0001);
+        let (px, py) = marker_fractions(73., 18., 687., 1024.);
+        assert!((px - 0.73).abs() < 0.0001);
+        assert!((py - 0.18).abs() < 0.0001);
     }
 }

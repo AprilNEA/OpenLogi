@@ -25,14 +25,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openlogi_assets::http::safe_component_path;
-use openlogi_assets::{
-    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
-};
+use openlogi_assets::{DeviceEntry, FRONT_RENDER_FILES, Index, Metadata};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
+pub(crate) use self::images::read_png_dimensions;
+use self::images::{load_manifest, resolve_depot_renders};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
@@ -118,6 +117,10 @@ pub struct ResolvedAsset {
     /// the side/buttons view the mouse model aligns hotspots against. `None`
     /// when the depot ships no front render.
     pub hero_image_path: Option<PathBuf>,
+    /// G-series `device_side` render (`side_spectrum.png` / `side_core.png`)
+    /// for the mouse-model Top/Side toggle. `None` when the depot has no
+    /// side view on disk.
+    pub side_image_path: Option<PathBuf>,
     /// Precomputed inter-key lighting holes for a light-up keyboard, decoded
     /// from the depot's baked RLE mask and painted live over the device image
     /// (see [`crate::app::glow_canvas`]). `None` for depots without a mask.
@@ -225,79 +228,25 @@ impl AssetResolver {
                 );
                 continue;
             };
-            // Hotspot metadata in whichever schema this depot cached:
-            // `core_metadata.json` (newer) or `metadata.json` (older).
-            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
-                continue;
-            };
-            let meta_path = dir.join(meta_name);
-
-            // Pick the colour variant matching this device's HID++
-            // extended_model_id byte. Logi calibrates the assignment
-            // markers against the *buttons* image (typically
-            // `side_*.png`), so we prefer that resource for the
-            // mouse-model render — otherwise hotspot percentages drift
-            // off every button. `front_*.png` is left for the gallery.
-            //
-            // The depot's manifest keys variants on one of its model ids,
-            // which isn't always the index primary — the MX Master 3S
-            // manifest is keyed on `2b034` while the index lists `2b043`
-            // first. Try each listed id as the variant base so the right
-            // colour render resolves regardless of which pid Logi keyed on.
-            // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
-            let buttons_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| buttons_image_for(m, base, model.extended_model_id))
-            });
-            let variant_front_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| variant_image_for(m, base, model.extended_model_id))
-            });
-            // Front/hero render for the gallery: the colour variant's
-            // `device_image`, falling back to the generic front renders. Resolved
-            // against this same root so it sits beside the buttons image.
-            let hero_image_path = variant_front_name
-                .clone()
-                .into_iter()
-                .chain(FRONT_RENDER_FILES.map(str::to_string))
-                .filter_map(|n| safe_component_path(&dir, &n, "asset file").ok())
-                .find(|p| p.exists());
-            let image_name = buttons_name
-                .clone()
-                .or_else(|| variant_front_name.clone())
-                .unwrap_or_else(|| "side_core.png".to_string());
-            // The chosen file may not have been synced (older bundles
-            // shipped front-only); fall back through alternatives so a
-            // stale cache still gets *something* rather than a synthetic
-            // silhouette. Both filename schemas (`*_core` and bare) are
-            // tried for each of the buttons and hero renders.
-            let mut candidates = vec![image_name.clone()];
-            candidates.extend(BUTTONS_RENDER_FILES.map(str::to_string));
-            candidates.extend(variant_front_name);
-            candidates.extend(FRONT_RENDER_FILES.map(str::to_string));
-            let Some(image_path) = candidates
-                .iter()
-                .filter_map(|n| safe_component_path(&dir, n, "asset file").ok())
-                .find(|p| p.exists())
+            let Some(renders) = resolve_depot_renders(&dir, depot, entry, model, manifest.as_ref())
             else {
                 continue;
             };
+            let meta_path = dir.join(&renders.meta_name);
 
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
+                    warn!(depot, root = %root.display(), file = renders.meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
                 }
             };
-            let (png_width, png_height) = match read_png_dimensions(&image_path) {
+            let (png_width, png_height) = match read_png_dimensions(&renders.image_path) {
                 Ok(dims) => dims,
                 Err(e) => {
                     warn!(
-                        path = %image_path.display(),
+                        path = %renders.image_path.display(),
                         error = %e,
                         "could not read PNG dimensions — falling back to metadata origin"
                     );
@@ -311,7 +260,7 @@ impl AssetResolver {
             debug!(
                 depot,
                 root = %root.display(),
-                image = %image_name,
+                image = %renders.image_name,
                 ext = model.extended_model_id,
                 png_width,
                 png_height,
@@ -321,15 +270,16 @@ impl AssetResolver {
             // Only keyboards paint the inter-key glow, and the runtime
             // fallback decodes the full render — don't pay that for mice.
             let glow = (kind == Some(DeviceKind::Keyboard))
-                .then(|| self::glow::resolve_glow_geometry(&dir, &image_path))
+                .then(|| self::glow::resolve_glow_geometry(&dir, &renders.image_path))
                 .flatten()
                 .map(Arc::new);
             return Some(ResolvedAsset {
                 depot: depot.to_string(),
                 display_name: entry.display_name.clone(),
                 kind,
-                image_path,
-                hero_image_path,
+                image_path: renders.image_path,
+                hero_image_path: renders.hero_image_path,
+                side_image_path: renders.side_image_path,
                 glow,
                 metadata,
                 png_width,
@@ -379,6 +329,7 @@ impl AssetResolver {
                 kind: DeviceKind::from_registry_type(&entry.kind),
                 image_path: image_path.clone(),
                 hero_image_path: Some(image_path),
+                side_image_path: None,
                 glow: None,
                 // Standalone-light rendering intentionally consumes only the
                 // verified front image; shared metadata remains for HID++
@@ -410,7 +361,10 @@ impl Default for AssetResolver {
 ///    `extended_model_id` (registry: `"2b042"`, device reports
 ///    `ext=01 + b042`). Safe in practice because Logitech reserves PID
 ///    ranges per product family.
-/// 4. Firmware `codename` ↔ registry `displayName` (exact, case-insensitive).
+/// 4. Shared-SKU PID → depot: later hardware revisions whose published
+///    `modelIds` omit them (G502 Spectrum `c332` / Hero `c08b` →
+///    `g502_core`).
+/// 5. Firmware `codename` ↔ registry `displayName` (exact, case-insensitive).
 ///    Last resort for devices whose live PID is absent from the registry
 ///    under every transport — e.g. an MX Master 3S over BTLE reports model
 ///    id `b034`, but the registry keys the 3S as `2b043`; only the name
@@ -438,6 +392,22 @@ pub(crate) fn resolve_in_index<'a>(
     if let Some(hit) = suffix.iter().find_map(|m| index.find_by_model_id_suffix(m)) {
         debug!(depot = hit.0, "asset matched via bolt-pid suffix fallback");
         return Some(hit);
+    }
+
+    // Shared-SKU fallback: later hardware revisions (G502 Spectrum /
+    // Hero) live in an earlier SKU's depot whose published `modelIds`
+    // omit them.
+    for id in model.model_ids.iter().copied().filter(|&id| id != 0) {
+        if let Some(depot) = openlogi_assets::shared_depot_for_pid(id)
+            && let Some(entry) = index.devices.get(depot)
+        {
+            debug!(
+                depot,
+                pid = format_args!("{id:04x}"),
+                "asset matched via shared-SKU PID"
+            );
+            return Some((depot, entry));
+        }
     }
 
     // Last resort: bridge by firmware codename ↔ registry displayName.
@@ -553,6 +523,136 @@ mod tests {
         let index = legacy_mx_master_3s_index();
         let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
         assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
+
+    fn g502_core_entry() -> DeviceEntry {
+        DeviceEntry {
+            model_id: "c07d".to_string(),
+            model_ids: vec!["c07d".into()],
+            display_name: "G502".to_string(),
+            kind: "MOUSE".to_string(),
+            asset_path: "v1/devices/g502_core/".to_string(),
+            files: Vec::new(),
+        }
+    }
+
+    fn g502_spectrum_model() -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 0,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports {
+                usb: true,
+                ..Default::default()
+            },
+            model_ids: [0xc332, 0, 0],
+            extended_model_id: 0,
+        }
+    }
+
+    #[test]
+    fn spectrum_pid_resolves_g502_core_depot() {
+        // Published index lists only Proteus Core `c07d`; the live Spectrum
+        // reports USB/HID++ PID `c332`. Shared-SKU matching bridges it.
+        let index = index_of("g502_core", g502_core_entry());
+        let hit = resolve_in_index(&index, &g502_spectrum_model(), None);
+        assert_eq!(hit.map(|(depot, _)| depot), Some("g502_core"));
+    }
+
+    #[test]
+    fn spectrum_pid_does_not_need_the_usb_product_string() {
+        // The OS product string is "Tunable RGB Gaming Mouse G502", which
+        // does not equal the registry displayName "G502". PID matching
+        // must succeed without that last-resort name bridge.
+        let index = index_of("g502_core", g502_core_entry());
+        assert!(
+            resolve_in_index(
+                &index,
+                &g502_spectrum_model(),
+                Some("Tunable RGB Gaming Mouse G502")
+            )
+            .is_some()
+        );
+        let no_alias = index_of("g502_wireless", {
+            let mut e = g502_core_entry();
+            e.model_id = "407f".into();
+            e.model_ids = vec!["407f".into()];
+            e.display_name = "G502 Lightspeed".into();
+            e
+        });
+        assert!(
+            resolve_in_index(&no_alias, &g502_spectrum_model(), None).is_none(),
+            "c332 must not land on a different G502 depot"
+        );
+    }
+
+    #[test]
+    fn spectrum_load_picks_named_variant_art_and_metadata() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = "g502_core";
+        let dir = root.path().join(depot);
+        std::fs::create_dir_all(&dir).expect("create depot dir");
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{
+              "devices": [
+                {"modelId":"g502_core","resources":[
+                  {"key":"device_image","src":"front_core.png"},
+                  {"key":"device_side","src":"side_core.png"},
+                  {"key":"image_metadata","src":"core_metadata.json"}
+                ]},
+                {"modelId":"g502_spectrum","resources":[
+                  {"key":"device_image","src":"front_spectrum.png"},
+                  {"key":"device_side","src":"side_spectrum.png"},
+                  {"key":"image_metadata","src":"spectrum_metadata.json"}
+                ]}
+              ]
+            }"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            dir.join("spectrum_metadata.json"),
+            r#"{"images":[{"key":"device_image","origin":{"width":10,"height":20}},
+                          {"key":"device_side","origin":{"width":8,"height":20},
+                           "assignments":[{"slotId":"g502_spectrum_g4_m1",
+                                           "marker":{"x":1,"y":1},"label":{"x":0,"y":0}}]}]}"#,
+        )
+        .expect("write spectrum metadata");
+        std::fs::write(dir.join("core_metadata.json"), r#"{"images":[]}"#)
+            .expect("write core metadata");
+        std::fs::write(dir.join("front_spectrum.png"), png_header(10, 20))
+            .expect("write spectrum front");
+        std::fs::write(dir.join("side_spectrum.png"), png_header(8, 20))
+            .expect("write spectrum side");
+        std::fs::write(dir.join("front_core.png"), png_header(11, 21)).expect("write core front");
+
+        let resolver = AssetResolver {
+            read_roots: vec![root.path().to_path_buf()],
+            write_root: root.path().to_path_buf(),
+            has_bundle: false,
+            index: Some(index_of(depot, g502_core_entry())),
+        };
+        let asset = resolver
+            .resolve(&g502_spectrum_model(), None)
+            .expect("Spectrum should resolve against the Core depot");
+        assert_eq!(asset.display_name, "G502");
+        assert_eq!(
+            asset.image_path.file_name().expect("front name"),
+            "front_spectrum.png"
+        );
+        assert_eq!(
+            asset
+                .side_image_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .expect("side name"),
+            "side_spectrum.png"
+        );
+        assert_eq!(
+            asset.metadata.images[0].key, "device_image",
+            "Spectrum metadata, not Core"
+        );
+        assert_eq!(asset.metadata.assignments().count(), 1);
     }
 
     fn bare_model() -> DeviceModelInfo {

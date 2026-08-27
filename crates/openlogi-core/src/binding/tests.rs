@@ -333,6 +333,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "CycleOnboardProfile",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -347,12 +348,14 @@ fn persisted_action_variant_names_are_stable() {
         "MuteVolume",
         "NewTab",
         "NextDesktop",
+        "NextDpiPreset",
         "NextTab",
         "NextTrack",
         "None",
         "OpenApplication",
         "Paste",
         "PlayPause",
+        "PrevDpiPreset",
         "PrevTab",
         "PrevTrack",
         "PreviousDesktop",
@@ -446,6 +449,9 @@ fn category_mouse_variants() {
 #[test]
 fn category_dpi_variants() {
     assert_eq!(Action::CycleDpiPresets.category(), Category::Dpi);
+    assert_eq!(Action::NextDpiPreset.category(), Category::Dpi);
+    assert_eq!(Action::PrevDpiPreset.category(), Category::Dpi);
+    assert_eq!(Action::CycleOnboardProfile.category(), Category::Dpi);
     assert_eq!(Action::ToggleSmartShift.category(), Category::Dpi);
 }
 

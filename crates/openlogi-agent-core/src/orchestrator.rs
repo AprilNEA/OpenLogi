@@ -826,6 +826,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_fn_locks();
+        self.apply_onboard_profiles();
         self.reapply_light_settings();
     }
 
@@ -844,6 +845,35 @@ impl Orchestrator {
                     fn_lock,
                 );
             }
+        }
+    }
+
+    /// Push committed button bindings into G-series onboard flash (`0x8100`).
+    /// Only stored overrides are written, so a first connect leaves firmware
+    /// mappings intact. MX-class mice lack the feature and skip the write.
+    fn apply_onboard_profiles(&self) {
+        for dev in self.devices.iter().filter(|dev| {
+            dev.online
+                && matches!(dev.kind, DeviceKind::Mouse | DeviceKind::Trackball)
+                && dev.capabilities.is_some_and(|caps| caps.buttons)
+        }) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let stored = self
+                .config
+                .effective_bindings(&dev.config_key, self.current_app.as_deref());
+            if stored.is_empty() {
+                continue;
+            }
+            let bindings = stored
+                .into_iter()
+                .map(|(button, binding)| (button, binding.click_action()))
+                .collect();
+            crate::hardware::apply_onboard_bindings_in_background(
+                self.shared.device(&route),
+                bindings,
+            );
         }
     }
 

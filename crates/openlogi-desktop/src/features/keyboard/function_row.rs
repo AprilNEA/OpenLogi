@@ -1385,6 +1385,7 @@ mod tests {
             .iter()
             .map(|x| Assignment {
                 slot_name: String::new(),
+                slot_id: String::new(),
                 marker: Point { x: *x, y: marker_y },
                 label: Direction { x: -1, y: -1 },
             })
@@ -1408,6 +1409,7 @@ mod tests {
             },
             png_width: png.0,
             png_height: png.1,
+            side_image_path: None,
         }
     }
 
@@ -1418,6 +1420,7 @@ mod tests {
             kind: Some(DeviceKind::Keyboard),
             image_path: PathBuf::from("/tmp/mx-keys.png"),
             hero_image_path: None,
+            side_image_path: None,
             glow: None,
             metadata: Metadata {
                 images: vec![
@@ -1450,6 +1453,7 @@ mod tests {
             .enumerate()
             .map(|(idx, x)| Assignment {
                 slot_name: format!("slot-{idx}"),
+                slot_id: String::new(),
                 marker: Point { x: *x, y: 13.0 },
                 label: Direction { x: -1, y: -1 },
             })

@@ -101,7 +101,7 @@ pub fn load_registry(source: Option<AssetSource>) -> Result<AssetRegistry> {
     // `ext = 0` gets its base PNG.
     if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
         && let Some(entry) = registry.index().devices.get(&forced).cloned()
-        && let Err(e) = sync_depot(registry.client(), &cache_root, &forced, &entry, 0)
+        && let Err(e) = sync_depot(registry.client(), &cache_root, &forced, &entry, 0, [0; 3])
     {
         warn!(depot = %forced, error = %e, "forced depot sync failed");
     }
@@ -121,13 +121,13 @@ pub fn sync_target(registry: &AssetRegistry, target: &AssetTarget) -> Result<()>
     let resolved = match target {
         AssetTarget::Hidpp { model, codename } => {
             super::resolve_in_index(index, model, codename.as_deref())
-                .map(|(depot, entry)| (depot, entry, model.extended_model_id))
+                .map(|(depot, entry)| (depot, entry, model.extended_model_id, model.model_ids))
         }
         AssetTarget::Standalone { registry_model_id } => index
             .find_by_model_id(registry_model_id)
-            .map(|(depot, entry)| (depot, entry, 0)),
+            .map(|(depot, entry)| (depot, entry, 0, [0; 3])),
     };
-    let Some((depot, entry, ext)) = resolved else {
+    let Some((depot, entry, ext, hidpp_pids)) = resolved else {
         if let AssetTarget::Standalone { registry_model_id } = target {
             info!(
                 registry_model_id,
@@ -138,8 +138,15 @@ pub fn sync_target(registry: &AssetRegistry, target: &AssetTarget) -> Result<()>
         }
         return Ok(());
     };
-    sync_depot(registry.client(), &cache_root, depot, entry, ext)
-        .with_context(|| format!("sync depot {depot}"))
+    sync_depot(
+        registry.client(),
+        &cache_root,
+        depot,
+        entry,
+        ext,
+        hidpp_pids,
+    )
+    .with_context(|| format!("sync depot {depot}"))
 }
 
 fn sync_depot(
@@ -148,6 +155,7 @@ fn sync_depot(
     depot: &str,
     entry: &DeviceEntry,
     ext: u8,
+    hidpp_pids: [u16; 3],
 ) -> Result<()> {
     let dir = http::safe_component_path(cache_root, depot, "asset depot")?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -169,26 +177,35 @@ fn sync_depot(
         warn!(depot, error = %e, "buttons render fetch failed");
     }
 
-    // Optional second pass: download the manifest-mapped render PNGs — the
-    // colour variant matching the device's `extended_model_id` for the front
-    // (gallery) and side / buttons (mouse-model) views, plus the camera hero
-    // (`device_camera_image` — camera depots ship no bare `front*.png`, so the
-    // baseline fetch above brings no render for them at all). Failure is
-    // non-fatal — `AssetResolver.load_files` falls back to whatever landed.
+    // Optional second pass: download the manifest-mapped render PNGs and
+    // variant metadata. G-series payloads key SKU / colourways on the
+    // depot name (`g502_spectrum`, `g513_ext5`) rather than the hex PID
+    // the index lists — `variant_lookup_ids` tries those first.
+    // Failure is non-fatal — `AssetResolver.load_files` falls back to
+    // whatever landed. Camera depots ship no bare `front*.png`, so the
+    // baseline fetch above brings no render for them at all.
     let manifest_path = dir.join("manifest.json");
+    let index_ids: Vec<&str> = entry.model_id_candidates().collect();
+    let lookup_ids = openlogi_assets::variant_lookup_ids(depot, &index_ids, &hidpp_pids, ext);
     for resource_key in [
         "device_image",
         "device_buttons_image",
+        "device_side",
         "device_camera_image",
+        "image_metadata",
     ] {
-        let Some(variant) =
-            pick_variant_filename(&manifest_path, &entry.model_id, ext, resource_key)
-        else {
+        let Some(variant) = pick_variant_filename(&manifest_path, &lookup_ids, resource_key) else {
             continue;
         };
         if matches!(
             variant.as_str(),
-            "front_core.png" | "front.png" | "side_core.png" | "side.png"
+            "front_core.png"
+                | "front.png"
+                | "side_core.png"
+                | "side.png"
+                | "core_metadata.json"
+                | "metadata.json"
+                | "metadata_full.json"
         ) {
             continue;
         }
@@ -224,16 +241,13 @@ fn fetch_to_cache(
     Ok(())
 }
 
-/// Parse a freshly-downloaded `manifest.json` and resolve the colour
-/// variant filename for `resource_key` (e.g. `"device_image"` or
-/// `"device_camera_image"`). `ext == 0` resolves the base-model entry —
-/// needed for depots whose base render isn't a baseline `front*.png` (the
-/// caller's skip list keeps already-fetched baseline names from re-fetching).
-/// `None` when the manifest is missing, malformed, or lacks the variant.
+/// Parse a freshly-downloaded `manifest.json` and resolve the colour /
+/// SKU variant filename for `resource_key`. `lookup_ids` is most-specific
+/// first (named SKU, depot name + ext, index PID + ext). `None` when the
+/// manifest is missing, malformed, or lacks that resource on every id.
 fn pick_variant_filename(
     manifest_path: &Path,
-    base_model_id: &str,
-    ext: u8,
+    lookup_ids: &[String],
     resource_key: &str,
 ) -> Option<String> {
     if !manifest_path.exists() {
@@ -243,7 +257,7 @@ fn pick_variant_filename(
         .map_err(|e| warn!(error = %e, path = %manifest_path.display(), "manifest unreadable"))
         .ok()?;
     manifest
-        .resource_for_variant(base_model_id, ext, resource_key)
+        .resource_for_first(lookup_ids, resource_key)
         .map(str::to_string)
 }
 

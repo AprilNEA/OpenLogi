@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
@@ -9,15 +10,16 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, h_flex,
+    Icon, IconName, Selectable as _, h_flex,
     input::{InputEvent, InputState},
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
-    LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
-    asset_hotspots_for_png, default_labels, labels_from_hotspots,
+    LABEL_H, LabelDistribution, asset_dimensions, asset_dimensions_for_png,
+    asset_has_button_labels, asset_hotspots_for_image, asset_hotspots_for_png, default_labels,
+    labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
@@ -29,6 +31,7 @@ use crate::features::profiles::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
+use crate::ui::components::control_button;
 use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 
 const SIDE_GAP: f32 = 24.;
@@ -126,6 +129,8 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    /// G-series depots split thumb buttons onto `device_side`.
+    show_side: bool,
     _state_obs: Subscription,
 }
 
@@ -165,6 +170,7 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            show_side: false,
             _state_obs: state_obs,
         }
     }
@@ -193,6 +199,7 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
+        self.show_side = false;
     }
 
     fn select(&mut self, control: MouseControlId) {
@@ -227,6 +234,10 @@ fn set_control_hovered(
 }
 
 impl Render for MouseModelView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one screen: model canvas, optional Top/Side toggle, inspector"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::components::localize_placeholder(
             &self.action_search,
@@ -268,7 +279,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, thumbwheel, self.show_side);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -279,7 +290,8 @@ impl Render for MouseModelView {
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, glow);
+        let breathing_art =
+            breathing_art(asset, mouse_left, mouse_w, mouse_h, glow, self.show_side);
         let model = ModelRect {
             left: mouse_left,
             width: mouse_w,
@@ -313,6 +325,14 @@ impl Render for MouseModelView {
             }))
             .child(hotspots_layer);
 
+        let has_side = asset.is_some_and(has_g_series_side);
+        let show_side = self.show_side;
+        let canvas_stack = v_flex()
+            .items_center()
+            .gap_2()
+            .when(has_side, |this| this.child(view_toggle(show_side, &view)))
+            .child(canvas);
+
         let inspector = binding_inspector(
             BindingInspectorData {
                 selected: self.selected,
@@ -327,7 +347,7 @@ impl Render for MouseModelView {
             &view,
             cx,
         );
-        workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
+        workspace_layout(canvas_stack, profile_status, inspector, &self.focus_handle)
     }
 }
 
@@ -384,6 +404,7 @@ fn model_layout(
     viewport_w: f32,
     viewport_h: f32,
     thumbwheel: bool,
+    show_side: bool,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -401,8 +422,14 @@ fn model_layout(
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
+        asset,
+        target_h,
+        max_image_w,
+        thumbwheel,
+        label_distribution,
+        show_side,
+    );
     if !has_labels {
         labels.clear();
     }
@@ -427,10 +454,19 @@ fn scaled_model(
     max_w: f32,
     thumbwheel: bool,
     label_distribution: LabelDistribution,
+    show_side: bool,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
-        let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let side = show_side.then(|| g_series_side_render(a)).flatten();
+        let (w, h, hotspots) = if let Some((_, png_w, png_h)) = side {
+            let (w, h) = asset_dimensions(png_w, png_h, target_h, max_w);
+            let hotspots = asset_hotspots_for_image(a, w, h, "device_side", png_w, png_h);
+            (w, h, hotspots)
+        } else {
+            let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
+            let hotspots = asset_hotspots_for_png(a, w, h);
+            (w, h, hotspots)
+        };
         let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
@@ -495,12 +531,17 @@ fn breathing_art(
     mouse_w: f32,
     mouse_h: f32,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
+    show_side: bool,
 ) -> impl IntoElement {
     let device_art: AnyElement = match asset {
-        Some(a) => img(a.image_path.clone())
-            .w(px(mouse_w))
-            .h(px(mouse_h))
-            .into_any_element(),
+        Some(a) => {
+            let path = if show_side {
+                g_series_side_render(a).map_or_else(|| a.image_path.clone(), |(path, _, _)| path)
+            } else {
+                a.image_path.clone()
+            };
+            img(path).w(px(mouse_w)).h(px(mouse_h)).into_any_element()
+        }
         None => Silhouette {
             w: mouse_w,
             h: mouse_h,
@@ -521,6 +562,58 @@ fn breathing_art(
             this.child(glow_canvas(geom, color))
         })
         .child(device_art)
+}
+
+fn has_g_series_side(asset: &ResolvedAsset) -> bool {
+    g_series_side_render(asset).is_some()
+}
+
+fn g_series_side_render(asset: &ResolvedAsset) -> Option<(PathBuf, u32, u32)> {
+    asset.metadata.assignments_on("device_side").next()?;
+    if let Some(path) = asset.side_image_path.as_ref()
+        && let Ok((width, height)) = crate::services::assets::read_png_dimensions(path)
+    {
+        return Some((path.clone(), width, height));
+    }
+    let parent = asset.image_path.parent()?;
+    for name in ["side_spectrum.png", "side_core.png", "side.png"] {
+        let path = parent.join(name);
+        if path.exists()
+            && let Ok((width, height)) = crate::services::assets::read_png_dimensions(&path)
+        {
+            return Some((path, width, height));
+        }
+    }
+    None
+}
+
+fn view_toggle(show_side: bool, view: &Entity<MouseModelView>) -> impl IntoElement {
+    let front_view = view.clone();
+    let side_view = view.clone();
+    h_flex()
+        .gap_1()
+        .child(
+            control_button("mouse-view-top")
+                .label(tr!("Top"))
+                .selected(!show_side)
+                .on_click(move |_, _, cx| {
+                    front_view.update(cx, |this, cx| {
+                        this.show_side = false;
+                        cx.notify();
+                    });
+                }),
+        )
+        .child(
+            control_button("mouse-view-side")
+                .label(tr!("Side"))
+                .selected(show_side)
+                .on_click(move |_, _, cx| {
+                    side_view.update(cx, |this, cx| {
+                        this.show_side = true;
+                        cx.notify();
+                    });
+                }),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -1019,8 +1112,10 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+        let (_, _, without, _) =
+            scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly, false);
+        let (_, _, with, _) =
+            scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly, false);
         assert_eq!(
             without
                 .iter()

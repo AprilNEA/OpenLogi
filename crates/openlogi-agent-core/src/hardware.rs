@@ -17,9 +17,11 @@
 //! at the cadence these fire at (≤ once per slider release / button press)
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
+use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ScrollResolution,
@@ -251,6 +253,35 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
             Err(_) => warn!(
                 index,
                 "Fn-lock write timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
+}
+
+/// Write the effective button map into a G-series mouse's `0x8100` onboard
+/// profile. Mice without that feature fail with `FeatureUnsupported`, which
+/// is expected and logged at debug.
+pub fn apply_onboard_bindings_in_background(
+    op: DeviceOp<'_>,
+    bindings: BTreeMap<ButtonId, Action>,
+) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "onboard profiles",
+        move |shared| async move {
+            openlogi_hid::apply_onboard_button_bindings_on(&shared, &bindings).await
+        },
+        move |result| match result {
+            Ok(Ok(())) => debug!(index, "onboard profile buttons written"),
+            Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+                index,
+                feature = format_args!("{feature_hex:#06x}"),
+                "onboard profiles unsupported"
+            ),
+            Ok(Err(e)) => warn!(error = ?e, "onboard profile write failed"),
+            Err(_) => warn!(
+                index,
+                "onboard profile write timed out (device asleep/unresponsive)"
             ),
         },
     );

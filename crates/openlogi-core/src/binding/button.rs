@@ -73,17 +73,21 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
-    ///
-    /// Declared last: the TOML config and any serialized form encode the
-    /// variant identifier / index, so new buttons are append-only.
     WheelTiltRight,
+    /// DPI-up / G7 on G-series onboard-profile mice. Appended: serde variant
+    /// index is the IPC/config encoding, so new buttons are append-only.
+    DpiUp,
+    /// DPI-down / G8 on G-series onboard-profile mice.
+    DpiDown,
+    /// Onboard profile cycle / G9 on G-series mice.
+    ProfileCycle,
 }
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
     /// trigger list.
-    pub const ALL: [ButtonId; 13] = [
+    pub const ALL: [ButtonId; 16] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -92,6 +96,9 @@ impl ButtonId {
         ButtonId::Back,
         ButtonId::Forward,
         ButtonId::DpiToggle,
+        ButtonId::DpiUp,
+        ButtonId::DpiDown,
+        ButtonId::ProfileCycle,
         ButtonId::Thumbwheel,
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
@@ -152,6 +159,9 @@ impl ButtonId {
             ButtonId::Back => "Back",
             ButtonId::Forward => "Forward",
             ButtonId::DpiToggle => "DPI Toggle",
+            ButtonId::DpiUp => "DPI Up",
+            ButtonId::DpiDown => "DPI Down",
+            ButtonId::ProfileCycle => "Profile Cycle",
             ButtonId::Thumbwheel => "Thumb Wheel",
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",

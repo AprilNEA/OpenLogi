@@ -15,6 +15,7 @@ pub mod http;
 pub mod index;
 pub mod manifest;
 pub mod metadata;
+mod skus;
 mod source;
 
 pub use error::AssetError;
@@ -25,4 +26,5 @@ pub use index::{
 };
 pub use manifest::{DepotManifest, ManifestDevice, ManifestResource, variant_model_id};
 pub use metadata::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
+pub use skus::{named_variant_for_pid, shared_depot_for_pid, variant_lookup_ids};
 pub use source::{AssetRegistry, AssetSource};

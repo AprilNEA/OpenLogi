@@ -112,17 +112,20 @@ impl DeviceEntry {
     }
 
     /// Baseline files both syncs fetch per depot: hotspot metadata (either
-    /// schema), the manifest, and the hero render (either schema). A slot
-    /// the depot doesn't ship is skipped — a camera/receiver depot with no
-    /// metadata or render contributes just the manifest, if even that.
+    /// schema), the manifest, the hero render, and the side/buttons render
+    /// when the depot ships one (G-series mice put thumb buttons on
+    /// `device_side`). A slot the depot doesn't ship is skipped — a
+    /// camera/receiver depot with no metadata or render contributes just
+    /// the manifest, if even that.
     #[must_use]
     pub fn baseline_files(&self) -> Vec<&'static str> {
-        let mut files = Vec::with_capacity(3);
+        let mut files = Vec::with_capacity(4);
         files.extend(self.preferred_file(&METADATA_FILES));
         if self.files.iter().any(|f| f.name == "manifest.json") {
             files.push("manifest.json");
         }
         files.extend(self.preferred_file(&FRONT_RENDER_FILES));
+        files.extend(self.preferred_file(&BUTTONS_RENDER_FILES));
         files
     }
 }
@@ -380,7 +383,7 @@ mod tests {
         let e = entry_with_files(&["metadata.json", "manifest.json", "front.png", "side.png"]);
         assert_eq!(
             e.baseline_files(),
-            ["metadata.json", "manifest.json", "front.png"]
+            ["metadata.json", "manifest.json", "front.png", "side.png"]
         );
         assert_eq!(e.preferred_file(&BUTTONS_RENDER_FILES), Some("side.png"));
     }

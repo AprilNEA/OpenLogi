@@ -178,6 +178,24 @@ pub async fn dump_reprog_controls(
     device::dump_reprog_controls(&*native_backend(), route).await
 }
 
+/// Dump HID++ `0x8100` onboard profiles of the device `route` reaches.
+pub async fn dump_onboard_profiles(
+    route: &DeviceRoute,
+) -> Result<device::OnboardProfilesDump, WriteError> {
+    device::dump_onboard_profiles(&*native_backend(), route).await
+}
+
+/// Write button bindings into the active onboard profile of `route`.
+pub async fn apply_onboard_button_bindings(
+    route: &DeviceRoute,
+    bindings: &std::collections::BTreeMap<
+        openlogi_core::binding::ButtonId,
+        openlogi_core::binding::Action,
+    >,
+) -> Result<(), WriteError> {
+    device::apply_onboard_button_bindings(&*native_backend(), route, bindings).await
+}
+
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await

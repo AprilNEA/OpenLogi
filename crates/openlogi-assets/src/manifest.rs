@@ -28,9 +28,14 @@
 //! }
 //! ```
 //!
-//! Only `device_image` is consumed today — that's the PNG the GUI
-//! renders. The rest of the schema is parsed permissively so additional
-//! fields don't break older clients.
+//! Callers resolve `device_image`, `device_buttons_image`, `device_side`,
+//! and `image_metadata`. The rest of the schema is parsed permissively so
+//! additional fields don't break older clients.
+//!
+//! Gaming-mouse manifests often key variants on the depot name
+//! (`g502_spectrum`, `g513_ext5`) rather than the hex PID the index lists.
+//! Use [`crate::variant_lookup_ids`] to build the candidate list, then
+//! [`DepotManifest::resource_for_first`].
 
 use std::path::Path;
 
@@ -101,6 +106,17 @@ impl DepotManifest {
         resource_key: &str,
     ) -> Option<&str> {
         self.resource_for(&variant_model_id(base_model_id, ext), resource_key)
+    }
+
+    /// First of `model_ids` that has `resource_key` in this manifest.
+    ///
+    /// G-series payloads try a named SKU, then the depot name, then the
+    /// index hex PID — see [`crate::variant_lookup_ids`].
+    #[must_use]
+    pub fn resource_for_first(&self, model_ids: &[String], resource_key: &str) -> Option<&str> {
+        model_ids
+            .iter()
+            .find_map(|id| self.resource_for(id, resource_key))
     }
 }
 
