@@ -319,6 +319,11 @@ impl From<PairingError> for PairingFailure {
             PairingError::Timeout => Self::Timeout,
             PairingError::Device(code) => Self::Device { code },
             PairingError::Cancelled => Self::Cancelled,
+            // The public agent API prevents this library-boundary rejection;
+            // retain the existing wire enum if an in-process caller violates it.
+            PairingError::UnsupportedCommand => Self::Hid {
+                message: "pairing command is not supported by the active receiver".into(),
+            },
             // Carried as the generic transport-failure message so the wire
             // format stays unchanged (PairingFailure variants are append-only).
             PairingError::MalformedNotification(what) => Self::Hid {
