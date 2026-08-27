@@ -307,12 +307,23 @@ async fn apply_color_rgb_effects(
     let mut params = [0u8; CLUSTER_EFFECT_PARAM_COUNT];
     params[..3].copy_from_slice(&[r, g, b]);
 
-    let mut written = 0u8;
+    let mut static_effects = Vec::with_capacity(usize::from(cluster_count));
     for cluster in 0..cluster_count {
         let Some(effect_index) = static_rgb_effect_index(feature, cluster).await? else {
             debug!(index, cluster, "0x8071 cluster has no static RGB effect");
-            continue;
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: RGB_EFFECTS_FEATURE,
+            });
         };
+        static_effects.push((cluster, effect_index));
+    }
+    if static_effects.is_empty() {
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: RGB_EFFECTS_FEATURE,
+        });
+    }
+
+    for (cluster, effect_index) in static_effects {
         feature
             .set_rgb_cluster_effect(
                 cluster,
@@ -323,17 +334,11 @@ async fn apply_color_rgb_effects(
             )
             .await
             .map_err(classify_rgb_lighting_error)?;
-        written = written.saturating_add(1);
         tokio::time::sleep(FRAME_GAP).await;
-    }
-    if written == 0 {
-        return Err(WriteError::FeatureUnsupported {
-            feature_hex: RGB_EFFECTS_FEATURE,
-        });
     }
     debug!(
         index,
-        cluster_count, written, r, g, b, "set colour via 0x8071 RGB effects"
+        cluster_count, r, g, b, "set colour via 0x8071 RGB effects"
     );
     Ok(())
 }

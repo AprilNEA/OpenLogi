@@ -475,10 +475,10 @@ async fn a_device_with_only_rgb_effects_can_be_coloured() -> Result<(), WriteErr
 }
 
 #[tokio::test]
-async fn rgb_effects_without_static_colour_fall_back_and_restore_control() -> Result<(), WriteError>
-{
+async fn partial_rgb_effect_support_falls_back_before_writing_and_restores_control()
+-> Result<(), WriteError> {
     let (raw, handle) =
-        ScriptedRawHidChannel::with_responder(rgb_effects_without_static_scripted_response);
+        ScriptedRawHidChannel::with_responder(partial_rgb_effects_scripted_response);
     let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
         channel,
@@ -500,6 +500,11 @@ async fn rgb_effects_without_static_colour_fall_back_and_restore_control() -> Re
     assert_eq!(control_writes.len(), 2);
     assert_eq!(&control_writes[0][5..7], &[1, 0]);
     assert_eq!(&control_writes[1][5..7], &[0, 0]);
+    assert!(
+        written
+            .iter()
+            .all(|report| { !(report.len() == 20 && report[2] == 0x08 && report[3] >> 4 == 0x01) })
+    );
     assert!(
         written
             .iter()
@@ -722,9 +727,9 @@ fn rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-/// A device whose 0x8071 clusters do not offer a static effect, but whose
-/// 0x8081 zones can still be painted by the automatic fallback.
-fn rgb_effects_without_static_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+/// A device whose first 0x8071 cluster offers a static effect and whose second
+/// does not. Its 0x8081 zones can still be painted by the automatic fallback.
+fn partial_rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
     }
@@ -752,11 +757,18 @@ fn rgb_effects_without_static_scripted_response(request: &[u8]) -> Option<Vec<u8
         (0x08, 0x00) => {
             payload[..3].copy_from_slice(&request[4..7]);
             match (request[4], request[5]) {
-                (0xff, 0xff) => payload[2] = 1,
-                (0, 0xff) => payload[4] = 1,
-                (0, 0) => payload[3] = 2,
+                (0xff, 0xff) => payload[2] = 2,
+                (0 | 1, 0xff) => payload[4] = 1,
+                (cluster @ (0 | 1), 0) => {
+                    let effect_id = u16::from(cluster == 0);
+                    payload[2..4].copy_from_slice(&effect_id.to_be_bytes());
+                }
                 _ => return None,
             }
+            true
+        }
+        (0x08, 0x01) => {
+            payload.copy_from_slice(&request[4..20]);
             true
         }
         (0x07, 0x00) => {
