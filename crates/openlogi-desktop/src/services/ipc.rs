@@ -13,7 +13,7 @@
 //! ask again with generation 0 and the next answer is the whole truth.
 //!
 //! What is left to time is failure. `launch::spawn_agent` brings the agent up
-//! when the socket stays down — gated by [`should_spawn`], which fires
+//! when the socket stays down — gated by [`SpawnReflex`], which fires
 //! immediately for an agent that was never reachable but gives a lost
 //! connection [`SPAWN_AFTER_LOSS`] first (the deliberate quits and the
 //! supervised restarts announce themselves within that window) and never
@@ -188,17 +188,8 @@ async fn observe_loop(
 ) {
     let mut client: Option<AgentClient> = None;
     // The agent is normally started by launchd, but the GUI brings it up when
-    // the socket is down (see `launch::spawn_agent`), gated by `should_spawn`.
-    let mut last_spawn_attempt: Option<Instant> = None;
-    // `Some(t)` while no usable connection exists (down since `t`, initially
-    // process start); `None` while connected. Times both the unreachable
-    // banner and the spawn reflex.
-    let mut down_since: Option<Instant> = Some(Instant::now());
-    let mut ever_connected = false;
-    // The last connect attempt found a live agent *newer* than this GUI:
-    // spawning cannot help (kickstart is a no-op on a running service and a
-    // fresh copy exits as a duplicate) — only a GUI relaunch does.
-    let mut agent_is_newer = false;
+    // the socket is down (see `launch::spawn_agent`), gated by the reflex.
+    let mut reflex = SpawnReflex::new(Instant::now());
     let mut notified_unreachable = false;
     let mut notified_outdated = false;
     // Generation 0 means "I have seen nothing", so the first answer is the
@@ -220,8 +211,7 @@ async fn observe_loop(
             // The poll answered: apply it and arm the next one. `pending` is
             // finished, so it is deliberately not handed back.
             Woken::Observed(Ok(observation)) => {
-                down_since = None;
-                ever_connected = true;
+                reflex.connected();
                 notified_unreachable = false;
                 notified_outdated = false;
                 if observation.generation != seen {
@@ -237,7 +227,7 @@ async fn observe_loop(
             Woken::Observed(Err(())) => {
                 client = None;
                 seen = 0;
-                down_since = Some(Instant::now());
+                reflex.lost(Instant::now());
             }
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             Woken::Command(Some(cmd)) => {
@@ -245,21 +235,17 @@ async fn observe_loop(
                 if handle(&mut client, update_tx, cmd).await.is_err() {
                     client = None;
                     seen = 0;
-                    if down_since.is_none() {
-                        down_since = Some(Instant::now());
-                    }
+                    reflex.lost(Instant::now());
                 }
             }
             Woken::Reconnect => match ensure(&mut client).await {
                 Ok(client) => {
-                    down_since = None;
-                    ever_connected = true;
-                    agent_is_newer = false;
+                    reflex.connected();
                     inflight = Some(observe(client, seen));
                 }
-                Err(ConnectFailure::Unreachable) => agent_is_newer = false,
+                Err(ConnectFailure::Unreachable) => reflex.agent_unreachable(),
                 Err(ConnectFailure::NewerAgent) => {
-                    agent_is_newer = true;
+                    reflex.newer_agent_running();
                     if !notified_outdated {
                         notified_outdated = true;
                         let _ = update_tx.send(GuiUpdate::OutdatedGui);
@@ -267,40 +253,109 @@ async fn observe_loop(
                 }
             },
         }
-        if let Some(down_at) = down_since {
-            if !notified_unreachable && down_at.elapsed() >= UNREACHABLE_AFTER {
+        let now = Instant::now();
+        if let Some(down_at) = reflex.down_since() {
+            if !notified_unreachable && now.saturating_duration_since(down_at) >= UNREACHABLE_AFTER
+            {
                 notified_unreachable = true;
                 let _ = update_tx.send(GuiUpdate::Unreachable);
             }
-            if should_spawn(
-                down_at.elapsed(),
-                ever_connected,
-                agent_is_newer,
-                last_spawn_attempt.map(|t| t.elapsed()),
-            ) {
+            if reflex.should_fire(now) {
                 spawn_agent();
-                last_spawn_attempt = Some(Instant::now());
+                reflex.fired(now);
             }
         }
     }
 }
 
-/// The spawn reflex's trigger rule — all timing, no I/O, so the tests can pin
-/// it. `down_for` is how long no usable connection has existed;
-/// `last_attempt` is the time since the reflex last fired, `None` for never.
-fn should_spawn(
-    down_for: Duration,
-    ever_connected: bool,
+/// The spawn reflex: what the loop knows about the agent link, and the rule
+/// for when `launch::spawn_agent` may fire — all timing, no I/O, driven by an
+/// explicit `now` so the tests can pin it.
+struct SpawnReflex {
+    link: Link,
+    /// The last connect attempt found a live agent *newer* than this GUI:
+    /// spawning cannot help (kickstart is a no-op on a running service and a
+    /// fresh copy exits as a duplicate) — only a GUI relaunch does.
     agent_is_newer: bool,
-    last_attempt: Option<Duration>,
-) -> bool {
-    if agent_is_newer {
-        return false;
+    last_fired: Option<Instant>,
+}
+
+/// The reflex's view of the agent link. `Cold` and `Lost` differ in who else
+/// might act: a connection that never existed has no first responder, while
+/// every cause of losing one has a better first responder than this GUI.
+enum Link {
+    /// A usable, version-matched connection exists.
+    Connected,
+    /// No connection has ever existed — down since process start.
+    Cold { since: Instant },
+    /// An established connection dropped at `since`: launchd's respawn, the
+    /// agent's self-exec, and the tray-Quit deep link all announce
+    /// themselves within [`SPAWN_AFTER_LOSS`].
+    Lost { since: Instant },
+}
+
+impl SpawnReflex {
+    fn new(now: Instant) -> Self {
+        Self {
+            link: Link::Cold { since: now },
+            agent_is_newer: false,
+            last_fired: None,
+        }
     }
-    if ever_connected && down_for < SPAWN_AFTER_LOSS {
-        return false;
+
+    fn connected(&mut self) {
+        self.link = Link::Connected;
+        self.agent_is_newer = false;
     }
-    last_attempt.is_none_or(|elapsed| elapsed >= SPAWN_RETRY_PERIOD)
+
+    /// An established connection dropped. A no-op while already down: the
+    /// original downtime keeps its start (and `Cold` stays cold — a
+    /// connection that came and went inside one command dispatch was never
+    /// established from the loop's point of view).
+    fn lost(&mut self, now: Instant) {
+        if matches!(self.link, Link::Connected) {
+            self.link = Link::Lost { since: now };
+        }
+    }
+
+    fn agent_unreachable(&mut self) {
+        self.agent_is_newer = false;
+    }
+
+    fn newer_agent_running(&mut self) {
+        self.agent_is_newer = true;
+    }
+
+    /// When the downtime started, `None` while connected — the unreachable
+    /// banner's clock.
+    fn down_since(&self) -> Option<Instant> {
+        match self.link {
+            Link::Connected => None,
+            Link::Cold { since } | Link::Lost { since } => Some(since),
+        }
+    }
+
+    /// The trigger rule: fire immediately while cold, wait out the first
+    /// responders after a loss, never at a newer agent, at most once per
+    /// [`SPAWN_RETRY_PERIOD`].
+    fn should_fire(&self, now: Instant) -> bool {
+        if self.agent_is_newer {
+            return false;
+        }
+        let waited = match self.link {
+            Link::Connected => return false,
+            Link::Cold { .. } => true,
+            Link::Lost { since } => now.saturating_duration_since(since) >= SPAWN_AFTER_LOSS,
+        };
+        waited
+            && self
+                .last_fired
+                .is_none_or(|t| now.saturating_duration_since(t) >= SPAWN_RETRY_PERIOD)
+    }
+
+    fn fired(&mut self, now: Instant) {
+        self.last_fired = Some(now);
+    }
 }
 
 /// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
@@ -615,40 +670,45 @@ mod tests {
 
     #[test]
     fn a_never_reached_agent_is_spawned_immediately() {
-        assert!(should_spawn(Duration::ZERO, false, false, None));
+        let t0 = Instant::now();
+        let reflex = SpawnReflex::new(t0);
+        assert!(reflex.should_fire(t0));
     }
 
     #[test]
     fn a_lost_connection_waits_out_the_first_responders() {
         // A supervised restart, a self-exec, or the quit deep link announce
         // themselves within the grace window; the reflex must not race them.
-        assert!(!should_spawn(Duration::from_millis(500), true, false, None));
-        assert!(should_spawn(SPAWN_AFTER_LOSS, true, false, None));
+        let t0 = Instant::now();
+        let mut reflex = SpawnReflex::new(t0);
+        reflex.connected();
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(120)));
+        reflex.lost(t0 + Duration::from_secs(120));
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(121)));
+        assert!(reflex.should_fire(t0 + Duration::from_secs(120) + SPAWN_AFTER_LOSS));
     }
 
     #[test]
     fn a_live_newer_agent_is_never_spawned_at() {
         // Kickstart would no-op and a fresh copy exits as a duplicate; only
         // relaunching the GUI helps, so firing is pure churn.
-        assert!(!should_spawn(Duration::from_secs(120), false, true, None));
-        assert!(!should_spawn(
-            Duration::from_secs(120),
-            true,
-            true,
-            Some(Duration::from_secs(120))
-        ));
+        let t0 = Instant::now();
+        let mut reflex = SpawnReflex::new(t0);
+        reflex.newer_agent_running();
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(120)));
+        // The newer agent going away (it was quit or replaced) re-arms the
+        // reflex on the next failed attempt.
+        reflex.agent_unreachable();
+        assert!(reflex.should_fire(t0 + Duration::from_secs(120)));
     }
 
     #[test]
     fn retries_are_rate_limited() {
-        let recent = Some(Duration::from_secs(29));
-        assert!(!should_spawn(Duration::from_secs(120), true, false, recent));
-        assert!(should_spawn(
-            Duration::from_secs(120),
-            true,
-            false,
-            Some(SPAWN_RETRY_PERIOD),
-        ));
+        let t0 = Instant::now();
+        let mut reflex = SpawnReflex::new(t0);
+        reflex.fired(t0);
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(29)));
+        assert!(reflex.should_fire(t0 + SPAWN_RETRY_PERIOD));
     }
 
     #[test]
