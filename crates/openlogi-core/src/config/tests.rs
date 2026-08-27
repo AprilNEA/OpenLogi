@@ -1848,6 +1848,93 @@ Forward = "BrowserForward"
 }
 
 #[test]
+fn loading_hand_edited_duplicate_routes_keeps_the_first_device_key() {
+    let source = r#"
+schema_version = 6
+selected_device = "unit:ffffffff"
+
+[devices.keyboard]
+host_switch_targets = ["unit:ffffffff"]
+
+[devices."unit:11111111".links."receiver:82839805:slot:1".overrides]
+dpi = 800
+
+[devices."unit:ffffffff".links."receiver:82839805:slot:1".overrides]
+dpi = 1600
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, source).expect("write hand-edited config");
+
+    let config = Config::load_from_path(&path).expect("load");
+
+    assert_eq!(
+        config.devices["unit:11111111"].links["receiver:82839805:slot:1"]
+            .overrides
+            .dpi,
+        Some(Dpi::new(800)),
+        "the lexicographically first device key keeps its complete link"
+    );
+    assert!(
+        !config.devices["unit:ffffffff"]
+            .links
+            .contains_key("receiver:82839805:slot:1"),
+        "the later duplicate no longer indexes the route"
+    );
+    assert_eq!(config.selected_device.as_deref(), Some("unit:ffffffff"));
+    assert_eq!(
+        config.devices["keyboard"].host_switch_targets,
+        vec!["unit:ffffffff".to_string()],
+        "repairing an index does not rename the referenced device entry"
+    );
+}
+
+#[test]
+fn loading_v4_repairs_duplicate_routes_created_by_key_migration() {
+    let source = r#"
+schema_version = 4
+selected_device = "direct:046d:c08d:unit:11111111"
+
+[devices.keyboard]
+host_switch_targets = ["direct:046d:c08d:unit:11111111"]
+
+[devices."direct:046d:c08d:unit:11111111"]
+dpi = 1600
+
+[devices."unit:ffffffff".links."direct:046d:c08d".overrides]
+dpi = 800
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, source).expect("write v4 config");
+
+    let config = Config::load_from_path(&path).expect("load and migrate");
+
+    assert!(
+        config.devices["unit:11111111"]
+            .links
+            .contains_key("direct:046d:c08d"),
+        "the first post-migration device key owns the route"
+    );
+    assert!(
+        !config.devices["unit:ffffffff"]
+            .links
+            .contains_key("direct:046d:c08d"),
+        "the pre-existing duplicate is removed"
+    );
+    assert_eq!(
+        config.selected_device.as_deref(),
+        Some("unit:11111111"),
+        "selection follows the migrated device key"
+    );
+    assert_eq!(
+        config.devices["keyboard"].host_switch_targets,
+        vec!["unit:11111111".to_string()],
+        "host-switch references follow the migrated device key"
+    );
+}
+
+#[test]
 fn an_empty_link_table_survives_a_save_and_reload() {
     // The set of `links` keys *is* the route index — the only thing that can
     // identify a sleeping device from its route alone. A link with nothing

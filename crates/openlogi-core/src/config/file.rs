@@ -273,6 +273,7 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 4 {
         config.migrate_transport_scoped_keys();
     }
+    config.repair_duplicate_routes();
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
 }

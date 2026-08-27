@@ -44,6 +44,42 @@ pub fn canonical_device_key(
 }
 
 impl Config {
+    /// Restore the route index's one-owner invariant after loading and schema
+    /// migration.
+    ///
+    /// A hand-edited file can put one route in several entries, and a key
+    /// migration can add a link that an existing entry already claims. Device
+    /// keys are stored in a [`BTreeMap`](std::collections::BTreeMap), so the
+    /// lexicographically first key keeps its complete
+    /// [`LinkConfig`](crate::config::LinkConfig) and later claims are removed.
+    /// This matches the owner an ambiguous index resolved
+    /// to before the repair, when [`Self::resolve_device_key`] used the first
+    /// matching map entry.
+    ///
+    /// Only the route index is repaired. Device entries are neither renamed
+    /// nor consumed, so [`Self::selected_device`] and
+    /// [`DeviceConfig::host_switch_targets`] keep referring to the same
+    /// physical configuration entries.
+    #[cfg(feature = "fs")]
+    pub(super) fn repair_duplicate_routes(&mut self) {
+        let mut owners = std::collections::BTreeMap::<String, String>::new();
+        for (device_key, device) in &mut self.devices {
+            device.links.retain(|route_key, _| {
+                let Some(owner) = owners.get(route_key) else {
+                    owners.insert(route_key.clone(), device_key.clone());
+                    return true;
+                };
+                tracing::warn!(
+                    %route_key,
+                    %owner,
+                    duplicate_owner = %device_key,
+                    "route is indexed by multiple devices; keeping the first owner"
+                );
+                false
+            });
+        }
+    }
+
     /// The configuration key to *read and write* for a device reached by
     /// `stable`, given whatever `identity` the current probe could read.
     ///
