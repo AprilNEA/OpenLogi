@@ -1,5 +1,6 @@
 use super::*;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
+use hidpp::feature::hosts_info::{HostBusType, HostSlotStatus};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 
@@ -26,6 +27,34 @@ const TEST_TORQUE: TunableTorque = match TunableTorque::try_new(33) {
     Ok(value) => value,
     Err(_) => panic!("valid test SmartShift torque"),
 };
+
+#[test]
+fn host_diagnostics_preserve_known_protocol_values() {
+    assert_eq!(
+        DiagnosticHostSlotStatus::try_from(HostSlotStatus::Empty)
+            .expect("empty is a supported host-slot status"),
+        DiagnosticHostSlotStatus::Empty
+    );
+    assert_eq!(
+        DiagnosticHostSlotStatus::try_from(HostSlotStatus::Paired)
+            .expect("paired is a supported host-slot status"),
+        DiagnosticHostSlotStatus::Paired
+    );
+
+    for (wire, diagnostic) in [
+        (HostBusType::Undefined, DiagnosticHostBus::Undefined),
+        (HostBusType::Equad, DiagnosticHostBus::Equad),
+        (HostBusType::Usb, DiagnosticHostBus::Usb),
+        (HostBusType::Bt, DiagnosticHostBus::Bluetooth),
+        (HostBusType::Ble, DiagnosticHostBus::BluetoothLowEnergy),
+        (HostBusType::BlePro, DiagnosticHostBus::Bolt),
+    ] {
+        assert_eq!(
+            DiagnosticHostBus::try_from(wire).expect("known host bus must remain supported"),
+            diagnostic
+        );
+    }
+}
 
 #[test]
 fn smartshift_and_wheel_mode_byte_encodings_match() {

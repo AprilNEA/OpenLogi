@@ -24,8 +24,8 @@ use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, DiagnosticHosts, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform,
+    LightingMethod, LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 
 /// This host's HID stack.
@@ -162,6 +162,11 @@ pub async fn apply_litra(
 /// Walk the HID++ feature table of the device `route` reaches.
 pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
     device::dump_features(&*native_backend(), route).await
+}
+
+/// Read the Easy-Switch host table without changing the active host.
+pub async fn dump_hosts(route: &DeviceRoute) -> Result<DiagnosticHosts, WriteError> {
+    device::dump_hosts(&*native_backend(), route).await
 }
 
 /// Walk the firmware entities of the device `route` reaches.

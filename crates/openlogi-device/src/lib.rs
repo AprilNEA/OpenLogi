@@ -56,11 +56,12 @@ pub use session::keyboard::{
     KEYBOARD_KEY_CIDS, run_keyboard_capture_session, run_keyboard_capture_session_with_registry,
 };
 pub use write::{
-    Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
-    HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
-    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel,
-    ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError,
-    apply_litra, commands_for_light_settings, dump_features, dump_firmware_entities,
+    DiagnosticHostBus, DiagnosticHostSlot, DiagnosticHostSlotStatus, DiagnosticHosts, Dpi,
+    DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo, HapticWaveform,
+    HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID,
+    LightCommand, LightingMethod, LitraDescriptor, LitraModel, ReprogControlEntry,
+    ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError, apply_litra,
+    commands_for_light_settings, dump_features, dump_firmware_entities, dump_hosts,
     dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, find_litra, get_backlight,
     get_dpi, get_dpi_info, get_dpi_info_on, get_scroll_wheel_mode, get_scroll_wheel_mode_on,
     get_smartshift_status, get_smartshift_status_on, litra_model_for_route, matches_litra,

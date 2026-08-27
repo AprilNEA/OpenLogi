@@ -10,6 +10,7 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::hosts_info::{HostBusType, HostIndex, HostSlotStatus, HostsInfoFeature},
     feature::unified_battery::UnifiedBatteryFeature,
     protocol::v20::Hidpp20Error,
 };
@@ -43,6 +44,95 @@ pub struct ReprogControlEntry {
     pub task_id: u16,
     /// Capability and classification flags for the control.
     pub flags: CidFlags,
+}
+
+/// Pairing state of one Easy-Switch host slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticHostSlotStatus {
+    /// No host is paired in this slot.
+    Empty,
+    /// A host is paired in this slot.
+    Paired,
+}
+
+/// Wireless transport recorded for one Easy-Switch host slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticHostBus {
+    /// The device did not identify the transport.
+    Undefined,
+    /// Logitech eQuad / Unifying transport.
+    Equad,
+    /// Wired USB transport.
+    Usb,
+    /// Bluetooth Classic transport.
+    Bluetooth,
+    /// Bluetooth Low Energy transport.
+    BluetoothLowEnergy,
+    /// Bluetooth Low Energy Pro / Logi Bolt transport.
+    Bolt,
+}
+
+/// Read-only snapshot of one Easy-Switch host slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticHostSlot {
+    /// Zero-based slot index used by HID++ `ChangeHost`.
+    pub index: u8,
+    /// Whether a host is paired in the slot.
+    pub status: DiagnosticHostSlotStatus,
+    /// Transport associated with the pairing.
+    pub bus: DiagnosticHostBus,
+}
+
+/// Read-only snapshot of a device's Easy-Switch host table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticHosts {
+    /// Zero-based active host slot, when the device returned a concrete slot.
+    pub current_host: Option<u8>,
+    /// Every slot reported by the device.
+    pub slots: Vec<DiagnosticHostSlot>,
+}
+
+impl TryFrom<HostSlotStatus> for DiagnosticHostSlotStatus {
+    type Error = WriteError;
+
+    fn try_from(status: HostSlotStatus) -> Result<Self, Self::Error> {
+        match status {
+            HostSlotStatus::Empty => Ok(Self::Empty),
+            HostSlotStatus::Paired => Ok(Self::Paired),
+            _ => Err(unsupported_hosts_response()),
+        }
+    }
+}
+
+impl TryFrom<HostBusType> for DiagnosticHostBus {
+    type Error = WriteError;
+
+    fn try_from(bus: HostBusType) -> Result<Self, Self::Error> {
+        match bus {
+            HostBusType::Undefined => Ok(Self::Undefined),
+            HostBusType::Equad => Ok(Self::Equad),
+            HostBusType::Usb => Ok(Self::Usb),
+            HostBusType::Bt => Ok(Self::Bluetooth),
+            HostBusType::Ble => Ok(Self::BluetoothLowEnergy),
+            HostBusType::BlePro => Ok(Self::Bolt),
+            _ => Err(unsupported_hosts_response()),
+        }
+    }
+}
+
+fn current_host_slot(host: HostIndex) -> Result<Option<u8>, WriteError> {
+    match host {
+        HostIndex::Current => Ok(None),
+        HostIndex::Slot(slot) => Ok(Some(slot)),
+        _ => Err(unsupported_hosts_response()),
+    }
+}
+
+fn unsupported_hosts_response() -> WriteError {
+    WriteError::UnsupportedResponse {
+        operation: HidppOperation::DumpFeatures,
+        feature_hex: HostsInfoFeature::ID,
+    }
 }
 
 impl From<CidInfo> for ReprogControlEntry {
@@ -138,6 +228,43 @@ pub async fn dump_reprog_controls(
             entries.push(control.into());
         }
         Ok(entries)
+    })
+    .await
+}
+
+/// Read the Easy-Switch host table without changing the active host.
+pub async fn dump_hosts(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<DiagnosticHosts, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let hosts = open_feature::<HostsInfoFeature>(&mut device).await?;
+        let feature_info = hosts.get_feature_info().await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::DumpFeatures, HostsInfoFeature::ID)
+        })?;
+        let current_host = current_host_slot(feature_info.current_host)?;
+        let mut slots = Vec::with_capacity(usize::from(feature_info.host_count));
+        for slot in 0..feature_info.host_count {
+            let info = hosts
+                .get_host_info(HostIndex::Slot(slot))
+                .await
+                .map_err(|error| {
+                    classify_hidpp_error(error, HidppOperation::DumpFeatures, HostsInfoFeature::ID)
+                })?;
+            slots.push(DiagnosticHostSlot {
+                index: slot,
+                status: info.status.try_into()?,
+                bus: info.bus_type.try_into()?,
+            });
+        }
+        Ok(DiagnosticHosts {
+            current_host,
+            slots,
+        })
     })
     .await
 }
