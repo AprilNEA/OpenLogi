@@ -1,10 +1,12 @@
 //! Bringing the agent up when the socket is unreachable.
 //!
-//! On macOS a supervised-first cascade: `launchctl kickstart` the registered
-//! service, register it on demand when absent (registration *is* the
-//! supervised start), then the legacy direct-launch paths (`open -g -n` /
-//! `disclaim`) — a broken registration degrades instead of wedging the retry
-//! loop. Elsewhere only the direct launch exists.
+//! On macOS production is supervised-only: `launchctl kickstart` the
+//! registered service, register it on demand when absent (registration *is*
+//! the supervised start), and stop there — a login item the user switched
+//! off stays off, and a bundle whose registration fails needs its install
+//! fixed, not an unmanaged shadow agent. Only dev profiles (which never
+//! register) fall through to the direct launch (`open -g -n` / `disclaim`),
+//! which elsewhere is the only path.
 
 use std::path::PathBuf;
 
@@ -40,12 +42,10 @@ pub(super) fn spawn_agent() {
             return;
         }
         // Second rung: on a fresh install this reflex outruns the
-        // backgrounded startup ensure, and a direct launch would bring up an
-        // unmanaged agent that shadows the service all session (a
-        // same-version takeover never displaces it). Registering IS the
-        // supervised start; the re-run kickstart doubles as the "did it
-        // take?" check. Dev profiles never register implicitly (a login item
-        // into `target/` goes stale).
+        // backgrounded startup ensure — registering IS the supervised start,
+        // and the re-run kickstart doubles as the "did it take?" check. Dev
+        // profiles never register implicitly (a login item into `target/`
+        // goes stale).
         if !openlogi_core::paths::is_dev_profile() {
             match crate::platform::registration::ensure_registered() {
                 Ok(()) => {
@@ -57,6 +57,15 @@ pub(super) fn spawn_agent() {
                     warn!(error, "on-demand agent service registration failed");
                 }
             }
+            // Production stops here: the supervised rungs are the only
+            // launchers, so a Login Items disable is a real off switch and a
+            // failed registration is a broken install to fix, not something
+            // to shadow with an unmanaged agent that outlives this window.
+            warn!(
+                status = ?crate::platform::registration::status(),
+                "agent is not running and the supervised launch paths could not start it — leaving it down"
+            );
+            return;
         }
     }
     let Some(path) = agent_binary_path() else {

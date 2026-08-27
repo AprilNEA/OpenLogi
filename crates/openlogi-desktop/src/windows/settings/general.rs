@@ -14,7 +14,6 @@ pub(super) fn general_page(
     vertical_scroll_sensitivity_slider: Entity<SliderState>,
     thumbwheel_sensitivity_slider: Entity<SliderState>,
     registration_status: ServiceStatus,
-    launch_at_login: bool,
 ) -> SettingPage {
     let group = SettingGroup::new()
         .item(
@@ -64,7 +63,7 @@ pub(super) fn general_page(
     // the service until the user flips it back on there — surface it instead
     // of letting the switch above claim a state macOS is overriding.
     let group = if registration_status == ServiceStatus::RequiresApproval {
-        group.item(login_item_approval_notice(launch_at_login))
+        group.item(login_item_approval_notice())
     } else {
         group
     };
@@ -184,22 +183,16 @@ fn launch_at_login_item() -> SettingItem {
     })
 }
 
-/// The `RequiresApproval` notice. With launch-at-login on, the disable costs
-/// the login start and crash recovery; with it off, only crash recovery.
-fn login_item_approval_notice(launch_at_login: bool) -> SettingItem {
+/// The `RequiresApproval` notice: with the direct-launch fallback gone, the
+/// switched-off login item stops the agent entirely, whatever the preference.
+fn login_item_approval_notice() -> SettingItem {
     SettingItem::new(
         tr!("Login item disabled in System Settings"),
         SettingField::render(|_, _, cx| open_login_items_button(cx)),
     )
-    .description(if launch_at_login {
-        tr!(
-            "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery."
-        )
-    } else {
-        tr!(
-            "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore automatic crash recovery."
-        )
-    })
+    .description(tr!(
+        "macOS is blocking OpenLogi's background agent: its login item is switched off. The agent cannot run until you turn it back on under Login Items."
+    ))
 }
 
 /// Deep link to System Settings › Login Items — the only place that can
