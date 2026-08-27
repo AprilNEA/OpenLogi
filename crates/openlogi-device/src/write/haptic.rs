@@ -115,17 +115,17 @@ fn clear_cached_location() {
 /// Nothing else in the stack ever asserts this state — devices historically
 /// inherited it from Logi Options+, and some power transitions clear it, after
 /// which `play` calls are accepted but produce no physical feedback. Callers
-/// arm once per Actions Ring session, before the first hover.
+/// arm once per Actions Ring session, before the first hover — which is why
+/// this deliberately bypasses the cached location and re-resolves the
+/// feature: the cache key (channel identity + device index) cannot see a
+/// *different device* re-paired into the same receiver slot, so each session
+/// starts by overwriting the entry with a freshly-proven location, and the
+/// per-hover plays then reuse it for the session's lifetime.
 pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
-    let feature = if let Some(feature) = cached_feature(channel, index) {
-        feature
-    } else {
-        let (feature, feature_index) = feature_on_channel(channel, index).await?;
-        store_cached_location(channel, index, feature_index);
-        feature
-    };
+    let (feature, feature_index) = feature_on_channel(channel, index).await?;
+    store_cached_location(channel, index, feature_index);
     let config = feature.get_configuration().await.map_err(|error| {
         clear_cached_location();
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)

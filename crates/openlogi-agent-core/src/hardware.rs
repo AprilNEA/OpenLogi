@@ -560,9 +560,8 @@ mod tests {
         }
     }
 
-    /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`],
-    /// the same path `authoritative_channel` uses to clear the haptic feature
-    /// cache) and must never invoke `f` — a route that can't be resolved has no
+    /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`])
+    /// and must never invoke `f` — a route that can't be resolved has no
     /// channel to hand it, so running the caller's write would be a bug, not a
     /// no-op.
     #[tokio::test]
