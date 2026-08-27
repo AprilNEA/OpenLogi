@@ -28,7 +28,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
-| `openlogi-desktop/src/platform/login_item/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
+| `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
@@ -210,7 +210,7 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `CGGetActiveDisplayList` / `CGDisplayBounds` pair.
 - `desktop/platform/os.rs` — reading AppKit's `NSAppearanceName` statics to set
   `NSApp.appearance`.
-- `desktop/platform/login_item/macos.rs` — the `SMAppService` calls (all generated
+- `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
   bindings are `unsafe fn`s) and the `SMAppServiceErrorDomain` extern static.
   Together with `os.rs`, the GUI's entire `unsafe` surface.
 - `camera/{capture,uvc/iokit}.rs` — the AVFoundation capture FFI and the IOKit

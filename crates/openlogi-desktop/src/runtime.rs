@@ -120,7 +120,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
         #[cfg(target_os = "macos")]
-        reconcile_login_item_at_startup(cx);
+        ensure_registration_at_startup(cx);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
         let mut rt = Runtime::new(cams, sync_tx, swr);
@@ -172,10 +172,10 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
     .detach();
 }
 
-/// Ensure the agent's login-item service is registered, at startup: a fresh
+/// Ensure the agent's launchd service is registered, at startup: a fresh
 /// install registers on its first GUI launch, and an app update triggers the
 /// re-registration Apple requires for a changed executable (the
-/// version-marker check inside `login_item::ensure_registered`).
+/// version-marker check inside `registration::ensure_registered`).
 /// Registration is deliberately independent of `launch_at_login` — the
 /// preference is a config value the agent itself reads and acts on (keep
 /// working, or idle out), so there is no preference to capture here and no
@@ -188,14 +188,14 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
 /// build goes stale on the next `cargo clean`, so dev registration stays an
 /// explicit toggle in the dev GUI.
 #[cfg(target_os = "macos")]
-fn reconcile_login_item_at_startup(cx: &mut gpui::AsyncApp) {
+fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
     if openlogi_core::paths::is_dev_profile() {
         return;
     }
     cx.background_executor()
         .spawn(async {
-            if let Err(error) = crate::platform::login_item::ensure_registered() {
-                tracing::warn!(error, "startup login-item registration failed");
+            if let Err(error) = crate::platform::registration::ensure_registered() {
+                tracing::warn!(error, "startup service registration failed");
             }
         })
         .detach();

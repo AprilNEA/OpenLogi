@@ -324,7 +324,7 @@ fn spawn_agent() {
         info!("suite is quitting — leaving the agent down");
         return;
     }
-    // A registered login-item service is launchd's to start: kickstart is
+    // A registered launchd service is launchd's to start: kickstart is
     // idempotent (a no-op on a running service), the process comes up
     // *supervised* (crash respawn per the service plist), and launchd makes it
     // its own TCC responsible process. Every failure falls through to the
@@ -387,21 +387,21 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     disclaim::Command::new(path).spawn().map(|_| ())
 }
 
-/// `launchctl kickstart` the agent's registered login-item service. Returns
+/// `launchctl kickstart` the agent's registered launchd service. Returns
 /// whether the start was handed to launchd — `false` (not registered, user
 /// switched it off in Login Items, or launchctl itself failed) sends the
 /// caller down the direct-launch paths.
 #[cfg(target_os = "macos")]
 fn kickstart_registered_agent() -> bool {
-    use crate::platform::login_item;
+    use crate::platform::registration;
 
-    if login_item::status() != login_item::ServiceStatus::Enabled {
+    if registration::status() != registration::ServiceStatus::Enabled {
         return false;
     }
     let Some(uid) = current_uid() else {
         return false;
     };
-    let target = format!("gui/{uid}/{}", login_item::agent_service_label());
+    let target = format!("gui/{uid}/{}", registration::agent_service_label());
     match std::process::Command::new("/bin/launchctl")
         .arg("kickstart")
         .arg(&target)

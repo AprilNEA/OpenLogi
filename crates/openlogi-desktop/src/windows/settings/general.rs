@@ -164,8 +164,9 @@ fn sensitivity_field(
         })
 }
 
-/// The launch-at-login switch. On macOS the setter also
-/// registers/unregisters the agent's login-item service in place.
+/// The launch-at-login switch — just a persisted config value the agent
+/// reads (the sunk switch); the setter only runs an opportunistic
+/// registration ensure, never an unregister.
 fn launch_at_login_item() -> SettingItem {
     SettingItem::new(
         tr!("Launch at login"),
@@ -224,5 +225,5 @@ fn open_login_items_button(cx: &App) -> BaseButton {
         .hover(move |s| s.bg(pal.control_hover))
         .focus_visible(move |s| s.bg(pal.control_hover))
         .child(tr!("Open Login Items"))
-        .on_click(|_, _, _| crate::platform::login_item::open_login_items_settings())
+        .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())
 }

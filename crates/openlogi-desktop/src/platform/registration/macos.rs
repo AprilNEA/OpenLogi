@@ -73,7 +73,7 @@ fn registration_is_stale() -> bool {
 fn registered_version_path() -> Option<std::path::PathBuf> {
     openlogi_core::paths::data_dir()
         .ok()
-        .map(|dir| dir.join("login-item-version"))
+        .map(|dir| dir.join("registration-version"))
 }
 
 fn record_registered_version() {
@@ -88,7 +88,7 @@ fn record_registered_version() {
     };
     if let Err(error) = write() {
         // Worst case the next launch re-registers once more.
-        tracing::warn!(%error, "could not record the login-item registration version");
+        tracing::warn!(%error, "could not record the service registration version");
     }
 }
 

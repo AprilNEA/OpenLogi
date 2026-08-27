@@ -136,12 +136,12 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
-    /// Snapshot of the agent service's login-item status, taken when the
+    /// Snapshot of the agent service's registration status, taken when the
     /// window opens and after every settings change (the status read is an
     /// XPC round-trip, so it must not run per frame). Drives the General
     /// page's "switched off in System Settings" notice; a flip made outside
     /// the app shows up on the next settings change or reopen.
-    login_item_status: crate::platform::login_item::ServiceStatus,
+    registration_status: crate::platform::registration::ServiceStatus,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -178,7 +178,7 @@ impl SettingsView {
                 // A settings change may have run the opportunistic
                 // registration ensure, so re-read the status snapshot.
                 if matches!(event, StateEvent::SettingsChanged) {
-                    this.login_item_status = crate::platform::login_item::status();
+                    this.registration_status = crate::platform::registration::status();
                 }
                 cx.notify();
             }
@@ -264,7 +264,7 @@ impl SettingsView {
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
-            login_item_status: crate::platform::login_item::status(),
+            registration_status: crate::platform::registration::status(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
@@ -473,8 +473,8 @@ impl Render for SettingsView {
             .page(general::general_page(
                 self.vertical_scroll_sensitivity_slider.clone(),
                 self.thumbwheel_sensitivity_slider.clone(),
-                self.login_item_status
-                    == crate::platform::login_item::ServiceStatus::RequiresApproval,
+                self.registration_status
+                    == crate::platform::registration::ServiceStatus::RequiresApproval,
                 AppState::try_read(cx).is_none_or(|state| state.app_settings().launch_at_login),
             ))
             .page(updates::updates_page(self.updater.clone()));

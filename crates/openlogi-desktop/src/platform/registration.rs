@@ -1,4 +1,4 @@
-//! macOS login-item registration for the background agent service.
+//! Registration of the background agent's launchd service (macOS).
 //!
 //! The GUI owns this side of the agent's lifecycle: `SMAppService` resolves
 //! plists against the *calling* app's bundle

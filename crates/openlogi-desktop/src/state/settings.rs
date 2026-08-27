@@ -16,10 +16,10 @@ impl AppState {
         &self.config.app_settings
     }
     /// Toggle launch-at-login and persist it to `config.toml` — which *is*
-    /// the switch: on macOS the login-item registration is
+    /// the switch: on macOS the service registration is
     /// preference-independent (the service plist always carries the login
     /// trigger; the agent reads this value when launchd starts it and idles
-    /// out when it is off — see `platform::login_item`), and on Linux/Windows
+    /// out when it is off — see `platform::registration`), and on Linux/Windows
     /// the agent reconciles its autostart unit when it reloads the config.
     /// Registration is only *ensured* here opportunistically, healing drift
     /// without ever re-prompting an intact install — and giving a dev build,
@@ -33,9 +33,9 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.launch_at_login = enabled);
         if self.persist_and_reload("launch-at-login setting")
-            && let Err(error) = crate::platform::login_item::ensure_registered()
+            && let Err(error) = crate::platform::registration::ensure_registered()
         {
-            tracing::warn!(error, enabled, "login-item registration failed");
+            tracing::warn!(error, enabled, "service registration failed");
         }
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The
