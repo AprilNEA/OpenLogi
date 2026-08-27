@@ -262,7 +262,6 @@ async fn manage(
         done: done_tx,
         capture: capture_channel,
     };
-    let mut epoch: u64 = 0;
     // The capture-vs-pairing arbiter hands out one exclusive lease. All session
     // tasks share it through an `Arc`; the manager keeps only a `Weak` so the
     // lease frees itself when the last session exits (letting pairing proceed).
@@ -326,8 +325,7 @@ async fn manage(
                         lease = Arc::downgrade(&fresh);
                         fresh
                     };
-                    epoch = epoch.wrapping_add(1);
-                    let id = HidppSessionId::new(&key, epoch);
+                    let id = HidppSessionId::new(&key);
                     let session = spawn_session(
                         id,
                         target,

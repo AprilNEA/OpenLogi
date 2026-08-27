@@ -9,7 +9,7 @@ fn route() -> DeviceRoute {
 }
 
 fn session_id(epoch: u64) -> HidppSessionId {
-    HidppSessionId::new("mouse-a", epoch)
+    HidppSessionId::with_epoch("mouse-a", epoch)
 }
 
 fn stopped_session_with_epoch(epoch: u64) -> RunningSession {
@@ -55,7 +55,7 @@ fn ignores_a_stale_session_superseded_by_a_restart() {
 fn ignores_a_completion_from_another_device_at_the_same_epoch() {
     assert_eq!(
         on_done(
-            &HidppSessionId::new("mouse-b", 7),
+            &HidppSessionId::with_epoch("mouse-b", 7),
             Some(&live_session_with_epoch(7))
         ),
         DoneAction::Ignore

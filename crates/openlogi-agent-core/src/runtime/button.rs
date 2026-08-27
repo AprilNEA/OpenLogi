@@ -24,15 +24,36 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Stable identity of one HID++ capture-session incarnation.
+/// Stable identity of one HID++ capture-session incarnation, unique across
+/// every manager that mints one: the shared button and scroll runtimes key
+/// cancellation on it, so two live sessions with equal identities would
+/// cancel each other's presses.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HidppSessionId {
     device_key: Arc<str>,
     epoch: u64,
 }
 
+/// Feeds [`HidppSessionId::new`] — one counter for the whole process.
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
+
 impl HidppSessionId {
-    pub(crate) fn new(device_key: &str, epoch: u64) -> Self {
+    /// Mint the identity for a fresh capture-session incarnation. The epoch
+    /// is allocated here rather than by the calling manager, so uniqueness
+    /// holds by construction: the gesture and keyboard managers both run a
+    /// session for an online bound keyboard, and manager-local counters would
+    /// deterministically collide on its first sessions.
+    pub(crate) fn new(device_key: &str) -> Self {
+        Self {
+            device_key: Arc::from(device_key),
+            epoch: NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    /// Test-only: an id with a chosen epoch, so stale-vs-current cases are
+    /// constructible regardless of minting order.
+    #[cfg(test)]
+    pub(crate) fn with_epoch(device_key: &str, epoch: u64) -> Self {
         Self {
             device_key: Arc::from(device_key),
             epoch,

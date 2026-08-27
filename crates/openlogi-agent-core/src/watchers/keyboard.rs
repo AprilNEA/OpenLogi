@@ -175,7 +175,6 @@ async fn manage(
     // unexpected exit of the *current* session re-arms while stale completions
     // are ignored — same pacing/starvation reasoning as the gesture watcher.
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<HidppSessionId>();
-    let mut epoch: u64 = 0;
 
     loop {
         tokio::select! {
@@ -223,8 +222,7 @@ async fn manage(
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let slot = Arc::clone(&keyboard_channel);
                     let session_registry = registry.clone();
-                    epoch = epoch.wrapping_add(1);
-                    let id = HidppSessionId::new(&target.config_key, epoch);
+                    let id = HidppSessionId::new(&target.config_key);
                     let (sink, mut session_rx) = mpsc::unbounded_channel();
                     let forward = tx.clone();
                     let forward_id = id.clone();
