@@ -8,6 +8,12 @@
 //! [`FLOW-PROTOCOL.md`]: ../../../docs/FLOW-PROTOCOL.md
 //! [`proto/flow.v1.proto`]: ../proto/flow.v1.proto
 
+pub mod frame;
+pub mod identity;
+pub mod negotiation;
+pub mod pairing;
+pub mod sas;
+
 /// Types generated from the authoritative Flow protobuf schema.
 // Buffa emits compatibility suppressions and intentionally mechanical code.
 // The allow is scoped to generated include expansions; clippy cannot credit an

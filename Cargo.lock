@@ -5932,7 +5932,11 @@ version = "0.8.20"
 dependencies = [
  "buffa",
  "buffa-build",
+ "hkdf",
  "protox",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
