@@ -93,9 +93,11 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   the status item, its `MenuTarget` and the `ResumeTarget` are bound as locals
   that outlive `NSApplication::run()`. They must stay bound — menu items
   reference their target *weakly*, and the notification center does the same.
-- `openlogi-camera`'s frame delegate is deliberately the opposite: an ivar-less
-  `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on a
-  background dispatch queue.
+- `openlogi-camera`'s frame delegate is deliberately the opposite: an
+  `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on
+  a background dispatch queue. Its one ivar is the owning session's
+  `Arc<FrameSink>` (`Send + Sync`), so which session a frame belongs to is
+  carried by ownership instead of process-global statics.
 
 ## Privacy permissions (TCC): typed framework crates, never a hand-rolled `extern`
 
