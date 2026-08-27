@@ -305,6 +305,8 @@ _version: 1
 "Thumb Wheel Up": "썸휠 위로"
 "Thumb Wheel Down": "썸휠 아래로"
 "Do Nothing": "동작 없음"
+"Swap left and right mouse buttons": "Swap left and right mouse buttons"
+"Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide."
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

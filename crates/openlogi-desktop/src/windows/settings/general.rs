@@ -7,6 +7,8 @@ use super::{
 };
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
+#[cfg(target_os = "macos")]
+use openlogi_ipc::PrimaryMouseButton;
 
 use crate::platform::registration::ServiceStatus;
 
@@ -59,6 +61,9 @@ pub(super) fn general_page(
     } else {
         group
     };
+
+    #[cfg(target_os = "macos")]
+    let group = group.item(primary_mouse_button_item());
 
     // One `show_in_menu_bar` setting drives the macOS status item and the
     // Windows notification-area icon (honored at next agent launch); Linux
@@ -115,6 +120,33 @@ fn smooth_scrolling_item() -> SettingItem {
     )
     .description(tr!(
         "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn primary_mouse_button_item() -> SettingItem {
+    SettingItem::new(
+        tr!("Swap left and right mouse buttons"),
+        SettingField::switch(
+            |cx| {
+                AppState::try_read(cx).is_some_and(|state| {
+                    state.primary_mouse_button() == Some(PrimaryMouseButton::Right)
+                })
+            },
+            |enabled, cx| {
+                let button = if enabled {
+                    PrimaryMouseButton::Right
+                } else {
+                    PrimaryMouseButton::Left
+                };
+                if let Some(state) = AppState::try_read(cx) {
+                    state.request_primary_mouse_button(button);
+                }
+            },
+        ),
+    )
+    .description(tr!(
+        "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide."
     ))
 }
 

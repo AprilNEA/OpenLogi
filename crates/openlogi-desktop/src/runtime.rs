@@ -330,6 +330,8 @@ impl Runtime {
                         state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
                     let camera_changed = state.set_camera_active(snapshot.camera_active);
                     let foreground_changed = state.set_foreground(snapshot.foreground.clone());
+                    let primary_mouse_button_changed =
+                        state.set_primary_mouse_button(snapshot.primary_mouse_button);
                     if merged {
                         cx.emit(StateEvent::InventoryChanged);
                     }
@@ -341,6 +343,9 @@ impl Runtime {
                     }
                     if foreground_changed {
                         cx.emit(StateEvent::ForegroundChanged);
+                    }
+                    if primary_mouse_button_changed {
+                        cx.emit(StateEvent::SettingsChanged);
                     }
                     let settings = state.app_settings();
                     (

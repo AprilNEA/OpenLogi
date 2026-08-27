@@ -33,6 +33,8 @@ mod shutdown;
 mod startup;
 #[cfg(target_os = "macos")]
 mod status_item;
+#[cfg(target_os = "macos")]
+mod system_mouse;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;

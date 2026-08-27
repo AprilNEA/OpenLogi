@@ -291,6 +291,10 @@ impl Armed {
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
             }
+            #[cfg(target_os = "macos")]
+            WatcherEvent::PrimaryMouseButton(button) => {
+                self.observable.set_primary_mouse_button(button);
+            }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
             WatcherEvent::Lost(Watcher::Inventory) => {

@@ -26,7 +26,8 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    PairingCommandError, PairingUpdate, PrimaryMouseButton, RingObservation,
+    SystemMouseSettingError,
 };
 use succession::Compat;
 
@@ -288,6 +289,38 @@ impl Agent for AgentServer {
         // A failed send is the designed steady state: the gate drops its
         // receiver at arming, and an armed agent no longer cares.
         let _ = self.demand.send(kind);
+    }
+
+    async fn set_primary_mouse_button(
+        self,
+        _: Context,
+        button: PrimaryMouseButton,
+    ) -> Result<PrimaryMouseButton, SystemMouseSettingError> {
+        #[cfg(target_os = "macos")]
+        {
+            match crate::system_mouse::set(button) {
+                Ok(applied) => {
+                    self.observable.set_primary_mouse_button(applied);
+                    Ok(applied)
+                }
+                Err(error) => {
+                    // A partial platform write is possible (live IOHID state is
+                    // updated before persistence). Publish the truth we can
+                    // read instead of leaving clients on a stale value.
+                    if let Ok(actual) = crate::system_mouse::read() {
+                        self.observable.set_primary_mouse_button(actual);
+                    }
+                    Err(SystemMouseSettingError::Unavailable {
+                        message: error.to_string(),
+                    })
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = button;
+            Err(SystemMouseSettingError::Unsupported)
+        }
     }
 
     async fn action_ring_hover(

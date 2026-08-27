@@ -33,7 +33,8 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PrimaryMouseButton,
+    SystemMouseSettingError,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -108,6 +109,7 @@ pub enum Command {
     SetLight(DeviceRoute, LightCommand, String, u64),
     SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftStatus),
+    SetPrimaryMouseButton(PrimaryMouseButton),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
     ReadSmartShift(
         DeviceRoute,
@@ -548,6 +550,9 @@ async fn handle(
         Command::SetSmartShift(route, status) => {
             log_apply(client.set_smartshift(ctx, route, status).await)?;
         }
+        Command::SetPrimaryMouseButton(button) => {
+            log_system_mouse(client.set_primary_mouse_button(ctx, button).await)?;
+        }
         Command::ReadDpi(route, reply) => {
             let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
         }
@@ -618,6 +623,21 @@ fn log_apply(r: Result<Result<(), WriteError>, tarpc::client::RpcError>) -> Resu
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
             warn!(error = %e, "agent rejected device command");
+            Ok(())
+        }
+        Err(_) => Err(()),
+    }
+}
+
+/// A host-setting write converges through the observable snapshot. Log an
+/// application refusal here; a transport drop tells the caller to reconnect.
+fn log_system_mouse(
+    result: Result<Result<PrimaryMouseButton, SystemMouseSettingError>, tarpc::client::RpcError>,
+) -> Result<(), ()> {
+    match result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => {
+            warn!(?error, "agent could not change the primary mouse button");
             Ok(())
         }
         Err(_) => Err(()),

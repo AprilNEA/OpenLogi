@@ -305,6 +305,8 @@ _version: 1
 "Thumb Wheel Up": "Roda de polegar para cima"
 "Thumb Wheel Down": "Roda de polegar para baixo"
 "Do Nothing": "Não fazer nada"
+"Swap left and right mouse buttons": "Swap left and right mouse buttons"
+"Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide."
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

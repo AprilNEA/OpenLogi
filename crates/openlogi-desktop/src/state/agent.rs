@@ -1,7 +1,7 @@
 //! Agent connection status and debug monitor state.
 
 use openlogi_core::device::DeviceInventory;
-use openlogi_ipc::ForegroundApps;
+use openlogi_ipc::{ForegroundApps, PrimaryMouseButton};
 
 use super::{AgentLink, AppState};
 
@@ -9,6 +9,7 @@ use super::{AgentLink, AppState};
 pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
+    primary_mouse_button: Option<PrimaryMouseButton>,
     last_ready_inventory: Vec<DeviceInventory>,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
@@ -21,6 +22,7 @@ impl Default for AgentSession {
         Self {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
+            primary_mouse_button: None,
             last_ready_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
@@ -113,5 +115,26 @@ impl AppState {
 
     pub(super) fn foreground(&self) -> &ForegroundApps {
         &self.agent.foreground
+    }
+
+    /// The latest host-wide primary mouse button reported by the agent.
+    #[must_use]
+    pub fn primary_mouse_button(&self) -> Option<PrimaryMouseButton> {
+        self.agent.primary_mouse_button
+    }
+
+    /// Adopt a host-wide primary mouse button observation.
+    pub fn set_primary_mouse_button(&mut self, button: Option<PrimaryMouseButton>) -> bool {
+        if self.agent.primary_mouse_button == button {
+            return false;
+        }
+        self.agent.primary_mouse_button = button;
+        true
+    }
+
+    /// Ask the agent to change the macOS system setting. The observed snapshot,
+    /// not this command, remains the GUI's source of truth.
+    pub fn request_primary_mouse_button(&self, button: PrimaryMouseButton) {
+        self.send_ipc(crate::services::ipc::Command::SetPrimaryMouseButton(button));
     }
 }
