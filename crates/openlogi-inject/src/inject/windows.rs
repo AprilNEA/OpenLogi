@@ -59,6 +59,9 @@ pub(super) fn execute(action: &Action) {
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => post_custom_shortcut(combo),
+        Effect::HeldMouseButton6 => {
+            tracing::warn!("held Mouse Button 6 output is unsupported on Windows");
+        }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),

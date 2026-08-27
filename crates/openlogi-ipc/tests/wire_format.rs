@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -101,7 +101,12 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 28);
+    assert_eq!(PROTOCOL_VERSION, 29);
+}
+
+#[test]
+fn held_mouse_button6_action_is_append_only_on_the_wire() {
+    assert_wire(&Action::HoldMouseButton6, "35");
 }
 
 #[test]

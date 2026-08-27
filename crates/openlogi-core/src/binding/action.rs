@@ -187,6 +187,20 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Hold standard macOS Mouse Button 6 for the source press lifetime.
+    ///
+    /// The picker exposes this action only on macOS. Other platforms preserve
+    /// configuration compatibility but do not synthesize a substitute event.
+    HoldMouseButton6,
+}
+
+/// An output that a lifecycle-aware runtime keeps active for a physical press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldAction<'a> {
+    /// A recorded keyboard chord.
+    Shortcut(&'a KeyCombo),
+    /// Standard macOS Mouse Button 6.
+    MouseButton6,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -238,6 +252,7 @@ macro_rules! for_each_unit_action {
             MiddleClick "Middle Click" Mouse Mouse,
             MouseBack "Back (Button 4)" Mouse MouseBack,
             MouseForward "Forward (Button 5)" Mouse MouseForward,
+            HoldMouseButton6 "Button 6 (Hold)" Mouse Mouse macos_only,
             // Editing
             Copy "Copy" Editing Copy,
             Paste "Paste" Editing Paste,
@@ -356,6 +371,9 @@ macro_rules! derive_action_core {
     (@item $variant:ident not_pickable) => {
         None
     };
+    (@item $variant:ident macos_only) => {
+        cfg!(target_os = "macos").then_some(Action::$variant)
+    };
 }
 
 for_each_unit_action!(derive_action_core);
@@ -367,6 +385,17 @@ impl Action {
     pub fn held_combo(&self) -> Option<&KeyCombo> {
         match self {
             Self::HoldShortcut(combo) => Some(combo),
+            _ => None,
+        }
+    }
+
+    /// The output whose down edge must remain active until the originating
+    /// physical press ends, or `None` for an instantaneous action.
+    #[must_use]
+    pub fn held_action(&self) -> Option<HeldAction<'_>> {
+        match self {
+            Self::HoldShortcut(combo) => Some(HeldAction::Shortcut(combo)),
+            Self::HoldMouseButton6 => Some(HeldAction::MouseButton6),
             _ => None,
         }
     }

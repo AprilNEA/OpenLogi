@@ -261,6 +261,38 @@ pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
     hold_transition(Some(old), Some(new));
 }
 
+/// Synthesise the down edge of standard macOS Mouse Button 6.
+///
+/// Every successful lifecycle start must be paired with
+/// [`release_hold_mouse_button6`], including cancellation and shutdown paths.
+/// On platforms without a verified Button 6 mapping this logs a warning and
+/// emits no substitute event.
+pub fn press_hold_mouse_button6() {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_button6_phase(macos::MousePhase::Down);
+        }
+        _ => {
+            tracing::warn!("held Mouse Button 6 output is unsupported on this platform");
+        }
+    }
+}
+
+/// Synthesise the up edge matching a prior [`press_hold_mouse_button6`].
+///
+/// On platforms without a verified Button 6 mapping this logs a warning and
+/// emits no substitute event.
+pub fn release_hold_mouse_button6() {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_button6_phase(macos::MousePhase::Up);
+        }
+        _ => {
+            tracing::warn!("held Mouse Button 6 output is unsupported on this platform");
+        }
+    }
+}
+
 fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {

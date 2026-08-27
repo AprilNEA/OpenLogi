@@ -52,6 +52,29 @@ fn hold_shortcut_has_distinct_lifecycle_semantics() {
 }
 
 #[test]
+fn hold_mouse_button6_has_lifecycle_semantics() {
+    let action = Action::HoldMouseButton6;
+
+    assert_eq!(action.label(), "Button 6 (Hold)");
+    assert_eq!(action.category(), Category::Mouse);
+    assert_eq!(action.held_action(), Some(HeldAction::MouseButton6));
+    assert_matches!(action.effect(), Effect::HeldMouseButton6);
+    assert_eq!(roundtrip(&action), action);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hold_mouse_button6_is_pickable_on_macos() {
+    assert!(Action::catalog().contains(&Action::HoldMouseButton6));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn hold_mouse_button6_is_not_pickable_off_macos() {
+    assert!(!Action::catalog().contains(&Action::HoldMouseButton6));
+}
+
+#[test]
 fn hold_shortcut_roundtrips_toml() {
     let action = Action::HoldShortcut("Alt+Space".parse().expect("valid shortcut failed"));
     assert_eq!(roundtrip(&action), action);
@@ -336,6 +359,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldMouseButton6",
         "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",

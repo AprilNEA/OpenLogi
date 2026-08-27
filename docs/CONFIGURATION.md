@@ -101,6 +101,20 @@ the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
 agent shuts down. Use it for push-to-talk and other hold-to-activate controls.
 
+`HoldMouseButton6` is a macOS-first held output for applications that bind
+standard extra Mouse Button 6. It emits `OtherMouseDown` on press and the
+matching `OtherMouseUp` on release, including every interruption or shutdown
+outcome. Bind it directly to a lifecycle-capable control, for example:
+
+```toml
+GestureButton = "HoldMouseButton6"
+```
+
+It appears in the macOS action picker only. Linux and Windows preserve the
+configuration value but warn rather than emit an invented Button 6 mapping.
+It cannot be assigned to an Actions Ring slot because ring selections have no
+physical press lifetime to hold.
+
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button
 down for 500 ms fires `long` exactly once, and the later release does not also
@@ -122,3 +136,5 @@ Top = { action = { CustomShortcut = "Cmd+Shift+P" }, icon = "Keyboard", label = 
 ```
 
 `ShowActionsRing` is rejected inside a ring slot to prevent recursive rings.
+`HoldMouseButton6` is also rejected there because it requires a physical press
+lifecycle.

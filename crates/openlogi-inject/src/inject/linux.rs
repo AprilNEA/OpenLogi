@@ -40,6 +40,9 @@ pub(super) fn execute(action: &Action) {
         Effect::Click(button) => click(mouse_button_code(button)),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
+        Effect::HeldMouseButton6 => {
+            tracing::warn!("held Mouse Button 6 output is unsupported on Linux");
+        }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),

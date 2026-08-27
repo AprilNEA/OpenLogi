@@ -38,6 +38,28 @@ const NX_KEYTYPE_PLAY: i32 = 16;
 const NX_KEYTYPE_NEXT: i32 = 17;
 const NX_KEYTYPE_PREVIOUS: i32 = 18;
 
+/// One edge of a synthetic extra-mouse-button press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MousePhase {
+    /// Button press.
+    Down,
+    /// Button release.
+    Up,
+}
+
+/// CoreGraphics' zero-based number for standard Mouse Button 6.
+pub(super) const fn button6_number() -> i64 {
+    5
+}
+
+/// CoreGraphics event kind for an extra-mouse-button edge.
+pub(super) const fn other_mouse_event_type(phase: MousePhase) -> CGEventType {
+    match phase {
+        MousePhase::Down => CGEventType::OtherMouseDown,
+        MousePhase::Up => CGEventType::OtherMouseUp,
+    }
+}
+
 /// macOS implementation: classify `action` into an [`Effect`] and dispatch
 /// to the appropriate event helper.
 pub(super) fn execute(action: &Action) {
@@ -50,6 +72,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Click(button) => dispatch_click(button),
         Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => post_keycombo(combo),
+        Effect::HeldMouseButton6 => post_button6(),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -211,24 +234,42 @@ fn post_click(button: CGMouseButton) {
 /// buttons ≥ 3. Tagged via [`tag_synthetic`] so OpenLogi's own event tap
 /// ignores it instead of re-translating it into a Back/Forward press.
 fn post_other_button(button_number: i64) {
+    for phase in [MousePhase::Down, MousePhase::Up] {
+        post_other_button_phase(button_number, phase);
+    }
+}
+
+/// Post one extra-mouse-button edge by its zero-based button number.
+fn post_other_button_phase(button_number: i64, phase: MousePhase) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for extra mouse button");
         return;
     };
     let location =
         CGEvent::new(src.clone()).map_or_else(|()| CGPoint::new(0., 0.), |e| e.location());
-    for (kind, phase) in [
-        (CGEventType::OtherMouseDown, "down"),
-        (CGEventType::OtherMouseUp, "up"),
-    ] {
-        if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, CGMouseButton::Center)
-        {
-            ev.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
-            tag_synthetic(&ev);
-            ev.post(CGEventTapLocation::HID);
-        } else {
-            tracing::warn!(phase, "CGEvent::new_mouse_event failed for extra button");
-        }
+    if let Ok(ev) = CGEvent::new_mouse_event(
+        src,
+        other_mouse_event_type(phase),
+        location,
+        CGMouseButton::Center,
+    ) {
+        ev.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
+        tag_synthetic(&ev);
+        ev.post(CGEventTapLocation::HID);
+    } else {
+        tracing::warn!(?phase, "CGEvent::new_mouse_event failed for extra button");
+    }
+}
+
+/// Post one standard Mouse Button 6 edge.
+pub(super) fn post_button6_phase(phase: MousePhase) {
+    post_other_button_phase(button6_number(), phase);
+}
+
+/// Post a balanced standard Mouse Button 6 click.
+fn post_button6() {
+    for phase in [MousePhase::Down, MousePhase::Up] {
+        post_button6_phase(phase);
     }
 }
 
@@ -430,10 +471,13 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use core_graphics::event::CGEventFlags;
+    use core_graphics::event::{CGEventFlags, CGEventType};
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, held_key_event, hid_usage_to_macos};
+    use super::{
+        MousePhase, button6_number, combo, held_key_event, hid_usage_to_macos,
+        other_mouse_event_type,
+    };
     use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
     #[test]
@@ -444,6 +488,19 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
         assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
         assert_eq!(hid_usage_to_macos(0xff), None);
+    }
+
+    #[test]
+    fn button6_uses_other_mouse_edges_and_raw_number_five() {
+        assert_eq!(button6_number(), 5);
+        assert_eq!(
+            other_mouse_event_type(MousePhase::Down) as u32,
+            CGEventType::OtherMouseDown as u32
+        );
+        assert_eq!(
+            other_mouse_event_type(MousePhase::Up) as u32,
+            CGEventType::OtherMouseUp as u32
+        );
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
