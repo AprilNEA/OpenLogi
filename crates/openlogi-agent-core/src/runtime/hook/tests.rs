@@ -201,6 +201,19 @@ fn unattributed_extra_buttons_preserve_the_narrow_macos_exception() {
 }
 
 #[test]
+fn accepted_unattributed_press_owns_its_release_across_focus_changes() {
+    let mut presses = AcceptedUnattributedPresses::default();
+
+    assert!(!AcceptedUnattributedPresses::admit_down(false));
+    assert!(AcceptedUnattributedPresses::admit_down(true));
+    assert!(!presses.take_release(ButtonId::Back));
+
+    presses.accept(ButtonId::Back);
+    assert!(presses.take_release(ButtonId::Back));
+    assert!(!presses.take_release(ButtonId::Back));
+}
+
+#[test]
 fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads() {
     let logitech = EventDevice {
         vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
