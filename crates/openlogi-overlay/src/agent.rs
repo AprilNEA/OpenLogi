@@ -140,38 +140,78 @@ const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
 /// How long to wait between attempts to reach an agent.
 const RETRY_PERIOD: Duration = Duration::from_secs(1);
 
-/// Record a failed attempt to reach an agent, and say whether to give up.
+/// Invocation observer phase and the state meaningful within each phase.
 ///
-/// `unreachable_since` is armed by the first failure of a run and cleared by
-/// the caller on every success, so a helper whose agent keeps flapping back
-/// within the deadline never accumulates its way to an exit.
-fn give_up(unreachable_since: &mut Option<Instant>, now: Instant) -> bool {
-    let armed = *unreachable_since.get_or_insert(now);
-    now.duration_since(armed) >= GIVE_UP_AFTER
+/// A successful connection owns its generation cursor; a reconnect episode
+/// owns its give-up clock. Transitioning between them resets the fact from the
+/// previous phase by construction.
+enum InvocationPollState<C> {
+    Reconnecting { unreachable_since: Option<Instant> },
+    Observing { client: C, seen: Generation },
+}
+
+impl<C> Default for InvocationPollState<C> {
+    fn default() -> Self {
+        Self::Reconnecting {
+            unreachable_since: None,
+        }
+    }
+}
+
+impl<C> InvocationPollState<C> {
+    fn connected(&mut self, client: C) {
+        *self = Self::Observing { client, seen: 0 };
+    }
+
+    fn connection_failed(&mut self, now: Instant) -> bool {
+        let Self::Reconnecting { unreachable_since } = self else {
+            return false;
+        };
+        let armed = *unreachable_since.get_or_insert(now);
+        now.duration_since(armed) >= GIVE_UP_AFTER
+    }
+
+    fn observation(&self) -> Option<(&C, Generation)> {
+        match self {
+            Self::Observing { client, seen } => Some((client, *seen)),
+            Self::Reconnecting { .. } => None,
+        }
+    }
+
+    fn observed(&mut self, generation: Generation) {
+        if let Self::Observing { seen, .. } = self {
+            *seen = generation;
+        }
+    }
+
+    fn disconnected(&mut self) {
+        *self = Self::Reconnecting {
+            unreachable_since: None,
+        };
+    }
 }
 
 async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
-    let mut client = None;
-    // Generation 0 says "I have seen nothing", so the first answer is whatever
-    // is showing right now — an overlay restarted mid-ring paints the live one
-    // instead of having missed its invocation. Reset on every disconnect: the
-    // replacement agent numbers its own generations.
-    let mut seen: Generation = 0;
-    // Armed while no agent is answering; see `give_up`.
-    let mut unreachable_since: Option<Instant> = None;
+    let mut state = InvocationPollState::default();
     loop {
-        if client.is_none() {
-            client = connect().await;
-            seen = 0;
-        }
-        let Some(active) = client.as_ref() else {
-            if give_up(&mut unreachable_since, Instant::now()) {
-                stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
+        if matches!(&state, InvocationPollState::Reconnecting { .. }) {
+            if let Some(client) = connect().await {
+                // Generation 0 says "I have seen nothing", so the first
+                // answer is whatever is showing right now. A replacement
+                // agent numbers its own generations, so every connection
+                // starts there independently.
+                state.connected(client);
+            } else {
+                if state.connection_failed(Instant::now()) {
+                    stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
+                }
+                tokio::time::sleep(RETRY_PERIOD).await;
+                continue;
             }
-            tokio::time::sleep(RETRY_PERIOD).await;
+        }
+        let Some((active, seen)) = state.observation() else {
             continue;
         };
-        unreachable_since = None;
         let mut ctx = context::current();
         // Above the agent's hold, or tarpc would cancel the handler mid-wait.
         ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
@@ -180,14 +220,14 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
                 if observed.generation == seen {
                     continue; // the hold elapsed: still alive, still nothing new
                 }
-                seen = observed.generation;
+                state.observed(observed.generation);
                 if tx.send(observed.invocation).is_err() {
                     return;
                 }
             }
             Err(error) => {
                 debug!(?error, "Actions Ring state channel disconnected");
-                client = None;
+                state.disconnected();
             }
         }
     }
@@ -392,37 +432,66 @@ mod tests {
 
     #[test]
     fn the_first_failed_attempt_only_arms_the_give_up_clock() {
-        let mut since = None;
+        let mut state = InvocationPollState::<()>::default();
         let now = Instant::now();
-        assert!(!give_up(&mut since, now));
-        assert_eq!(since, Some(now));
+        assert!(!state.connection_failed(now));
+        assert!(matches!(
+            state,
+            InvocationPollState::Reconnecting {
+                unreachable_since: Some(armed)
+            } if armed == now
+        ));
     }
 
     #[test]
     fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
         let start = Instant::now();
-        let mut since = None;
-        assert!(!give_up(&mut since, start));
-        assert!(!give_up(&mut since, start + GIVE_UP_AFTER / 2));
-        assert!(give_up(&mut since, start + GIVE_UP_AFTER));
+        let mut state = InvocationPollState::<()>::default();
+        assert!(!state.connection_failed(start));
+        assert!(!state.connection_failed(start + GIVE_UP_AFTER / 2));
+        assert!(state.connection_failed(start + GIVE_UP_AFTER));
     }
 
     #[test]
     fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
         let start = Instant::now();
-        let mut since = None;
+        let mut state = InvocationPollState::default();
         // Each round the agent is gone for half the deadline, then answers —
-        // which is what clears the clock at the call site. Five rounds is two
-        // and a half deadlines in total, so a version that kept the clock
-        // running across outages would have exited by the third.
+        // which moves the clock out of the reconnecting phase. Five rounds is
+        // two and a half deadlines in total, so a version that kept the clock
+        // across transitions would have exited by the third.
         for round in 1..=5 {
             let gone = start + (GIVE_UP_AFTER / 2) * round;
             assert!(
-                !give_up(&mut since, gone),
+                !state.connection_failed(gone),
                 "a reachable agent must not inherit the previous outage's clock"
             );
-            since = None;
+            state.connected(());
+            assert_eq!(
+                state.observation().map(|observation| observation.1),
+                Some(0)
+            );
+            state.disconnected();
         }
+    }
+
+    #[test]
+    fn a_replacement_agent_starts_with_its_own_generation_cursor() {
+        let mut state = InvocationPollState::default();
+        state.connected(());
+        state.observed(17);
+        assert_eq!(
+            state.observation().map(|observation| observation.1),
+            Some(17)
+        );
+
+        state.disconnected();
+        state.connected(());
+
+        assert_eq!(
+            state.observation().map(|observation| observation.1),
+            Some(0)
+        );
     }
 
     #[test]
