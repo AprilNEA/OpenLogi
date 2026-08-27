@@ -136,14 +136,16 @@ impl ActionExecutor {
             // press is visible through both capture paths, debounce the shared
             // action before either output so the browser navigates only once.
             Action::BrowserBack | Action::BrowserForward => {
-                if browser_nav_debounce_ok(action) {
+                if let Some(reservation) = browser_nav_debounce_begin(action) {
                     match target {
                         Some(ActionDispatchTarget::SafariProcess(pid)) => {
-                            dispatch_captured_safari_navigation(
+                            if !dispatch_captured_safari_navigation(
                                 action,
                                 pid,
                                 openlogi_inject::ax_navigate_browser,
-                            );
+                            ) {
+                                browser_nav_debounce_cancel(reservation);
+                            }
                         }
                         None => dispatch_browser_navigation(
                             action,
@@ -394,21 +396,43 @@ const BROWSER_NAV_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Per-direction last-dispatch timestamps: `(last_back, last_forward)`.
 static BROWSER_NAV_LAST: Mutex<(Option<Instant>, Option<Instant>)> = Mutex::new((None, None));
 
-fn browser_nav_debounce_ok(action: &Action) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrowserNavDebounceReservation {
+    forward: bool,
+    timestamp: Instant,
+}
+
+fn browser_nav_debounce_begin(action: &Action) -> Option<BrowserNavDebounceReservation> {
     let mut last = BROWSER_NAV_LAST
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let slot = if matches!(action, Action::BrowserForward) {
-        &mut last.1
-    } else {
-        &mut last.0
-    };
+    let forward = matches!(action, Action::BrowserForward);
+    let slot = if forward { &mut last.1 } else { &mut last.0 };
     let now = Instant::now();
     let fire = slot.is_none_or(|time| now.duration_since(time) >= BROWSER_NAV_DEBOUNCE);
     if fire {
         *slot = Some(now);
+        Some(BrowserNavDebounceReservation {
+            forward,
+            timestamp: now,
+        })
+    } else {
+        None
     }
-    fire
+}
+
+fn browser_nav_debounce_cancel(reservation: BrowserNavDebounceReservation) {
+    let mut last = BROWSER_NAV_LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let slot = if reservation.forward {
+        &mut last.1
+    } else {
+        &mut last.0
+    };
+    if *slot == Some(reservation.timestamp) {
+        *slot = None;
+    }
 }
 
 fn dispatch_browser_navigation(
@@ -430,17 +454,20 @@ fn dispatch_captured_safari_navigation(
     action: &Action,
     pid: i32,
     ax_navigate: impl FnOnce(i32, bool) -> bool,
-) {
+) -> bool {
     let forward = matches!(action, Action::BrowserForward);
-    if !ax_navigate(pid, forward) {
+    let navigated = ax_navigate(pid, forward);
+    if !navigated {
         info!(pid, action = %action.label(), "captured Safari navigation unavailable — keyboard fallback suppressed");
     }
+    navigated
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);
@@ -490,23 +517,30 @@ mod tests {
     fn captured_safari_navigation_keeps_press_time_pid_and_never_falls_back() {
         let mut target = None;
 
-        dispatch_captured_safari_navigation(&Action::BrowserBack, 417, |pid, forward| {
-            target = Some((pid, forward));
-            false
-        });
+        assert!(!dispatch_captured_safari_navigation(
+            &Action::BrowserBack,
+            417,
+            |pid, forward| {
+                target = Some((pid, forward));
+                false
+            }
+        ));
 
         assert_eq!(target, Some((417, false)));
     }
 
     #[test]
     fn browser_navigation_debounce_is_per_direction_and_expires() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         *BROWSER_NAV_LAST
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = (Some(now), None);
 
-        assert!(!browser_nav_debounce_ok(&Action::BrowserBack));
-        assert!(browser_nav_debounce_ok(&Action::BrowserForward));
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_none());
+        assert!(browser_nav_debounce_begin(&Action::BrowserForward).is_some());
 
         let expired = Instant::now()
             .checked_sub(BROWSER_NAV_DEBOUNCE)
@@ -516,6 +550,51 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner)
             .0 = Some(expired);
 
-        assert!(browser_nav_debounce_ok(&Action::BrowserBack));
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
+    }
+
+    #[test]
+    fn failed_captured_navigation_releases_its_debounce_reservation() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (None, None);
+        let reservation = browser_nav_debounce_begin(&Action::BrowserBack)
+            .expect("the first attempt should reserve the direction");
+
+        assert!(!dispatch_captured_safari_navigation(
+            &Action::BrowserBack,
+            417,
+            |_, _| false
+        ));
+        browser_nav_debounce_cancel(reservation);
+
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
+    }
+
+    #[test]
+    fn canceling_a_failed_attempt_never_clears_a_newer_reservation() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let original = Instant::now();
+        let newer = original + Duration::from_millis(1);
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (Some(newer), None);
+        browser_nav_debounce_cancel(BrowserNavDebounceReservation {
+            forward: false,
+            timestamp: original,
+        });
+
+        assert_eq!(
+            BROWSER_NAV_LAST
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .0,
+            Some(newer)
+        );
     }
 }
