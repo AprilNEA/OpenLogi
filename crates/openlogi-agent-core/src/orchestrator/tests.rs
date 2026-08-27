@@ -902,3 +902,38 @@ fn app_switch_republishes_capture_plans() {
     orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
+
+#[test]
+fn close_button_haptic_routes_filters_by_online_capability_and_config() {
+    let haptic_capable = || {
+        Some(Capabilities {
+            haptic_feedback: true,
+            ..Capabilities::default()
+        })
+    };
+
+    let mut config = Config::default();
+    config.set_close_button_haptics("enabled-and-capable", true);
+    config.set_close_button_haptics("disabled-in-config", false);
+    config.set_close_button_haptics("offline", true);
+    config.set_close_button_haptics("lacks-capability", true);
+
+    let mut enabled_and_capable = dev("enabled-and-capable", 1, true);
+    enabled_and_capable.capabilities = haptic_capable();
+    let mut disabled_in_config = dev("disabled-in-config", 2, true);
+    disabled_in_config.capabilities = haptic_capable();
+    let mut offline = dev("offline", 3, false);
+    offline.capabilities = haptic_capable();
+    let lacks_capability = dev("lacks-capability", 4, true); // capabilities: None
+
+    let expected_route = enabled_and_capable.route.clone().expect("fixture route");
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        enabled_and_capable,
+        disabled_in_config,
+        offline,
+        lacks_capability,
+    ];
+
+    assert_eq!(orch.close_button_haptic_routes(), vec![expected_route]);
+}

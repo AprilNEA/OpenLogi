@@ -676,6 +676,27 @@ impl Orchestrator {
         })
     }
 
+    /// Routes of every online, haptic-capable device with close-button
+    /// haptics enabled in its config. Unlike [`Self::action_ring_session`]'s
+    /// single active-device haptic route, this reflects a global cursor
+    /// signal — there is only one cursor — so every opted-in connected
+    /// device is returned and buzzes together for the same hover-enter
+    /// event.
+    #[must_use]
+    pub fn close_button_haptic_routes(&self) -> Vec<DeviceRoute> {
+        self.devices
+            .iter()
+            .filter(|device| {
+                device.online
+                    && device
+                        .capabilities
+                        .is_some_and(|capabilities| capabilities.haptic_feedback)
+                    && self.config.close_button_haptics(&device.config_key)
+            })
+            .filter_map(|device| device.route.clone())
+            .collect()
+    }
+
     /// Where enumeration stands, for the IPC `status` poll.
     #[must_use]
     pub fn inventory_health(&self) -> InventoryHealth {

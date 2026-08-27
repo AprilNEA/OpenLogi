@@ -58,6 +58,7 @@ mod action_ring;
 mod agent;
 mod bindings;
 mod camera;
+mod close_button_haptics;
 mod config;
 mod device_key;
 mod device_runtime;

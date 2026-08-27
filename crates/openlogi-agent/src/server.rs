@@ -313,8 +313,8 @@ impl Agent for AgentServer {
 /// is strictly better than queueing them.
 #[derive(Clone)]
 pub struct RingHapticPlayer {
-    tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
-    pending_arm: Arc<std::sync::Mutex<Option<DeviceRoute>>>,
+    tx: tokio::sync::watch::Sender<Option<(Vec<DeviceRoute>, HapticWaveform, &'static str)>>,
+    pending_arm: Arc<std::sync::Mutex<Option<Vec<DeviceRoute>>>>,
 }
 
 /// How long every attempt at one buzz may take together.
@@ -373,7 +373,9 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
     }
 }
 
-/// Play one waveform, retrying within [`PLAY_BUDGET`]. Returns whether it played.
+/// Play one waveform on every route in `routes`, sharing one [`PLAY_BUDGET`]
+/// across the whole batch — one interaction, one allowance, regardless of how
+/// many devices it targets. Returns whether every route played.
 ///
 /// A busy receiver drops HID++ replies under concurrent pointer traffic, so a
 /// single attempt fails exactly when the user is actively hovering. Retrying
@@ -382,12 +384,31 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
 /// single-flight.
 async fn play_within_budget(
     shared: &SharedRuntime,
-    rx: &tokio::sync::watch::Receiver<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
-    route: &DeviceRoute,
+    rx: &tokio::sync::watch::Receiver<Option<(Vec<DeviceRoute>, HapticWaveform, &'static str)>>,
+    routes: &[DeviceRoute],
     waveform: HapticWaveform,
     interaction: &'static str,
 ) -> bool {
     let budget = Budget::starting_at(Instant::now(), PLAY_BUDGET);
+    let mut all_played = true;
+    for route in routes {
+        all_played &=
+            play_route_within_budget(shared, rx, route, waveform, interaction, budget).await;
+    }
+    all_played
+}
+
+/// Play one waveform on `route`, retrying within the remainder of `budget`.
+/// Returns whether it played. See [`play_within_budget`] for the batching
+/// this is a per-route step of.
+async fn play_route_within_budget(
+    shared: &SharedRuntime,
+    rx: &tokio::sync::watch::Receiver<Option<(Vec<DeviceRoute>, HapticWaveform, &'static str)>>,
+    route: &DeviceRoute,
+    waveform: HapticWaveform,
+    interaction: &'static str,
+    budget: Budget,
+) -> bool {
     for attempt in 1..=3u8 {
         let Some(remaining) = budget.remaining(Instant::now()) else {
             warn!(
@@ -454,9 +475,9 @@ impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
     pub fn spawn(shared: SharedRuntime) -> Self {
         let (tx, mut rx) = tokio::sync::watch::channel::<
-            Option<(DeviceRoute, HapticWaveform, &'static str)>,
+            Option<(Vec<DeviceRoute>, HapticWaveform, &'static str)>,
         >(None);
-        let pending_arm = Arc::new(std::sync::Mutex::new(None::<DeviceRoute>));
+        let pending_arm = Arc::new(std::sync::Mutex::new(None::<Vec<DeviceRoute>>));
         let worker_arm = Arc::clone(&pending_arm);
         tokio::spawn(async move {
             let mut consecutive_failures = 0u32;
@@ -466,11 +487,11 @@ impl RingHapticPlayer {
                 // guaranteed to complete before the session's first buzz —
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine.
-                let arm_route = worker_arm
+                let arm_routes = worker_arm
                     .lock()
                     .ok()
                     .and_then(|mut pending| pending.take());
-                if let Some(route) = arm_route {
+                if let Some(routes) = arm_routes {
                     // A new session starts the breaker over. Both counters are
                     // worker-lifetime state, so without this a session that
                     // ended two failures deep makes the next session's first
@@ -478,10 +499,12 @@ impl RingHapticPlayer {
                     // tail of one ring silences the opening of the next.
                     consecutive_failures = 0;
                     cooldown_until = None;
-                    arm_firmware_haptics(&shared, &route).await;
+                    for route in &routes {
+                        arm_firmware_haptics(&shared, route).await;
+                    }
                 }
                 let request = rx.borrow_and_update().clone();
-                let Some((route, waveform, interaction)) = request else {
+                let Some((routes, waveform, interaction)) = request else {
                     continue;
                 };
                 // Circuit breaker: when replies keep getting lost, further
@@ -494,7 +517,7 @@ impl RingHapticPlayer {
                     }
                     cooldown_until = None;
                 }
-                if play_within_budget(&shared, &rx, &route, waveform, interaction).await {
+                if play_within_budget(&shared, &rx, &routes, waveform, interaction).await {
                     consecutive_failures = 0;
                 } else {
                     consecutive_failures += 1;
@@ -516,26 +539,64 @@ impl RingHapticPlayer {
     /// The wake-up send also clears any stale not-yet-played waveform from a
     /// previous session so it cannot replay.
     pub fn arm(&self, route: Option<DeviceRoute>) {
-        let Some(route) = route else {
+        self.arm_many(route.into_iter().collect());
+    }
+
+    /// Queue a firmware arming check for every route in `routes`, run before
+    /// the next buzz. See [`Self::arm`] for the single-route case this
+    /// generalizes (used by the Actions Ring's one active device); the
+    /// close-button hover feature arms every opted-in connected device the
+    /// same way, on activation and on a periodic re-check rather than once
+    /// per hover.
+    ///
+    /// Merges into whatever the worker hasn't drained yet rather than
+    /// replacing it: an Actions Ring session opening and the close-button
+    /// watcher's periodic re-arm can both queue a request before the worker
+    /// wakes, and overwriting would silently drop one route set's arming —
+    /// its next buzz would be accepted without producing a pulse.
+    pub fn arm_many(&self, routes: Vec<DeviceRoute>) {
+        if routes.is_empty() {
             return;
-        };
+        }
         if let Ok(mut pending) = self.pending_arm.lock() {
-            *pending = Some(route);
+            match pending.as_mut() {
+                Some(queued) => {
+                    let new_routes: Vec<_> = routes
+                        .into_iter()
+                        .filter(|route| !queued.contains(route))
+                        .collect();
+                    queued.extend(new_routes);
+                }
+                None => *pending = Some(routes),
+            }
         }
         let _ = self.tx.send(None);
     }
 
-    /// Queue `waveform`, replacing any not-yet-played request.
+    /// Queue `waveform` on `route`, replacing any not-yet-played request.
     fn play(
         &self,
         route: Option<DeviceRoute>,
         waveform: HapticWaveform,
         interaction: &'static str,
     ) {
-        let Some(route) = route else {
+        self.play_many(route.into_iter().collect(), waveform, interaction);
+    }
+
+    /// Queue `waveform` on every route in `routes`, replacing any
+    /// not-yet-played request. A no-op for an empty `routes` — nothing to
+    /// buzz, so nothing should replace whatever the worker already has
+    /// queued.
+    pub fn play_many(
+        &self,
+        routes: Vec<DeviceRoute>,
+        waveform: HapticWaveform,
+        interaction: &'static str,
+    ) {
+        if routes.is_empty() {
             return;
-        };
-        let _ = self.tx.send(Some((route, waveform, interaction)));
+        }
+        let _ = self.tx.send(Some((routes, waveform, interaction)));
     }
 }
 
@@ -575,8 +636,82 @@ pub async fn run(server: AgentServer) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
+    use super::{ARM_BUDGET, Budget, PLAY_BUDGET, RingHapticPlayer};
+    use openlogi_hid::{DeviceRoute, HapticWaveform};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// An empty route list means "nothing to buzz" — the queued request must
+    /// stay untouched rather than being replaced by a no-op, or a close-button
+    /// hover with no eligible device could clobber an in-flight Ring buzz.
+    #[test]
+    fn play_many_is_a_no_op_for_empty_routes() {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let player = RingHapticPlayer {
+            tx,
+            pending_arm: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        player.play_many(Vec::new(), HapticWaveform::SubtleCollision, "test");
+
+        assert!(!rx.has_changed().unwrap_or(true));
+    }
+
+    fn route(slot: u8) -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: "AA00".to_string(),
+            slot,
+        }
+    }
+
+    /// An Actions Ring session opening and the close-button watcher's
+    /// periodic re-arm can both queue a request before the worker drains
+    /// `pending_arm`; a second `arm_many` must add to that queue rather than
+    /// replace it, or one route set's arming is silently dropped and its
+    /// next buzz plays without producing a pulse.
+    #[test]
+    fn arm_many_merges_with_an_already_queued_request_instead_of_replacing_it() {
+        let (tx, _rx) = tokio::sync::watch::channel(None);
+        let player = RingHapticPlayer {
+            tx,
+            pending_arm: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        player.arm_many(vec![route(1)]);
+        player.arm_many(vec![route(2)]);
+
+        let pending = player
+            .pending_arm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("both arm_many calls queued a non-empty route list");
+        assert_eq!(pending, vec![route(1), route(2)]);
+    }
+
+    /// The same route queued twice (e.g. the immediate activation arm and
+    /// the periodic re-arm racing) must not duplicate in the pending set —
+    /// harmless for arming itself, but unbounded growth on a long-running
+    /// watcher is still a bug worth refusing.
+    #[test]
+    fn arm_many_does_not_duplicate_an_already_queued_route() {
+        let (tx, _rx) = tokio::sync::watch::channel(None);
+        let player = RingHapticPlayer {
+            tx,
+            pending_arm: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        player.arm_many(vec![route(1)]);
+        player.arm_many(vec![route(1)]);
+
+        let pending = player
+            .pending_arm
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("arm_many queued a non-empty route list");
+        assert_eq!(pending, vec![route(1)]);
+    }
 
     /// Attempts share one allowance, so the second gets what the first left —
     /// not another full one, which is how three retries came to outlast the

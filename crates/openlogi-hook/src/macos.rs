@@ -26,7 +26,12 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types_shared::ForeignType as _;
-use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
+use objc2_application_services::{
+    AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement,
+};
+// Aliased: `core_foundation::string::CFString` (the older crate, used by the
+// CGEventTap machinery above) is already imported under the bare name.
+use objc2_core_foundation::{CFRetained, CFString as AxCFString, CFType};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -696,6 +701,67 @@ impl HookBackend for Backend {
             y: point.y,
         })
     }
+
+    fn cursor_is_over_close_button(position: CursorPosition) -> bool {
+        close_button_hit_test(position.x, position.y)
+    }
+}
+
+/// Best-effort Accessibility hit-test for whether `(x, y)` sits over a
+/// window's close button.
+///
+/// Deliberately not gated on [`HookBackend::has_accessibility`]: that check
+/// creates and destroys a throwaway `CGEventTap` per call (see
+/// `.claude/rules/hook.md`), which is fine at its own ~1 s polling cadence but
+/// unsuited to this function's much faster polling. `AXUIElementCopyElementAtPosition`
+/// and `AXUIElementCopyAttributeValue` fail cheaply and harmlessly with a
+/// non-`Success` `AXError` when this process is not Accessibility-trusted, so
+/// that failure alone is treated as "not hovering".
+fn close_button_hit_test(x: f64, y: f64) -> bool {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "screen coordinates fit comfortably in f32"
+    )]
+    let (x, y) = (x as f32, y as f32);
+
+    // SAFETY: `new_system_wide` takes no arguments; Apple documents the
+    // returned element as always non-null.
+    let system_wide = unsafe { AXUIElement::new_system_wide() };
+
+    let mut hit: *const AXUIElement = std::ptr::null();
+    // SAFETY: `hit` is a live local `*const AXUIElement` for the duration of
+    // the call; `x`/`y` are finite screen coordinates from `cursor_position`.
+    let err =
+        unsafe { system_wide.copy_element_at_position(x, y, std::ptr::NonNull::from(&mut hit)) };
+    if err != AXError::Success {
+        return false;
+    }
+    let Some(hit) = std::ptr::NonNull::new(hit.cast_mut()) else {
+        return false;
+    };
+    // SAFETY: `AXUIElementCopyElementAtPosition` follows the Core Foundation
+    // Copy/Create rule (a `+1` retain count on success), so `hit` is owned here.
+    let element = unsafe { CFRetained::from_raw(hit) };
+
+    let subrole_attr = AxCFString::from_str("AXSubrole");
+    let mut subrole: *const CFType = std::ptr::null();
+    // SAFETY: `subrole` is a live local `*const CFType` for the duration of
+    // the call; `element` is the live element hit-tested above.
+    let err = unsafe {
+        element.copy_attribute_value(&subrole_attr, std::ptr::NonNull::from(&mut subrole))
+    };
+    if err != AXError::Success {
+        return false;
+    }
+    let Some(subrole) = std::ptr::NonNull::new(subrole.cast_mut()) else {
+        return false;
+    };
+    // SAFETY: same Copy-rule ownership as the element above.
+    let subrole = unsafe { CFRetained::from_raw(subrole) };
+
+    subrole
+        .downcast_ref::<AxCFString>()
+        .is_some_and(|s| s.to_string() == "AXCloseButton")
 }
 
 fn hooked_event_types() -> Vec<CGEventType> {

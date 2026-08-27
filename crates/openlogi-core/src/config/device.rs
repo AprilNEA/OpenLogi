@@ -258,6 +258,13 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Play a single haptic pulse (`HapticWaveform::SubtleCollision`) when the
+    /// cursor hovers a window's close control (macOS traffic-light dot /
+    /// Windows titlebar `X`). Independent of the Actions Ring haptics toggle
+    /// and not per-application. `false` (default) is omitted from
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub close_button_haptics: bool,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -368,6 +375,7 @@ impl Default for DeviceConfig {
             thumbwheel_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
+            close_button_haptics: false,
             host_switch_targets: Vec::new(),
             fn_lock: None,
         }
@@ -487,6 +495,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
+    close_button_haptics: bool,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -548,6 +558,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            close_button_haptics: raw.close_button_haptics,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
         }
@@ -573,6 +584,19 @@ mod tests {
         );
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
+        Ok(())
+    }
+
+    #[test]
+    fn close_button_haptics_defaults_to_off_and_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let default_config = DeviceConfig::default();
+        assert!(!default_config.close_button_haptics);
+        assert!(!toml::to_string(&default_config)?.contains("close_button_haptics"));
+
+        let config: DeviceConfig = toml::from_str("close_button_haptics = true")?;
+        assert!(config.close_button_haptics);
+        assert!(toml::to_string(&config)?.contains("close_button_haptics"));
         Ok(())
     }
 }
