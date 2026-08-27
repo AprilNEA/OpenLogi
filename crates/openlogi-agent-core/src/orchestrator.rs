@@ -10,7 +10,7 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -250,16 +250,90 @@ impl Orchestrator {
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
-        // A disabled selected device gets empty maps: the OS hook then passes
-        // its events through untouched instead of applying remaps to a device
-        // the user asked OpenLogi to leave alone.
+        // A disabled selected device gets empty button maps so the hook stops
+        // remapping it. Inversion is exempt: it is keyed per device, so muting
+        // this one must not stop inverting another's wheel (and the builder
+        // already drops a device that is itself disabled).
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
-            return HookMaps::default();
+            return HookMaps {
+                invert_scroll: self.software_scroll_inversion(),
+                ..Default::default()
+            };
         }
         HookMaps {
             bindings: button_bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
+            invert_scroll: self.software_scroll_inversion(),
         }
+    }
+
+    /// `(vendor_id, product_id)` of every device with scroll inversion on but no
+    /// native HID++ inversion to carry it — the set the OS hook rewrites deltas
+    /// for. Not app-scoped, unlike the button maps: inversion belongs to the
+    /// device, not the foreground app.
+    ///
+    /// Only [`DeviceRoute::Direct`] devices qualify — a receiver-paired device
+    /// reports the receiver's ids, which would match every device on that
+    /// dongle.
+    ///
+    /// The hook rewrites *by identity* and two identical directly-attached mice
+    /// share one, so every **online** device behind an identity has to agree.
+    /// Anything short of "enabled, inversion on, no native support" counts as a
+    /// refusal and drops the identity: a disabled device must stay untouched,
+    /// and a natively-capable one already has the setting in firmware
+    /// (`scroll_settings_for`), where rewriting on top would invert twice.
+    /// Dropping is the safer failure — inverting a wheel nobody asked for is
+    /// untraceable from the GUI. An offline device emits no scroll events, so it
+    /// holds no vote either way.
+    fn software_scroll_inversion(&self) -> BTreeSet<(u32, u32)> {
+        // Per identity: whether a device sharing it wants the rewrite, and
+        // whether another refuses.
+        let mut by_identity: BTreeMap<(u32, u32), (bool, bool)> = BTreeMap::new();
+        for dev in &self.devices {
+            // An offline device emits no scroll events, so the rewrite can
+            // neither serve nor harm it — it holds no vote, and vetoing on its
+            // behalf would strand its twin. It rejoins the vote when the
+            // inventory brings it back and this rebuilds.
+            if !dev.online {
+                continue;
+            }
+            let Some(DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            }) = dev.route
+            else {
+                continue;
+            };
+            // For a device that *is* live, every reason to skip is a refusal on
+            // its identity rather than an omission: skipping it silently would
+            // let a twin's setting drag it along.
+            let wants = self.config.device_enabled(&dev.config_key)
+                && self.config.invert_scroll(&dev.config_key)
+                && !dev.capabilities.is_some_and(|caps| caps.scroll_inversion);
+            let entry = by_identity
+                .entry((u32::from(vendor_id), u32::from(product_id)))
+                .or_default();
+            if wants {
+                entry.0 = true;
+            } else {
+                entry.1 = true;
+            }
+        }
+        by_identity
+            .into_iter()
+            .filter_map(|(identity, (wanted, refused))| {
+                if wanted && refused {
+                    warn!(
+                        vendor_id = identity.0,
+                        product_id = identity.1,
+                        "devices sharing this identity disagree on scroll inversion; \
+                         the hook cannot tell them apart, so neither wheel is inverted"
+                    );
+                    return None;
+                }
+                wanted.then_some(identity)
+            })
+            .collect()
     }
 
     /// The keyboard key-capture spec for the first known keyboard, or `None`

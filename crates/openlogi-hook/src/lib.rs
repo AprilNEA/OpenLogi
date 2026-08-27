@@ -192,6 +192,16 @@ pub enum EventDisposition {
     PassThrough,
     /// Drop the event; the target application never sees it.
     Suppress,
+    /// Negate this scroll event's deltas in place, then let it continue —
+    /// software wheel inversion for firmware with no native HID++ inversion
+    /// (`0x2121`). Only meaningful for [`MouseEvent::Scroll`]; any other class
+    /// treats it as [`Self::PassThrough`].
+    ///
+    /// macOS rewrites the `CGEvent` rather than suppressing and re-posting, so
+    /// the scroll keeps its phase, momentum and pixel-precision fields and no
+    /// synthetic event re-enters the tap. Linux and Windows have no rewrite path
+    /// yet and pass it through.
+    InvertScroll,
 }
 
 /// Where in the event stream a tap is inserted (macOS `CGEventTapLocation`).

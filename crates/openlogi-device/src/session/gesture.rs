@@ -152,13 +152,22 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 5] = [
 ];
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
-/// delivers — the dedicated gesture button on most MX mice, and the Haptic
-/// Sense Panel on MX Master 4 (two distinct physical controls). Each source in
+/// delivers — the dedicated gesture button, the MX Master 4 Haptic Sense Panel,
+/// and the DPI/ModeShift button on a model that ships neither. Each source in
 /// gesture mode is diverted with raw-XY; one with a non-default single binding
 /// instead is plain-diverted like a standard button.
-pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
+///
+/// The DPI/ModeShift family is listed here *and* in the plain DPI capture
+/// because on a device without a gesture button it is the only raw-XY-capable
+/// control there is (MX Vertical: no `0x00c3`, `0x00d7` never emits, `0x00fd`
+/// is `raw-xy`). It only gestures once a map is bound to
+/// [`ButtonId::DpiToggle`], and the divert loop skips CIDs a device lacks.
+pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 5] = [
     (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
+    (reprog_controls::DPI_MODE_SHIFT_CIDS[0], ButtonId::DpiToggle),
+    (reprog_controls::DPI_MODE_SHIFT_CIDS[1], ButtonId::DpiToggle),
+    (reprog_controls::DPI_MODE_SHIFT_CIDS[2], ButtonId::DpiToggle),
 ];
 
 /// Which of one device's controls a capture session should divert.
@@ -488,6 +497,12 @@ async fn arm_controls_into(
             }
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
+            // This write carries no raw-XY, so re-arming a CID already armed as
+            // a gesture source would strip the reporting its hold depends on —
+            // the same hazard the `divert_buttons` loop guards against below.
+            if armed.gesture_cids.contains(&cid) {
+                continue;
+            }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 let reporting = arm_reprog_control(&rc, cid, false).await?;
                 armed.reporting.push(reporting);

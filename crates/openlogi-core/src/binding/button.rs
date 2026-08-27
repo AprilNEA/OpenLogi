@@ -130,14 +130,22 @@ impl ButtonId {
         )
     }
 
-    /// Whether this button is a HID++ gesture source — a control that is
-    /// captured over HID++ raw-XY diversion (never the OS hook) and can
-    /// therefore own the gesture role with swipe directions: the dedicated
-    /// gesture button, or the MX Master 4 haptic panel. The capture layer maps
-    /// each to its control ID.
+    /// Whether this button is a HID++ gesture source — a control captured over
+    /// raw-XY diversion (never the OS hook) and so able to own the gesture role
+    /// with swipe directions: the dedicated gesture button, the MX Master 4
+    /// haptic panel, or the DPI/ModeShift button on a device that ships neither.
+    /// The capture layer maps each to its control ID.
+    ///
+    /// [`ButtonId::DpiToggle`] qualifies because on such a device it is the only
+    /// raw-XY-capable control (MX Vertical's `0x00fd`). It only *acts* as one
+    /// once a gesture map is bound to it: its canonical default is a single
+    /// DPI-cycle action, which drops out of the gesture-map lookup.
     #[must_use]
     pub fn is_hidpp_gesture_source(self) -> bool {
-        matches!(self, ButtonId::GestureButton | ButtonId::HapticPanel)
+        matches!(
+            self,
+            ButtonId::GestureButton | ButtonId::HapticPanel | ButtonId::DpiToggle
+        )
     }
 
     /// Human-readable label for popovers and tooltips.

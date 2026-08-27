@@ -697,3 +697,16 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
         None
     );
 }
+
+#[test]
+fn dpi_cids_are_gesture_sources_dispatching_as_the_dpi_toggle() {
+    // An unresolved CID is dropped rather than misattributed, so a device that
+    // gestures from its DPI button would never begin a hold.
+    for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
+        assert_eq!(
+            gesture_source_button(cid),
+            Some(ButtonId::DpiToggle),
+            "cid {cid:#06x} must dispatch as the DPI toggle"
+        );
+    }
+}

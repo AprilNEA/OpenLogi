@@ -617,3 +617,14 @@ fn scroll_actions_lower_to_unit_direction() {
         Effect::Scroll { dx: 1, dy: 0 }
     );
 }
+
+#[test]
+fn dpi_toggle_is_a_gesture_source_yet_defaults_to_a_single_action() {
+    // The `Single` default is what keeps DPI cycling the behavior every existing
+    // device still gets: it drops out of the gesture-map lookup.
+    assert!(ButtonId::DpiToggle.is_hidpp_gesture_source());
+    assert!(matches!(
+        default_binding_for(ButtonId::DpiToggle),
+        Binding::Single(_)
+    ));
+}
