@@ -291,7 +291,6 @@ impl Armed {
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
             }
-            #[cfg(target_os = "macos")]
             WatcherEvent::PrimaryMouseButton(button) => {
                 self.observable.set_primary_mouse_button(button);
             }

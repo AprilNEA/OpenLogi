@@ -296,30 +296,21 @@ impl Agent for AgentServer {
         _: Context,
         button: PrimaryMouseButton,
     ) -> Result<PrimaryMouseButton, SystemMouseSettingError> {
-        #[cfg(target_os = "macos")]
-        {
-            match crate::system_mouse::set(button) {
-                Ok(applied) => {
-                    self.observable.set_primary_mouse_button(applied);
-                    Ok(applied)
-                }
-                Err(error) => {
-                    // A partial platform write is possible (live IOHID state is
-                    // updated before persistence). Publish the truth we can
-                    // read instead of leaving clients on a stale value.
-                    if let Ok(actual) = crate::system_mouse::read() {
-                        self.observable.set_primary_mouse_button(actual);
-                    }
-                    Err(SystemMouseSettingError::Unavailable {
-                        message: error.to_string(),
-                    })
-                }
+        match crate::system_mouse::set(button) {
+            Ok(applied) => {
+                self.observable.set_primary_mouse_button(applied);
+                Ok(applied)
             }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = button;
-            Err(SystemMouseSettingError::Unsupported)
+            Err(error) => {
+                // A backend may complete only part of a platform write. Publish
+                // the truth we can read instead of leaving clients stale.
+                if !matches!(error, SystemMouseSettingError::Unsupported)
+                    && let Ok(actual) = crate::system_mouse::read()
+                {
+                    self.observable.set_primary_mouse_button(actual);
+                }
+                Err(error)
+            }
         }
     }
 
