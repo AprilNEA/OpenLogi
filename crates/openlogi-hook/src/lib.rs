@@ -31,6 +31,8 @@ pub use openlogi_core::app::ForegroundApp;
 pub use openlogi_core::binding::ButtonId;
 pub use openlogi_core::scroll::ScrollDelta;
 
+pub mod edge;
+
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
 /// sources (IOKit, evdev) hand it back as a `u32`.
