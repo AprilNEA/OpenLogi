@@ -1,9 +1,8 @@
 // OpenLogi Flow peer protocol, version 1.
 //
 // This file is the authoritative wire contract between two OpenLogi agents
-// (see FLOW-PROTOCOL.md for framing, stream binding, state machines, and the
-// evolution rules that bind every edit to this file). It lives in docs/ until
-// crates/openlogi-flow exists, then moves there verbatim.
+// (see docs/FLOW-PROTOCOL.md for framing, stream binding, state machines, and
+// the evolution rules that bind every edit to this file).
 //
 // Ground rules (enforced in review, restated from FLOW-PROTOCOL.md):
 //   - Field numbers and FrameKind values are never reused or renumbered.

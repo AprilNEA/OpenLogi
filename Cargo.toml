@@ -14,6 +14,7 @@ members = [
     "crates/openlogi-assets",
     "crates/openlogi-cli",
     "crates/openlogi-ipc",
+    "crates/openlogi-flow",
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
     "crates/openlogi-desktop",
@@ -67,6 +68,7 @@ thiserror = "2"
 num_enum = "0.7.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+buffa = "0.9"
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 core-foundation = { version = "0.10", default-features = false, features = ["link"] }
 opener = "0.8.5"
