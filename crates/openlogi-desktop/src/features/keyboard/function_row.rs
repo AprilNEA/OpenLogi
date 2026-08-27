@@ -1392,7 +1392,7 @@ mod tests {
         ResolvedAsset {
             depot: "g513".to_string(),
             display_name: "G513".to_string(),
-            kind: DeviceKind::Keyboard,
+            kind: Some(DeviceKind::Keyboard),
             image_path: PathBuf::from("/tmp/g513.png"),
             hero_image_path: None,
             glow: None,
@@ -1415,7 +1415,7 @@ mod tests {
         ResolvedAsset {
             depot: "mx_keys_s_for_mac".to_string(),
             display_name: "MX Keys S for Mac".to_string(),
-            kind: DeviceKind::Keyboard,
+            kind: Some(DeviceKind::Keyboard),
             image_path: PathBuf::from("/tmp/mx-keys.png"),
             hero_image_path: None,
             glow: None,

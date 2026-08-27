@@ -208,7 +208,7 @@ pub(super) fn build_device_list(
                 .map(|a| a.display_name.clone())
                 .or_else(|| paired.codename.as_deref().map(prettify_codename))
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
+            let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
                 canonical_key,
@@ -771,15 +771,15 @@ fn demo_keyboard() -> DeviceRecord {
 /// The registry type wins because it is per-model and human-maintained, so a
 /// device that matched a known depot is classified by what that model *is* —
 /// not by a Bolt pairing register that can misreport (the failure behind #127).
-/// We fall back to `hid_kind` when there is no asset or its type is `Unknown`.
-/// A genuine disagreement is logged at debug (the list rebuilds on every
-/// snapshot, so a louder level would spam); it flags a HID++ source we
-/// shouldn't trust for that device.
+/// We fall back to `hid_kind` when the asset side has no opinion (`None`: no
+/// asset, or an unmodelled registry type). A genuine disagreement is logged at
+/// debug (the list rebuilds on every snapshot, so a louder level would spam);
+/// it flags a HID++ source we shouldn't trust for that device.
 ///
 /// Kind is cosmetic (icon / label) since #127: config panels gate on
 /// [`Capabilities`], never on kind, so a wrong pick can't hide functionality.
 fn effective_kind(hid_kind: DeviceKind, asset_kind: Option<DeviceKind>) -> DeviceKind {
-    let Some(asset_kind) = asset_kind.filter(|k| *k != DeviceKind::Unknown) else {
+    let Some(asset_kind) = asset_kind else {
         return hid_kind;
     };
     if hid_kind != DeviceKind::Unknown && hid_kind != asset_kind {
@@ -1514,10 +1514,6 @@ mod tests {
     fn hid_kind_is_used_without_a_modelled_asset() {
         // No asset, or an asset whose type we don't model → keep the HID kind.
         assert_eq!(effective_kind(DeviceKind::Mouse, None), DeviceKind::Mouse);
-        assert_eq!(
-            effective_kind(DeviceKind::Mouse, Some(DeviceKind::Unknown)),
-            DeviceKind::Mouse
-        );
     }
 
     #[test]

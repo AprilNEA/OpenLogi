@@ -110,8 +110,8 @@ pub struct ResolvedAsset {
     /// asset index `type` string. Per-model and human-maintained, so it's the
     /// most authoritative kind signal we have — the UI prefers it over the
     /// runtime HID++ classification when a device matched a known depot.
-    /// [`DeviceKind::Unknown`] when the registry type was missing/unmodelled.
-    pub kind: DeviceKind,
+    /// `None` when the registry type was missing/unmodelled: no asset opinion.
+    pub kind: Option<DeviceKind>,
     pub image_path: PathBuf,
     /// The front/hero render (`device_image`, typically `front_*.png`) used for
     /// the device gallery cards — distinct from [`Self::image_path`], which is
@@ -320,7 +320,7 @@ impl AssetResolver {
             let kind = DeviceKind::from_registry_type(&entry.kind);
             // Only keyboards paint the inter-key glow, and the runtime
             // fallback decodes the full render — don't pay that for mice.
-            let glow = (kind == DeviceKind::Keyboard)
+            let glow = (kind == Some(DeviceKind::Keyboard))
                 .then(|| self::glow::resolve_glow_geometry(&dir, &image_path))
                 .flatten()
                 .map(Arc::new);
@@ -658,7 +658,7 @@ mod tests {
             .resolve_registry_model("8c900")
             .expect("standalone registry model should resolve");
         assert_eq!(asset.display_name, "Litra Glow");
-        assert_eq!(asset.kind, DeviceKind::Light);
+        assert_eq!(asset.kind, Some(DeviceKind::Light));
         assert_eq!(asset.image_path, depot.join("front.png"));
         assert_eq!((asset.png_width, asset.png_height), (396, 396));
     }
