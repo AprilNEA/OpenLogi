@@ -12,12 +12,12 @@ use hidpp::{
             ZONE_PRESENCE_PAGE_LEN, ZonePresencePage,
         },
         rgb_effects::{
-            CLUSTER_EFFECT_PARAM_COUNT, EventsNotificationFlags, PowerModeTarget,
-            RgbEffectsFeature, RgbPersistence, SwControlFlags,
+            CLUSTER_EFFECT_PARAM_COUNT, PowerModeTarget, RgbEffectsFeature, RgbPersistence,
+            SwControlFlags,
         },
     },
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::SharedChannel;
 use crate::backend::HidBackend;
@@ -269,14 +269,36 @@ async fn set_color_rgb_effects(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = open_feature::<RgbEffectsFeature>(&mut device).await?;
+    let previous_control = feature
+        .get_sw_control()
+        .await
+        .map_err(classify_rgb_lighting_error)?;
     feature
         .set_sw_control(
-            SwControlFlags::ALL_CLUSTERS,
-            EventsNotificationFlags::empty(),
+            previous_control.control | SwControlFlags::ALL_CLUSTERS,
+            previous_control.events,
         )
         .await
         .map_err(classify_rgb_lighting_error)?;
 
+    let result = apply_color_rgb_effects(&feature, index, r, g, b).await;
+    if result.is_err()
+        && let Err(error) = feature
+            .set_sw_control(previous_control.control, previous_control.events)
+            .await
+    {
+        warn!(index, ?error, "failed to restore 0x8071 software control");
+    }
+    result
+}
+
+async fn apply_color_rgb_effects(
+    feature: &RgbEffectsFeature,
+    index: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
     let cluster_count = feature
         .get_device_info()
         .await
@@ -287,7 +309,7 @@ async fn set_color_rgb_effects(
 
     let mut written = 0u8;
     for cluster in 0..cluster_count {
-        let Some(effect_index) = static_rgb_effect_index(&feature, cluster).await? else {
+        let Some(effect_index) = static_rgb_effect_index(feature, cluster).await? else {
             debug!(index, cluster, "0x8071 cluster has no static RGB effect");
             continue;
         };
@@ -305,8 +327,7 @@ async fn set_color_rgb_effects(
         tokio::time::sleep(FRAME_GAP).await;
     }
     if written == 0 {
-        return Err(WriteError::UnsupportedResponse {
-            operation: HidppOperation::Lighting,
+        return Err(WriteError::FeatureUnsupported {
             feature_hex: RGB_EFFECTS_FEATURE,
         });
     }

@@ -474,6 +474,40 @@ async fn a_device_with_only_rgb_effects_can_be_coloured() -> Result<(), WriteErr
     Ok(())
 }
 
+#[tokio::test]
+async fn rgb_effects_without_static_colour_fall_back_and_restore_control() -> Result<(), WriteError>
+{
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(rgb_effects_without_static_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc547,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let control_writes: Vec<_> = written
+        .iter()
+        .filter(|report| {
+            report.len() == 7 && report[2] == 0x08 && report[3] >> 4 == 0x05 && report[4] == 1
+        })
+        .collect();
+    assert_eq!(control_writes.len(), 2);
+    assert_eq!(&control_writes[0][5..7], &[1, 0]);
+    assert_eq!(&control_writes[1][5..7], &[0, 0]);
+    assert!(
+        written
+            .iter()
+            .any(|report| { report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == 0x06 })
+    );
+    Ok(())
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
@@ -675,6 +709,65 @@ fn rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         // setRgbClusterEffect: echo the long request.
         (0x08, 0x01) => {
             payload.copy_from_slice(&request[4..20]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// A device whose 0x8071 clusters do not offer a static effect, but whose
+/// 0x8081 zones can still be painted by the automatic fallback.
+fn rgb_effects_without_static_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = match feature_id {
+                0x8071 => 0x08,
+                0x8081 => 0x07,
+                _ => 0,
+            };
+            false
+        }
+        (0x08, 0x05) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            false
+        }
+        (0x08, 0x00) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            match (request[4], request[5]) {
+                (0xff, 0xff) => payload[2] = 1,
+                (0, 0xff) => payload[4] = 1,
+                (0, 0) => payload[3] = 2,
+                _ => return None,
+            }
+            true
+        }
+        (0x07, 0x00) => {
+            payload[..2].copy_from_slice(&request[4..6]);
+            if request[5] == 0 {
+                payload[2] = 0b0001_1110;
+            }
+            true
+        }
+        (0x07, 0x06 | 0x07) => {
+            payload[..12].copy_from_slice(&request[4..16]);
             true
         }
         _ => return None,
