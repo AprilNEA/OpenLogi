@@ -13,6 +13,7 @@ pub mod identity;
 pub mod negotiation;
 pub mod pairing;
 pub mod sas;
+pub mod transport;
 
 /// Types generated from the authoritative Flow protobuf schema.
 // Buffa emits compatibility suppressions and intentionally mechanical code.

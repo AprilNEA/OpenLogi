@@ -13,12 +13,20 @@ publish = false
 [dependencies]
 buffa = { workspace = true }
 hkdf = { workspace = true }
+quinn = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 sha2 = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "net"] }
+x509-parser = { workspace = true }
 
 [build-dependencies]
 buffa-build = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
