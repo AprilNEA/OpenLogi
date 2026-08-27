@@ -34,8 +34,8 @@ pub(super) fn spawn_agent() {
         return;
     }
     // Kickstart is idempotent, the process comes up supervised, and launchd
-    // makes it its own TCC responsible process; every failure falls through
-    // rung by rung.
+    // makes it its own TCC responsible process. Production tries only the two
+    // supervised rungs below; direct launch is reserved for dev profiles.
     #[cfg(target_os = "macos")]
     {
         if kickstart_registered_agent() {
@@ -114,8 +114,8 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
 
 /// `launchctl kickstart` the agent's registered launchd service. Returns
 /// whether the start was handed to launchd — `false` (not registered, user
-/// switched it off in Login Items, or launchctl itself failed) sends the
-/// caller down the direct-launch paths.
+/// switched it off in Login Items, or launchctl itself failed) lets the caller
+/// try registration before deciding whether its profile permits direct launch.
 #[cfg(target_os = "macos")]
 fn kickstart_registered_agent() -> bool {
     use crate::platform::registration;
@@ -141,12 +141,12 @@ fn kickstart_registered_agent() -> bool {
                 %target,
                 status = %out.status,
                 stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "launchctl kickstart failed — falling back to a direct launch"
+                "launchctl kickstart failed"
             );
             false
         }
         Err(e) => {
-            warn!(error = %e, "could not run launchctl — falling back to a direct launch");
+            warn!(error = %e, "could not run launchctl");
             false
         }
     }
