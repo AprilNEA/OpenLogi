@@ -330,6 +330,26 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
+/// Navigate the frontmost browser backwards or forwards through its
+/// Accessibility toolbar button.
+///
+/// Safari ignores the synthetic keyboard events used by the ordinary browser
+/// shortcuts, so callers should try this first and fall back to
+/// [`execute`](crate::execute) when it returns `false`. No-op (returns `false`)
+/// on non-macOS platforms.
+#[must_use]
+pub fn ax_navigate_frontmost_browser(forward: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::ax_browser_navigate(forward, None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = forward;
+        false
+    }
+}
+
 /// Integer scroll units ready for a platform API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QuantizedScroll {
