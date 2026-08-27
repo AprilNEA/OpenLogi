@@ -3,52 +3,60 @@
 use crate::PermissionStatus;
 use crate::linux::{HidrawProbe, Probes};
 
+/// The whole truth table: both probes pass → `Granted`; an unwritable
+/// uinput or a denied hidraw → `Denied`; only "nothing connected to probe"
+/// is `Unknown`.
 #[test]
-fn granted_when_both_probes_pass() {
-    assert_eq!(
-        PermissionStatus::from(Probes {
-            uinput_writable: true,
-            hidraw: HidrawProbe::Accessible,
-        }),
-        PermissionStatus::Granted
-    );
-}
-
-#[test]
-fn denied_when_uinput_is_not_writable() {
-    for hidraw in [
-        HidrawProbe::Accessible,
-        HidrawProbe::Denied,
-        HidrawProbe::NonePresent,
-    ] {
-        assert_eq!(
-            PermissionStatus::from(Probes {
+fn every_probe_combination_maps_to_its_verdict() {
+    let cases = [
+        (
+            Probes {
+                uinput_writable: true,
+                hidraw: HidrawProbe::Accessible,
+            },
+            PermissionStatus::Granted,
+        ),
+        (
+            Probes {
+                uinput_writable: true,
+                hidraw: HidrawProbe::Denied,
+            },
+            PermissionStatus::Denied,
+        ),
+        (
+            Probes {
+                uinput_writable: true,
+                hidraw: HidrawProbe::NonePresent,
+            },
+            PermissionStatus::Unknown,
+        ),
+        (
+            Probes {
                 uinput_writable: false,
-                hidraw,
-            }),
-            PermissionStatus::Denied
+                hidraw: HidrawProbe::Accessible,
+            },
+            PermissionStatus::Denied,
+        ),
+        (
+            Probes {
+                uinput_writable: false,
+                hidraw: HidrawProbe::Denied,
+            },
+            PermissionStatus::Denied,
+        ),
+        (
+            Probes {
+                uinput_writable: false,
+                hidraw: HidrawProbe::NonePresent,
+            },
+            PermissionStatus::Denied,
+        ),
+    ];
+    for (probes, expected) in cases {
+        assert_eq!(
+            PermissionStatus::from(probes),
+            expected,
+            "probes: {probes:?}"
         );
     }
-}
-
-#[test]
-fn denied_when_hidraw_is_denied() {
-    assert_eq!(
-        PermissionStatus::from(Probes {
-            uinput_writable: true,
-            hidraw: HidrawProbe::Denied,
-        }),
-        PermissionStatus::Denied
-    );
-}
-
-#[test]
-fn unknown_when_no_logitech_device_is_connected() {
-    assert_eq!(
-        PermissionStatus::from(Probes {
-            uinput_writable: true,
-            hidraw: HidrawProbe::NonePresent,
-        }),
-        PermissionStatus::Unknown
-    );
 }
