@@ -106,6 +106,8 @@ pub(super) enum ThemeFilter {
 pub struct SettingsView {
     focus_handle: FocusHandle,
     appearance_obs: Option<Subscription>,
+    /// Refreshes host-owned snapshots when Settings becomes active again.
+    _activation_obs: Subscription,
     _state_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
@@ -137,10 +139,10 @@ pub struct SettingsView {
     /// after a Clear.
     asset_cache_desc: SharedString,
     /// Snapshot of the agent service's registration status, taken when the
-    /// window opens and after every settings change (the status read is an
-    /// XPC round-trip, so it must not run per frame). Drives the General
-    /// page's "switched off in System Settings" notice; a flip made outside
-    /// the app shows up on the next settings change or reopen.
+    /// window opens, regains focus, and after every settings change (the status
+    /// read is an XPC round-trip, so it must not run per frame). Drives the
+    /// General page's "switched off in System Settings" notice while keeping
+    /// the render path on this intentional cache.
     registration_status: crate::platform::registration::ServiceStatus,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
@@ -178,11 +180,12 @@ impl SettingsView {
                 // A settings change may have run the opportunistic
                 // registration ensure, so re-read the status snapshot.
                 if matches!(event, StateEvent::SettingsChanged) {
-                    this.registration_status = crate::platform::registration::status();
+                    this.refresh_registration_status(cx);
                 }
                 cx.notify();
             }
         });
+        let activation_obs = Self::observe_registration_status(window, cx);
 
         let theme_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter themes…")));
@@ -251,6 +254,7 @@ impl SettingsView {
         Self {
             focus_handle,
             appearance_obs: None,
+            _activation_obs: activation_obs,
             _state_obs: state_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
@@ -268,6 +272,22 @@ impl SettingsView {
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
+    }
+
+    fn refresh_registration_status(&mut self, cx: &mut Context<Self>) {
+        let status = crate::platform::registration::status();
+        if self.registration_status != status {
+            self.registration_status = status;
+            cx.notify();
+        }
+    }
+
+    fn observe_registration_status(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_registration_status(cx);
+            }
+        })
     }
 
     fn thumbwheel_sensitivity_slider(
