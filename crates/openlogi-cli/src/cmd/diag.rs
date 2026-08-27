@@ -1,10 +1,10 @@
 //! `openlogi diag` — real-device smoke tests for the HID++ write path.
 //!
-//! Subcommands exercise direct HID++ reads and verified writes. The intent is
-//! diagnosis, not persistent configuration: nothing here
-//! touches `config.toml` or talks to the GUI; everything runs through the
-//! same `openlogi_hid` API the GPUI app uses, so a green diag means the
-//! GUI's write path works on this host.
+//! Most subcommands exercise direct HID++ reads and verified writes. The intent
+//! is diagnosis, not persistent configuration: nothing here touches
+//! `config.toml` or talks to the GUI. `host-switch` deliberately goes through
+//! the running agent because the device leaves its current radio link after
+//! the write, and the agent owns the authoritative HID channel.
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
@@ -15,6 +15,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod host_switch;
 pub mod lighting;
 pub mod pointer_speed;
 pub mod smartshift;
@@ -38,6 +39,8 @@ pub enum DiagCmd {
     Wheel(wheel::WheelArgs),
     /// Read 0x2205 pointer scaling → write a test value → read back → restore.
     PointerSpeed(pointer_speed::PointerSpeedArgs),
+    /// Switch a multi-host device through the running agent (HID++ 0x1814).
+    HostSwitch(host_switch::HostSwitchArgs),
 }
 
 impl DiagCmd {
@@ -54,6 +57,7 @@ impl DiagCmd {
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
+            Self::HostSwitch(args) => host_switch::run(args).await,
         }
     }
 }
@@ -102,11 +106,15 @@ struct Candidate {
 /// Enumerate inventories and resolve every *online* paired device to a route.
 async fn online_devices() -> Result<Vec<Candidate>> {
     let inventories = openlogi_hid::enumerate().await?;
+    Ok(online_devices_from(&inventories))
+}
+
+fn online_devices_from(inventories: &[DeviceInventory]) -> Vec<Candidate> {
     let mut out = Vec::new();
-    for inventory in &inventories {
+    for inventory in inventories {
         out.extend(online_candidates(inventory));
     }
-    Ok(out)
+    out
 }
 
 fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
@@ -148,6 +156,24 @@ fn no_match_err(devices: &[Candidate], query: Option<&str>) -> anyhow::Error {
     }
 }
 
+fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRoute, String)> {
+    let needle = query.to_lowercase();
+    devices
+        .iter()
+        .find(|candidate| candidate.name.to_lowercase().contains(&needle))
+        .map(|candidate| (candidate.route.clone(), candidate.name.clone()))
+        .ok_or_else(|| no_match_err(devices, Some(query)))
+}
+
+/// Select an online device from an agent-provided inventory by name substring.
+pub(crate) fn select_inventory_device(
+    inventories: &[DeviceInventory],
+    query: &str,
+) -> Result<(DeviceRoute, String)> {
+    let devices = online_devices_from(inventories);
+    select_named_device(&devices, query)
+}
+
 /// Pick the device a diag should run against.
 ///
 /// Selection order:
@@ -166,12 +192,7 @@ pub(crate) async fn select_device(
     let devices = online_devices().await?;
 
     if let Some(q) = query {
-        let needle = q.to_lowercase();
-        return devices
-            .iter()
-            .find(|c| c.name.to_lowercase().contains(&needle))
-            .map(|c| (c.route.clone(), c.name.clone()))
-            .ok_or_else(|| no_match_err(&devices, query));
+        return select_named_device(&devices, q);
     }
 
     if !required_features.is_empty() {

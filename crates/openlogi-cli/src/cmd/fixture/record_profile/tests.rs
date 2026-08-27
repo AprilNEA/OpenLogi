@@ -22,6 +22,7 @@ use openlogi_ipc::{
     ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
     LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    SwitchHostError,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -383,13 +384,21 @@ impl Agent for TestAgent {
     ) -> Result<(), ConfigReloadError> {
         unreachable!("profile capture is read-only")
     }
-
     async fn observe_notices(self, _: TarpcContext, _since: Generation) -> NoticeObservation {
         unreachable!("profile capture must not inspect the overlay's notices")
     }
 
     async fn observe_lock_keys(self, _: TarpcContext, _since: Generation) -> LockKeyObservation {
         unreachable!("profile capture must not inspect the lock-key indicator")
+    }
+
+    async fn switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _host: u8,
+    ) -> Result<(), SwitchHostError> {
+        unreachable!("profile capture must never switch a host")
     }
 }
 
