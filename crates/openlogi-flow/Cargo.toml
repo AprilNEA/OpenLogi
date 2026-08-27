@@ -1,0 +1,20 @@
+[package]
+name = "openlogi-flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OpenLogi Flow peer protocol, pairing, and QUIC transport."
+# Agent-internal protocol infrastructure; no published crate depends on it.
+publish = false
+
+[dependencies]
+buffa = { workspace = true }
+
+[build-dependencies]
+buffa-build = "0.9"
+
+[lints]
+workspace = true
