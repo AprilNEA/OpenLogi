@@ -8,6 +8,8 @@ name: Nix CI
 # flake.lock pins nixpkgs exactly; update-flake-lock.yml advances it in a tested
 # PR instead of allowing an unreviewed upstream channel to drift under builds.
 on:
+  push:
+    branches: [main, master]
   schedule:
     # Mondays, 04:17 UTC. Off-peak, and far from the release cadence.
     - cron: "17 4 * * 1"
@@ -83,6 +85,13 @@ jobs:
         run: test "$(uname -m)" = "${{ matrix.machine }}"
       - name: Install upstream Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Setup Cachix
+        uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc # v15
+        with:
+          name: "${{ secrets.CACHIX_CACHE_NAME }}"
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          pushFilter: '(-source$|\.tar\.gz$|\.tar\.xz$)'
+          skipPush: ${{ github.event_name == 'pull_request' }}
       - name: Restore and save Nix store paths
         uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
         with:
