@@ -186,10 +186,35 @@ thread_local! {
     /// rejected the remap. Their matching release must also pass through so
     /// apps never see a stuck auxiliary button (down without up).
     static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    static ACCEPTED_UNATTRIBUTED_PRESSES: RefCell<AcceptedUnattributedPresses> =
+        RefCell::new(AcceptedUnattributedPresses::default());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+}
+
+#[derive(Default)]
+struct AcceptedUnattributedPresses {
+    buttons: HashSet<ButtonId>,
+}
+
+impl AcceptedUnattributedPresses {
+    fn accept(&mut self, id: ButtonId) {
+        self.buttons.insert(id);
+    }
+
+    fn admit_down(safari_is_frontmost: bool) -> bool {
+        safari_is_frontmost
+    }
+
+    fn take_release(&mut self, id: ButtonId) -> bool {
+        self.buttons.remove(&id)
+    }
+
+    fn clear(&mut self) {
+        self.buttons.clear();
+    }
 }
 
 /// Whether a translated mouse button is safe to remap.
@@ -277,10 +302,23 @@ fn handle_button(
     if !id.is_os_hook_button() {
         return EventDisposition::PassThrough;
     }
-    let live_safari = device.is_none()
-        && matches!(id, ButtonId::Back | ButtonId::Forward)
-        && safari_is_frontmost();
-    if !button_source_may_remap(id, device, live_safari) {
+    let unattributed_browser_button = cfg!(target_os = "macos")
+        && device.is_none()
+        && matches!(id, ButtonId::Back | ButtonId::Forward);
+    let safari_exception = unattributed_browser_button
+        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| {
+            if pressed {
+                AcceptedUnattributedPresses::admit_down(safari_is_frontmost())
+            } else {
+                presses.take_release(id)
+            }
+        });
+    if !button_source_may_remap(id, device, safari_exception) {
+        if !pressed && unattributed_browser_button {
+            FAIL_OPEN_PRESSES.with_borrow_mut(|presses| {
+                presses.remove(&id);
+            });
+        }
         return EventDisposition::PassThrough;
     }
 
@@ -297,6 +335,9 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None) {
+                if unattributed_browser_button {
+                    ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
+                }
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
                 return EventDisposition::Suppress;
             }
@@ -319,6 +360,10 @@ fn handle_button(
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
+        if unattributed_browser_button {
+            dispatcher.try_hook_button_up(id);
+            return EventDisposition::Suppress;
+        }
     }
 
     let binding = hooks
@@ -336,6 +381,9 @@ fn handle_button(
         let queued = dispatcher
             .try_hook_button_down(id, Some(&binding))
             .is_some();
+        if queued && unattributed_browser_button {
+            ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
+        }
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
     dispatcher.try_hook_button_up(id);
@@ -495,6 +543,8 @@ pub fn start(
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
+                    ACCEPTED_UNATTRIBUTED_PRESSES
+                        .with_borrow_mut(AcceptedUnattributedPresses::clear);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();
