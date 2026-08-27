@@ -44,24 +44,41 @@ pub async fn run(args: ProfilesArgs) -> Result<()> {
     }
     if dump.active_buttons.is_empty() {
         println!("  (no packed button table decoded for this profile format)");
-        return Ok(());
+    } else {
+        println!("  {:>4}  {:<16}  binding", "g", "button");
+        for slot in dump.active_buttons {
+            let name = slot
+                .button
+                .map_or_else(|| "-".to_string(), |button| button.label().to_string());
+            let bytes = slot.binding.bytes;
+            println!(
+                "  G{:<3}  {:<16}  {:02x} {:02x} {:02x} {:02x}  {}",
+                slot.index + 1,
+                name,
+                bytes[0],
+                bytes[1],
+                bytes[2],
+                bytes[3],
+                describe_binding(bytes)
+            );
+        }
     }
-    println!("  {:>4}  {:<16}  binding", "g", "button");
-    for slot in dump.active_buttons {
-        let name = slot
-            .button
-            .map_or_else(|| "-".to_string(), |button| button.label().to_string());
-        let bytes = slot.binding.bytes;
-        println!(
-            "  G{:<3}  {:<16}  {:02x} {:02x} {:02x} {:02x}  {}",
-            slot.index + 1,
-            name,
-            bytes[0],
-            bytes[1],
-            bytes[2],
-            bytes[3],
-            describe_binding(bytes)
-        );
+    if dump.dpi_presets.is_empty() {
+        println!("  dpi: (none decoded)");
+    } else {
+        let presets: Vec<String> = dump.dpi_presets.iter().map(ToString::to_string).collect();
+        println!("  dpi: {}", presets.join(", "));
+    }
+    if dump.leds.is_empty() {
+        println!("  leds: (none decoded)");
+    } else {
+        for (i, led) in dump.leds.iter().enumerate() {
+            let (r, g, b) = led.color.components();
+            println!(
+                "  led[{i}]: {:?} #{r:02x}{g:02x}{b:02x} brightness={}",
+                led.mode, led.brightness
+            );
+        }
     }
     Ok(())
 }

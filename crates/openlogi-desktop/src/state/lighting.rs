@@ -2,13 +2,14 @@
 
 use openlogi_core::config::Lighting;
 use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::hid::OnboardLed;
 use tracing::debug;
 
 use super::AppState;
 
 impl AppState {
-    /// The lighting config for the active device, or the default when none is
-    /// stored / no device is selected.
+    /// The lighting config for the active device, or the onboard LED when none
+    /// is stored, or the default when neither exists.
     #[must_use]
     pub fn lighting(&self) -> Lighting {
         self.current_record()
@@ -16,7 +17,23 @@ impl AppState {
                 let key = record.persistent_config_key()?;
                 self.lighting_for(key, &record.route_key)
             })
+            .or_else(|| self.onboard_led().map(lighting_from_onboard))
             .unwrap_or_default()
+    }
+
+    /// Onboard LED records last read from firmware for the selected device.
+    #[must_use]
+    pub fn onboard_leds(&self) -> &[OnboardLed] {
+        self.current_record()
+            .and_then(|record| self.onboard_leds.get(&record.device_key()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The first onboard LED for the selected device, if firmware was read.
+    #[must_use]
+    pub fn onboard_led(&self) -> Option<OnboardLed> {
+        self.onboard_leds().first().copied()
     }
     /// The stored lighting config for `key` on `route_key`, or `None` when
     /// unset (or overridden to unset on that link).
@@ -61,5 +78,18 @@ impl AppState {
         if let Some(route) = target {
             self.send_ipc(crate::services::ipc::Command::SetLighting(route, lighting));
         }
+    }
+}
+
+fn lighting_from_onboard(led: OnboardLed) -> Lighting {
+    use openlogi_core::hid::OnboardLedMode;
+    Lighting {
+        enabled: led.mode != OnboardLedMode::Off,
+        color: led.color,
+        brightness: if led.brightness == 0 {
+            100
+        } else {
+            led.brightness
+        },
     }
 }

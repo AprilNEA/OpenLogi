@@ -15,7 +15,7 @@ use gpui::{App, Context, Entity, EventEmitter, Global};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{Dpi, SmartShiftStatus};
+use openlogi_core::hid::{Dpi, OnboardLed, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -176,6 +176,9 @@ pub struct AppState {
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Devices whose onboard firmware map was already fetched this session.
     onboard_import_attempted: BTreeSet<DeviceKey>,
+    /// Onboard LED records last read from firmware, used when no lighting
+    /// config has been saved yet.
+    onboard_leds: BTreeMap<DeviceKey, Vec<OnboardLed>>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
     /// entity owns it because permission can resolve after the initiating view
     /// or window closes; dropping the entity at process shutdown cancels it.
@@ -275,6 +278,7 @@ impl AppState {
             lighting: LightingState::default(),
             ipc_commands,
             onboard_import_attempted: BTreeSet::new(),
+            onboard_leds: BTreeMap::new(),
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
         };

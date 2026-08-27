@@ -9,7 +9,8 @@ use hidpp::{
         CreatableFeature,
         onboard_profiles::{
             self, OnboardProfilesFeature, decode_active_profile_index, parse_profile_directory,
-            patch_g402_button, profile_index_is_one_based, read_g402_button, special,
+            patch_g402_button, profile_index_is_one_based, read_g402_button, read_g402_dpi_table,
+            read_g402_leds, special,
         },
     },
     protocol::v20::Hidpp20Error,
@@ -19,6 +20,8 @@ pub use hidpp::feature::onboard_profiles::{
     ButtonBinding, OnboardMode, ProfileDirectoryEntry, ProfilesDescription,
 };
 use openlogi_core::binding::{Action, ButtonId, KeyCombo};
+use openlogi_core::color::Rgb;
+use openlogi_core::hid::{Dpi, OnboardLed, OnboardLedMode, OnboardProfileSnapshot};
 use tracing::{debug, warn};
 
 use crate::SharedChannel;
@@ -44,6 +47,10 @@ pub struct OnboardProfilesDump {
     pub directory: Vec<ProfileDirectoryEntry>,
     /// Decoded button table of the active profile, when readable.
     pub active_buttons: Vec<OnboardButtonSlot>,
+    /// Enabled DPI slots from the active profile (`0` firmware slots omitted).
+    pub dpi_presets: Vec<Dpi>,
+    /// Logo then side LED from the active profile, when the sector is long enough.
+    pub leds: Vec<OnboardLed>,
 }
 
 /// One physical button slot in the active onboard profile.
@@ -120,20 +127,24 @@ async fn dump_onboard_profiles_on_channel(
         Vec::new()
     };
 
-    let active_buttons = match directory.get(usize::from(active_profile)) {
+    let (active_buttons, dpi_presets, leds) = match directory.get(usize::from(active_profile)) {
         Some(entry) if description.has_g402_button_table() => {
             match feature
                 .read_sector(entry.address, description.sector_size)
                 .await
             {
-                Ok(sector) => decode_active_buttons(&sector, description.button_count),
+                Ok(sector) => (
+                    decode_active_buttons(&sector, description.button_count),
+                    decode_dpi_presets(&sector),
+                    decode_leds(&sector),
+                ),
                 Err(error) => {
                     warn!(error = ?error, "active onboard profile read failed");
-                    Vec::new()
+                    (Vec::new(), Vec::new(), Vec::new())
                 }
             }
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
 
     Ok(OnboardProfilesDump {
@@ -143,6 +154,8 @@ async fn dump_onboard_profiles_on_channel(
         active_profile_raw,
         directory,
         active_buttons,
+        dpi_presets,
+        leds,
     })
 }
 
@@ -157,6 +170,73 @@ fn decode_active_buttons(sector: &[u8], button_count: u8) -> Vec<OnboardButtonSl
             })
         })
         .collect()
+}
+
+fn decode_dpi_presets(sector: &[u8]) -> Vec<Dpi> {
+    read_g402_dpi_table(sector)
+        .into_iter()
+        .filter(|&dpi| dpi != 0)
+        .map(Dpi::from)
+        .collect()
+}
+
+fn decode_leds(sector: &[u8]) -> Vec<OnboardLed> {
+    let Some(raw) = read_g402_leds(sector) else {
+        return Vec::new();
+    };
+    raw.into_iter().map(decode_led).collect()
+}
+
+/// Decode one packed G402 LED record.
+///
+/// Reverse-engineered layout: libratbag `hidpp20_internal_led` (mode byte +
+/// 10-byte effect union). Period fields are big-endian; intensity `0` means 100.
+fn decode_led(bytes: [u8; 11]) -> OnboardLed {
+    let mode = OnboardLedMode::from_firmware(bytes[0]);
+    let (color, brightness) = match mode {
+        OnboardLedMode::On | OnboardLedMode::Starlight => {
+            (Rgb::new(bytes[1], bytes[2], bytes[3]), 100)
+        }
+        OnboardLedMode::Breathing | OnboardLedMode::Ripple => {
+            (Rgb::new(bytes[1], bytes[2], bytes[3]), percent(bytes[7]))
+        }
+        OnboardLedMode::Cycle | OnboardLedMode::ColorWave => (Rgb::WHITE, percent(bytes[8])),
+        OnboardLedMode::Off | OnboardLedMode::Custom => (Rgb::new(0, 0, 0), 0),
+    };
+    OnboardLed {
+        mode,
+        color,
+        brightness,
+    }
+}
+
+fn percent(value: u8) -> u8 {
+    if value == 0 { 100 } else { value.min(100) }
+}
+
+/// Read the active onboard profile as buttons, DPI presets, and LEDs.
+pub async fn read_onboard_profile(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<OnboardProfileSnapshot, WriteError> {
+    let dump = dump_onboard_profiles(backend, route).await?;
+    Ok(snapshot_from_dump(&dump))
+}
+
+/// Read the active onboard profile on an already-open channel.
+pub async fn read_onboard_profile_on(
+    shared: &SharedChannel,
+) -> Result<OnboardProfileSnapshot, WriteError> {
+    let dump = dump_onboard_profiles_on(shared).await?;
+    Ok(snapshot_from_dump(&dump))
+}
+
+fn snapshot_from_dump(dump: &OnboardProfilesDump) -> OnboardProfileSnapshot {
+    OnboardProfileSnapshot {
+        bindings: actions_from_dump(dump),
+        dpi_presets: dump.dpi_presets.clone(),
+        leds: dump.leds.clone(),
+    }
 }
 
 /// Write `bindings` into the active G402-format onboard profile.
@@ -335,15 +415,35 @@ pub async fn read_onboard_button_bindings_on(
 }
 
 fn decode_action(binding: ButtonBinding) -> Option<Action> {
-    for action in Action::catalog() {
-        if encode_action(&action) == Some(binding) {
-            return Some(action);
+    match binding.bytes {
+        [0xff, ..] => Some(Action::None),
+        [0x90, opcode, ..] => decode_special(opcode),
+        _ => {
+            for action in Action::catalog() {
+                if encode_action(&action) == Some(binding) {
+                    return Some(action);
+                }
+            }
+            let [0x80, 0x02, modifiers, usage] = binding.bytes else {
+                return None;
+            };
+            KeyCombo::from_hid_report(modifiers, usage).map(Action::CustomShortcut)
         }
     }
-    let [0x80, 0x02, modifiers, usage] = binding.bytes else {
-        return None;
-    };
-    KeyCombo::from_hid_report(modifiers, usage).map(Action::CustomShortcut)
+}
+
+fn decode_special(opcode: u8) -> Option<Action> {
+    Some(match opcode {
+        special::TILT_LEFT => Action::HorizontalScrollLeft,
+        special::TILT_RIGHT => Action::HorizontalScrollRight,
+        special::NEXT_DPI => Action::NextDpiPreset,
+        special::PREV_DPI => Action::PrevDpiPreset,
+        special::CYCLE_DPI => Action::CycleDpiPresets,
+        special::CYCLE_PROFILE => Action::CycleOnboardProfile,
+        special::SCROLL_DOWN => Action::ScrollDown,
+        special::SCROLL_UP => Action::ScrollUp,
+        _ => return None,
+    })
 }
 
 fn encode_action(action: &Action) -> Option<ButtonBinding> {
@@ -504,5 +604,44 @@ mod tests {
             None,
             "sniper/DPI-shift has no Action yet and must not become a default"
         );
+    }
+
+    #[test]
+    fn firmware_specials_ignore_padding_bytes() {
+        let padded = ButtonBinding {
+            bytes: [0x90, special::CYCLE_PROFILE, 0xff, 0xff],
+        };
+        assert_eq!(decode_action(padded), Some(Action::CycleOnboardProfile));
+        let tilt = ButtonBinding {
+            bytes: [0x90, special::TILT_RIGHT, 0xff, 0xff],
+        };
+        assert_eq!(decode_action(tilt), Some(Action::HorizontalScrollRight));
+    }
+
+    #[test]
+    fn firmware_keypad_chords_decode_as_custom_shortcuts() {
+        let plus: KeyCombo = "KpPlus".parse().expect("keypad plus is a valid shortcut");
+        assert_eq!(
+            decode_action(ButtonBinding::hid_keyboard(0, 0x57)),
+            Some(Action::CustomShortcut(plus))
+        );
+        let minus: KeyCombo = "KpMinus".parse().expect("keypad minus is a valid shortcut");
+        assert_eq!(
+            decode_action(ButtonBinding::hid_keyboard(0, 0x56)),
+            Some(Action::CustomShortcut(minus))
+        );
+    }
+
+    #[test]
+    fn onboard_fixed_led_decodes_color() {
+        let mut bytes = [0u8; 11];
+        bytes[0] = 0x01;
+        bytes[1] = 0x12;
+        bytes[2] = 0x34;
+        bytes[3] = 0x56;
+        let led = super::decode_led(bytes);
+        assert_eq!(led.mode, openlogi_core::hid::OnboardLedMode::On);
+        assert_eq!(led.color.components(), (0x12, 0x34, 0x56));
+        assert_eq!(led.brightness, 100);
     }
 }

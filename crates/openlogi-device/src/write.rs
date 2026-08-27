@@ -58,7 +58,7 @@ pub use onboard::{
     ButtonBinding, OnboardButtonSlot, OnboardMode, OnboardProfilesDump, ProfileDirectoryEntry,
     ProfilesDescription, apply_onboard_button_bindings, apply_onboard_button_bindings_on,
     dump_onboard_profiles, dump_onboard_profiles_on, read_onboard_button_bindings,
-    read_onboard_button_bindings_on,
+    read_onboard_button_bindings_on, read_onboard_profile, read_onboard_profile_on,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
