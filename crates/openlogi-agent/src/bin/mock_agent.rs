@@ -274,6 +274,9 @@ struct State {
     /// unique here because the script has a single receiver.
     settings: HashMap<u8, DeviceSettings>,
     pairing: Option<PairingSession>,
+    /// Event stream for the most recently started pairing session. It outlives
+    /// the live session long enough for a client to drain its terminal update.
+    pairing_updates: Option<UnboundedReceiver<PairingUpdate>>,
     /// Where pairing stands, for the observable snapshot. Outlives
     /// [`Self::pairing`]: a terminal phase is the session's result.
     phase: Option<PairingPhase>,
@@ -327,6 +330,7 @@ impl State {
             next_slot: KEYBOARD_SLOT + 1,
             settings,
             pairing: None,
+            pairing_updates: None,
             phase: None,
             next_pairing_id: 0,
             started: Instant::now(),
@@ -339,16 +343,23 @@ impl State {
         self.phase = Some(phase);
     }
 
-    /// Register a new pairing session and return its id.
-    fn begin_pairing(&mut self, updates: UnboundedSender<PairingUpdate>) -> u64 {
+    /// Register a new pairing session and publish its initial phase together.
+    fn begin_pairing(&mut self) -> Result<u64, PairingCommandError> {
+        if self.pairing.is_some() {
+            return Err(PairingCommandError::AlreadyActive);
+        }
+        let (updates, update_rx) = mpsc::unbounded_channel();
         let id = self.next_pairing_id;
         self.next_pairing_id += 1;
+        let _ = updates.send(PairingUpdate::Searching);
         self.pairing = Some(PairingSession {
             id,
             updates,
             discovered: None,
         });
-        id
+        self.pairing_updates = Some(update_rx);
+        self.set_phase(PairingPhase::Searching);
+        Ok(id)
     }
 
     /// The live session, but only if it is still the one `id` started.
@@ -363,6 +374,42 @@ impl State {
         } else {
             None
         }
+    }
+
+    /// Select one device and publish `Pairing` in the same state transition.
+    fn select_pairing_device(
+        &mut self,
+        address: [u8; 6],
+    ) -> Result<(u64, UnboundedSender<PairingUpdate>, String), PairingCommandError> {
+        let Some(session) = self.pairing.as_ref() else {
+            return Err(PairingCommandError::NoActiveSession);
+        };
+        let Some(found) = session
+            .discovered
+            .as_ref()
+            .filter(|found| found.address == address)
+        else {
+            return Err(PairingCommandError::UnknownDevice);
+        };
+        let selected = (session.id, session.updates.clone(), found.name.clone());
+        self.set_phase(PairingPhase::Pairing);
+        Ok(selected)
+    }
+
+    /// Cancel the live session, or dismiss a terminal result, as one transition.
+    fn cancel_pairing(&mut self) {
+        self.phase = None;
+        if let Some(session) = self.pairing.take() {
+            let _ = session
+                .updates
+                .send(PairingUpdate::Failed(PairingFailure::Cancelled));
+        }
+    }
+
+    fn next_pairing_update(&mut self) -> Option<PairingUpdate> {
+        self.pairing_updates
+            .as_mut()
+            .and_then(|updates| updates.try_recv().ok())
     }
 
     /// Whether a host camera is "in use" right now — flipped on a timer so the
@@ -674,9 +721,6 @@ fn agent_status() -> AgentStatus {
 #[derive(Clone)]
 struct MockAgent {
     state: Arc<Mutex<State>>,
-    /// Long-poll side of the pairing channel, outside [`MockAgent::state`] so a
-    /// held `next_pairing` can't block `snapshot`.
-    pairing_rx: Arc<Mutex<Option<UnboundedReceiver<PairingUpdate>>>>,
     /// The last [`Observation`] handed out, so `observe` can stamp a new
     /// generation when the rendered state differs from it.
     served: Arc<Mutex<Observation>>,
@@ -690,7 +734,6 @@ impl MockAgent {
         };
         Self {
             state: Arc::new(Mutex::new(state)),
-            pairing_rx: Arc::new(Mutex::new(None)),
             served: Arc::new(Mutex::new(served)),
         }
     }
@@ -879,17 +922,10 @@ impl Agent for MockAgent {
         _: Context,
         _selector: ReceiverSelector,
     ) -> Result<(), PairingCommandError> {
-        let (tx, rx) = mpsc::unbounded_channel();
         let id = {
             let mut state = self.state.lock().await;
-            if state.pairing.is_some() {
-                return Err(PairingCommandError::AlreadyActive);
-            }
-            state.begin_pairing(tx.clone())
+            state.begin_pairing()?
         };
-        *self.pairing_rx.lock().await = Some(rx);
-        let _ = tx.send(PairingUpdate::Searching);
-        self.state.lock().await.set_phase(PairingPhase::Searching);
 
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
@@ -913,21 +949,7 @@ impl Agent for MockAgent {
     }
 
     async fn pair_device(self, _: Context, address: [u8; 6]) -> Result<(), PairingCommandError> {
-        let (id, tx, name) = {
-            let state = self.state.lock().await;
-            let Some(session) = state.pairing.as_ref() else {
-                return Err(PairingCommandError::NoActiveSession);
-            };
-            let Some(found) = session
-                .discovered
-                .as_ref()
-                .filter(|found| found.address == address)
-            else {
-                return Err(PairingCommandError::UnknownDevice);
-            };
-            (session.id, session.updates.clone(), found.name.clone())
-        };
-        self.state.lock().await.set_phase(PairingPhase::Pairing);
+        let (id, tx, name) = { self.state.lock().await.select_pairing_device(address)? };
 
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
@@ -942,8 +964,8 @@ impl Agent for MockAgent {
                     return;
                 }
                 state.set_phase(PairingPhase::Passkey(method.clone()));
+                let _ = tx.send(PairingUpdate::Passkey(method));
             }
-            let _ = tx.send(PairingUpdate::Passkey(method));
             tokio::time::sleep(PASSKEY_TYPING_DELAY).await;
             let mut state = state.lock().await;
             // No session of ours left = cancelled while the "user" was typing.
@@ -963,14 +985,7 @@ impl Agent for MockAgent {
         // Cancelling with nothing active is `Ok` in the real agent, so it is
         // `Ok` here — the GUI must not see a different contract from the mock.
         let mut state = self.state.lock().await;
-        // A cancelled session leaves no result, and dismissing a finished one
-        // clears its result — both are "no session" (see the real agent).
-        state.phase = None;
-        if let Some(session) = state.pairing.take() {
-            let _ = session
-                .updates
-                .send(PairingUpdate::Failed(PairingFailure::Cancelled));
-        }
+        state.cancel_pairing();
         Ok(())
     }
 
@@ -982,13 +997,7 @@ impl Agent for MockAgent {
         // which is what keeps the GUI's poll loop from spinning.
         let started = Instant::now();
         while started.elapsed() < PAIRING_HOLD {
-            if let Some(update) = self
-                .pairing_rx
-                .lock()
-                .await
-                .as_mut()
-                .and_then(|rx| rx.try_recv().ok())
-            {
+            if let Some(update) = self.state.lock().await.next_pairing_update() {
                 return Some(update);
             }
             tokio::time::sleep(PAIRING_POLL_TICK).await;
@@ -1039,5 +1048,69 @@ impl Agent for MockAgent {
         }
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_discovery() -> State {
+        let mut state = State::new().expect("mock state should be valid");
+        let id = state
+            .begin_pairing()
+            .expect("idle mock should admit pairing");
+        state
+            .pairing_session(id)
+            .expect("new pairing session should be active")
+            .discovered = Some(FoundDevice {
+            address: CANDIDATE_ADDRESS,
+            name: "ERGO K860".to_string(),
+        });
+        state.set_phase(PairingPhase::Found(vec![FoundDevice {
+            address: CANDIDATE_ADDRESS,
+            name: "ERGO K860".to_string(),
+        }]));
+        state
+    }
+
+    #[test]
+    fn cancel_and_device_selection_are_atomic_in_either_order() {
+        let mut cancel_first = state_with_discovery();
+        cancel_first.cancel_pairing();
+
+        assert!(matches!(
+            cancel_first.select_pairing_device(CANDIDATE_ADDRESS),
+            Err(PairingCommandError::NoActiveSession)
+        ));
+        assert!(cancel_first.pairing.is_none());
+        assert_eq!(cancel_first.phase, None);
+        assert!(matches!(
+            cancel_first.next_pairing_update(),
+            Some(PairingUpdate::Searching)
+        ));
+        assert!(matches!(
+            cancel_first.next_pairing_update(),
+            Some(PairingUpdate::Failed(PairingFailure::Cancelled))
+        ));
+
+        let mut select_first = state_with_discovery();
+        select_first
+            .select_pairing_device(CANDIDATE_ADDRESS)
+            .expect("discovered device should be selectable");
+        assert_eq!(select_first.phase, Some(PairingPhase::Pairing));
+
+        select_first.cancel_pairing();
+
+        assert!(select_first.pairing.is_none());
+        assert_eq!(select_first.phase, None);
+        assert!(matches!(
+            select_first.next_pairing_update(),
+            Some(PairingUpdate::Searching)
+        ));
+        assert!(matches!(
+            select_first.next_pairing_update(),
+            Some(PairingUpdate::Failed(PairingFailure::Cancelled))
+        ));
     }
 }
