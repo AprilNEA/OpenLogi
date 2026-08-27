@@ -83,9 +83,10 @@ fn main() {
 
     // Watch our own executable and restart as the new image when an app update
     // replaces it — see `binary_watch`. Only the lock-holding (real) agent
-    // watches, so a losing duplicate can't restart anything.
+    // watches, so a losing duplicate can't restart anything. The overlay is
+    // spawned later, once `run` decides the agent is actually wanted — a
+    // dormant agent must not bring a helper up.
     let uninstalled = binary_watch::spawn();
-    overlay::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
@@ -115,14 +116,24 @@ fn main() {
         let app_icon = config.app_settings.app_icon;
         let resume_pending = Arc::new(AtomicBool::new(false));
         let core_resume_pending = Arc::clone(&resume_pending);
+        // The tray waits for the core to declare the agent *armed*: a dormant
+        // agent (launch_at_login off, started at login, no client yet) must
+        // not put an icon in the menu bar only to vanish seconds later. A
+        // dropped sender means the core exited without arming — fall through
+        // and let the process end.
+        let (armed_tx, armed_rx) = std::sync::mpsc::channel::<()>();
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
-            .spawn(move || runtime.block_on(run(config, core_resume_pending, uninstalled)))
+            .spawn(move || {
+                runtime.block_on(run(config, core_resume_pending, uninstalled, armed_tx));
+            })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        tray::run_app_loop(show_in_menu_bar, app_icon, resume_pending);
+        if armed_rx.recv().is_ok() {
+            tray::run_app_loop(show_in_menu_bar, app_icon, resume_pending);
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -268,8 +279,8 @@ fn spawn_ipc_server(
     observable: Arc<ObservableState>,
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
-    action_ring: Arc<ActionRingManager>,
-    dispatcher: ActionDispatcher,
+    inputs: &InputServices,
+    connected: Arc<tokio::sync::Notify>,
 ) -> server::RingHapticPlayer {
     let server = AgentServer::new(
         orchestrator,
@@ -277,12 +288,61 @@ fn spawn_ipc_server(
         observable,
         pairing,
         event_monitor,
-        action_ring,
-        dispatcher,
+        Arc::clone(&inputs.ring),
+        inputs.dispatcher.clone(),
     );
     let ring_haptics = server.ring_haptics.clone();
-    tokio::spawn(server::run(server));
+    tokio::spawn(server::run(server, connected));
     ring_haptics
+}
+
+/// The per-source state watchers the select loop drains, spawned at arming.
+struct StateWatchers {
+    inventory: tokio::sync::mpsc::UnboundedReceiver<watchers::inventory::InventoryEvent>,
+    camera: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    app: tokio::sync::mpsc::UnboundedReceiver<watchers::foreground_app::ForegroundUpdate>,
+    accessibility: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    input_monitoring: tokio::sync::mpsc::UnboundedReceiver<bool>,
+}
+
+fn spawn_state_watchers(shared: &SharedRuntime) -> StateWatchers {
+    StateWatchers {
+        inventory: watchers::inventory::spawn_with_registry(
+            Duration::from_secs(2),
+            shared.channel_registry.clone(),
+        ),
+        camera: watchers::camera::spawn(Duration::from_secs(1)),
+        app: watchers::foreground_app::spawn(Duration::from_secs(1)),
+        accessibility: watchers::accessibility::spawn(Duration::from_millis(1200)),
+        input_monitoring: watchers::input_monitoring::spawn(Duration::from_millis(1200)),
+    }
+}
+
+/// Seed the permission facts with non-prompting reads, so a client that
+/// connects before the permission watchers' first tick (the IPC server starts
+/// ahead of them) doesn't see a default instead of reality.
+#[cfg(target_os = "macos")]
+fn seed_permission_facts(observable: &ObservableState) {
+    observable.set_accessibility_granted(Hook::has_accessibility());
+    observable.set_input_monitoring_granted(openlogi_hid::permissions::has_access());
+}
+
+/// The dormancy gate's verdict: wait for a client to connect (the demand that
+/// arms a dormant agent), giving up on the deadline, a shutdown signal, or an
+/// uninstall.
+#[cfg(target_os = "macos")]
+async fn await_demand(
+    connected: &tokio::sync::Notify,
+    sigterm: &mut Option<tokio::signal::unix::Signal>,
+    sigint: &mut Option<tokio::signal::unix::Signal>,
+    uninstalled: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> bool {
+    tokio::select! {
+        () = connected.notified() => true,
+        () = tokio::time::sleep(DORMANT_DEADLINE) => false,
+        () = shutdown_signal(sigterm, sigint) => false,
+        Some(()) = uninstalled.recv() => false,
+    }
 }
 
 /// A future that fires when `signal` does, or never when the handler could not
@@ -364,6 +424,29 @@ fn stop_hook(hook: &mut Option<Hook>, inputs: &InputServices) {
     *hook = None;
     inputs.dispatcher.cancel_hook_buttons();
     inputs.scroll_input.cancel_hooks();
+}
+
+/// Fold one Accessibility-grant change into the hook: tear it down on a
+/// revoke, install it on a grant (when capture is enabled), and publish the
+/// resulting hook state — one publish for every path: revoked, installed,
+/// kept, or never installed because capture is off.
+fn apply_accessibility_update(
+    granted: bool,
+    hook: &mut Option<Hook>,
+    capture_mouse_events: bool,
+    observable: &ObservableState,
+    shared: &SharedRuntime,
+    inputs: &InputServices,
+    event_monitor: &Arc<EventMonitor>,
+) {
+    observable.set_accessibility_granted(granted);
+    if !granted {
+        stop_hook(hook, inputs);
+    }
+    if granted && hook.is_none() {
+        *hook = start_hook(capture_mouse_events, shared, inputs, event_monitor);
+    }
+    observable.set_hook_installed(hook.is_some());
 }
 
 /// Prompt for Accessibility when the enabled mouse hook needs it.
@@ -450,39 +533,52 @@ async fn apply_foreground_update(
     }
 }
 
-async fn run(
-    config: Config,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
-    mut uninstalled: tokio::sync::mpsc::UnboundedReceiver<()>,
-) {
-    // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
-    // LaunchAgent, before `config` moves into the orchestrator.
-    autostart::reconcile(config.app_settings.launch_at_login);
+/// How long a dormant agent waits for a client before leaving. Generous next
+/// to the seconds a kickstarting GUI needs to connect; the only cost of the
+/// window is an idle process that has opened no device and prompted for
+/// nothing.
+#[cfg(target_os = "macos")]
+const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 
-    // Read the hook kill-switch before `config` moves into the orchestrator.
-    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
-    // an agent restart, which the config docs state.
-    let capture_mouse_events = config.app_settings.capture_mouse_events;
+/// Everything [`run`] needs alive after [`bootstrap`]: the shared state plus
+/// the running IPC server's handles.
+struct Core {
+    orchestrator: Arc<Mutex<Orchestrator>>,
+    shared: SharedRuntime,
+    observable: Arc<ObservableState>,
+    event_monitor: Arc<EventMonitor>,
+    inputs: InputServices,
+    ring_haptics: server::RingHapticPlayer,
+    /// Notified on every accepted IPC connection — the dormancy gate's
+    /// demand signal.
+    connected: Arc<tokio::sync::Notify>,
+}
 
-    prompt_missing_accessibility(capture_mouse_events);
-    #[cfg(target_os = "macos")]
-    request_input_monitoring().await;
-
+/// Build the agent's shared state and start the IPC server — everything that
+/// is safe *before* arming: pure construction plus the socket bind. No
+/// permission prompt, no device open, no helper spawn.
+///
+/// The IPC server starts here, ahead of the watchers and prompts: it is pure
+/// state service over what exists so far (an empty, `Scanning` inventory),
+/// binding early is what lets a dormant agent hear the demand that should
+/// wake it, and a first-run Input Monitoring consent dialog no longer
+/// blackholes the GUI's connect either.
+async fn bootstrap(config: Config) -> Option<Core> {
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives
     // behind an async mutex. Locks are brief (a map rebuild or a clone).
     // One cell holds everything the GUI can observe. The orchestrator
     // republishes the device and config facts from its own mutators; the hook
-    // facts are published by the select loop below, which owns the hook.
+    // facts are published by the select loop, which owns the hook.
     let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
+    #[cfg(target_os = "macos")]
+    seed_permission_facts(&observable);
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
         config,
         Arc::clone(&observable),
     )));
     let shared = orchestrator.lock().await.shared();
-    let Some(mut inputs) = InputServices::start(&shared) else {
-        return;
-    };
+    let inputs = InputServices::start(&shared)?;
 
     // Live event monitor: shared between the hook callback (which mirrors events
     // into it) and the IPC server (which the GUI polls). The janitor turns it
@@ -496,32 +592,101 @@ async fn run(
         Arc::clone(&observable),
     ));
 
-    // HID++ watchers need no Accessibility permission — start them up front.
-    spawn_hidpp_watchers(&shared, &inputs);
-
-    let mut inventory_rx = watchers::inventory::spawn_with_registry(
-        Duration::from_secs(2),
-        shared.channel_registry.clone(),
-    );
-    let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
-    let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
-    let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
-    let mut input_monitoring_rx = watchers::input_monitoring::spawn(Duration::from_millis(1200));
-
-    let (mut sigterm, mut sigint) = shutdown_signals();
-
-    // IPC server: the GUI connects here for device state + "apply now" commands.
-    // The endpoint (Unix socket / Windows named pipe) is resolved inside
-    // `transport::bind`, called by `server::run`.
+    let connected = Arc::new(tokio::sync::Notify::new());
     let ring_haptics = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
         Arc::clone(&observable),
         Arc::clone(&pairing),
         Arc::clone(&event_monitor),
-        Arc::clone(&inputs.ring),
-        inputs.dispatcher.clone(),
+        &inputs,
+        Arc::clone(&connected),
     );
+    Some(Core {
+        orchestrator,
+        shared,
+        observable,
+        event_monitor,
+        inputs,
+        ring_haptics,
+        connected,
+    })
+}
+
+async fn run(
+    config: Config,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+    mut uninstalled: tokio::sync::mpsc::UnboundedReceiver<()>,
+    #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+) {
+    // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
+    // LaunchAgent, before `config` moves into the orchestrator.
+    autostart::reconcile(config.app_settings.launch_at_login);
+
+    // Read the hook kill-switch before `config` moves into the orchestrator.
+    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
+    // an agent restart, which the config docs state.
+    let capture_mouse_events = config.app_settings.capture_mouse_events;
+    #[cfg(target_os = "macos")]
+    let launch_at_login = config.app_settings.launch_at_login;
+
+    let Some(core) = bootstrap(config).await else {
+        return;
+    };
+    let Core {
+        orchestrator,
+        shared,
+        observable,
+        event_monitor,
+        mut inputs,
+        ring_haptics,
+        connected,
+    } = core;
+    // Only the macOS dormancy gate listens for demand; elsewhere the agent
+    // always arms.
+    #[cfg(not(target_os = "macos"))]
+    drop(connected);
+
+    let (mut sigterm, mut sigint) = shutdown_signals();
+
+    // The sunk launch-at-login switch: the service plist always carries the
+    // login trigger (supervision demands it — `SuccessfulExit` implies
+    // `RunAtLoad`), so with the preference off, being started with no client
+    // in sight means "launchd ran us at login the user opted out of". Wait
+    // briefly for demand — a GUI kickstart connects within seconds — and
+    // otherwise leave with a clean `exit(0)` launchd will not respawn. Until
+    // then nothing user-visible has happened: no permission prompt, no device
+    // open, no menu-bar icon, no overlay helper.
+    #[cfg(target_os = "macos")]
+    if !launch_at_login {
+        info!("launch_at_login is off — dormant until a client connects");
+        if !await_demand(&connected, &mut sigterm, &mut sigint, &mut uninstalled).await {
+            info!("no client arrived — exiting until wanted");
+            return;
+        }
+        info!("client connected — arming");
+    }
+    // Arming point: the tray may show, the overlay may start, permissions may
+    // prompt, devices may open.
+    #[cfg(target_os = "macos")]
+    let _ = armed_tx.send(());
+    overlay::spawn();
+
+    prompt_missing_accessibility(capture_mouse_events);
+    #[cfg(target_os = "macos")]
+    request_input_monitoring().await;
+
+    // HID++ watchers need no Accessibility permission — start them up front.
+    spawn_hidpp_watchers(&shared, &inputs);
+
+    let watchers = spawn_state_watchers(&shared);
+    let StateWatchers {
+        inventory: mut inventory_rx,
+        camera: mut camera_rx,
+        app: mut app_rx,
+        accessibility: mut accessibility_rx,
+        input_monitoring: mut input_monitoring_rx,
+    } = watchers;
 
     // The CGEventTap hook is installed once Accessibility is granted and dropped
     // if it's revoked (the tap self-disables on revoke regardless; dropping the
@@ -564,21 +729,15 @@ async fn run(
                 begin_action_ring(&orchestrator, &inputs.ring, &ring_haptics, device_key.as_deref()).await;
             }
             Some(granted) = accessibility_rx.recv() => {
-                observable.set_accessibility_granted(granted);
-                if !granted {
-                    stop_hook(&mut hook, &inputs);
-                }
-                if granted && hook.is_none() {
-                    hook = start_hook(
-                        capture_mouse_events,
-                        &shared,
-                        &inputs,
-                        &event_monitor,
-                    );
-                }
-                // One publish for every path above: revoked, installed, kept,
-                // or never installed because capture is off.
-                observable.set_hook_installed(hook.is_some());
+                apply_accessibility_update(
+                    granted,
+                    &mut hook,
+                    capture_mouse_events,
+                    &observable,
+                    &shared,
+                    &inputs,
+                    &event_monitor,
+                );
             }
             () = shutdown_signal(&mut sigterm, &mut sigint) => {
                 release_hook_and_exit(hook.take(), &mut inputs, "shutdown signal")

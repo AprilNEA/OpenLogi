@@ -129,6 +129,7 @@ _version: 1
 "Automatically start OpenLogi when you log in.": "Inicia OpenLogi automáticamente al iniciar sesión."
 "Login item disabled in System Settings": "Ítem de inicio desactivado en Ajustes del Sistema"
 "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery.": "macOS está bloqueando el agente en segundo plano de OpenLogi: su ítem de inicio está desactivado. Actívalo en Ítems de inicio para restaurar el arranque al iniciar sesión y la recuperación automática tras fallos."
+"macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore automatic crash recovery.": "macOS está bloqueando el agente en segundo plano de OpenLogi: su ítem de inicio está desactivado. Actívalo en Ítems de inicio para restaurar la recuperación automática tras fallos."
 "Open Login Items": "Abrir Ítems de inicio"
 "Check for updates": "Buscar actualizaciones"
 "Check once per launch for a new version (query only — no automatic download).": "Busca una versión nueva una vez por inicio (solo consulta: sin descarga automática)."

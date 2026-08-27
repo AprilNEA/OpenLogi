@@ -119,6 +119,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // dead bytes. Off-thread so it never delays the first paint.
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
+        #[cfg(target_os = "macos")]
         reconcile_login_item_at_startup(cx);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
@@ -171,50 +172,33 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
     .detach();
 }
 
-/// Reconcile the agent's login-item registration with the `launch_at_login`
-/// setting at startup (macOS; a no-op elsewhere): a fresh install registers on
-/// its first GUI launch, and a setting changed while the GUI wasn't running
-/// catches up here. Only the preference's own gap drives it — a service the
-/// user switched off in System Settings (`RequiresApproval`) is respected,
-/// never re-registered; the Settings row surfaces that state instead. Skipped
-/// for dev profiles: a login item pointing into a `target/` build goes stale
-/// on the next `cargo clean`, so dev registration stays an explicit toggle in
-/// the dev GUI.
+/// Ensure the agent's login-item service is registered, at startup: a fresh
+/// install registers on its first GUI launch, and an app update triggers the
+/// re-registration Apple requires for a changed executable (the
+/// version-marker check inside `login_item::ensure_registered`).
+/// Registration is deliberately independent of `launch_at_login` — the
+/// preference is a config value the agent itself reads and acts on (keep
+/// working, or idle out), so there is no preference to capture here and no
+/// stale-input race to stage around. A service the user switched off in
+/// System Settings is respected by the ensure rule; the Settings row
+/// surfaces that state.
 ///
-/// A detached task, with the XPC round-trips on the background executor, so
-/// nothing here delays the first paint — and the preference is read from the
-/// live [`AppState`] only *after* the slow status read, so a toggle flipped in
-/// a just-opened Settings window wins over whatever the preference was at
-/// spawn (the stale-async-input rule; the toggle's own registration call still
-/// runs last and agrees).
+/// On the background executor: the XPC round-trips must not delay the first
+/// paint. Skipped for dev profiles: a login item pointing into a `target/`
+/// build goes stale on the next `cargo clean`, so dev registration stays an
+/// explicit toggle in the dev GUI.
+#[cfg(target_os = "macos")]
 fn reconcile_login_item_at_startup(cx: &mut gpui::AsyncApp) {
     if openlogi_core::paths::is_dev_profile() {
         return;
     }
-    cx.spawn(async move |cx| {
-        use crate::platform::login_item::{self, ServiceStatus};
-        let status = cx
-            .background_executor()
-            .spawn(async { login_item::status() })
-            .await;
-        let enabled = cx.update(|cx| {
-            AppState::try_global(cx).map(|state| state.read(cx).app_settings().launch_at_login)
-        });
-        let Some(enabled) = enabled else { return };
-        let register = match (enabled, status) {
-            (true, ServiceStatus::NotRegistered) => true,
-            (false, ServiceStatus::Enabled | ServiceStatus::RequiresApproval) => false,
-            _ => return,
-        };
-        let result = cx
-            .background_executor()
-            .spawn(async move { login_item::sync_registration(register) })
-            .await;
-        if let Err(error) = result {
-            tracing::warn!(error, register, "startup login-item reconcile failed");
-        }
-    })
-    .detach();
+    cx.background_executor()
+        .spawn(async {
+            if let Err(error) = crate::platform::login_item::ensure_registered() {
+                tracing::warn!(error, "startup login-item registration failed");
+            }
+        })
+        .detach();
 }
 
 /// State the event loop carries between events.

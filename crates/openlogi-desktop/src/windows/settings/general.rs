@@ -12,6 +12,7 @@ pub(super) fn general_page(
     vertical_scroll_sensitivity_slider: Entity<SliderState>,
     thumbwheel_sensitivity_slider: Entity<SliderState>,
     login_item_needs_approval: bool,
+    launch_at_login: bool,
 ) -> SettingPage {
     let group = SettingGroup::new()
         .item(
@@ -60,9 +61,11 @@ pub(super) fn general_page(
     // Registered but switched off under System Settings › Login Items: the
     // launchd service (crash respawn included) cannot start until the user
     // flips it back on, and only that pane can — surface it instead of
-    // letting the switch above claim a state macOS is overriding.
+    // letting the switch above claim a state macOS is overriding. What the
+    // disable actually costs depends on which service the preference
+    // selects, so the wording follows it.
     let group = if login_item_needs_approval {
-        group.item(login_item_approval_notice())
+        group.item(login_item_approval_notice(launch_at_login))
     } else {
         group
     };
@@ -183,16 +186,24 @@ fn launch_at_login_item() -> SettingItem {
     })
 }
 
-/// The "switched off in System Settings" notice shown while the service
-/// status is `RequiresApproval`.
-fn login_item_approval_notice() -> SettingItem {
+/// The "switched off in System Settings" notice shown while the preferred
+/// service's status is `RequiresApproval`. With launch-at-login on, the
+/// disable costs both the login start and crash recovery; with it off, only
+/// the on-demand service's crash recovery is at stake.
+fn login_item_approval_notice(launch_at_login: bool) -> SettingItem {
     SettingItem::new(
         tr!("Login item disabled in System Settings"),
         SettingField::render(|_, _, cx| open_login_items_button(cx)),
     )
-    .description(tr!(
-        "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery."
-    ))
+    .description(if launch_at_login {
+        tr!(
+            "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery."
+        )
+    } else {
+        tr!(
+            "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore automatic crash recovery."
+        )
+    })
 }
 
 /// Deep link to System Settings › Login Items — the only place that can

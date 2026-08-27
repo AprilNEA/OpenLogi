@@ -136,9 +136,9 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
-    /// Snapshot of the agent service's login-item registration, taken when
-    /// the window opens and after every settings change (the status read is
-    /// an XPC round-trip, so it must not run per frame). Drives the General
+    /// Snapshot of the agent service's login-item status, taken when the
+    /// window opens and after every settings change (the status read is an
+    /// XPC round-trip, so it must not run per frame). Drives the General
     /// page's "switched off in System Settings" notice; a flip made outside
     /// the app shows up on the next settings change or reopen.
     login_item_status: crate::platform::login_item::ServiceStatus,
@@ -175,9 +175,8 @@ impl SettingsView {
                     | StateEvent::SettingsChanged
                     | StateEvent::LanguageChanged
             ) {
-                // The launch-at-login toggle registers/unregisters the
-                // login item, so its status snapshot is stale exactly when
-                // a settings change lands.
+                // A settings change may have run the opportunistic
+                // registration ensure, so re-read the status snapshot.
                 if matches!(event, StateEvent::SettingsChanged) {
                     this.login_item_status = crate::platform::login_item::status();
                 }
@@ -476,6 +475,7 @@ impl Render for SettingsView {
                 self.thumbwheel_sensitivity_slider.clone(),
                 self.login_item_status
                     == crate::platform::login_item::ServiceStatus::RequiresApproval,
+                AppState::try_read(cx).is_none_or(|state| state.app_settings().launch_at_login),
             ))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod

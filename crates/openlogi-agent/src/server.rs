@@ -543,7 +543,7 @@ impl RingHapticPlayer {
 /// exits. A stale socket left by a prior crash is reclaimed by the listener —
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
-pub async fn run(server: AgentServer) {
+pub async fn run(server: AgentServer, connected: Arc<tokio::sync::Notify>) {
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -561,6 +561,10 @@ pub async fn run(server: AgentServer) {
                 continue;
             }
         };
+        // Wake the dormancy gate: a client connecting is the agent's "demand"
+        // signal (`notify_one` stores a permit, so a connection that lands
+        // before the gate starts waiting still wakes it).
+        connected.notify_one();
         let server = server.clone();
         let channel = BaseChannel::with_defaults(transport::wrap(stream));
         tokio::spawn(

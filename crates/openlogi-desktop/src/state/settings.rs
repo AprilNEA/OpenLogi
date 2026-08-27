@@ -15,27 +15,25 @@ impl AppState {
     pub fn app_settings(&self) -> &AppSettings {
         &self.config.app_settings
     }
-    /// Toggle launch-at-login, persist to `config.toml`, and apply it: on
-    /// macOS the GUI registers/unregisters the agent's `SMAppService` login
-    /// item right here (only the app owning the bundle can — see
-    /// `platform::login_item`), elsewhere the agent reconciles its autostart
-    /// unit when it reloads the config. No-op when the value is unchanged.
-    /// Disk failures restore the persisted value and surface a configuration
-    /// error without crashing.
+    /// Toggle launch-at-login and persist it to `config.toml` — which *is*
+    /// the switch: on macOS the login-item registration is
+    /// preference-independent (the service plist always carries the login
+    /// trigger; the agent reads this value when launchd starts it and idles
+    /// out when it is off — see `platform::login_item`), and on Linux/Windows
+    /// the agent reconciles its autostart unit when it reloads the config.
+    /// Registration is only *ensured* here opportunistically, healing drift
+    /// without ever re-prompting an intact install — and giving a dev build,
+    /// whose startup skips registration, its explicit way in. No-op when the
+    /// value is unchanged; disk failures restore the persisted value and
+    /// surface a configuration error without crashing.
     pub fn set_launch_at_login(&mut self, enabled: bool) {
         if self.config.app_settings.launch_at_login == enabled {
             return;
         }
         self.config
             .edit(|config| config.app_settings.launch_at_login = enabled);
-        // Persist first: only a saved preference may drive launchd, or a disk
-        // failure (which rolls the setting back) would leave the login item
-        // flipped against the value the window shows. The reverse failure —
-        // saved but the registration call failed — is convergent instead: the
-        // config is the desired state, the startup reconcile retries it, and
-        // the Settings row reads the live status back.
         if self.persist_and_reload("launch-at-login setting")
-            && let Err(error) = crate::platform::login_item::sync_registration(enabled)
+            && let Err(error) = crate::platform::login_item::ensure_registered()
         {
             tracing::warn!(error, enabled, "login-item registration failed");
         }

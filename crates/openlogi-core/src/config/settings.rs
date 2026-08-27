@@ -147,10 +147,12 @@ pub enum AssetSourcePreference {
 pub struct AppSettings {
     /// Start the background agent at login. **On by default**: the agent is
     /// what keeps remaps working, so a fresh install that silently died on
-    /// reboot would be broken-by-default. On macOS the GUI maps this to an
-    /// `SMAppService` registration (visible and revocable under System
-    /// Settings › Login Items — that consent surface is what makes the
-    /// default defensible); on Linux/Windows the agent reconciles its
+    /// reboot would be broken-by-default. On macOS this is a *sunk* switch:
+    /// the `SMAppService` login item stays registered either way (visible and
+    /// revocable under System Settings › Login Items — that consent surface
+    /// is what makes the default defensible), and the agent itself reads this
+    /// value when launchd starts it — off, and with no client connecting, it
+    /// idles out instead of arming. On Linux/Windows the agent reconciles its
     /// autostart unit / Run-key with it. A config written before the flip
     /// keeps the value it saved.
     #[serde(default = "default_true")]

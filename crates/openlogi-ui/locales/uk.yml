@@ -129,6 +129,7 @@ _version: 1
 "Automatically start OpenLogi when you log in.": "Автоматично запускати OpenLogi під час входу."
 "Login item disabled in System Settings": "Об'єкт входу вимкнено в Системних параметрах"
 "macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore launch at login and automatic crash recovery.": "macOS блокує фоновий агент OpenLogi: його об'єкт входу вимкнено. Увімкніть його в розділі «Об'єкти входу», щоб відновити запуск під час входу та автоматичне відновлення після збою."
+"macOS is blocking OpenLogi's background agent: its login item is switched off. Turn it on under Login Items to restore automatic crash recovery.": "macOS блокує фоновий агент OpenLogi: його об'єкт входу вимкнено. Увімкніть його в розділі «Об'єкти входу», щоб відновити автоматичне відновлення після збою."
 "Open Login Items": "Відкрити Об'єкти входу"
 "Check for updates": "Перевіряти наявність оновлень"
 "Check once per launch for a new version (query only — no automatic download).": "Перевіряти нову версію раз на запуск (лише запит — без автоматичного завантаження)."
