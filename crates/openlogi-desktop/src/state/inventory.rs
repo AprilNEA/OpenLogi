@@ -158,8 +158,7 @@ impl AppState {
         for key in &rerouted {
             self.pointer.reads.remove(key);
             if let Some(entry) = self.devices.runtime.get_mut(key) {
-                entry.smartshift.pending_confirm = None;
-                entry.smartshift.write_status = None;
+                entry.smartshift.reset();
             }
         }
         let present: HashSet<_> = self

@@ -9,10 +9,10 @@ use super::smartshift::SmartShiftDeviceState;
 /// Replaces six parallel `BTreeMap<String, _>` fields that all shared the
 /// same device-key domain — manual camera-light override, volatile light
 /// settings, an in-flight light command, the inventory-miss counter, a
-/// pending SmartShift write id, and the SmartShift write-confirmation status
-/// — with one row per device. The row also keeps light-command status scoped to
-/// the device that produced it. A device absent from the owning map is
-/// equivalent to every field here at its default.
+/// SmartShift write lifecycle, and its confirmation status — with one row per
+/// device. The row also keeps light-command status scoped to the device that
+/// produced it. A device absent from the owning map is equivalent to every
+/// field here at its default.
 #[derive(Debug, Default)]
 pub(super) struct DeviceRuntimeState {
     /// Consecutive inventory snapshots that omitted this device.

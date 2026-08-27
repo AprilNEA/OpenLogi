@@ -28,8 +28,11 @@ use crate::services::assets::AssetResolver;
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
 use super::scroll::set_scroll_resolution_if_supported;
-use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
-use super::{AppState, ConfigPersistence, LightCommandStatus, Load, SmartShiftWriteStatus};
+use super::smartshift::{
+    ConfirmationOutcome, SmartShiftDeviceState, smartshift_read_is_current,
+    smartshift_write_outcome,
+};
+use super::{AppState, ConfigPersistence, LightCommandStatus, Load};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
@@ -1001,7 +1004,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
     assert_eq!(smartshift_write_outcome(expected, None), None);
     assert_eq!(
         smartshift_write_outcome(expected, Some(&Load::Ready(Arc::new(expected)))),
-        Some(SmartShiftWriteStatus::Confirmed)
+        Some(ConfirmationOutcome::Confirmed)
     );
     assert_eq!(
         smartshift_write_outcome(
@@ -1013,7 +1016,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
                 ..expected
             }))),
         ),
-        Some(SmartShiftWriteStatus::Failed)
+        Some(ConfirmationOutcome::Failed)
     );
     assert_eq!(
         smartshift_write_outcome(
@@ -1022,7 +1025,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
                 "timeout".to_string(),
             ))
         ),
-        Some(SmartShiftWriteStatus::Failed)
+        Some(ConfirmationOutcome::Failed)
     );
 }
 
@@ -1033,18 +1036,20 @@ fn stale_smartshift_reads_do_not_resolve_newer_writes() {
         auto_disengage: SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(12.0)),
         tunable_torque: None,
     };
-    let applying = SmartShiftWriteStatus::Applying {
-        expected,
-        write_id: 2,
-    };
+    let mut write = SmartShiftDeviceState::default();
+    write.queue(expected, 2);
 
-    assert!(smartshift_read_is_current(Some(2), Some(&applying)));
-    assert!(!smartshift_read_is_current(Some(1), Some(&applying)));
-    assert!(!smartshift_read_is_current(None, Some(&applying)));
-    assert!(!smartshift_read_is_current(
-        Some(2),
-        Some(&SmartShiftWriteStatus::Confirmed)
-    ));
+    assert!(
+        !smartshift_read_is_current(Some(2), Some(&write)),
+        "a tagged read cannot land before its confirmation request starts"
+    );
+    assert!(!smartshift_read_is_current(None, Some(&write)));
+    assert_eq!(write.begin_confirmation(), Some(2));
+    assert!(smartshift_read_is_current(Some(2), Some(&write)));
+    assert!(!smartshift_read_is_current(Some(1), Some(&write)));
+    assert!(!smartshift_read_is_current(None, Some(&write)));
+    write.reset();
+    assert!(!smartshift_read_is_current(Some(2), Some(&write)));
     assert!(smartshift_read_is_current(None, None));
 }
 
