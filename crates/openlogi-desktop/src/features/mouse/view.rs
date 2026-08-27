@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
+    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
@@ -11,6 +11,7 @@ use gpui_base::Button as BaseButton;
 use gpui_component::{
     Icon, IconName, h_flex,
     input::{InputEvent, InputState},
+    tooltip::Tooltip,
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
@@ -182,7 +183,6 @@ impl MouseModelView {
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
         self.action_picker_open = false;
-        self.model_perspective = MouseModelPerspective::View1;
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
@@ -1092,14 +1092,11 @@ impl RenderOnce for HotspotTrigger {
         let click_view = view.clone();
         let hotspot = self.hotspot;
         let btn = hotspot.id;
+        let label = hotspot_accessibility_label(btn, editable);
 
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(if editable {
-                tr!("Bind %{name}", name => tr!(btn.label()))
-            } else {
-                format!("{}: {}", tr!(btn.label()), tr!("Native")).into()
-            })
+            .accessibility_label(label.clone())
             .aria_selected(selected)
             .flex()
             .items_center()
@@ -1129,6 +1126,9 @@ impl RenderOnce for HotspotTrigger {
                     .border_2()
                     .border_color(rgb(ACCENT_BLUE))
             })
+            .when(!editable, |button| {
+                button.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            })
             .when(editable, |button| {
                 button
                     .cursor_pointer()
@@ -1142,6 +1142,14 @@ impl RenderOnce for HotspotTrigger {
             .on_hover(move |hovered, _window, cx| {
                 set_control_hovered(&view, btn, *hovered, cx);
             })
+    }
+}
+
+fn hotspot_accessibility_label(button: MouseControlId, editable: bool) -> SharedString {
+    if editable {
+        tr!("Bind %{name}", name => tr!(button.label()))
+    } else {
+        format!("{}: {}", tr!(button.label()), tr!("Native")).into()
     }
 }
 
@@ -1233,6 +1241,24 @@ mod tests {
         cx.run_until_parked();
     }
 
+    #[gpui::test]
+    fn selecting_a_gesture_keeps_the_active_g502_perspective(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+
+        view.update(cx, |view, _| {
+            view.model_perspective = MouseModelPerspective::View2;
+
+            view.set_gesture_selected_dir(Some(GestureDirection::Up));
+
+            assert_eq!(view.model_perspective, MouseModelPerspective::View2);
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
     #[test]
     fn active_thumbwheel_directions_highlight_the_paired_control() {
         assert_eq!(
@@ -1292,5 +1318,7 @@ mod tests {
         assert!(!binding.text.is_empty());
         assert!(!binding.editable);
         assert!(binding.icon.is_none());
+        let name = tr!("DPI Up");
+        assert!(hotspot_accessibility_label(ButtonId::DpiUp.into(), false).contains(name.as_ref()));
     }
 }

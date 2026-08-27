@@ -8,9 +8,9 @@ use openlogi_core::{
     device::{DeviceModelInfo, is_g502_family},
 };
 
-use super::geometry::{LabelDistribution, default_labels};
-use super::hotspots::{Hotspot, MouseControlId, default_hotspots};
-use super::leader_lines::{Label, Side};
+use super::geometry::{LabelDistribution, default_labels, labels_from_hotspots};
+use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::leader_lines::Label;
 
 /// G Hub splits the G502 button map into top and thumb-side perspectives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,7 +87,11 @@ impl MouseButtonLayout {
     ) -> Vec<Label> {
         match self {
             Self::Default => default_labels(thumbwheel, distribution),
-            Self::G502 => g502_labels(perspective),
+            Self::G502 => labels_from_hotspots(
+                &g502_hotspots(perspective),
+                MOUSE_MODEL_SIZE.1,
+                distribution,
+            ),
         }
     }
 }
@@ -172,74 +176,12 @@ fn g502_side_hotspots() -> Vec<Hotspot> {
     ]
 }
 
-fn g502_labels(perspective: MouseModelPerspective) -> Vec<Label> {
-    match perspective {
-        MouseModelPerspective::View1 => g502_top_labels(),
-        MouseModelPerspective::View2 => g502_side_labels(),
-    }
-}
-
-fn g502_top_labels() -> Vec<Label> {
-    vec![
-        Label {
-            id: ButtonId::MiddleClick.into(),
-            side: Side::Left,
-            y: 80.,
-        },
-        Label {
-            id: ButtonId::WheelTiltLeft.into(),
-            side: Side::Left,
-            y: 160.,
-        },
-        Label {
-            id: ButtonId::WheelTiltRight.into(),
-            side: Side::Left,
-            y: 240.,
-        },
-        Label {
-            id: ButtonId::SmartShift.into(),
-            side: Side::Left,
-            y: 320.,
-        },
-        Label {
-            id: ButtonId::DpiUp.into(),
-            side: Side::Left,
-            y: 400.,
-        },
-        Label {
-            id: ButtonId::DpiDown.into(),
-            side: Side::Left,
-            y: 480.,
-        },
-    ]
-}
-
-fn g502_side_labels() -> Vec<Label> {
-    vec![
-        Label {
-            id: ButtonId::DpiShift.into(),
-            side: Side::Left,
-            y: 160.,
-        },
-        Label {
-            id: ButtonId::Forward.into(),
-            side: Side::Left,
-            y: 280.,
-        },
-        Label {
-            id: ButtonId::Back.into(),
-            side: Side::Left,
-            y: 400.,
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use openlogi_core::device::DeviceTransports;
 
-    use super::super::hotspots::MOUSE_MODEL_SIZE;
+    use super::super::leader_lines::Side;
 
     #[test]
     fn default_layout_includes_mx_gesture_button() {
@@ -356,5 +298,44 @@ mod tests {
         assert!(MouseButtonLayout::G502.binds_control(ButtonId::MiddleClick.into()));
         assert!(MouseButtonLayout::G502.binds_control(ButtonId::Back.into()));
         assert!(MouseButtonLayout::G502.binds_control(ButtonId::Forward.into()));
+    }
+
+    #[test]
+    fn g502_labels_follow_hotspot_height_without_crossing() {
+        let hotspots =
+            MouseButtonLayout::G502.fallback_hotspots(MouseModelPerspective::View1, false);
+        let labels = MouseButtonLayout::G502.fallback_labels(
+            MouseModelPerspective::View1,
+            false,
+            LabelDistribution::LeftOnly,
+        );
+        let mut ordered = labels.iter().collect::<Vec<_>>();
+        ordered.sort_by(|a, b| a.y.total_cmp(&b.y));
+        let hotspot_y = |id| {
+            hotspots
+                .iter()
+                .find(|hotspot| hotspot.id == id)
+                .expect("every label has a hotspot")
+                .center()
+                .1
+        };
+
+        assert!(
+            ordered
+                .windows(2)
+                .all(|pair| hotspot_y(pair[0].id) <= hotspot_y(pair[1].id))
+        );
+    }
+
+    #[test]
+    fn g502_labels_use_both_sides_when_requested() {
+        let labels = MouseButtonLayout::G502.fallback_labels(
+            MouseModelPerspective::View1,
+            false,
+            LabelDistribution::BothSides,
+        );
+
+        assert!(labels.iter().any(|label| label.side == Side::Left));
+        assert!(labels.iter().any(|label| label.side == Side::Right));
     }
 }
