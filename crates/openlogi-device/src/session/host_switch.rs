@@ -19,12 +19,10 @@ use hidpp::{
     protocol::v20,
 };
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::timeout,
-};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
+use crate::time::timeout;
 use crate::{
     ChannelPool, DeviceRoute,
     backend::BackendError,

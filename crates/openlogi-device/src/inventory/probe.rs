@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use crate::time::timeout;
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
@@ -15,7 +16,6 @@ use hidpp::{
     },
 };
 use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
-use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};

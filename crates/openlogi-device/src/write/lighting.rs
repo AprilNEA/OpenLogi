@@ -218,7 +218,7 @@ async fn set_color_effects(
             .set_zone_effect(zone, EFFECT_FIXED, params, Persistence::Volatile)
             .await
             .map_err(classify_lighting_error)?;
-        tokio::time::sleep(FRAME_GAP).await;
+        crate::time::sleep(FRAME_GAP).await;
     }
     debug!(
         index,

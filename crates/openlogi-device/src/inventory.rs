@@ -7,11 +7,11 @@ use std::{
     time::Duration,
 };
 
+use crate::time::timeout;
 use futures_concurrency::future::Join as _;
 use hidpp::channel::HidppChannel;
 use openlogi_core::device::DeviceInventory;
 use thiserror::Error;
-use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
@@ -337,7 +337,7 @@ pub async fn enumerate(
         // partial live result) is cleared so it can't count as one of the two
         // "stable" reads and short-circuit a later healthy-but-short pass.
         previous_inventories = if all_healthy { Some(inventories) } else { None };
-        tokio::time::sleep(ONESHOT_RETRY_DELAY).await;
+        crate::time::sleep(ONESHOT_RETRY_DELAY).await;
         attempt += 1;
     }
 }

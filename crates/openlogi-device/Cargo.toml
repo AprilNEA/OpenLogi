@@ -20,6 +20,9 @@ openlogi-core = { version = "0.8.1", path = "../openlogi-core", default-features
 openlogi-device-registry = { workspace = true }
 futures-lite = { workspace = true }
 futures-concurrency = "7"
+# The one timer for both targets — see `src/time.rs`. Already in the graph via
+# `openlogi-hidpp`, the other crate on the portable list.
+futures-timer = "3.0.4"
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -30,3 +33,10 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+# `futures-timer` only reaches for the browser's timer under this feature;
+# without it a wasm build silently gets the thread-backed native path, which is
+# the runtime panic this crate is trying not to have. Scoped to the wasm target
+# so native builds pull neither `gloo-timers` nor `send_wrapper`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-timer = { version = "3.0.4", features = ["wasm-bindgen"] }

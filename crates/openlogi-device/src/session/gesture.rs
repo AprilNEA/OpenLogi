@@ -266,7 +266,7 @@ pub async fn run_capture_session(
     let channel_dead = loop {
         tokio::select! {
             _ = &mut shutdown => break false,
-            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
+            () = crate::time::sleep(LIVENESS_PING_INTERVAL) => {
                 match root.ping(0x5a).await {
                     Err(v20::Hidpp20Error::Channel(
                         hidpp::channel::ChannelError::Timeout

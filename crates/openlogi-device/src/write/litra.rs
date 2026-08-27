@@ -191,7 +191,7 @@ pub async fn apply(
     let Some(mut writer) = open_route_writer(backend, route).await? else {
         return Err(WriteError::DeviceNotFound);
     };
-    tokio::time::timeout(RAW_WRITE_TIMEOUT, writer.write_output_report(&report))
+    crate::time::timeout(RAW_WRITE_TIMEOUT, writer.write_output_report(&report))
         .await
         .map_err(|_| WriteError::RequestTimedOut {
             operation: super::HidppOperation::Light,

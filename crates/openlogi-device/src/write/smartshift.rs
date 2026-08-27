@@ -329,7 +329,7 @@ pub(super) async fn toggle_smartshift_on_channel(
                 error = ?err,
                 "SmartShift toggle hit a transient error; retrying once"
             );
-            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            crate::time::sleep(TRANSIENT_RETRY_DELAY).await;
             toggle_once(&mut device, index).await
         }
         Err(err) => Err(err),
@@ -409,7 +409,7 @@ pub(super) async fn set_smartshift_on_channel(
                 error = ?err,
                 "SmartShift write hit a transient error; retrying once"
             );
-            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            crate::time::sleep(TRANSIENT_RETRY_DELAY).await;
             // Re-open: the first attempt may have bound the wrong feature index
             // after a mis-delivered root.get_feature response.
             let smartshift = SmartShift::open(&mut device).await?;

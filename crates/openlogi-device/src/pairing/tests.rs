@@ -85,7 +85,7 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
         reports
     };
 
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let result = crate::time::timeout(Duration::from_secs(2), async {
         tokio::join!(
             run_session(
                 &channel,

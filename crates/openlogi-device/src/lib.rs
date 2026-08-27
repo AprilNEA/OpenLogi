@@ -25,6 +25,7 @@ pub mod pairing;
 pub mod reprog_controls;
 pub mod session;
 pub mod thumbwheel;
+pub mod time;
 pub mod write;
 
 pub use backend::{

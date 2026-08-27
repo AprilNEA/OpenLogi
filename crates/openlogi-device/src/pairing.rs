@@ -310,7 +310,7 @@ async fn drive(
     let mut partial: HashMap<u16, PartialDevice> = HashMap::new();
     // Auth byte of the device the user chose to pair, for passkey rendering.
     let mut pairing_auth: Option<u8> = None;
-    let deadline = tokio::time::sleep(SESSION_TIMEOUT);
+    let deadline = crate::time::sleep(SESSION_TIMEOUT);
     tokio::pin!(deadline);
 
     loop {
