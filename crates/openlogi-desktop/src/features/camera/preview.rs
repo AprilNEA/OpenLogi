@@ -21,7 +21,9 @@
 //!
 //! When the camera cannot be opened at all the placeholder says why rather than
 //! waiting on a first frame that is never coming — most usefully when another
-//! application already holds the device.
+//! application already holds the device. That one resolves itself the moment the
+//! other application quits, and nothing reports when it does, so the preview
+//! keeps retrying on a timer for as long as its tab is on screen.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +48,11 @@ mod tests;
 
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9
+/// How long to wait before opening a camera again after a failed start. A
+/// camera another application holds becomes free when that application lets go
+/// of it, which raises no event to wait on — so poll, slowly enough that a
+/// camera left busy costs one activation attempt every couple of seconds.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Live preview view. Holds the capture stream + its texture only while the
 /// parent points it at a camera via [`Self::set_target`].
@@ -60,7 +67,12 @@ enum PreviewLifecycle {
     Stopped,
     /// A target remains selected after opening its stream failed. Same-target
     /// renders stay idempotent rather than retrying the open in a hot loop.
-    StartFailed { target: String, error: CaptureError },
+    StartFailed {
+        target: String,
+        error: CaptureError,
+        /// Leaving this state cancels its pending retry.
+        _retry_task: Task<()>,
+    },
     /// A target is selected but waits for Camera permission before opening.
     AwaitingAccess(String),
     Streaming {
@@ -158,7 +170,29 @@ impl CameraPreview {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::warn!(%error, "camera preview failed to start");
-                self.lifecycle = PreviewLifecycle::StartFailed { target, error };
+                let retry_target = target.clone();
+                let retry_task = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(RETRY_INTERVAL).await;
+                    let _ = this.update(cx, |view, cx| {
+                        if !matches!(
+                            &view.lifecycle,
+                            PreviewLifecycle::StartFailed { target, .. } if *target == retry_target
+                        ) {
+                            return;
+                        }
+                        if view.capture.access_granted() {
+                            view.start_stream(retry_target, cx);
+                        } else {
+                            view.lifecycle = PreviewLifecycle::AwaitingAccess(retry_target);
+                        }
+                        cx.notify();
+                    });
+                });
+                self.lifecycle = PreviewLifecycle::StartFailed {
+                    target,
+                    error,
+                    _retry_task: retry_task,
+                };
                 return;
             }
         };
