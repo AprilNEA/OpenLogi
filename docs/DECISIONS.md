@@ -4,6 +4,54 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
+
+The 2026-06 daemon split (#165) put the resident input machinery in
+`openlogi-agent` and left the GUI an on-demand IPC client. Its two
+cross-process abstractions have been production infrastructure since:
+`openlogi-ipc` is the versioned, append-only wire, and `succession` owns the
+one-process-per-role lifetime pattern (the agent negotiates as a peer, the
+overlay serves one run as a subordinate, the GUI only reports mismatches).
+This entry records the deliberate end of that road: the agent itself does not
+split further, and no transport-agnostic event abstraction is built inside it.
+
+Two facts decide it:
+
+- **Every candidate cut crosses the hot path.** The agent's two
+  permission-bearing roles — the CGEventTap hook (Accessibility) and HID++
+  device I/O (Input Monitoring) — are not adjacent subsystems but two ends of
+  one input loop: the hook feeds the action dispatcher, which performs HID++
+  writes (DPI cycle) and OS injection, and HID++ gesture capture feeds the
+  same dispatcher in the other direction. A hook/device process boundary puts
+  IPC latency and a new failure mode inside button-press handling — the path
+  the product exists to keep fast. The GUI/agent split worked precisely
+  because its crossing edges are cold (config saves, snapshots, long-polls);
+  no cold cut of the agent exists.
+- **The isolation benefits already arrived by other means.** Crash recovery is
+  launchd supervision (`KeepAlive = {SuccessfulExit: false}`); prompt
+  containment is the dormancy gate (nothing user-visible before arming);
+  orphan lifetime is `succession`. What a split would still add — the event
+  tap surviving the seconds of a device-stack respawn — does not pay for a
+  second TCC identity: bundle identity is the TCC primary key, so a new
+  helper process is a new identity with zero existing grants, a mass
+  re-grant event of the 0.6.24 class.
+
+The standing doctrine for any edge that does someday cross a process boundary:
+give it the treatment the overlay got — a versioned method on the
+`openlogi-ipc` contract (append-only, golden-tested, `PROTOCOL_VERSION`
+bumped) plus a `succession` role for the new process's lifetime — and cut
+along the named seams (`startup::StateWatchers` is the message list of a
+watcher-side wire, `lifecycle::Armed` is the consumer-side state list). What
+is deliberately not built is an in-process event bus or transport-agnostic
+event-source layer: it would tax every in-process edge with serialization
+bounds, fallibility, and reconnection semantics that shared memory does not
+have, in preparation for a boundary this analysis says should not exist.
+
+Revisit if a platform forces a privilege split (a packaging world where
+uinput access requires a system service), if sandboxing the device stack
+becomes a requirement, or if a genuinely cold cut appears. The first move is
+still a wire, not an abstraction.
+
 ## 2026-08: Device settings are keyed by identity, not by transport
 
 A device's config key was derived from how it was reached, so the same mouse
