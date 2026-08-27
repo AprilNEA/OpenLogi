@@ -307,6 +307,7 @@ _version: 1
 "Do Nothing": "Hiçbir Şey Yapma"
 "Swap left and right mouse buttons": "Sol ve sağ fare düğmelerinin yerini değiştir"
 "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "Sağ fare düğmesini birincil düğme olarak kullanın. Bu, macOS Fare ayarını sistem genelinde değiştirir."
+"Couldn't change the primary mouse button. Try again or use macOS System Settings.": "Birincil fare düğmesi değiştirilemedi. Yeniden deneyin veya macOS Sistem Ayarları'nı kullanın."
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

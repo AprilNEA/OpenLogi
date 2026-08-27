@@ -3,6 +3,8 @@
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{ForegroundApps, PrimaryMouseButton};
 
+use crate::services::ipc::PrimaryMouseButtonCommandError;
+
 use super::{AgentLink, AppState};
 
 /// Agent-owned observations accepted by the GUI for this process session.
@@ -10,6 +12,8 @@ pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
     primary_mouse_button: Option<PrimaryMouseButton>,
+    primary_mouse_button_pending: Option<PrimaryMouseButton>,
+    primary_mouse_button_error: Option<PrimaryMouseButtonCommandError>,
     last_ready_inventory: Vec<DeviceInventory>,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
@@ -23,6 +27,8 @@ impl Default for AgentSession {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
             primary_mouse_button: None,
+            primary_mouse_button_pending: None,
+            primary_mouse_button_error: None,
             last_ready_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
@@ -123,6 +129,19 @@ impl AppState {
         self.agent.primary_mouse_button
     }
 
+    /// Whether a host-wide primary-button write is waiting for the agent.
+    #[must_use]
+    pub fn primary_mouse_button_pending(&self) -> bool {
+        self.agent.primary_mouse_button_pending.is_some()
+    }
+
+    /// The last primary-button write failure, retained until the user retries
+    /// or the agent confirms a later write.
+    #[must_use]
+    pub fn primary_mouse_button_error(&self) -> Option<&PrimaryMouseButtonCommandError> {
+        self.agent.primary_mouse_button_error.as_ref()
+    }
+
     /// Adopt a host-wide primary mouse button observation.
     pub fn set_primary_mouse_button(&mut self, button: Option<PrimaryMouseButton>) -> bool {
         if self.agent.primary_mouse_button == button {
@@ -133,8 +152,45 @@ impl AppState {
     }
 
     /// Ask the agent to change the macOS system setting. The observed snapshot,
-    /// not this command, remains the GUI's source of truth.
-    pub fn request_primary_mouse_button(&self, button: PrimaryMouseButton) {
-        self.send_ipc(crate::services::ipc::Command::SetPrimaryMouseButton(button));
+    /// not this pending request, remains the GUI's source of truth. Returns
+    /// whether request/error presentation changed.
+    pub fn request_primary_mouse_button(&mut self, button: PrimaryMouseButton) -> bool {
+        let previous = (
+            self.agent.primary_mouse_button_pending,
+            self.agent.primary_mouse_button_error.clone(),
+        );
+        if self.send_ipc(crate::services::ipc::Command::SetPrimaryMouseButton(button)) {
+            self.agent.primary_mouse_button_pending = Some(button);
+            self.agent.primary_mouse_button_error = None;
+        } else {
+            self.agent.primary_mouse_button_pending = None;
+            self.agent.primary_mouse_button_error =
+                Some(PrimaryMouseButtonCommandError::AgentUnavailable);
+        }
+        previous
+            != (
+                self.agent.primary_mouse_button_pending,
+                self.agent.primary_mouse_button_error.clone(),
+            )
+    }
+
+    /// Record whether the agent accepted the latest primary-button write.
+    /// Success only clears command presentation; the observed snapshot remains
+    /// responsible for changing the switch's value.
+    pub fn apply_primary_mouse_button_result(
+        &mut self,
+        result: Result<PrimaryMouseButton, PrimaryMouseButtonCommandError>,
+    ) -> bool {
+        let previous = (
+            self.agent.primary_mouse_button_pending,
+            self.agent.primary_mouse_button_error.clone(),
+        );
+        self.agent.primary_mouse_button_pending = None;
+        self.agent.primary_mouse_button_error = result.err();
+        previous
+            != (
+                self.agent.primary_mouse_button_pending,
+                self.agent.primary_mouse_button_error.clone(),
+            )
     }
 }

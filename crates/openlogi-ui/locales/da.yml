@@ -307,6 +307,7 @@ _version: 1
 "Do Nothing": "Gør ingenting"
 "Swap left and right mouse buttons": "Byt om på venstre og højre museknap"
 "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "Brug højre museknap som primærknap. Dette ændrer museindstillingen i macOS for hele systemet."
+"Couldn't change the primary mouse button. Try again or use macOS System Settings.": "Den primære museknap kunne ikke ændres. Prøv igen, eller brug Systemindstillinger i macOS."
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

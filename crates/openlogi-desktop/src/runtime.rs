@@ -275,6 +275,15 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::PrimaryMouseButtonResult(result) => {
+                cx.update(|cx| {
+                    AppState::update(cx, |state, cx| {
+                        if state.apply_primary_mouse_button_result(result) {
+                            cx.emit(StateEvent::SettingsChanged);
+                        }
+                    });
+                });
+            }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }

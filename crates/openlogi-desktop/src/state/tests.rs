@@ -20,10 +20,11 @@ use openlogi_core::hid::{
 
 use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_ipc::ForegroundApps;
+use openlogi_ipc::{ForegroundApps, PrimaryMouseButton, SystemMouseSettingError};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
+use crate::services::ipc::{Command, PrimaryMouseButtonCommandError};
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
@@ -144,6 +145,51 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
     assert_eq!(state.config_issue(), Some("agent rejected config"));
     assert!(state.apply_config_reload_result(Ok(())));
     assert_eq!(state.config_issue(), None);
+}
+
+#[test]
+fn primary_mouse_button_failure_stays_visible_without_overwriting_the_snapshot() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    state.set_primary_mouse_button(Some(PrimaryMouseButton::Left));
+
+    assert!(state.request_primary_mouse_button(PrimaryMouseButton::Right));
+    assert!(state.primary_mouse_button_pending());
+    assert!(state.primary_mouse_button_error().is_none());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::SetPrimaryMouseButton(PrimaryMouseButton::Right))
+    ));
+
+    let error = PrimaryMouseButtonCommandError::Rejected(SystemMouseSettingError::Unavailable {
+        message: "persistent write rejected".into(),
+    });
+    assert!(state.apply_primary_mouse_button_result(Err(error.clone())));
+    assert!(!state.primary_mouse_button_pending());
+    assert_eq!(state.primary_mouse_button_error(), Some(&error));
+    assert_eq!(
+        state.primary_mouse_button(),
+        Some(PrimaryMouseButton::Left),
+        "a command result must not replace the agent's authoritative snapshot"
+    );
+
+    assert!(state.request_primary_mouse_button(PrimaryMouseButton::Right));
+    assert!(state.primary_mouse_button_error().is_none());
+    assert!(state.apply_primary_mouse_button_result(Ok(PrimaryMouseButton::Right)));
+    assert_eq!(
+        state.primary_mouse_button(),
+        Some(PrimaryMouseButton::Left),
+        "even success waits for the observed snapshot to move the switch"
+    );
 }
 
 /// Config key of the mouse [`direct_inventory`] builds with a real unit id.

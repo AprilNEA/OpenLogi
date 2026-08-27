@@ -307,6 +307,7 @@ _version: 1
 "Do Nothing": "Nichts tun"
 "Swap left and right mouse buttons": "Linke und rechte Maustaste vertauschen"
 "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "Die rechte Maustaste als Primärtaste verwenden. Dadurch wird die macOS-Mauseinstellung systemweit geändert."
+"Couldn't change the primary mouse button. Try again or use macOS System Settings.": "Die primäre Maustaste konnte nicht geändert werden. Versuchen Sie es erneut oder verwenden Sie die macOS-Systemeinstellungen."
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

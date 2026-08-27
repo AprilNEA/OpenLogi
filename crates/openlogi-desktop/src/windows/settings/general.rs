@@ -22,6 +22,7 @@ pub(super) struct SensitivitySliders {
 pub(super) fn general_page(
     sliders: SensitivitySliders,
     registration_status: ServiceStatus,
+    cx: &App,
 ) -> SettingPage {
     let SensitivitySliders {
         vertical_scroll,
@@ -63,7 +64,7 @@ pub(super) fn general_page(
     };
 
     #[cfg(target_os = "macos")]
-    let group = group.item(primary_mouse_button_item());
+    let group = group.item(primary_mouse_button_item(cx));
 
     // One `show_in_menu_bar` setting drives the macOS status item and the
     // Windows notification-area icon (honored at next agent launch); Linux
@@ -124,7 +125,15 @@ fn smooth_scrolling_item() -> SettingItem {
 }
 
 #[cfg(target_os = "macos")]
-fn primary_mouse_button_item() -> SettingItem {
+fn primary_mouse_button_item(cx: &App) -> SettingItem {
+    let (available, pending, failed) =
+        AppState::try_read(cx).map_or((false, false, false), |state| {
+            (
+                state.primary_mouse_button().is_some(),
+                state.primary_mouse_button_pending(),
+                state.primary_mouse_button_error().is_some(),
+            )
+        });
     SettingItem::new(
         tr!("Swap left and right mouse buttons"),
         SettingField::switch(
@@ -139,15 +148,26 @@ fn primary_mouse_button_item() -> SettingItem {
                 } else {
                     PrimaryMouseButton::Left
                 };
-                if let Some(state) = AppState::try_read(cx) {
-                    state.request_primary_mouse_button(button);
+                if let Some(state) = AppState::try_global(cx) {
+                    state.update(cx, |state, cx| {
+                        if state.request_primary_mouse_button(button) {
+                            cx.emit(StateEvent::SettingsChanged);
+                        }
+                    });
                 }
             },
         ),
     )
-    .description(tr!(
-        "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide."
-    ))
+    .description(if failed {
+        tr!(
+            "Couldn't change the primary mouse button. Try again or use macOS System Settings."
+        )
+    } else {
+        tr!(
+            "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide."
+        )
+    })
+    .disabled(!available || pending)
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

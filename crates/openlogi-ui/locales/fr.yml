@@ -307,6 +307,7 @@ _version: 1
 "Do Nothing": "Ne rien faire"
 "Swap left and right mouse buttons": "Permuter les boutons gauche et droit de la souris"
 "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "Utilisez le bouton droit de la souris comme bouton principal. Cela modifie le réglage Souris de macOS pour l’ensemble du système."
+"Couldn't change the primary mouse button. Try again or use macOS System Settings.": "Impossible de modifier le bouton principal de la souris. Réessayez ou utilisez Réglages Système de macOS."
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

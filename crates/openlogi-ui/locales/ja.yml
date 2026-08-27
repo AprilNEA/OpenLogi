@@ -307,6 +307,7 @@ _version: 1
 "Do Nothing": "何もしない"
 "Swap left and right mouse buttons": "マウスの左右ボタンを入れ替える"
 "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "マウスの右ボタンを主ボタンとして使用します。macOSの「マウス」設定がシステム全体で変更されます。"
+"Couldn't change the primary mouse button. Try again or use macOS System Settings.": "マウスの主ボタンを変更できませんでした。もう一度試すか、macOSの「システム設定」を使用してください。"
 "Smooth scrolling": "Smooth scrolling"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
 "Vertical Scroll Sensitivity": "Vertical Scroll Sensitivity"

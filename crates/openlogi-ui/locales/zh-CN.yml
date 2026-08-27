@@ -307,6 +307,7 @@ _version: 1
 "Do Nothing": "不执行任何操作"
 "Swap left and right mouse buttons": "交换鼠标左右键"
 "Use the right mouse button as the primary click. This changes the macOS Mouse setting system-wide.": "将鼠标右键用作主按钮。此操作会在整个系统中更改 macOS 的“鼠标”设置。"
+"Couldn't change the primary mouse button. Try again or use macOS System Settings.": "无法更改鼠标主按钮。请重试或使用 macOS“系统设置”。"
 "Smooth scrolling": "平滑滚动"
 "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged.": "为传统鼠标滚轮输入添加平滑动画，不影响触控板滚动。"
 "Vertical Scroll Sensitivity": "垂直滚动灵敏度"
