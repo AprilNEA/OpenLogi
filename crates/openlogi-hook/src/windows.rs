@@ -9,7 +9,10 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
+use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
@@ -27,6 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
+use crate::edge::DisplayRect;
 use crate::windows_worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
@@ -186,6 +190,45 @@ impl HookBackend for Backend {
             y: f64::from(point.y),
         })
     }
+
+    fn display_rects() -> Vec<DisplayRect> {
+        let mut displays = Vec::new();
+        // SAFETY: null HDC/clip asks for every monitor; `displays` remains live
+        // and exclusively borrowed through dwData until this synchronous call
+        // returns, and the callback validates the RECT pointer before reading.
+        let result = unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(collect_display_rect),
+                std::ptr::from_mut(&mut displays).addr().cast_signed(),
+            )
+        };
+        if result == 0 { Vec::new() } else { displays }
+    }
+}
+
+unsafe extern "system" fn collect_display_rect(
+    _monitor: HMONITOR,
+    _device_context: HDC,
+    rect: *mut RECT,
+    displays: LPARAM,
+) -> i32 {
+    if rect.is_null() || displays == 0 {
+        return 0;
+    }
+    // SAFETY: EnumDisplayMonitors supplies a live RECT and the dwData pointer
+    // created from the exclusively borrowed Vec in `display_rects`.
+    let (rect, displays) = unsafe { (&*rect, &mut *(displays as *mut Vec<DisplayRect>)) };
+    if let Some(display) = DisplayRect::new(
+        f64::from(rect.left),
+        f64::from(rect.top),
+        f64::from(rect.right - rect.left),
+        f64::from(rect.bottom - rect.top),
+    ) {
+        displays.push(display);
+    }
+    1
 }
 
 #[expect(
@@ -461,7 +504,11 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         }),
         WM_MOUSEMOVE => {
             let (delta_x, delta_y) = motion_delta(previous?, data.pt)?;
-            Some(MouseEvent::Moved { delta_x, delta_y })
+            Some(MouseEvent::Moved {
+                delta_x,
+                delta_y,
+                modifiers: current_modifiers(),
+            })
         }
         _ => None,
     }
@@ -637,7 +684,8 @@ mod tests {
             translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)),
             Some(MouseEvent::Moved {
                 delta_x: 60,
-                delta_y: -5
+                delta_y: -5,
+                ..
             })
         ));
         assert!(

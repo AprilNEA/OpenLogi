@@ -20,6 +20,7 @@ use core_foundation::runloop::{
     CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
 use core_foundation::string::{CFString, CFStringRef};
+use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
 use core_graphics::event::{
     CGEvent, CGEventField, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventTapProxy, CGEventType, CallbackResult, EventField,
@@ -29,6 +30,7 @@ use foreign_types_shared::ForeignType as _;
 use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
 use tracing::{debug, error, warn};
 
+use crate::edge::DisplayRect;
 use crate::{
     ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, ForegroundApp,
     HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
@@ -280,12 +282,11 @@ fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
 }
 
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
-/// for event types we don't translate (e.g. move events, unknown buttons).
+/// for event types we don't translate (for example, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
     // Skip events OpenLogi itself synthesised, so a remapped click or inverted
-    // scroll we posted doesn't re-enter the hook as real input. Gate the field
-    // read to events we synthesize — keeping the FFI call off the high-rate
-    // pointer-move stream.
+    // scroll we posted doesn't re-enter the hook as real input. MouseMoved is
+    // included because Flow cursor arrival uses one tagged synthetic move.
     let can_be_synthetic = matches!(
         etype,
         CGEventType::LeftMouseDown
@@ -295,6 +296,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             | CGEventType::OtherMouseDown
             | CGEventType::OtherMouseUp
             | CGEventType::ScrollWheel
+            | CGEventType::MouseMoved
     );
     if can_be_synthetic
         && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
@@ -387,6 +389,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             Some(MouseEvent::Moved {
                 delta_x: dx as i32,
                 delta_y: dy as i32,
+                modifiers: modifiers_from_flags(event.get_flags()),
             })
         }
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -695,6 +698,30 @@ impl HookBackend for Backend {
             x: point.x,
             y: point.y,
         })
+    }
+
+    fn display_rects() -> Vec<DisplayRect> {
+        const MAX_DISPLAYS: u32 = 32;
+        let mut ids = [0u32; MAX_DISPLAYS as usize];
+        let mut count = 0;
+        // SAFETY: the list write is bounded by the capacity passed, and count
+        // reports how many active display ids CoreGraphics initialized.
+        if unsafe { CGGetActiveDisplayList(MAX_DISPLAYS, ids.as_mut_ptr(), &raw mut count) } != 0 {
+            return Vec::new();
+        }
+        ids.iter()
+            .take(count as usize)
+            .filter_map(|&id| {
+                // SAFETY: side-effect-free getter for an id from the active list.
+                let bounds = unsafe { CGDisplayBounds(id) };
+                DisplayRect::new(
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height,
+                )
+            })
+            .collect()
     }
 }
 

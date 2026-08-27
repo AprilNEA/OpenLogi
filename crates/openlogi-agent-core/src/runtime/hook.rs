@@ -453,7 +453,9 @@ pub fn start(
                     pressed,
                     device,
                 } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
-                MouseEvent::Moved { delta_x, delta_y } => {
+                MouseEvent::Moved {
+                    delta_x, delta_y, ..
+                } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {

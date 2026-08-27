@@ -26,6 +26,23 @@ static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return false;
+    };
+    let Ok(event) = CGEvent::new_mouse_event(
+        source,
+        CGEventType::MouseMoved,
+        CGPoint::new(x, y),
+        CGMouseButton::Left,
+    ) else {
+        return false;
+    };
+    tag_synthetic(&event);
+    event.post(CGEventTapLocation::HID);
+    true
+}
+
 // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
 const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase

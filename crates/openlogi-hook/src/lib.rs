@@ -178,6 +178,8 @@ pub enum MouseEvent {
         delta_x: i32,
         /// Positive = down, negative = up.
         delta_y: i32,
+        /// Which modifiers were held during this movement sample.
+        modifiers: KeyModifiers,
     },
     /// The OS interrupted event capture (on macOS, the tap was disabled by a
     /// timeout or by competing user input). Any in-progress gesture hold must be
@@ -370,6 +372,11 @@ trait HookBackend {
     fn cursor_position() -> Option<CursorPosition> {
         None
     }
+
+    /// See [`crate::display_rects`].
+    fn display_rects() -> Vec<edge::DisplayRect> {
+        Vec::new()
+    }
 }
 
 /// The backend for a platform with no hook: every default, and a
@@ -539,6 +546,17 @@ pub fn frontmost_application() -> Option<ForegroundApp> {
 #[must_use]
 pub fn cursor_position() -> Option<CursorPosition> {
     Backend::cursor_position()
+}
+
+/// Return active display bounds in the same global coordinate space as
+/// [`cursor_position`].
+///
+/// Returns an empty vector when enumeration is unavailable. Native Wayland
+/// deliberately has no global display coordinate space, so it is unsupported
+/// unless an X11/XWayland display is reachable.
+#[must_use]
+pub fn display_rects() -> Vec<edge::DisplayRect> {
+    Backend::display_rects()
 }
 
 #[cfg(target_os = "macos")]
