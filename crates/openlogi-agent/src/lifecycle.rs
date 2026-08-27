@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
@@ -31,7 +32,7 @@ use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(target_os = "macos")]
 use openlogi_ipc::ClientKind;
@@ -234,7 +235,7 @@ struct Armed {
 
 impl Armed {
     /// Start the watcher fleets, then drain every control-plane source until
-    /// told to leave (low-frequency by contract — [`startup::StateWatchers`]).
+    /// told to leave (low-frequency by contract — [`startup::WatcherEvent`]).
     async fn run(mut self) {
         #[cfg(target_os = "macos")]
         request_input_monitoring().await;
@@ -244,46 +245,45 @@ impl Armed {
         let mut watchers = startup::spawn_state_watchers(&self.shared);
 
         info!("openlogi-agent started");
-        // Set once the inventory channel closes (the watcher thread died), so
-        // the select stops polling a permanently-ready closed receiver.
-        let mut inventory_open = true;
-        let mut camera_open = true;
         loop {
             tokio::select! {
-                event = watchers.inventory.recv(), if inventory_open => if let Some(event) = event {
-                    self.apply_inventory(event).await;
-                } else {
-                    // Watcher thread death — without a snapshot the GUI
-                    // would scan forever.
-                    warn!("inventory watcher channel closed — marking enumeration unavailable");
-                    self.orchestrator.lock().await.mark_inventory_unavailable();
-                    inventory_open = false;
-                },
-                event = watchers.camera.recv(), if camera_open => if let Some(active) = event {
-                    self.orchestrator.lock().await.set_camera_active(active);
-                } else {
-                    #[cfg(target_os = "macos")]
-                    warn!("camera watcher channel closed — disabling camera automation updates");
-                    camera_open = false;
-                },
-                Some(app) = watchers.app.recv() => {
-                    self.apply_foreground(app).await;
-                }
+                Some(event) = watchers.next() => self.apply_watcher(event).await,
                 Some(device_key) = self.inputs.triggers.recv() => {
                     self.begin_action_ring(device_key.as_deref()).await;
-                }
-                Some(granted) = watchers.accessibility.recv() => {
-                    self.apply_accessibility(granted);
                 }
                 () = self.signals.recv() => self.shut_down("shutdown signal"),
                 // Uninstalled while running — leave through the same door so
                 // the event tap goes with us (#807).
                 Some(()) = self.uninstalled.recv() => self.shut_down("the app was uninstalled"),
-                Some(granted) = watchers.input_monitoring.recv() => {
-                    self.observable.set_input_monitoring_granted(granted);
-                }
                 else => break,
             }
+        }
+    }
+
+    /// Fold one watcher event into the agent's state.
+    async fn apply_watcher(&mut self, event: startup::WatcherEvent) {
+        use startup::{Watcher, WatcherEvent};
+        match event {
+            WatcherEvent::Inventory(event) => self.apply_inventory(event).await,
+            WatcherEvent::Camera(active) => {
+                self.orchestrator.lock().await.set_camera_active(active);
+            }
+            WatcherEvent::App(app) => self.apply_foreground(app).await,
+            WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted),
+            WatcherEvent::InputMonitoring(granted) => {
+                self.observable.set_input_monitoring_granted(granted);
+            }
+            // Watcher thread death — without a snapshot the GUI would scan
+            // forever.
+            WatcherEvent::Lost(Watcher::Inventory) => {
+                warn!("inventory watcher channel closed — marking enumeration unavailable");
+                self.orchestrator.lock().await.mark_inventory_unavailable();
+            }
+            WatcherEvent::Lost(Watcher::Camera) => {
+                #[cfg(target_os = "macos")]
+                warn!("camera watcher channel closed — disabling camera automation updates");
+            }
+            WatcherEvent::Lost(source) => debug!(?source, "state watcher channel closed"),
         }
     }
 

@@ -7,6 +7,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt as _;
+use futures::stream::{self, Stream};
+
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -186,32 +189,84 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
     );
 }
 
-/// The per-source state watchers the select loop drains, spawned at arming.
+/// One tagged event from the per-source state watchers.
 ///
-/// Everything the select loop listens to is low-frequency by contract —
-/// that is what makes the unbounded channels safe. The input hot path
-/// (hook → dispatcher → inject) never passes through it; do not route a
+/// Everything the lifecycle's select loop listens to is low-frequency by
+/// contract — that is what makes the unbounded channels safe. The input hot
+/// path (hook → dispatcher → inject) never passes through it; do not route a
 /// high-rate source here.
-pub(crate) struct StateWatchers {
-    pub(crate) inventory: tokio::sync::mpsc::UnboundedReceiver<watchers::inventory::InventoryEvent>,
-    pub(crate) camera: tokio::sync::mpsc::UnboundedReceiver<bool>,
-    pub(crate) app:
-        tokio::sync::mpsc::UnboundedReceiver<watchers::foreground_app::ForegroundUpdate>,
-    pub(crate) accessibility: tokio::sync::mpsc::UnboundedReceiver<bool>,
-    pub(crate) input_monitoring: tokio::sync::mpsc::UnboundedReceiver<bool>,
+pub(crate) enum WatcherEvent {
+    Inventory(watchers::inventory::InventoryEvent),
+    /// Camera activity flipped.
+    Camera(bool),
+    App(watchers::foreground_app::ForegroundUpdate),
+    /// The Accessibility grant flipped.
+    Accessibility(bool),
+    /// The Input Monitoring grant flipped.
+    InputMonitoring(bool),
+    /// A watcher's channel closed (its thread died). Emitted once; the
+    /// source then leaves the merge, so a dead watcher cannot busy-wake the
+    /// loop.
+    Lost(Watcher),
 }
 
-pub(crate) fn spawn_state_watchers(shared: &SharedRuntime) -> StateWatchers {
-    StateWatchers {
-        inventory: watchers::inventory::spawn_with_registry(
-            Duration::from_secs(2),
-            shared.channel_registry.clone(),
-        ),
-        camera: watchers::camera::spawn(Duration::from_secs(1)),
-        app: watchers::foreground_app::spawn(Duration::from_secs(1)),
-        accessibility: watchers::accessibility::spawn(Duration::from_millis(1200)),
-        input_monitoring: watchers::input_monitoring::spawn(Duration::from_millis(1200)),
+/// Which watcher a [`WatcherEvent::Lost`] names.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Watcher {
+    Inventory,
+    Camera,
+    App,
+    Accessibility,
+    InputMonitoring,
+}
+
+/// Spawn the per-source state watchers at arming, merged into one tagged
+/// stream.
+pub(crate) fn spawn_state_watchers(
+    shared: &SharedRuntime,
+) -> impl Stream<Item = WatcherEvent> + Unpin + use<> {
+    fn tagged<T: Send + 'static>(
+        rx: tokio::sync::mpsc::UnboundedReceiver<T>,
+        source: Watcher,
+        tag: impl Fn(T) -> WatcherEvent + Send + 'static,
+    ) -> stream::BoxStream<'static, WatcherEvent> {
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .map(tag)
+        .chain(stream::iter([WatcherEvent::Lost(source)]))
+        .boxed()
     }
+    stream::select_all([
+        tagged(
+            watchers::inventory::spawn_with_registry(
+                Duration::from_secs(2),
+                shared.channel_registry.clone(),
+            ),
+            Watcher::Inventory,
+            WatcherEvent::Inventory,
+        ),
+        tagged(
+            watchers::camera::spawn(Duration::from_secs(1)),
+            Watcher::Camera,
+            WatcherEvent::Camera,
+        ),
+        tagged(
+            watchers::foreground_app::spawn(Duration::from_secs(1)),
+            Watcher::App,
+            WatcherEvent::App,
+        ),
+        tagged(
+            watchers::accessibility::spawn(Duration::from_millis(1200)),
+            Watcher::Accessibility,
+            WatcherEvent::Accessibility,
+        ),
+        tagged(
+            watchers::input_monitoring::spawn(Duration::from_millis(1200)),
+            Watcher::InputMonitoring,
+            WatcherEvent::InputMonitoring,
+        ),
+    ])
 }
 
 /// Seed the permission facts with non-prompting reads, so a client that
