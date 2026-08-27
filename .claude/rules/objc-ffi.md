@@ -42,7 +42,7 @@ Spawning the agent under its own macOS TCC identity (so its Accessibility /
 Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the
 external [`disclaim`](https://crates.io/crates/disclaim) crate — `posix_spawn` +
 the private `responsibility_spawnattrs_setdisclaim`, not ObjC.
-`openlogi-desktop/src/services/ipc.rs`'s `spawn_agent` uses it; there is no
+`openlogi-desktop/src/services/ipc/launch.rs`'s `spawn_agent` uses it; there is no
 in-tree FFI for it. Likewise, installed-application discovery and icon
 rendering for per-app profiles live in the external
 [`appcatalog`](https://crates.io/crates/appcatalog) crate (`NSWorkspace` +

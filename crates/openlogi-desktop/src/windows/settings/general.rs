@@ -8,10 +8,12 @@ use super::{
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 
+use crate::platform::registration::ServiceStatus;
+
 pub(super) fn general_page(
     vertical_scroll_sensitivity_slider: Entity<SliderState>,
     thumbwheel_sensitivity_slider: Entity<SliderState>,
-    login_item_needs_approval: bool,
+    registration_status: ServiceStatus,
     launch_at_login: bool,
 ) -> SettingPage {
     let group = SettingGroup::new()
@@ -64,7 +66,7 @@ pub(super) fn general_page(
     // letting the switch above claim a state macOS is overriding. What the
     // disable actually costs depends on which service the preference
     // selects, so the wording follows it.
-    let group = if login_item_needs_approval {
+    let group = if registration_status == ServiceStatus::RequiresApproval {
         group.item(login_item_approval_notice(launch_at_login))
     } else {
         group

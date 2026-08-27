@@ -473,8 +473,7 @@ impl Render for SettingsView {
             .page(general::general_page(
                 self.vertical_scroll_sensitivity_slider.clone(),
                 self.thumbwheel_sensitivity_slider.clone(),
-                self.registration_status
-                    == crate::platform::registration::ServiceStatus::RequiresApproval,
+                self.registration_status,
                 AppState::try_read(cx).is_none_or(|state| state.app_settings().launch_at_login),
             ))
             .page(updates::updates_page(self.updater.clone()));
