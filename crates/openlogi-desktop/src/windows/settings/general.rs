@@ -63,8 +63,7 @@ pub(super) fn general_page(
         group
     };
 
-    #[cfg(target_os = "macos")]
-    let group = group.item(primary_mouse_button_item(cx));
+    let group = with_primary_mouse_button(group, cx);
 
     // One `show_in_menu_bar` setting drives the macOS status item and the
     // Windows notification-area icon (honored at next agent launch); Linux
@@ -122,6 +121,16 @@ fn smooth_scrolling_item() -> SettingItem {
     .description(tr!(
         "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn with_primary_mouse_button(group: SettingGroup, cx: &App) -> SettingGroup {
+    group.item(primary_mouse_button_item(cx))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_primary_mouse_button(group: SettingGroup, _: &App) -> SettingGroup {
+    group
 }
 
 #[cfg(target_os = "macos")]

@@ -3,6 +3,7 @@
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{ForegroundApps, PrimaryMouseButton};
 
+#[cfg(target_os = "macos")]
 use crate::services::ipc::PrimaryMouseButtonCommandError;
 
 use super::{AgentLink, AppState};
@@ -12,7 +13,9 @@ pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
     primary_mouse_button: Option<PrimaryMouseButton>,
+    #[cfg(target_os = "macos")]
     primary_mouse_button_pending: Option<PrimaryMouseButton>,
+    #[cfg(target_os = "macos")]
     primary_mouse_button_error: Option<PrimaryMouseButtonCommandError>,
     last_ready_inventory: Vec<DeviceInventory>,
     #[cfg(all(target_os = "macos", debug_assertions))]
@@ -27,7 +30,9 @@ impl Default for AgentSession {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
             primary_mouse_button: None,
+            #[cfg(target_os = "macos")]
             primary_mouse_button_pending: None,
+            #[cfg(target_os = "macos")]
             primary_mouse_button_error: None,
             last_ready_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
@@ -124,12 +129,14 @@ impl AppState {
     }
 
     /// The latest host-wide primary mouse button reported by the agent.
+    #[cfg(target_os = "macos")]
     #[must_use]
     pub fn primary_mouse_button(&self) -> Option<PrimaryMouseButton> {
         self.agent.primary_mouse_button
     }
 
     /// Whether a host-wide primary-button write is waiting for the agent.
+    #[cfg(target_os = "macos")]
     #[must_use]
     pub fn primary_mouse_button_pending(&self) -> bool {
         self.agent.primary_mouse_button_pending.is_some()
@@ -137,6 +144,7 @@ impl AppState {
 
     /// The last primary-button write failure, retained until the user retries
     /// or the agent confirms a later write.
+    #[cfg(target_os = "macos")]
     #[must_use]
     pub fn primary_mouse_button_error(&self) -> Option<&PrimaryMouseButtonCommandError> {
         self.agent.primary_mouse_button_error.as_ref()
@@ -154,6 +162,7 @@ impl AppState {
     /// Ask the agent to change the macOS system setting. The observed snapshot,
     /// not this pending request, remains the GUI's source of truth. Returns
     /// whether request/error presentation changed.
+    #[cfg(target_os = "macos")]
     pub fn request_primary_mouse_button(&mut self, button: PrimaryMouseButton) -> bool {
         let previous = (
             self.agent.primary_mouse_button_pending,
@@ -177,6 +186,7 @@ impl AppState {
     /// Record whether the agent accepted the latest primary-button write.
     /// Success only clears command presentation; the observed snapshot remains
     /// responsible for changing the switch's value.
+    #[cfg(target_os = "macos")]
     pub fn apply_primary_mouse_button_result(
         &mut self,
         result: Result<PrimaryMouseButton, PrimaryMouseButtonCommandError>,

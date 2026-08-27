@@ -20,10 +20,13 @@ use openlogi_core::hid::{
 
 use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_ipc::{ForegroundApps, PrimaryMouseButton, SystemMouseSettingError};
+use openlogi_ipc::ForegroundApps;
+#[cfg(target_os = "macos")]
+use openlogi_ipc::{PrimaryMouseButton, SystemMouseSettingError};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
+#[cfg(target_os = "macos")]
 use crate::services::ipc::{Command, PrimaryMouseButtonCommandError};
 
 use super::bindings::apply_thumbwheel_pair;
@@ -147,6 +150,7 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
     assert_eq!(state.config_issue(), None);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn primary_mouse_button_failure_stays_visible_without_overwriting_the_snapshot() {
     let cache = AssetResolver::new();

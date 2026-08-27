@@ -275,6 +275,7 @@ impl Runtime {
                     });
                 });
             }
+            #[cfg(target_os = "macos")]
             ipc::GuiUpdate::PrimaryMouseButtonResult(result) => {
                 cx.update(|cx| {
                     AppState::update(cx, |state, cx| {
