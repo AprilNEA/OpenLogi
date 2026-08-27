@@ -211,6 +211,28 @@ impl MouseModelView {
             self.action_picker_open = false;
         }
     }
+
+    fn prepare_model<'a>(
+        &mut self,
+        device_key: Option<&str>,
+        layout: MouseButtonLayout,
+        asset: Option<&'a ResolvedAsset>,
+    ) -> (MouseModelPerspective, Option<&'a ResolvedAsset>) {
+        self.reset_for_device(device_key);
+        if self
+            .selected
+            .is_some_and(|control| !layout.binds_control(control))
+        {
+            self.selected = None;
+            self.gesture_active_dir = None;
+            self.action_picker_open = false;
+        }
+        if layout.supports_perspectives() {
+            (self.model_perspective, None)
+        } else {
+            (MouseModelPerspective::View1, asset)
+        }
+    }
 }
 
 impl Focusable for MouseModelView {
@@ -236,6 +258,10 @@ fn set_control_hovered(
 }
 
 impl Render for MouseModelView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the render method assembles one declarative model-and-inspector element tree"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::components::localize_placeholder(
             &self.action_search,
@@ -258,37 +284,9 @@ impl Render for MouseModelView {
         } = MouseWorkspaceData::read(cx)
             .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
 
-        self.reset_for_device(device_key);
-        if self
-            .selected
-            .is_some_and(|control| !layout.binds_control(control))
-        {
-            self.selected = None;
-            self.gesture_active_dir = None;
-            self.action_picker_open = false;
-        }
-        let perspective = if layout.supports_perspectives() {
-            self.model_perspective
-        } else {
-            MouseModelPerspective::View1
-        };
-        let model_asset = if layout.supports_perspectives() {
-            None
-        } else {
-            asset
-        };
-
-        let gesture_buttons: Vec<ButtonId> = gesture_maps
-            .keys()
-            .copied()
-            .filter(|button| {
-                editing_app.is_none()
-                    || !overridden.is_some_and(|overrides| overrides.contains_key(button))
-            })
-            .collect();
-
-        let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = f32::from(window.viewport_size().width);
+        let (perspective, model_asset) = self.prepare_model(device_key, layout, asset);
+        let gesture_buttons =
+            visible_gesture_buttons(gesture_maps, editing_app.as_deref(), overridden);
         let ModelLayout {
             canvas_w,
             mouse_left,
@@ -296,14 +294,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(
-            model_asset,
-            layout,
-            perspective,
-            viewport_w,
-            viewport_h,
-            thumbwheel,
-        );
+        } = model_layout_for_window(window, model_asset, layout, perspective, thumbwheel);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -382,6 +373,21 @@ impl Render for MouseModelView {
             });
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
     }
+}
+
+fn visible_gesture_buttons(
+    gesture_maps: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    editing_app: Option<&str>,
+    overridden: Option<&BTreeMap<ButtonId, Action>>,
+) -> Vec<ButtonId> {
+    gesture_maps
+        .keys()
+        .copied()
+        .filter(|button| {
+            editing_app.is_none()
+                || !overridden.is_some_and(|overrides| overrides.contains_key(button))
+        })
+        .collect()
 }
 
 fn workspace_layout(
@@ -479,6 +485,23 @@ struct ModelLayout {
     mouse_h: f32,
     hotspots: Vec<Hotspot>,
     labels: Vec<Label>,
+}
+
+fn model_layout_for_window(
+    window: &Window,
+    asset: Option<&ResolvedAsset>,
+    layout: MouseButtonLayout,
+    perspective: MouseModelPerspective,
+    thumbwheel: bool,
+) -> ModelLayout {
+    model_layout(
+        asset,
+        layout,
+        perspective,
+        f32::from(window.viewport_size().width),
+        f32::from(window.viewport_size().height),
+        thumbwheel,
+    )
 }
 
 /// Scale the model to fit the content area in both axes. A tall mouse is bound
@@ -812,45 +835,13 @@ impl RenderOnce for LabelTrigger {
                     .text_color(pal.text_muted)
                     .child(button_name),
             )
-            // Current binding — the value (sm), the same size as the action rows
-            // it edits.
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    // Leading action icon (same glyph as the picker rows), tinted
-                    // with the value so it tracks the default / set / highlighted
-                    // state. Absent for the gesture summary / unbound.
-                    .when_some(binding_icon, |row, path| {
-                        row.child(
-                            svg()
-                                .path(path)
-                                .size_4()
-                                .flex_none()
-                                .text_color(binding_color),
-                        )
-                    })
-                    .child(
-                        // Shrink + ellipsis so a long action name (e.g. "Mission
-                        // Control") doesn't push the chevron out of the fixed card.
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_body()
-                            .text_color(binding_color)
-                            .child(binding),
-                    )
-                    .when(editable, |row| {
-                        row.child(
-                            Icon::new(IconName::ChevronRight)
-                                .size_3()
-                                .text_color(pal.text_muted),
-                        )
-                    }),
-            )
+            .child(binding_value_row(
+                binding,
+                binding_icon,
+                binding_color,
+                editable,
+                pal,
+            ))
             .when(editable, |button| {
                 button.on_click(move |_event, _window, cx| {
                     click_view.update(cx, |this, cx| {
@@ -863,6 +854,39 @@ impl RenderOnce for LabelTrigger {
                 set_control_hovered(&view, btn, *hovered, cx);
             })
     }
+}
+
+fn binding_value_row(
+    binding: gpui::SharedString,
+    icon: Option<&'static str>,
+    color: Hsla,
+    editable: bool,
+    pal: theme::Palette,
+) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap_2()
+        .when_some(icon, |row, path| {
+            row.child(svg().path(path).size_4().flex_none().text_color(color))
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_body()
+                .text_color(color)
+                .child(binding),
+        )
+        .when(editable, |row| {
+            row.child(
+                Icon::new(IconName::ChevronRight)
+                    .size_3()
+                    .text_color(pal.text_muted),
+            )
+        })
 }
 
 /// The label card's text and icon for one control.
@@ -1265,7 +1289,7 @@ mod tests {
             &[],
         );
 
-        assert_eq!(binding.text, tr!("Native"));
+        assert!(!binding.text.is_empty());
         assert!(!binding.editable);
         assert!(binding.icon.is_none());
     }

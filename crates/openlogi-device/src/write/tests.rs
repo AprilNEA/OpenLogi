@@ -461,8 +461,8 @@ async fn a_device_with_only_rgb_effects_can_be_coloured() -> Result<(), WriteErr
         .filter(|report| report.len() == 20 && report[2] == 0x08 && report[3] >> 4 == 0x01)
         .collect();
     assert_eq!(effect_writes.len(), 2);
-    for (cluster, report) in effect_writes.into_iter().enumerate() {
-        assert_eq!(report[4], cluster as u8);
+    for (cluster, report) in [0u8, 1].into_iter().zip(effect_writes) {
+        assert_eq!(report[4], cluster);
         assert_eq!(
             report[5], 1,
             "the discovered static effect must be selected"

@@ -50,7 +50,9 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
         ButtonId::Back => Action::BrowserBack,
         ButtonId::Forward => Action::BrowserForward,
-        ButtonId::DpiToggle => Action::CycleDpiPresets,
+        ButtonId::DpiToggle | ButtonId::DpiUp | ButtonId::DpiDown | ButtonId::DpiShift => {
+            Action::CycleDpiPresets
+        }
         #[expect(
             clippy::match_same_arms,
             reason = "the tap is inert because its captured events are noise (see above), \
@@ -66,7 +68,6 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
         ButtonId::HapticPanel => Action::ShowActionsRing,
-        ButtonId::DpiUp | ButtonId::DpiDown | ButtonId::DpiShift => Action::CycleDpiPresets,
         ButtonId::SmartShift => Action::ToggleSmartShift,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
