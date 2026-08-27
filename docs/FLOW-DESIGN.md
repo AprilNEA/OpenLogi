@@ -9,8 +9,9 @@ ground. Once milestones land, durable decisions graduate into
 The peer protocol itself is specified normatively in
 [FLOW-PROTOCOL.md](FLOW-PROTOCOL.md) (framing, stream binding, state
 machines, evolution rules) with the message schema in
-[flow.v1.proto](flow.v1.proto); both move into `crates/openlogi-flow` when it
-exists.
+[`flow.v1.proto`](../crates/openlogi-flow/proto/flow.v1.proto). The normative
+specification remains in `docs/`; the schema lives with its code generator in
+`openlogi-flow`.
 
 ## What Flow is
 
@@ -283,7 +284,7 @@ corroborating, not binding.)
 
 Three layers, the outer ones frozen forever (normative details:
 [FLOW-PROTOCOL.md](FLOW-PROTOCOL.md); message schema:
-[flow.v1.proto](flow.v1.proto)):
+[`flow.v1.proto`](../crates/openlogi-flow/proto/flow.v1.proto)):
 
 ```
 ┌─ layer 0: envelope (frozen; any version can decode) ─────────────┐

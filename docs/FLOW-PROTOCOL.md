@@ -4,13 +4,14 @@ Companion to [FLOW-DESIGN.md](FLOW-DESIGN.md), which records *why* this
 protocol looks the way it does (transport choice, encoding choice, BYON,
 no-relay). This document is the *what*: the normative contract two OpenLogi
 agents implement. The authoritative message schema is
-[flow.v1.proto](flow.v1.proto); this file defines everything protobuf cannot
-express — framing, stream binding, state machines, canonical byte forms,
-timeouts, and the evolution rules.
+[`flow.v1.proto`](../crates/openlogi-flow/proto/flow.v1.proto); this file
+defines everything protobuf cannot express — framing, stream binding, state
+machines, canonical byte forms, timeouts, and the evolution rules.
 
-Both files move verbatim into `crates/openlogi-flow` when that crate lands
-(proto under `proto/`, this spec as the crate-level docs). Until then, edits
-to either are reviewed against the evolution rules at the bottom.
+The schema lives under `crates/openlogi-flow/proto/` so code generation and
+the wire contract cannot drift apart. This normative specification remains in
+`docs/`; edits to either are reviewed against the evolution rules at the
+bottom.
 
 ## Transport binding
 
