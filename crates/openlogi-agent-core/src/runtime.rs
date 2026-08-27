@@ -112,15 +112,18 @@ impl ActionExecutor {
                 );
                 return;
             }
-            // BrowserBack/BrowserForward fall through to the keyboard shortcut
-            // (Cmd+[ / Cmd+]) here — for Chrome and other apps that respond to
-            // it, and as the HID++ gesture watcher's own fallback when its
-            // AXPress attempt (Safari) fails. On devices where one physical
+            // Safari ignores synthetic browser-navigation shortcuts, so try
+            // its Accessibility toolbar button before the keyboard fallback
+            // used by Chrome and other apps. On devices where one physical
             // press is visible through both capture paths, debounce the shared
-            // action so the browser navigates only once.
+            // action before either output so the browser navigates only once.
             Action::BrowserBack | Action::BrowserForward => {
                 if browser_nav_debounce_ok(action) {
-                    openlogi_inject::execute(action);
+                    dispatch_browser_navigation(
+                        action,
+                        openlogi_inject::ax_navigate_frontmost_browser,
+                        || openlogi_inject::execute(action),
+                    );
                 } else {
                     info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
                 }
@@ -373,6 +376,17 @@ fn browser_nav_debounce_ok(action: &Action) -> bool {
     fire
 }
 
+fn dispatch_browser_navigation(
+    action: &Action,
+    ax_navigate: impl FnOnce(bool) -> bool,
+    keyboard_fallback: impl FnOnce(),
+) {
+    let forward = matches!(action, Action::BrowserForward);
+    if !ax_navigate(forward) {
+        keyboard_fallback();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +398,41 @@ mod tests {
 
         assert!(!held.start(&press, &Action::Copy));
         held.end(&press);
+    }
+
+    #[test]
+    fn accessibility_browser_navigation_suppresses_the_keyboard_fallback() {
+        let mut direction = None;
+        let mut fell_back = false;
+
+        dispatch_browser_navigation(
+            &Action::BrowserForward,
+            |forward| {
+                direction = Some(forward);
+                true
+            },
+            || fell_back = true,
+        );
+
+        assert_eq!(direction, Some(true));
+        assert!(!fell_back);
+    }
+
+    #[test]
+    fn failed_accessibility_navigation_falls_back_to_the_keyboard_shortcut() {
+        let mut direction = None;
+        let mut fell_back = false;
+
+        dispatch_browser_navigation(
+            &Action::BrowserBack,
+            |forward| {
+                direction = Some(forward);
+                false
+            },
+            || fell_back = true,
+        );
+
+        assert_eq!(direction, Some(false));
+        assert!(fell_back);
     }
 }

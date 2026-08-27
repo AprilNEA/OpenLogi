@@ -47,6 +47,10 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// Safari does not consume native Back/Forward mouse events on macOS, and
+    /// those events can lack sender attribution. The foreground-app watcher
+    /// enables this narrowly while Safari owns the active profile.
+    pub allow_unattributed_browser_buttons: bool,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -192,19 +196,27 @@ thread_local! {
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
-/// Whether a button event's physical source may be remapped/suppressed.
+/// Whether a translated mouse button is safe to remap.
 ///
-/// macOS fails closed because its hook is global: only a known Logitech,
-/// non-trackpad source may be suppressed. Bluetooth-direct Back/Forward
-/// gestures are captured through their device-specific HID++ session instead
-/// of weakening this policy. Linux/Windows restrict hook attachment upstream,
-/// so an unavailable source remains eligible there.
-fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
+/// macOS normally attributes CGEvents to an IOKit sender, but physical Back /
+/// Forward events can arrive without the backing IOHIDEvent. While Safari is
+/// frontmost, those two extra buttons are safe to admit: primary clicks are
+/// rejected before this policy, trackpad gestures arrive as scroll/motion
+/// rather than OtherMouse button 3/4, and OpenLogi's own synthetic events are
+/// filtered in the hook backend. Other apps and button types remain fail-closed
+/// when macOS omits attribution. Linux and Windows select the device before the
+/// callback, so their unattributed hook buttons remain remappable.
+fn button_source_may_remap(
+    id: ButtonId,
+    device: Option<&EventDevice>,
+    allow_unattributed_browser_buttons: bool,
+) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
-        // Linux/Windows restrict which devices the hook attaches to upstream.
-        // macOS uses one global tap, so an unattributed event must fail closed.
-        None => !cfg!(target_os = "macos"),
+        None if cfg!(target_os = "macos") => {
+            allow_unattributed_browser_buttons && matches!(id, ButtonId::Back | ButtonId::Forward)
+        }
+        None => true,
     }
 }
 
@@ -215,7 +227,11 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
 /// selection before this callback and therefore admit their unattributed
 /// wheel events through the same policy as button remapping.
 fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
-    !from_trackpad && button_source_may_remap(device)
+    !from_trackpad
+        && match device {
+            Some(d) => source_is_remappable(Some(d)),
+            None => !cfg!(target_os = "macos"),
+        }
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
@@ -251,7 +267,14 @@ fn handle_button(
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.is_os_hook_button() {
+        return EventDisposition::PassThrough;
+    }
+    let allow_unattributed_browser_buttons = device.is_none()
+        && hooks
+            .try_read()
+            .is_ok_and(|maps| maps.allow_unattributed_browser_buttons);
+    if !button_source_may_remap(id, device, allow_unattributed_browser_buttons) {
         return EventDisposition::PassThrough;
     }
 

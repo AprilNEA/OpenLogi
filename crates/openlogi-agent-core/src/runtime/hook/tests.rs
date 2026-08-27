@@ -9,7 +9,10 @@ fn token(id: u64, button: ButtonId) -> PressToken {
 
 #[test]
 fn senderless_buttons_follow_the_platform_source_policy() {
-    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
+    assert_eq!(
+        button_source_may_remap(ButtonId::Back, None, false),
+        !cfg!(target_os = "macos")
+    );
 }
 
 #[test]
@@ -23,8 +26,16 @@ fn attributed_sources_still_follow_the_device_policy() {
         ..EventDevice::default()
     };
 
-    assert!(!button_source_may_remap(Some(&trackpad)));
-    assert!(button_source_may_remap(Some(&logitech_mouse)));
+    assert!(!button_source_may_remap(
+        ButtonId::Back,
+        Some(&trackpad),
+        false
+    ));
+    assert!(button_source_may_remap(
+        ButtonId::Back,
+        Some(&logitech_mouse),
+        false
+    ));
 }
 
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
@@ -169,6 +180,23 @@ fn rejected_key_edges_fail_open() {
     assert_eq!(
         queued_event_disposition(false),
         EventDisposition::PassThrough
+    );
+}
+
+#[test]
+fn unattributed_extra_buttons_preserve_the_narrow_macos_exception() {
+    for id in [ButtonId::Back, ButtonId::Forward] {
+        assert_eq!(
+            button_source_may_remap(id, None, false),
+            !cfg!(target_os = "macos"),
+            "macOS keeps sender-less browser buttons native outside Safari"
+        );
+        assert!(button_source_may_remap(id, None, true));
+    }
+    assert_eq!(
+        button_source_may_remap(ButtonId::MiddleClick, None, true),
+        !cfg!(target_os = "macos"),
+        "macOS admits only sender-less Back and Forward events"
     );
 }
 
