@@ -28,15 +28,54 @@ use super::{
     ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
 };
 
-/// One probed node's contribution this tick: its inventory (if any), whether
-/// the node actually answered — the ledger replays the last snapshot when it
-/// didn't (see [`super::ledger::NodeLedger::settle`]) — whether the
-/// one-shot retry can stop early, and each device's cache contribution for the
-/// caller to apply and to drive eviction.
+/// One node probe's verdict about its own trustworthiness. Three-valued on
+/// purpose: the old `healthy`/`complete` bool pair could also express
+/// "couldn't check, but the check is complete", which no probe path means —
+/// the invariant lived in a comment at every construction site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProbeVerdict {
+    /// The node could not be checked (budget timeout, unanswered registers, a
+    /// feature walk that never finished): the ledger replays the last-good
+    /// snapshot instead of presenting the failure as truth.
+    Failed,
+    /// The node answered — the only verdict that counts as stability
+    /// evidence. `complete` reports whether every expected device was seen,
+    /// which is what lets the one-shot retry stop early.
+    Healthy {
+        /// Every expected device is present in this probe's inventory.
+        complete: bool,
+    },
+}
+
+impl ProbeVerdict {
+    /// `Healthy` with `complete` decided by the walk, `Failed` otherwise —
+    /// for paths where one flag carries both facts.
+    pub(super) fn healthy_when(answered_in_full: bool) -> Self {
+        if answered_in_full {
+            Self::Healthy { complete: true }
+        } else {
+            Self::Failed
+        }
+    }
+
+    /// The node answered this tick (the ledger's replay gate).
+    pub(super) fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy { .. })
+    }
+
+    /// Every expected device was seen (the one-shot retry's stop signal).
+    pub(super) fn is_complete(self) -> bool {
+        matches!(self, Self::Healthy { complete: true })
+    }
+}
+
+/// One probed node's contribution this tick: its inventory (if any), the
+/// [`ProbeVerdict`] the ledger and the one-shot retry act on (see
+/// [`super::ledger::NodeLedger::settle`]), and each device's cache
+/// contribution for the caller to apply and to drive eviction.
 pub(super) struct NodeProbe {
     pub(super) inventory: Option<DeviceInventory>,
-    pub(super) healthy: bool,
-    pub(super) complete: bool,
+    pub(super) verdict: ProbeVerdict,
     pub(super) outcomes: Vec<CacheOutcome>,
 }
 
@@ -45,8 +84,7 @@ impl NodeProbe {
     pub(super) fn failed() -> Self {
         Self {
             inventory: None,
-            healthy: false,
-            complete: false,
+            verdict: ProbeVerdict::Failed,
             outcomes: Vec::new(),
         }
     }
@@ -131,11 +169,11 @@ async fn probe_bolt_receiver(
 ///
 /// `slot_results` holds one entry per *occupied* slot in slot order — empty or
 /// unreadable slots are dropped in phase 1 ([`read_bolt_slot_identity`]) and
-/// never reach here. The probe is `complete`/`healthy` only when the
-/// pairing-count register answered AND every counted slot was readable: `None`
-/// (the receiver didn't answer, e.g. a parked channel) or a shortfall is
-/// "couldn't fully check", so the ledger replays the last good snapshot instead
-/// of presenting the partial walk as the new truth (#218). A slot whose feature
+/// never reach here. The verdict is `Healthy` only when the pairing-count
+/// register answered AND every counted slot was readable: `None` (the
+/// receiver didn't answer, e.g. a parked channel) or a shortfall is "couldn't
+/// fully check", so the ledger replays the last good snapshot instead of
+/// presenting the partial walk as the new truth (#218). A slot whose feature
 /// walk merely timed out still counts here — it falls back to cached/identity
 /// data in [`walk_bolt_slot`].
 pub(super) fn assemble_bolt_probe(
@@ -154,12 +192,11 @@ pub(super) fn assemble_bolt_probe(
             "paired-device count mismatch — some slots may be unreadable"
         );
     }
-    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
+    let answered_in_full = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
 
     NodeProbe {
         inventory: Some(DeviceInventory { receiver, paired }),
-        healthy: complete,
-        complete,
+        verdict: ProbeVerdict::healthy_when(answered_in_full),
         outcomes,
     }
 }
@@ -259,9 +296,8 @@ async fn probe_unifying_receiver(
     //
     // The one-shot CLI path still needs a retry when the count says more
     // devices may appear after a late arrival drain. Report that separately as
-    // `complete = false`; the unchanged-inventory fallback stops expected
+    // `complete: false`; the unchanged-inventory fallback stops expected
     // offline Unifying shortfalls after they stabilize.
-    let healthy = true;
     let complete = paired.len() == usize::from(pairing_count);
 
     NodeProbe {
@@ -274,8 +310,7 @@ async fn probe_unifying_receiver(
             },
             paired,
         }),
-        healthy,
-        complete,
+        verdict: ProbeVerdict::Healthy { complete },
         outcomes,
     }
 }
@@ -474,8 +509,7 @@ async fn probe_direct(
         );
         return NodeProbe {
             inventory: None,
-            healthy: false,
-            complete: false,
+            verdict: ProbeVerdict::Failed,
             outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
         };
     }
@@ -491,8 +525,7 @@ async fn probe_direct(
         // prior entry for this node be evicted.
         return NodeProbe {
             inventory: None,
-            healthy: walk_succeeded,
-            complete: walk_succeeded,
+            verdict: ProbeVerdict::healthy_when(walk_succeeded),
             outcomes: vec![CacheOutcome::Unkeyed],
         };
     }
@@ -525,8 +558,7 @@ async fn probe_direct(
     };
     NodeProbe {
         inventory: Some(inventory),
-        healthy: true,
-        complete: true,
+        verdict: ProbeVerdict::Healthy { complete: true },
         outcomes: vec![outcome],
     }
 }

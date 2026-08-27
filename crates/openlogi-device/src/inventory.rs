@@ -650,7 +650,7 @@ impl Enumerator {
         // Aggregates for the one-shot retry. `all_complete` can stop
         // immediately; `all_healthy` gates the unchanged-inventory shortcut so
         // failed probes keep retrying. The ledger's own per-node replay is
-        // governed by `probe.healthy`.
+        // governed by each probe's verdict.
         let mut all_complete = true;
         let mut all_healthy = true;
         for (node, channel, result, budget, receiver) in results {
@@ -667,10 +667,12 @@ impl Enumerator {
                 );
                 NodeProbe::failed()
             };
-            all_complete &= probe.complete;
-            all_healthy &= probe.healthy;
+            all_complete &= probe.verdict.is_complete();
+            all_healthy &= probe.verdict.is_healthy();
             outcomes.extend(probe.outcomes);
-            let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
+            let settled = self
+                .ledger
+                .settle(&node, probe.verdict.is_healthy(), probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
             // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second

@@ -14,8 +14,8 @@ use super::cache::{
 };
 use super::features::ProbedFeatures;
 use super::probe::{
-    NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
-    preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
+    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
 };
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
@@ -521,8 +521,11 @@ fn bolt_probe_is_complete_when_count_matches_readable_slots() {
         Some(2),
         vec![bolt_slot(1), bolt_slot(2)],
     );
-    assert!(probe.complete, "count matches the readable slots");
-    assert!(probe.healthy, "a complete Bolt walk is authoritative");
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Healthy { complete: true },
+        "a count matching the readable slots is authoritative and complete"
+    );
     assert_eq!(paired_slots(&probe), vec![1, 2], "slots surface in order");
     assert_eq!(
         probe.outcomes.len(),
@@ -543,9 +546,9 @@ fn bolt_probe_is_incomplete_when_a_counted_slot_is_unreadable() {
         vec![1],
         "only the readable slot surfaces"
     );
-    assert!(!probe.complete, "a count shortfall is not complete");
-    assert!(
-        !probe.healthy,
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Failed,
         "an incomplete Bolt walk is not authoritative"
     );
 }
@@ -557,11 +560,11 @@ fn bolt_probe_is_incomplete_when_the_count_register_is_unanswered() {
     // truth, so it stays incomplete and the ledger keeps the prior snapshot.
     let probe = assemble_bolt_probe(bolt_receiver_info(), None, vec![bolt_slot(1), bolt_slot(2)]);
     assert_eq!(paired_slots(&probe), vec![1, 2]);
-    assert!(
-        !probe.complete,
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Failed,
         "no count register means we couldn't fully check"
     );
-    assert!(!probe.healthy);
 }
 
 fn model(unit_id: [u8; 4], serial: Option<&str>) -> DeviceModelInfo {
