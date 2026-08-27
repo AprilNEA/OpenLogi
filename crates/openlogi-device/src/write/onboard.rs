@@ -305,6 +305,47 @@ fn encode_onboard_binding(button: ButtonId, action: &Action) -> ButtonBinding {
     encode_action(action).unwrap_or_else(|| native_binding(button))
 }
 
+/// Map the active onboard profile's decoded slots to OpenLogi actions.
+fn actions_from_dump(dump: &OnboardProfilesDump) -> BTreeMap<ButtonId, Action> {
+    dump.active_buttons
+        .iter()
+        .filter_map(|slot| {
+            let button = slot.button?;
+            let action = decode_action(slot.binding)?;
+            Some((button, action))
+        })
+        .collect()
+}
+
+/// Read the active onboard profile's buttons as OpenLogi actions.
+pub async fn read_onboard_button_bindings(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<BTreeMap<ButtonId, Action>, WriteError> {
+    let dump = dump_onboard_profiles(backend, route).await?;
+    Ok(actions_from_dump(&dump))
+}
+
+/// Read onboard button bindings on an already-open channel.
+pub async fn read_onboard_button_bindings_on(
+    shared: &SharedChannel,
+) -> Result<BTreeMap<ButtonId, Action>, WriteError> {
+    let dump = dump_onboard_profiles_on(shared).await?;
+    Ok(actions_from_dump(&dump))
+}
+
+fn decode_action(binding: ButtonBinding) -> Option<Action> {
+    for action in Action::catalog() {
+        if encode_action(&action) == Some(binding) {
+            return Some(action);
+        }
+    }
+    let [0x80, 0x02, modifiers, usage] = binding.bytes else {
+        return None;
+    };
+    KeyCombo::from_hid_report(modifiers, usage).map(Action::CustomShortcut)
+}
+
 fn encode_action(action: &Action) -> Option<ButtonBinding> {
     Some(match action {
         Action::None => ButtonBinding::disabled(),
@@ -402,9 +443,9 @@ fn route_product_id(route: &DeviceRoute) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_action, g_series_slot, native_binding};
+    use super::{decode_action, encode_action, g_series_slot, native_binding};
     use hidpp::feature::onboard_profiles::{ButtonBinding, special};
-    use openlogi_core::binding::{Action, ButtonId};
+    use openlogi_core::binding::{Action, ButtonId, KeyCombo};
 
     #[test]
     fn g_series_slots_match_g_key_numbers() {
@@ -437,5 +478,31 @@ mod tests {
             ButtonBinding::special(special::SHIFT_DPI)
         );
         assert!(encode_action(&Action::MissionControl).is_none());
+    }
+
+    #[test]
+    fn encoded_catalog_actions_round_trip() {
+        for action in Action::catalog() {
+            let Some(encoded) = encode_action(&action) else {
+                continue;
+            };
+            assert_eq!(
+                decode_action(encoded),
+                Some(action.clone()),
+                "round-trip failed for {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hid_keyboard_chords_decode_as_custom_shortcuts() {
+        let combo: KeyCombo = "Alt+F4".parse().expect("valid shortcut");
+        let encoded = encode_action(&Action::CustomShortcut(combo.clone())).expect("encodes");
+        assert_eq!(decode_action(encoded), Some(Action::CustomShortcut(combo)));
+        assert_eq!(
+            decode_action(ButtonBinding::special(special::SHIFT_DPI)),
+            None,
+            "sniper/DPI-shift has no Action yet and must not become a default"
+        );
     }
 }

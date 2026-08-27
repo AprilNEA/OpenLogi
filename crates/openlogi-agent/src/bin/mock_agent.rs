@@ -30,7 +30,7 @@
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{Action, ActionRingSlot, ButtonId};
 use openlogi_core::config::SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
@@ -1039,5 +1039,15 @@ impl Agent for MockAgent {
         }
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
+    }
+
+    async fn read_onboard_bindings(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+    ) -> Result<BTreeMap<ButtonId, Action>, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
     }
 }

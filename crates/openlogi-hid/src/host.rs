@@ -185,6 +185,16 @@ pub async fn dump_onboard_profiles(
     device::dump_onboard_profiles(&*native_backend(), route).await
 }
 
+/// Read the active onboard profile's buttons as OpenLogi actions.
+pub async fn read_onboard_button_bindings(
+    route: &DeviceRoute,
+) -> Result<
+    std::collections::BTreeMap<openlogi_core::binding::ButtonId, openlogi_core::binding::Action>,
+    WriteError,
+> {
+    device::read_onboard_button_bindings(&*native_backend(), route).await
+}
+
 /// Write button bindings into the active onboard profile of `route`.
 pub async fn apply_onboard_button_bindings(
     route: &DeviceRoute,

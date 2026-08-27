@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot, ButtonId};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
@@ -63,7 +63,9 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `ButtonId` G-series extras, `Action` onboard DPI/profile specials, and
 ///      [`HidppOperation::OnboardProfiles`] for HID++ `0x8100` writes.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v31: [`Agent::read_onboard_bindings`] appended so the GUI can show the
+///      firmware button table before any OpenLogi override exists.
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -557,4 +559,9 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Read the active HID++ `0x8100` onboard profile's buttons as OpenLogi
+    /// actions. Mice without that feature return [`WriteError::FeatureUnsupported`].
+    async fn read_onboard_bindings(
+        route: DeviceRoute,
+    ) -> Result<BTreeMap<ButtonId, Action>, WriteError>;
 }

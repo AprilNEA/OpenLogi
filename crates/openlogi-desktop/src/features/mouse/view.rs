@@ -129,6 +129,7 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    shortcut_input: Entity<InputState>,
     /// G-series depots split thumb buttons onto `device_side`.
     show_side: bool,
     _state_obs: Subscription,
@@ -145,6 +146,8 @@ impl MouseModelView {
             }
         })
         .detach();
+        let shortcut_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Shortcut, e.g. Cmd+Shift+P")));
         let state = AppState::global(cx);
         let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
             let relevant = match event {
@@ -170,6 +173,7 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            shortcut_input,
             show_side: false,
             _state_obs: state_obs,
         }
@@ -242,6 +246,12 @@ impl Render for MouseModelView {
         crate::ui::components::localize_placeholder(
             &self.action_search,
             tr!("Search actions…"),
+            window,
+            cx,
+        );
+        crate::ui::components::localize_placeholder(
+            &self.shortcut_input,
+            tr!("Shortcut, e.g. Cmd+Shift+P"),
             window,
             cx,
         );
@@ -344,6 +354,7 @@ impl Render for MouseModelView {
                 overridden,
             },
             &self.action_search,
+            &self.shortcut_input,
             &view,
             cx,
         );
@@ -1068,6 +1079,7 @@ mod tests {
                     overridden: None,
                 },
                 &view.action_search,
+                &view.shortcut_input,
                 &entity,
                 cx,
             );
