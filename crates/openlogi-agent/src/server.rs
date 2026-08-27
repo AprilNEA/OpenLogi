@@ -53,17 +53,14 @@ pub struct AgentServer {
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
-    /// Forwards each connection's [`ClientKind`] declaration to the dormancy
-    /// gate. Sends fail once the gate's receiver is gone (the agent armed) —
-    /// exactly the point where declarations stop mattering.
+    /// Forwards each connection's [`ClientKind`] declaration to the
+    /// dormancy gate.
     pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
 }
 
 impl AgentServer {
     /// Build a server and start the coalescing Actions Ring haptic worker.
-    ///
-    /// The second return is the receiving end of the demand channel this
-    /// server's `declare_client` handler feeds; the dormancy gate drains it.
+    /// The second return is the demand channel the dormancy gate drains.
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedRuntime,
@@ -280,9 +277,8 @@ impl Agent for AgentServer {
     }
 
     async fn declare_client(self, _: Context, kind: ClientKind) {
-        // A failed send is the designed steady state: the dormancy gate drops
-        // its receiver at arming (and never listens off macOS), and an armed
-        // agent no longer cares who connects.
+        // A failed send is the designed steady state: the gate drops its
+        // receiver at arming, and an armed agent no longer cares.
         let _ = self.demand.send(kind);
     }
 

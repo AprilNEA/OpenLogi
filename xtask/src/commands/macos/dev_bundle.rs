@@ -108,11 +108,9 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     signing.run(&sign_order(&app, components))?;
     register_with_launch_services(&app)?;
 
-    // Start the freshly built agent before the GUI launches, so the GUI's
-    // first IPC connect succeeds instead of riding its production fallback
-    // (spawn-on-unreachable) through every dev run. `reap_leftovers` stopped
-    // the previous build's agent above; without this the window sits on its
-    // connecting frame until that fallback fires.
+    // Start the freshly built agent before the GUI launches, so its first
+    // IPC connect succeeds instead of riding the production
+    // spawn-on-unreachable fallback through every dev run.
     #[cfg(unix)]
     if helpers_wanted() {
         start_agent(&app)?;

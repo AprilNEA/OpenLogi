@@ -15,17 +15,12 @@ impl AppState {
     pub fn app_settings(&self) -> &AppSettings {
         &self.config.app_settings
     }
-    /// Toggle launch-at-login and persist it to `config.toml` — which *is*
-    /// the switch: on macOS the service registration is
-    /// preference-independent (the service plist always carries the login
-    /// trigger; the agent reads this value when launchd starts it and idles
-    /// out when it is off — see `platform::registration`), and on Linux/Windows
-    /// the agent reconciles its autostart unit when it reloads the config.
-    /// Registration is only *ensured* here opportunistically, healing drift
-    /// without ever re-prompting an intact install — and giving a dev build,
-    /// whose startup skips registration, its explicit way in. No-op when the
-    /// value is unchanged; disk failures restore the persisted value and
-    /// surface a configuration error without crashing.
+    /// Toggle launch-at-login by persisting it to `config.toml` — which *is*
+    /// the switch: the agent reads it (see `platform::registration`), and on
+    /// Linux/Windows reconciles its autostart on config reload. Registration
+    /// is only ensured opportunistically here, healing drift without
+    /// re-prompting — and giving a dev build its explicit way in. Disk
+    /// failures restore the persisted value and surface a config error.
     pub fn set_launch_at_login(&mut self, enabled: bool) {
         if self.config.app_settings.launch_at_login == enabled {
             return;

@@ -60,22 +60,18 @@ pub(super) fn general_page(
         )
         .item(launch_at_login_item());
 
-    // Registered but switched off under System Settings › Login Items: the
-    // launchd service (crash respawn included) cannot start until the user
-    // flips it back on, and only that pane can — surface it instead of
-    // letting the switch above claim a state macOS is overriding. What the
-    // disable actually costs depends on which service the preference
-    // selects, so the wording follows it.
+    // Switched off under System Settings › Login Items: nothing can start
+    // the service until the user flips it back on there — surface it instead
+    // of letting the switch above claim a state macOS is overriding.
     let group = if registration_status == ServiceStatus::RequiresApproval {
         group.item(login_item_approval_notice(launch_at_login))
     } else {
         group
     };
 
-    // The same `show_in_menu_bar` setting drives the macOS status item and
-    // the Windows notification-area icon (the agent honors it on both; next
-    // launch, see tray.rs / tray_windows.rs) — so both platforms get the
-    // switch, with platform-fitting wording. Linux has no tray; no switch.
+    // One `show_in_menu_bar` setting drives the macOS status item and the
+    // Windows notification-area icon (honored at next agent launch); Linux
+    // has no tray, so no switch.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let group = group.item(
         SettingItem::new(
@@ -166,9 +162,8 @@ fn sensitivity_field(
         })
 }
 
-/// The launch-at-login switch — just a persisted config value the agent
-/// reads (the sunk switch); the setter only runs an opportunistic
-/// registration ensure, never an unregister.
+/// The launch-at-login switch — a persisted config value the agent reads
+/// (the sunk switch); the setter never unregisters.
 fn launch_at_login_item() -> SettingItem {
     SettingItem::new(
         tr!("Launch at login"),
@@ -189,10 +184,8 @@ fn launch_at_login_item() -> SettingItem {
     })
 }
 
-/// The "switched off in System Settings" notice shown while the preferred
-/// service's status is `RequiresApproval`. With launch-at-login on, the
-/// disable costs both the login start and crash recovery; with it off, only
-/// the on-demand service's crash recovery is at stake.
+/// The `RequiresApproval` notice. With launch-at-login on, the disable costs
+/// the login start and crash recovery; with it off, only crash recovery.
 fn login_item_approval_notice(launch_at_login: bool) -> SettingItem {
     SettingItem::new(
         tr!("Login item disabled in System Settings"),
@@ -210,8 +203,7 @@ fn login_item_approval_notice(launch_at_login: bool) -> SettingItem {
 }
 
 /// Deep link to System Settings › Login Items — the only place that can
-/// re-enable a service the user switched off there. Same visual recipe as the
-/// permission pane's "Open" buttons.
+/// re-enable a service switched off there.
 fn open_login_items_button(cx: &App) -> BaseButton {
     let pal = theme::palette(cx);
     BaseButton::new("open-login-items")

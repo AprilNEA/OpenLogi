@@ -14,10 +14,8 @@ use crate::windows;
 pub fn dispatch(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;
     match command {
-        // The tray sends Quit right before the agent exits: flag the IPC
-        // client first, or its unreachable→spawn reflex can resurrect the
-        // agent while this process is still tearing down (observed live —
-        // Quit, then the agent back four seconds later).
+        // Flag the IPC client before quitting, or its unreachable→spawn
+        // reflex can resurrect the agent mid-teardown (observed live).
         Cmd::Quit => {
             crate::services::ipc::mark_suite_quitting();
             cx.quit();

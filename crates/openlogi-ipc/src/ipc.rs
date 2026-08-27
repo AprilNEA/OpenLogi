@@ -424,9 +424,8 @@ pub enum ClientKind {
     Gui,
     /// The `openlogi` CLI reading a snapshot; served without arming.
     Cli,
-    /// The Actions Ring overlay helper; served without arming. An armed agent
-    /// spawns its own overlay, so one that connects on its own is an orphan
-    /// of a previous run and must not wake a dormant agent.
+    /// The Actions Ring overlay helper; served without arming — one that
+    /// connects on its own is an orphan of a previous run.
     Overlay,
 }
 
@@ -551,12 +550,9 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
-    /// Declare what kind of client this connection is.
-    ///
-    /// Informational for an armed agent, load-bearing for a dormant one: the
-    /// macOS dormancy gate arms only on a [`ClientKind::Gui`] declaration, so
-    /// every other client is served without waking the input stack. The
-    /// takeover probe never declares — it speaks only
-    /// [`Agent::protocol_version`] — and so never arms anything.
+    /// Declare what kind of client this connection is. Informational for an
+    /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
+    /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
+    /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
 }

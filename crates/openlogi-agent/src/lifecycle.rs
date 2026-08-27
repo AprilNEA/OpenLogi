@@ -8,18 +8,12 @@
 //!         └─ init failed    └─ dormant start nobody wanted       └─ signal / uninstall
 //! ```
 //!
-//! [`Booted`] owns everything a not-yet-armed agent may hold — the bootstrap
-//! [`Core`], the shutdown signals, the uninstall watcher — and the only path
-//! to the select loop moves it through [`Booted::arm`] into [`Armed`]. The
-//! moves are the type protection for two contracts that used to be implicit:
-//! the uninstall receiver is consumed first by the dormancy gate and then by
-//! the run loop (it travels inside the states, so no third consumer can
-//! exist), and the demand signal dies at arming ([`Booted::arm`] drops it —
-//! demand is a pre-arming concept).
-//!
-//! The gate exists only on macOS, where the sunk launch-at-login switch makes
-//! an unwanted login start possible. Windows and Linux arm unconditionally:
-//! their autostart reconciliation means the agent only ever starts wanted.
+//! The moves are the type protection for two contracts: the uninstall
+//! receiver travels inside the states (gate consumes it first, then the run
+//! loop — no third consumer can exist), and the demand channel dies at
+//! [`Booted::arm`]. The gate exists only on macOS, where the sunk
+//! launch-at-login switch makes an unwanted login start possible; Windows
+//! and Linux only ever start wanted, so they arm unconditionally.
 
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -48,10 +42,9 @@ use crate::shutdown::{self, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
 use crate::{autostart, overlay, server};
 
-/// How long a dormant agent waits for a client before leaving. Generous next
-/// to the seconds a kickstarting GUI needs to connect; the only cost of the
-/// window is an idle process that has opened no device and prompted for
-/// nothing.
+/// How long a dormant agent waits before leaving — generous next to the
+/// seconds a kickstarting GUI needs, and the window costs only an idle
+/// process that has opened no device and prompted for nothing.
 #[cfg(target_os = "macos")]
 const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -93,9 +86,8 @@ struct Booted {
     core: Core,
     signals: ShutdownSignals,
     uninstalled: UnboundedReceiver<()>,
-    /// The hook kill-switch, startup-only on purpose (like
-    /// `show_in_menu_bar`): flipping it requires an agent restart, which the
-    /// config docs state.
+    /// The hook kill-switch, startup-only on purpose: flipping it requires
+    /// an agent restart, which the config docs state.
     capture_mouse_events: bool,
     #[cfg(target_os = "macos")]
     launch_at_login: bool,
@@ -113,8 +105,7 @@ impl Booted {
         uninstalled: UnboundedReceiver<()>,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
-        // Read the startup-only flags before `config` moves into the
-        // orchestrator.
+        // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
         #[cfg(target_os = "macos")]
         let launch_at_login = config.app_settings.launch_at_login;
@@ -133,18 +124,13 @@ impl Booted {
         })
     }
 
-    /// The dormancy gate — the sunk launch-at-login switch's enforcement
-    /// point. The service plist always carries the login trigger (supervision
-    /// demands it — `SuccessfulExit` implies `RunAtLoad`), so with the
-    /// preference off, being started with no client in sight means "launchd
-    /// ran us at login the user opted out of". Wait briefly for demand — a
-    /// GUI kickstart connects and declares itself within seconds — and
-    /// otherwise leave with a clean `exit(0)` launchd will not respawn.
-    ///
-    /// Demand is a [`ClientKind::Gui`] declaration, not a mere connection:
-    /// the CLI and an orphaned overlay are served from the already-bound
-    /// socket without waking anything, and the takeover probe never declares
-    /// at all.
+    /// The dormancy gate. The service plist always carries the login trigger
+    /// (`SuccessfulExit` implies `RunAtLoad`), so preference-off plus no
+    /// client in sight means "launchd ran us at login the user opted out
+    /// of" — wait briefly, then leave with the `exit(0)` launchd will not
+    /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
+    /// connection: other clients are served without waking anything, and the
+    /// takeover probe never declares at all.
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Self> {
         if self.launch_at_login {
@@ -181,9 +167,7 @@ impl Booted {
     }
 
     /// The arming point: the tray may show, the overlay may start,
-    /// permissions may prompt, devices may open. Demand dies here —
-    /// [`Core`]'s `demand` receiver is dropped, because a running agent no
-    /// longer cares who connects.
+    /// permissions may prompt, devices may open.
     fn arm(self) -> Armed {
         let Self {
             core,
@@ -210,9 +194,8 @@ impl Booted {
             ring_haptics,
             demand,
         } = core;
-        // Demand is a pre-arming concept: dropping the receiver closes the
-        // channel, turning post-arming declarations into no-ops in the
-        // server's `declare_client` handler.
+        // Closing the channel turns post-arming declarations into no-ops in
+        // the server's `declare_client` handler.
         drop(demand);
         Armed {
             orchestrator,
@@ -231,8 +214,7 @@ impl Booted {
     }
 }
 
-/// The armed agent: everything the select loop folds events into, so each
-/// event handler is a method instead of a parameter list.
+/// The armed agent — everything the select loop folds events into.
 struct Armed {
     orchestrator: Arc<Mutex<Orchestrator>>,
     shared: SharedRuntime,
@@ -242,9 +224,8 @@ struct Armed {
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     uninstalled: UnboundedReceiver<()>,
-    /// The CGEventTap hook, installed once Accessibility is granted and
-    /// dropped if it's revoked (the tap self-disables on revoke regardless;
-    /// dropping the handle stops its thread).
+    /// The OS hook, installed once Accessibility is granted and dropped on
+    /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -253,14 +234,12 @@ struct Armed {
 
 impl Armed {
     /// Start the watcher fleets, then drain every control-plane source until
-    /// told to leave. The sources here are low-frequency by contract — see
-    /// [`startup::StateWatchers`].
+    /// told to leave (low-frequency by contract — [`startup::StateWatchers`]).
     async fn run(mut self) {
         #[cfg(target_os = "macos")]
         request_input_monitoring().await;
 
-        // HID++ watchers need no Accessibility permission — start them up
-        // front.
+        // HID++ watchers need no Accessibility — start them up front.
         startup::spawn_hidpp_watchers(&self.shared, &self.inputs);
         let mut watchers = startup::spawn_state_watchers(&self.shared);
 
@@ -274,9 +253,8 @@ impl Armed {
                 event = watchers.inventory.recv(), if inventory_open => if let Some(event) = event {
                     self.apply_inventory(event).await;
                 } else {
-                    // Watcher thread death (e.g. a panic inside the HID
-                    // backend's enumerate) — without a snapshot the GUI would
-                    // scan forever.
+                    // Watcher thread death — without a snapshot the GUI
+                    // would scan forever.
                     warn!("inventory watcher channel closed — marking enumeration unavailable");
                     self.orchestrator.lock().await.mark_inventory_unavailable();
                     inventory_open = false;
@@ -298,9 +276,8 @@ impl Armed {
                     self.apply_accessibility(granted);
                 }
                 () = self.signals.recv() => self.shut_down("shutdown signal"),
-                // The app was removed while we kept running from its bundle.
-                // Leave through the same door, so the event tap goes with us
-                // (#807).
+                // Uninstalled while running — leave through the same door so
+                // the event tap goes with us (#807).
                 Some(()) = self.uninstalled.recv() => self.shut_down("the app was uninstalled"),
                 Some(granted) = watchers.input_monitoring.recv() => {
                     self.observable.set_input_monitoring_granted(granted);
@@ -319,11 +296,9 @@ impl Armed {
                 hid_open_failures,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                // The portable watcher catches long sleeps from a polling gap.
-                // Native notifications (macOS workspace wakes, Windows
-                // suspend/resume) also cover the sleeps that gap misses;
-                // consume the coalesced signal at the exact point that can
-                // replay it.
+                // Native suspend/resume notifications cover the sleeps the
+                // polling gap misses; consume the coalesced signal at the
+                // point that can replay it.
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if self.resume_pending.swap(false, Ordering::Relaxed) {
                     info!("native resume notification — replaying volatile settings");
@@ -364,20 +339,15 @@ impl Armed {
             .await
             .action_ring_session(device_key)
         {
-            // Arm the firmware haptic engine before the first buzz: some power
-            // transitions clear its enabled state, after which plays are
-            // accepted without any physical feedback. Sequenced through the
-            // haptic worker so the first hover cannot race a still-disarmed
-            // engine.
+            // Re-arm the firmware haptic engine first: power transitions can
+            // clear it, after which plays are accepted without feedback.
             self.ring_haptics.arm(session.haptic_route.clone());
             self.inputs.ring.begin(session);
         }
     }
 
-    /// Fold one Accessibility-grant change into the hook: tear it down on a
-    /// revoke, install it on a grant (when capture is enabled), and publish
-    /// the resulting hook state — one publish for every path: revoked,
-    /// installed, kept, or never installed because capture is off.
+    /// Fold one Accessibility-grant change into the hook and publish the
+    /// resulting hook state — one publish on every path.
     fn apply_accessibility(&mut self, granted: bool) {
         self.observable.set_accessibility_granted(granted);
         if !granted {
@@ -389,9 +359,7 @@ impl Armed {
         self.observable.set_hook_installed(self.hook.is_some());
     }
 
-    /// Install the OS mouse hook now that Accessibility is granted, or say
-    /// why it stays off. `None` means no hook is running, which is what the
-    /// observable state reports either way.
+    /// Install the OS mouse hook, or say why it stays off.
     fn start_hook(&self) -> Option<Hook> {
         if !self.capture_mouse_events {
             info!(

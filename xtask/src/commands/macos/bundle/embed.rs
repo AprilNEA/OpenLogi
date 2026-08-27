@@ -162,12 +162,10 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// `panic = "unwind"` is an `exit(101)`, not a signal, which `Crashed` would
 /// leave down (verified live, alongside `Crashed` not respawning SIGKILL).
 ///
-/// One plist for both `launch_at_login` states, on purpose: launchd's model
-/// is triggers composed on a single job, and the preference is *sunk into the
-/// agent* — started with the preference off and no client connecting, it
-/// idles out with a clean `exit(0)` (which `SuccessfulExit` leaves down)
-/// instead of arming. Registration therefore never switches with the
-/// preference: no re-prompt, no second label, no half-switched states.
+/// One plist for both `launch_at_login` states: the preference is sunk into
+/// the agent, which idles out with a clean `exit(0)` — left down by
+/// `SuccessfulExit` — when started unwanted (the GUI's
+/// `platform::registration` doc has the model).
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let helper = HELPERS
         .iter()

@@ -1,10 +1,8 @@
-//! The agent's startup construction: everything built *before* arming.
+//! Startup construction: everything built *before* arming.
 //!
 //! [`bootstrap`] assembles the [`Core`] — pure construction plus the IPC
-//! socket bind, no permission prompt, no device open, no helper spawn. The
-//! watcher fleets ([`spawn_hidpp_watchers`], [`spawn_state_watchers`]) spawn
-//! later, at arming. The ladder itself — bootstrap, the dormancy gate,
-//! arming, the select loop — is `crate::lifecycle`.
+//! socket bind; the watcher fleets spawn later, at arming. The ladder itself
+//! is `crate::lifecycle`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,29 +32,20 @@ pub(crate) struct Core {
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
     pub(crate) ring_haptics: server::RingHapticPlayer,
-    /// Client declarations forwarded by the IPC server's `declare_client`
-    /// handler — the dormancy gate's demand channel. The channel buffers, so
-    /// a declaration that lands before the gate starts listening is not
-    /// lost; unbounded is safe because declarations are one per connection.
+    /// Client declarations forwarded by the IPC server — the dormancy gate's
+    /// demand channel. It buffers, so a declaration that lands before the
+    /// gate listens is not lost.
     pub(crate) demand: tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
 }
 
-/// Build the agent's shared state and start the IPC server — everything that
-/// is safe *before* arming: pure construction plus the socket bind. No
-/// permission prompt, no device open, no helper spawn.
-///
-/// The IPC server starts here, ahead of the watchers and prompts: it is pure
-/// state service over what exists so far (an empty, `Scanning` inventory),
-/// binding early is what lets a dormant agent hear the demand that should
-/// wake it, and a first-run Input Monitoring consent dialog no longer
-/// blackholes the GUI's connect either.
+/// Build the shared state and start the IPC server — everything safe before
+/// arming: no permission prompt, no device open, no helper spawn. Binding
+/// ahead of the watchers and prompts lets a dormant agent hear demand, and
+/// keeps a first-run consent dialog from blackholing the GUI's connect.
 pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
-    // The orchestrator is shared with the IPC server (which serves inventory /
-    // reload / status) and mutated by the watcher select loop, so it lives
-    // behind an async mutex. Locks are brief (a map rebuild or a clone).
-    // One cell holds everything the GUI can observe. The orchestrator
-    // republishes the device and config facts from its own mutators; the hook
-    // facts are published by the select loop, which owns the hook.
+    // The orchestrator is shared with the IPC server and mutated by the
+    // select loop, so it lives behind an async mutex; locks are brief. The
+    // hook facts are published by the select loop, which owns the hook.
     let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
     #[cfg(target_os = "macos")]
     seed_permission_facts(&observable);
@@ -67,9 +56,8 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     let shared = orchestrator.lock().await.shared();
     let inputs = InputServices::start(&shared)?;
 
-    // Live event monitor: shared between the hook callback (which mirrors events
-    // into it) and the IPC server (which the GUI polls). The janitor turns it
-    // back off once the GUI stops polling.
+    // Shared between the hook callback (which mirrors events into it) and
+    // the IPC server (which the GUI polls); the janitor turns it back off.
     let event_monitor = Arc::new(EventMonitor::default());
     tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
 
@@ -123,9 +111,8 @@ fn spawn_ipc_server(
     (ring_haptics, demand)
 }
 
-/// The input-action runtimes: the Actions Ring, the button-lifecycle worker,
-/// and the smooth-scroll worker. Started inside [`bootstrap`] — they are pure
-/// in-process workers that touch no device until an action is dispatched.
+/// The input-action runtimes — pure in-process workers that touch no device
+/// until an action is dispatched, so [`bootstrap`] may start them.
 pub(crate) struct InputServices {
     pub(crate) ring: Arc<ActionRingManager>,
     pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
@@ -201,11 +188,10 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
 
 /// The per-source state watchers the select loop drains, spawned at arming.
 ///
-/// Everything in here — and everything else the lifecycle's select loop
-/// listens to — is low-frequency by contract: second-scale polls and one-shot
-/// signals. That contract is what makes the unbounded channels safe. The
-/// input hot path (hook → dispatcher → inject) never passes through the
-/// select loop; do not route a high-rate source through it.
+/// Everything the select loop listens to is low-frequency by contract —
+/// that is what makes the unbounded channels safe. The input hot path
+/// (hook → dispatcher → inject) never passes through it; do not route a
+/// high-rate source here.
 pub(crate) struct StateWatchers {
     pub(crate) inventory: tokio::sync::mpsc::UnboundedReceiver<watchers::inventory::InventoryEvent>,
     pub(crate) camera: tokio::sync::mpsc::UnboundedReceiver<bool>,
@@ -229,8 +215,7 @@ pub(crate) fn spawn_state_watchers(shared: &SharedRuntime) -> StateWatchers {
 }
 
 /// Seed the permission facts with non-prompting reads, so a client that
-/// connects before the permission watchers' first tick (the IPC server starts
-/// ahead of them) doesn't see a default instead of reality.
+/// connects before the watchers' first tick doesn't see a default.
 #[cfg(target_os = "macos")]
 fn seed_permission_facts(observable: &ObservableState) {
     observable.set_accessibility_granted(Hook::has_accessibility());

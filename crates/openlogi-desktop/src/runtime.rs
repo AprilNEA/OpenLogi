@@ -173,24 +173,14 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
 }
 
 /// Ensure the agent's launchd service is registered, at startup: a fresh
-/// install registers on its first GUI launch, and an app update triggers the
-/// re-registration Apple requires for a changed executable (the
-/// version-marker check inside `registration::ensure_registered`). The spawn
-/// cascade in `services::ipc` also registers on demand when it finds the
-/// service absent — whichever path runs first wins and the other becomes a
-/// no-op; this one still covers the update re-register while the agent is
-/// alive and no spawn is ever needed.
-/// Registration is deliberately independent of `launch_at_login` — the
-/// preference is a config value the agent itself reads and acts on (keep
-/// working, or idle out), so there is no preference to capture here and no
-/// stale-input race to stage around. A service the user switched off in
-/// System Settings is respected by the ensure rule; the Settings row
-/// surfaces that state.
-///
-/// On the background executor: the XPC round-trips must not delay the first
-/// paint. Skipped for dev profiles: a login item pointing into a `target/`
-/// build goes stale on the next `cargo clean`, so dev registration stays an
-/// explicit toggle in the dev GUI.
+/// install registers on first GUI launch, an app update triggers the
+/// re-registration Apple requires for a changed executable. The spawn
+/// cascade in `services::ipc` also registers on demand — whichever runs
+/// first wins; this one still covers the update re-register while the agent
+/// is alive. Preference-independent (see `platform::registration`), so there
+/// is no stale input to stage around. On the background executor (XPC must
+/// not delay first paint); skipped for dev profiles, whose registration
+/// stays an explicit toggle.
 #[cfg(target_os = "macos")]
 fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
     if openlogi_core::paths::is_dev_profile() {

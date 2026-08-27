@@ -20,10 +20,8 @@ async fn fires(signal: &mut Option<tokio::signal::unix::Signal>) {
     }
 }
 
-/// The process's stop-signal listeners, installed once right after bootstrap
-/// and consumed by whichever lifecycle stage is currently in charge — the
-/// dormancy gate first, the run loop after arming. Owning them as one value
-/// is what hands them from stage to stage without a loose pair of receivers.
+/// The stop-signal listeners, installed once and consumed by whichever
+/// lifecycle stage is currently in charge.
 pub(crate) struct ShutdownSignals {
     #[cfg(unix)]
     sigterm: Option<tokio::signal::unix::Signal>,
@@ -54,10 +52,8 @@ impl ShutdownSignals {
     }
 
     /// Resolves on the first signal that means *stop now*: `SIGTERM` from
-    /// launchd (logout, `bootout`) or from an incoming agent's takeover,
-    /// `SIGINT` from a dev-run Ctrl-C. Both default to killing the process
-    /// where it stands, which on macOS would strand an armed HID event tap in
-    /// the system's tap chain.
+    /// launchd or a takeover, `SIGINT` from a dev-run Ctrl-C — both would
+    /// otherwise kill the process with the event tap still armed.
     #[cfg(unix)]
     pub(crate) async fn recv(&mut self) {
         tokio::select! {
@@ -73,13 +69,9 @@ impl ShutdownSignals {
     }
 }
 
-/// Release the input hook, then end the process.
-///
-/// Dropping the hook detaches the macOS event tap; a signal's default
-/// disposition would have killed the process with the tap still armed, and so
-/// would any other way of leaving that skips destructors. The agent's run loop
-/// is not the process — macOS keeps the AppKit tray loop on the main thread —
-/// so the exit has to be explicit.
+/// Release the input hook, then end the process. The run loop is not the
+/// process — macOS keeps the AppKit tray loop on the main thread — so the
+/// exit has to be explicit, and it must run the hook's destructor.
 pub(crate) fn release_hook_and_exit(
     hook: Option<Hook>,
     inputs: &mut InputServices,
