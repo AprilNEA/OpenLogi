@@ -17,7 +17,10 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+openlogi-flow = { path = "../openlogi-flow" }
 futures-lite = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
@@ -29,3 +32,4 @@ workspace = true
 # real multi-second sleep.
 openlogi-fixture = { workspace = true, features = ["fs"] }
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

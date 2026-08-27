@@ -40,6 +40,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
+use crate::flow::{FlowController, FlowDeviceSnapshot};
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
 };
@@ -163,6 +164,8 @@ pub struct SharedHandles {
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
+    /// Flow network, handoff, and edge runtime. Dormant until the agent arms.
+    pub flow: FlowController,
 }
 
 impl SharedHandles {
@@ -446,6 +449,13 @@ impl Orchestrator {
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            config.flow.clone(),
+            Arc::clone(&observable),
+            hardware.channel_pool(),
+            receiver_access.clone(),
+        );
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -463,7 +473,7 @@ impl Orchestrator {
             keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             watched_lights,
@@ -472,6 +482,7 @@ impl Orchestrator {
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
+            flow,
         };
         let orch = Self {
             config,
@@ -720,6 +731,19 @@ impl Orchestrator {
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .map(|device| FlowDeviceSnapshot {
+                    config_key: device.config_key.clone(),
+                    route: device.route.clone(),
+                    serial: device.serial.clone(),
+                    unit_id: device.unit_id,
+                    kind: device.kind,
+                    online: device.online,
+                })
+                .collect(),
+        );
     }
 
     fn publish_capture_plans(&self) {
@@ -1406,6 +1430,7 @@ impl Orchestrator {
         self.forget_saved_light_changes(&previous, source);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
+        self.shared.flow.update_config(&self.config.flow);
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
