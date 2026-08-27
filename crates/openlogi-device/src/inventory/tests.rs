@@ -317,9 +317,8 @@ fn absent_channels_retire_and_quiescent_absent_retirement_is_reaped() {
     cache.insert(1, Arc::new(()));
     cache.insert(2, Arc::new(()));
 
-    let mut retired = 0;
-    cache.retire_absent(&HashSet::from([2]), |_| retired += 1);
-    assert_eq!(retired, 1, "the retire hook fires once per retired channel");
+    let retired = cache.retire_absent(&HashSet::from([2]));
+    assert_eq!(retired, 1, "one absent channel retires once");
     assert!(cache.is_retiring(&1));
     assert!(cache.get(&2).is_some());
 

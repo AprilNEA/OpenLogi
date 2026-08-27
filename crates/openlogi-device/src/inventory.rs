@@ -230,18 +230,18 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
         false
     }
 
-    fn retire_absent(&mut self, seen: &HashSet<Node>, mut on_retire: impl FnMut(&Channel)) {
+    /// Retire every active node not in `seen`; returns how many retired.
+    fn retire_absent(&mut self, seen: &HashSet<Node>) -> usize {
         let absent = self
             .active
             .keys()
             .filter(|node| !seen.contains(*node))
             .cloned()
             .collect::<Vec<_>>();
-        for node in absent {
-            if let Some(channel) = self.retire_node(&node) {
-                on_retire(channel);
-            }
-        }
+        absent
+            .into_iter()
+            .filter(|node| self.retire_node(node).is_some())
+            .count()
     }
 
     fn reap_absent(&mut self, seen: &HashSet<Node>, is_quiescent: impl Fn(&Channel) -> bool) {
@@ -545,9 +545,7 @@ impl Enumerator {
         if let Some(registry) = &self.registry {
             registry.retain_nodes(&seen_nodes);
         }
-        self.channels.retire_absent(&seen_nodes, |cached| {
-            crate::write::clear_haptic_feature_cache_for(&cached.channel);
-        });
+        self.channels.retire_absent(&seen_nodes);
         self.channels.reap_absent(&seen_nodes, |cached| {
             Arc::strong_count(&cached.channel) == 1
         });
@@ -688,11 +686,7 @@ impl Enumerator {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
-                if let Some(cached) = self.channels.retire_node(&node) {
-                    // Release the haptic cache's pin on this channel NOW —
-                    // waiting for the next haptic route-miss deadlocks when
-                    // capture dies with it (see clear_haptic_feature_cache_for).
-                    crate::write::clear_haptic_feature_cache_for(&cached.channel);
+                if self.channels.retire_node(&node).is_some() {
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
             } else if let Some(registry) = &self.registry {

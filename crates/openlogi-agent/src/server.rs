@@ -367,7 +367,7 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
             shared
                 .device(route)
                 .run(HidppOperation::PlayHaptic, |c| async move {
-                    openlogi_hid::ensure_haptics_armed_on(&shared.channel_registry, &c).await
+                    openlogi_hid::ensure_haptics_armed_on(&c).await
                 }),
         )
         .await
@@ -416,7 +416,7 @@ async fn play_within_budget(
             shared
                 .device(route)
                 .run(HidppOperation::PlayHaptic, |c| async move {
-                    openlogi_hid::play_haptic_on(&shared.channel_registry, &c, waveform).await
+                    openlogi_hid::play_haptic_on(&c, waveform).await
                 }),
         )
         .await
