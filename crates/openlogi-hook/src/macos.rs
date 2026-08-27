@@ -9,7 +9,7 @@ mod watchdog;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -35,8 +35,8 @@ use crate::{
     TapLocation,
 };
 use watchdog::{
-    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, RearmBudget,
-    TapPhase, WatchdogSignals, stuck_callback,
+    CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
+    LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals, stuck_callback,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -753,8 +753,7 @@ fn run_tap_callback(
 /// the agent so macOS tears the tap down and system input recovers.
 fn spawn_callback_watchdog(
     signals: Arc<WatchdogSignals>,
-    in_callback: Arc<AtomicBool>,
-    entered_at_ms: Arc<AtomicU64>,
+    callback_activity: Arc<CallbackActivity>,
 ) -> std::io::Result<()> {
     thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
@@ -765,21 +764,15 @@ fn spawn_callback_watchdog(
                     return;
                 }
                 thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
-                if !in_callback.load(Ordering::Acquire) {
+                let Some(entered) = callback_activity.entered_at_ms() else {
                     continue;
-                }
-                let entered = entered_at_ms.load(Ordering::Acquire);
-                if entered == 0 {
-                    continue;
-                }
+                };
                 let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
                     continue;
                 };
                 // Re-sample: a fresh high-frequency event may have rewritten
-                // the stamp between the first loads and the budget check.
-                if !in_callback.load(Ordering::Acquire)
-                    || entered_at_ms.load(Ordering::Acquire) != entered
-                {
+                // the complete activity state during the budget check.
+                if callback_activity.entered_at_ms() != Some(entered) {
                     continue;
                 }
                 if signals.phase() != TapPhase::Armed {
@@ -953,16 +946,14 @@ fn thread_main(
     signals.mark_tap_progress();
     signals.set_phase(TapPhase::Arming);
 
-    let in_callback = Arc::new(AtomicBool::new(false));
-    let entered_at_ms = Arc::new(AtomicU64::new(0));
+    let callback_activity = Arc::new(CallbackActivity::default());
     // Latched by the callback when the OS disables the tap, consumed by the
     // run-loop slice that decides whether to re-arm it.
     let tap_disabled = Arc::new(AtomicBool::new(false));
 
     let tap_result = {
         let callback_signals = Arc::clone(&signals);
-        let in_callback = Arc::clone(&in_callback);
-        let entered_at_ms = Arc::clone(&entered_at_ms);
+        let callback_activity = Arc::clone(&callback_activity);
         let tap_disabled = Arc::clone(&tap_disabled);
         CGEventTap::new(
             CGEventTapLocation::HID,
@@ -976,10 +967,9 @@ fn thread_main(
                 ) {
                     tap_disabled.store(true, Ordering::Release);
                 }
-                entered_at_ms.store(callback_signals.now_millis(), Ordering::Relaxed);
-                in_callback.store(true, Ordering::Release);
+                callback_activity.enter(callback_signals.now_millis());
                 let disposition = run_tap_callback(cb.as_ref(), etype, event);
-                in_callback.store(false, Ordering::Release);
+                callback_activity.exit();
                 disposition
             },
         )
@@ -1007,11 +997,9 @@ fn thread_main(
         run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
     }
     signals.mark_tap_progress();
-    if let Err(error) = spawn_callback_watchdog(
-        Arc::clone(&signals),
-        Arc::clone(&in_callback),
-        Arc::clone(&entered_at_ms),
-    ) {
+    if let Err(error) =
+        spawn_callback_watchdog(Arc::clone(&signals), Arc::clone(&callback_activity))
+    {
         error!(%error, "could not spawn callback watchdog — refusing to arm HID tap");
         return;
     }
