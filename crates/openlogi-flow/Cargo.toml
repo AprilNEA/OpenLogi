@@ -12,6 +12,10 @@ publish = false
 
 [dependencies]
 buffa = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
 
 [build-dependencies]
 buffa-build = "0.9"
