@@ -340,21 +340,15 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
 /// no-device (or unreadable-state) blank.
 #[derive(Default)]
 struct ScrollingFacts {
-    inversion: Inversion,
+    /// The persisted inversion setting. Independent of
+    /// `inversion_supported` — a configured inversion on a link without
+    /// support still renders, checked and disabled — so these are two named
+    /// fields, not a sum type.
+    inverted: bool,
+    /// Whether the current link reports HID++ inversion support.
+    inversion_supported: bool,
     resolution: Option<openlogi_core::config::ScrollResolution>,
     hires: HiresWheel,
-}
-
-/// The current link's native scroll-inversion state.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-enum Inversion {
-    /// The device does not report HID++ inversion support.
-    #[default]
-    Unsupported,
-    /// Supported, scrolling with the default sign.
-    Normal,
-    /// Supported and inverted.
-    Inverted,
 }
 
 /// Where the device offers hi-res wheel control.
@@ -374,18 +368,13 @@ enum HiresWheel {
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let ScrollingFacts {
-        inversion,
+        inverted,
+        inversion_supported,
         resolution,
         hires,
     } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
-        inversion: match (
-            state.current_scroll_inversion_supported(),
-            state.current_invert_scroll(),
-        ) {
-            (false, _) => Inversion::Unsupported,
-            (true, false) => Inversion::Normal,
-            (true, true) => Inversion::Inverted,
-        },
+        inverted: state.current_invert_scroll(),
+        inversion_supported: state.current_scroll_inversion_supported(),
         resolution: state.current_scroll_resolution(),
         hires: if state.current_hires_wheel_supported() {
             HiresWheel::Here
@@ -395,10 +384,10 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             HiresWheel::Nowhere
         },
     });
-    let inversion_description = if inversion == Inversion::Unsupported {
-        tr!("This device does not report native HID++ scroll inversion support.")
-    } else {
+    let inversion_description = if inversion_supported {
         tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+    } else {
+        tr!("This device does not report native HID++ scroll inversion support.")
     };
     let inversion_row = h_flex()
         .justify_between()
@@ -421,9 +410,9 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         )
         .child(
             Toggle::new("invert-scroll-toggle")
-                .selected(inversion == Inversion::Inverted)
-                .disabled(inversion == Inversion::Unsupported)
-                .label((inversion == Inversion::Unsupported).then(|| tr!("Unavailable")))
+                .selected(inverted)
+                .disabled(!inversion_supported)
+                .label((!inversion_supported).then(|| tr!("Unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::update(cx, |state, cx| {
                         let key = state.current_record().map(DeviceRecord::device_key);
