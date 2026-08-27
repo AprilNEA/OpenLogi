@@ -266,7 +266,7 @@ pub const fn capture_supported() -> bool {
 /// enumeration moved off the UI thread. Control paths hold this for the
 /// seize's lifetime; enumeration takes it for the duration of the scan.
 #[cfg(target_os = "macos")]
-pub(crate) static USB_QUIESCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static USB_QUIESCE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Enumerate every connected **Logitech** UVC camera.
 ///
@@ -286,9 +286,7 @@ fn enumerate_all() -> Vec<Camera> {
     // Wait out any in-flight control seize so the scan can't land in the
     // window where the kernel driver is detached (poisoning is impossible —
     // holders never panic — but recover anyway rather than unwrap).
-    let _quiesce = USB_QUIESCE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _quiesce = USB_QUIESCE.lock();
     let serials = uvc::usb_serials_by_location();
     macos::enumerate()
         .iter()

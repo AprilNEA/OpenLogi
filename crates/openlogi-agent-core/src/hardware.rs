@@ -47,7 +47,7 @@ fn authoritative_channel(
     route: &DeviceRoute,
 ) -> Result<SharedChannel, WriteError> {
     let capture = capture
-        .and_then(|capture| capture.read().ok())
+        .map(|capture| capture.read())
         .and_then(|slot| (*slot).clone())
         .filter(|channel| channel.matches(route));
     choose_authoritative(
@@ -523,8 +523,8 @@ async fn timed<T>(
 
 #[cfg(test)]
 mod tests {
+    use parking_lot::RwLock;
     use std::cell::Cell;
-    use std::sync::RwLock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;

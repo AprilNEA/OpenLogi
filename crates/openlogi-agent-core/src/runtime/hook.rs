@@ -5,8 +5,10 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
+
+use parking_lot::RwLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -250,7 +252,9 @@ fn handle_button(
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
     if pressed {
-        let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
+        let is_gesture = hooks
+            .try_read()
+            .is_some_and(|m| m.gestures.contains_key(&id));
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
@@ -272,7 +276,6 @@ fn handle_button(
             if was_click {
                 let action = hooks
                     .try_read()
-                    .ok()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
                     info!(button = %id, action = %action.label(), "gesture click → executing bound action");
@@ -284,10 +287,7 @@ fn handle_button(
         }
     }
 
-    let binding = hooks
-        .try_read()
-        .ok()
-        .and_then(|m| m.bindings.get(&id).cloned());
+    let binding = hooks.try_read().and_then(|m| m.bindings.get(&id).cloned());
     let Some(binding) = binding else {
         return EventDisposition::PassThrough;
     };
@@ -357,7 +357,7 @@ fn handle_moved(
 ) -> EventDisposition {
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
-        let action = hooks.try_read().ok().map(|m| {
+        let action = hooks.try_read().map(|m| {
             m.gestures
                 .get(&button)
                 .and_then(|dirs| dirs.get(&dir).cloned())
@@ -401,7 +401,6 @@ fn handle_key(
     };
     let Some(action) = bindings
         .try_read()
-        .ok()
         .and_then(|map| map.get(&trigger).cloned())
     else {
         return EventDisposition::PassThrough;
@@ -472,7 +471,6 @@ pub fn start(
                     if delta.y() == 0.0
                         && let Some((button, action)) = hooks
                             .try_read()
-                            .ok()
                             .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");

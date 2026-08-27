@@ -11,7 +11,9 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId, KeyCombo};
@@ -87,28 +89,18 @@ impl ActionExecutor {
         }
 
         let next = match action {
-            Action::CycleDpiPresets => match self.dpi_cycle.write() {
-                Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
-                Err(e) => {
-                    warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
-                    None
-                }
-            },
-            Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
-                Ok(mut guard) => guard
-                    .state_for(device_key)
-                    .and_then(|state| state.set(usize::from(*i))),
-                Err(e) => {
-                    warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
-                    None
-                }
-            },
+            Action::CycleDpiPresets => self
+                .dpi_cycle
+                .write()
+                .state_for(device_key)
+                .and_then(DpiCycleState::cycle),
+            Action::SetDpiPreset(i) => self
+                .dpi_cycle
+                .write()
+                .state_for(device_key)
+                .and_then(|state| state.set(usize::from(*i))),
             Action::ToggleSmartShift => {
-                let target = self
-                    .dpi_cycle
-                    .read()
-                    .ok()
-                    .and_then(|cycles| cycles.target_for(device_key));
+                let target = self.dpi_cycle.read().target_for(device_key);
                 info!("SmartShift toggle → flipping wheel mode");
                 toggle_smartshift_in_background(
                     &self.capture,
@@ -366,9 +358,7 @@ const BROWSER_NAV_DEBOUNCE: Duration = Duration::from_millis(150);
 static BROWSER_NAV_LAST: Mutex<(Option<Instant>, Option<Instant>)> = Mutex::new((None, None));
 
 fn browser_nav_debounce_ok(action: &Action) -> bool {
-    let mut last = BROWSER_NAV_LAST
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut last = BROWSER_NAV_LAST.lock();
     let slot = if matches!(action, Action::BrowserForward) {
         &mut last.1
     } else {

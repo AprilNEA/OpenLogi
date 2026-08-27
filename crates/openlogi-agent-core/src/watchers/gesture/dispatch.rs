@@ -131,9 +131,7 @@ impl InputDispatcher {
     /// re-synthesised scroll output.
     pub(super) fn dispatch(&mut self, session: &HidppSessionId, input: CapturedInput) {
         let key = session.device_key();
-        let Ok(plans) = self.capture_plans.read() else {
-            return;
-        };
+        let plans = self.capture_plans.read();
         let Some(plan) = plans.iter().find(|plan| plan.config_key == key) else {
             debug!(key, "input from a device with no capture plan — ignored");
             return;

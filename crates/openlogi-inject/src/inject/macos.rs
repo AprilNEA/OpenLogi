@@ -1,6 +1,8 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
+
+use parking_lot::Mutex;
 
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
@@ -623,10 +625,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
         ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
     };
-    let Ok(mut quantizer) = quantizer.lock() else {
-        tracing::warn!("macOS scroll quantizer mutex poisoned");
-        return;
-    };
+    let mut quantizer = quantizer.lock();
     let delta = quantizer.quantize(delta, 1.0);
     drop(quantizer);
     if delta == QuantizedScroll::default() {
@@ -655,10 +654,7 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         ScrollDelta::Pixels { .. } => 1.0,
         ScrollDelta::WheelTicks { .. } => POINTS_PER_WHEEL_TICK,
     };
-    let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
-        tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
-        return;
-    };
+    let mut quantizer = SMOOTH_SCROLL_QUANTIZER.lock();
     let delta = quantizer.quantize(delta, units_per_input);
     drop(quantizer);
 

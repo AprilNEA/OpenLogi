@@ -13,6 +13,7 @@ openlogi-core = { path = "../openlogi-core", version = "0.8.1" }
 openlogi-inject = { path = "../openlogi-inject", version = "0.8.1" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }

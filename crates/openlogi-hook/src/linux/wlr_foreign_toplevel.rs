@@ -43,9 +43,9 @@
 //! Both helpers use `poll(2)` via the `libc` crate (already a Linux dependency)
 //! with `Instant`-based remaining-time accounting and `EINTR` retry.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
@@ -433,7 +433,7 @@ impl WlrForeignToplevelSource {
 
 impl FrontmostSource for WlrForeignToplevelSource {
     fn frontmost_app_id(&self) -> Option<String> {
-        let mut guard = self.session.lock().ok()?;
+        let mut guard = self.session.lock();
 
         // Reconnect when the compositor sent `Finished` (compositor reload /
         // restart) or when a prior reconnect attempt failed.

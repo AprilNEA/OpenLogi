@@ -19,8 +19,9 @@
 //! [`camera_authorization`] reports `Granted`/`Denied` by probing whether the
 //! node actually opens, and never `Undetermined`: there is nothing to prompt.
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use v4l::buffer::Type;
@@ -278,7 +279,7 @@ impl CameraStream {
     /// pixel buffer.
     #[must_use]
     pub fn latest_frame(&self) -> Option<Arc<Frame>> {
-        self.shared.latest.lock().ok().and_then(|slot| slot.clone())
+        self.shared.latest.lock().clone()
     }
 
     /// Take the most recent frame out of the slot (the next delivered frame
@@ -286,11 +287,7 @@ impl CameraStream {
     /// buffer without copying it.
     #[must_use]
     pub fn take_frame(&self) -> Option<Arc<Frame>> {
-        self.shared
-            .latest
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        self.shared.latest.lock().take()
     }
 
     /// A counter that increments on every delivered frame, so the preview can
@@ -366,9 +363,7 @@ fn run_stream(
         let Some(frame) = decode(&buffer[..used(buffer, meta.bytesused)], session) else {
             continue;
         };
-        if let Ok(mut slot) = shared.latest.lock() {
-            *slot = Some(Arc::new(frame));
-        }
+        *shared.latest.lock() = Some(Arc::new(frame));
         shared.generation.fetch_add(1, Ordering::Relaxed);
     }
     let _ = stream.stop();

@@ -5,6 +5,7 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
+use parking_lot::Mutex as SyncMutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -314,7 +315,7 @@ impl Agent for AgentServer {
 #[derive(Clone)]
 pub struct RingHapticPlayer {
     tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
-    pending_arm: Arc<std::sync::Mutex<Option<DeviceRoute>>>,
+    pending_arm: Arc<SyncMutex<Option<DeviceRoute>>>,
 }
 
 /// How long every attempt at one buzz may take together.
@@ -456,7 +457,7 @@ impl RingHapticPlayer {
         let (tx, mut rx) = tokio::sync::watch::channel::<
             Option<(DeviceRoute, HapticWaveform, &'static str)>,
         >(None);
-        let pending_arm = Arc::new(std::sync::Mutex::new(None::<DeviceRoute>));
+        let pending_arm = Arc::new(SyncMutex::new(None::<DeviceRoute>));
         let worker_arm = Arc::clone(&pending_arm);
         tokio::spawn(async move {
             let mut consecutive_failures = 0u32;
@@ -466,10 +467,7 @@ impl RingHapticPlayer {
                 // guaranteed to complete before the session's first buzz —
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine.
-                let arm_route = worker_arm
-                    .lock()
-                    .ok()
-                    .and_then(|mut pending| pending.take());
+                let arm_route = worker_arm.lock().take();
                 if let Some(route) = arm_route {
                     // A new session starts the breaker over. Both counters are
                     // worker-lifetime state, so without this a session that
@@ -519,7 +517,8 @@ impl RingHapticPlayer {
         let Some(route) = route else {
             return;
         };
-        if let Ok(mut pending) = self.pending_arm.lock() {
+        {
+            let mut pending = self.pending_arm.lock();
             *pending = Some(route);
         }
         let _ = self.tx.send(None);

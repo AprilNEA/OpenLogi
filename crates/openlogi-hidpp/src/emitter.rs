@@ -1,6 +1,4 @@
-use std::sync::Mutex;
-
-use crate::sync::lock;
+use parking_lot::Mutex;
 
 /// A simple event emitter sending a single event to multiple MPSC channels.
 #[derive(Debug)]
@@ -18,7 +16,7 @@ impl<T: Clone> EventEmitter<T> {
     /// Creates a new receiver and adds the corresponding sender to the sender
     /// list.
     pub fn create_receiver(&self) -> async_channel::Receiver<T> {
-        let mut senders = lock(&self.senders);
+        let mut senders = self.senders.lock();
         senders.retain(|sender| sender.receiver_count() > 0);
         let (tx, rx) = async_channel::unbounded();
         senders.push(tx);
@@ -34,7 +32,7 @@ impl<T: Clone> EventEmitter<T> {
     /// the same call with a deadlock hazard attached, since this runs while
     /// holding [`Self::senders`].
     pub fn emit(&self, event: T) {
-        let mut senders = lock(&self.senders);
+        let mut senders = self.senders.lock();
         senders
             .retain(|sender| sender.receiver_count() > 0 && sender.try_send(event.clone()).is_ok());
     }
@@ -53,7 +51,7 @@ mod tests {
 
         let _rx = emitter.create_receiver();
 
-        assert_eq!(emitter.senders.lock().unwrap().len(), 1);
+        assert_eq!(emitter.senders.lock().len(), 1);
     }
 
     #[test]
@@ -67,6 +65,6 @@ mod tests {
         emitter.emit(7);
 
         assert_eq!(live.recv_blocking().unwrap(), 7);
-        assert_eq!(emitter.senders.lock().unwrap().len(), 1);
+        assert_eq!(emitter.senders.lock().len(), 1);
     }
 }

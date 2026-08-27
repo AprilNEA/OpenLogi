@@ -1,11 +1,12 @@
 //! Version-aware configuration loading and conflict-safe persistence.
 
+use parking_lot::Mutex;
 use std::{
     collections::HashSet,
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex, PoisonError},
+    sync::LazyLock,
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -362,9 +363,7 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
 }
 
 fn backup_config_once(path: &Path) -> io::Result<()> {
-    let mut backed_up = BACKED_UP_CONFIGS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut backed_up = BACKED_UP_CONFIGS.lock();
     if backed_up.contains(path) {
         return Ok(());
     }

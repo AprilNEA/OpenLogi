@@ -441,9 +441,7 @@ fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     orch.devices = vec![dev("mouse", 1, true)];
     orch.rebuild();
     {
-        let Ok(mut dpi) = orch.shared.dpi_cycle.write() else {
-            panic!("DPI cycle lock should not be poisoned");
-        };
+        let mut dpi = orch.shared.dpi_cycle.write();
         if let Some(state) = dpi.by_key.get_mut("mouse") {
             state.index = 3;
         }
@@ -452,17 +450,13 @@ fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     orch.devices[0].online = false;
     orch.publish_device_runtime();
     {
-        let Ok(dpi) = orch.shared.dpi_cycle.read() else {
-            panic!("DPI cycle lock should not be poisoned");
-        };
+        let dpi = orch.shared.dpi_cycle.read();
         assert!(!dpi.by_key.contains_key("mouse"));
     }
 
     orch.devices[0].online = true;
     orch.publish_device_runtime();
-    let Ok(dpi) = orch.shared.dpi_cycle.read() else {
-        panic!("DPI cycle lock should not be poisoned");
-    };
+    let dpi = orch.shared.dpi_cycle.read();
     assert_eq!(dpi.by_key.get("mouse").map(|s| s.index), Some(0));
     assert_eq!(
         dpi.by_key.get("mouse").and_then(|s| s.target.clone()),
@@ -869,12 +863,10 @@ fn config_reload_clears_override_when_camera_mode_changes() {
 
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
-    orch.shared.capture_plans.read().ok().and_then(|plans| {
-        plans.first().and_then(|plan| {
-            plan.bindings
-                .get(&ButtonId::Back)
-                .map(Binding::click_action)
-        })
+    orch.shared.capture_plans.read().first().and_then(|plan| {
+        plan.bindings
+            .get(&ButtonId::Back)
+            .map(Binding::click_action)
     })
 }
 

@@ -2125,7 +2125,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5372,6 +5372,7 @@ dependencies = [
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-ipc",
+ "parking_lot",
  "plist",
  "succession",
  "sysinfo 0.38.4",
@@ -5395,6 +5396,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "parking_lot",
  "tokio",
  "tracing",
 ]
@@ -5443,6 +5445,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "openlogi-device-registry",
+ "parking_lot",
  "serde",
  "thiserror 2.0.18",
  "tracing",
@@ -5480,6 +5483,7 @@ dependencies = [
  "num_enum",
  "nutype",
  "openlogi-device-registry",
+ "parking_lot",
  "plist",
  "serde",
  "strum",
@@ -5542,6 +5546,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-device-registry",
  "openlogi-hidpp",
+ "parking_lot",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -5565,6 +5570,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-device",
  "openlogi-hidpp",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",
@@ -5590,6 +5596,7 @@ dependencies = [
  "num_enum",
  "openlogi-device-registry",
  "openlogi-hidpp-derive",
+ "parking_lot",
  "serde",
  "thiserror 2.0.18",
  "tracing",
@@ -5620,6 +5627,7 @@ dependencies = [
  "objc2-core-foundation",
  "openlogi-core",
  "openlogi-inject",
+ "parking_lot",
  "thiserror 2.0.18",
  "tracing",
  "wayland-client",
@@ -5642,6 +5650,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "opener",
  "openlogi-core",
+ "parking_lot",
  "serde",
  "shellexpand",
  "tracing",
@@ -6376,7 +6385,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6901,7 +6910,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6914,7 +6923,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6981,7 +6990,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8002,7 +8011,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9415,7 +9424,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

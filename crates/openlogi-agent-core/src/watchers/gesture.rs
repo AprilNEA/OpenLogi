@@ -227,13 +227,9 @@ fn wanted_sessions(
     }
     capture_plans
         .read()
-        .map(|plans| {
-            plans
-                .iter()
-                .map(|plan| (plan.config_key.clone(), SessionTarget::for_plan(plan)))
-                .collect()
-        })
-        .unwrap_or_default()
+        .iter()
+        .map(|plan| (plan.config_key.clone(), SessionTarget::for_plan(plan)))
+        .collect()
 }
 
 /// Keep one capture session alive per online device, restarting a session when
@@ -275,7 +271,7 @@ async fn manage(
                 let live = sessions.get(key);
                 let current = accepts_input(&event.session, live)
                     && !receiver_access.exclusive_requested()
-                    && capture_plans.read().is_ok_and(|plans| {
+                    && Some(capture_plans.read()).is_some_and(|plans| {
                         plans
                             .iter()
                             .find(|plan| plan.config_key == key)

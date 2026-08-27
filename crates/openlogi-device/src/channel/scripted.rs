@@ -6,9 +6,10 @@
 //! needs a keyboard whose host slots it can dictate. Each module keeps its own
 //! responder; only the plumbing lives here.
 
+use parking_lot::Mutex;
 use std::error::Error;
 use std::io;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use hidpp::channel::{HidppChannel, RawHidChannel};
 use tokio::sync::mpsc;
@@ -22,10 +23,7 @@ pub(crate) struct ScriptedRawHidHandle {
 
 impl ScriptedRawHidHandle {
     pub(crate) fn written_reports(&self) -> Vec<Vec<u8>> {
-        self.written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.written.lock().clone()
     }
 }
 
@@ -88,10 +86,7 @@ impl RawHidChannel for ScriptedRawHidChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        self.written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(src.to_vec());
+        self.written.lock().push(src.to_vec());
         if self.fails.is_some_and(|fails| fails(src)) {
             return Err(mock_error());
         }

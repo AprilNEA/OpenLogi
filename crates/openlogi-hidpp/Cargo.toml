@@ -43,6 +43,7 @@ tracing = { workspace = true }
 # events: EventSource<Event> }`. Not in upstream hidpp; used only here.
 openlogi-hidpp-derive = { version = "0.8.1", path = "../openlogi-hidpp-derive" }
 derive_more = { version = "2.1.1", default-features = false, features = ["from", "into"] }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

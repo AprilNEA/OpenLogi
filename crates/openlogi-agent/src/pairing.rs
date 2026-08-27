@@ -12,9 +12,9 @@
 //! HID node. Dropping that lease lets HID++ capture resume when the session ends
 //! (every end — including cancel — emits a terminal event).
 
+use parking_lot::Mutex as SyncMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -36,8 +36,8 @@ const RECEIVER_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Address-keyed cache of the full discovered devices, so the GUI can pair by
 /// address without round-tripping the non-serializable `DiscoveredDevice`.
-type DeviceCache = Arc<StdMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
-type ReceiverLeaseSlot = Arc<StdMutex<Option<ExclusiveReceiverLease>>>;
+type DeviceCache = Arc<SyncMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
+type ReceiverLeaseSlot = Arc<SyncMutex<Option<ExclusiveReceiverLease>>>;
 
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
@@ -64,9 +64,9 @@ impl PairingManager {
     pub fn new(shared: SharedRuntime, observable: Arc<ObservableState>) -> Self {
         let (ctrl, raw_events) = pairing::spawn();
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
-        let devices: DeviceCache = Arc::new(StdMutex::new(HashMap::new()));
+        let devices: DeviceCache = Arc::new(SyncMutex::new(HashMap::new()));
         let sessions = Arc::new(AtomicUsize::new(0));
-        let receiver_lease = Arc::new(StdMutex::new(None));
+        let receiver_lease = Arc::new(SyncMutex::new(None));
         tokio::spawn(translate(
             raw_events,
             upd_tx.clone(),
@@ -98,7 +98,8 @@ impl PairingManager {
         }
         let admission = SessionAdmission::new(Arc::clone(&self.sessions));
 
-        if let Ok(mut devices) = self.devices.lock() {
+        {
+            let mut devices = self.devices.lock();
             devices.clear();
         }
         let Ok(receiver_lease) = tokio::time::timeout(
@@ -129,11 +130,7 @@ impl PairingManager {
 
     /// Pair with a previously discovered device by address.
     pub fn pair(&self, address: [u8; 6]) -> Result<(), PairingCommandError> {
-        let device = self
-            .devices
-            .lock()
-            .ok()
-            .and_then(|devices| devices.get(&address).cloned());
+        let device = self.devices.lock().get(&address).cloned();
         if let Some(device) = device {
             self.ctrl
                 .send(Control::Pair(device))
@@ -179,14 +176,7 @@ fn with_receiver_lease_slot<T>(
     receiver_lease: &ReceiverLeaseSlot,
     f: impl FnOnce(&mut Option<ExclusiveReceiverLease>) -> T,
 ) -> T {
-    match receiver_lease.lock() {
-        Ok(mut slot) => f(&mut slot),
-        Err(poisoned) => {
-            warn!("pairing receiver lease lock poisoned; recovering lease slot");
-            let mut slot = poisoned.into_inner();
-            f(&mut slot)
-        }
-    }
+    f(&mut receiver_lease.lock())
 }
 
 struct SessionAdmission {
@@ -234,7 +224,8 @@ async fn translate(
                     address: device.address,
                     name: device.name.clone(),
                 };
-                if let Ok(mut devices) = devices.lock() {
+                {
+                    let mut devices = devices.lock();
                     devices.insert(device.address, device);
                 }
                 PairingUpdate::DeviceFound(found)
@@ -289,9 +280,10 @@ async fn translate(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use parking_lot::RwLock;
+    use std::panic::AssertUnwindSafe;
 
-    use std::sync::RwLock;
+    use super::*;
 
     use openlogi_agent_core::DpiCycles;
     use openlogi_agent_core::receiver_access::ReceiverAccess;
@@ -325,9 +317,9 @@ mod tests {
         PairingManager {
             ctrl,
             updates: Mutex::new(upd_rx),
-            devices: Arc::new(StdMutex::new(HashMap::new())),
+            devices: Arc::new(SyncMutex::new(HashMap::new())),
             sessions: Arc::new(AtomicUsize::new(0)),
-            receiver_lease: Arc::new(StdMutex::new(None)),
+            receiver_lease: Arc::new(SyncMutex::new(None)),
             shared: shared_runtime(),
             observable: Arc::new(ObservableState::new("test".to_string())),
         }
@@ -369,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_receiver_lease_recovers_poisoned_slot() {
+    async fn release_receiver_lease_survives_a_panicking_holder() {
         let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
         let manager = manager_with_ctrl(ctrl_tx);
         let receiver_lease = manager
@@ -387,13 +379,16 @@ mod tests {
                 .requested(ExclusiveAccessReason::Pairing)
         );
 
+        // A holder that panics used to poison the slot, and every later
+        // acquisition had to recover from that by hand. With a lock that does
+        // not poison, the slot is simply released when the guard unwinds —
+        // this asserts the release path still works afterwards rather than
+        // that a recovery path exists.
         let slot = Arc::clone(&manager.receiver_lease);
-        let _ = std::panic::catch_unwind(move || {
-            let Ok(_guard) = slot.lock() else {
-                panic!("test receiver lease slot should start unpoisoned");
-            };
-            panic!("poison receiver lease slot");
-        });
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _guard = slot.lock();
+            panic!("panic while the receiver lease slot is held");
+        }));
 
         manager.release_receiver_lease();
 
@@ -413,9 +408,7 @@ mod tests {
         let manager = manager_with_ctrl(ctrl_tx);
         manager.sessions.store(1, Ordering::Release);
         {
-            let Ok(mut devices) = manager.devices.lock() else {
-                panic!("test device cache lock should not be poisoned");
-            };
+            let mut devices = manager.devices.lock();
             devices.insert(
                 [1, 2, 3, 4, 5, 6],
                 DiscoveredDevice {
@@ -431,9 +424,7 @@ mod tests {
 
         assert_eq!(result, Err(PairingCommandError::AlreadyActive));
         assert_eq!(manager.sessions.load(Ordering::Acquire), 1);
-        let Ok(devices) = manager.devices.lock() else {
-            panic!("test device cache lock should not be poisoned");
-        };
+        let devices = manager.devices.lock();
         assert_eq!(devices.len(), 1);
         let sent = ctrl_rx.try_recv();
         assert!(

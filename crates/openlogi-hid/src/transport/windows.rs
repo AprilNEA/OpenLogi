@@ -1,4 +1,5 @@
 #[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "windows")]
 use std::{error::Error, io};

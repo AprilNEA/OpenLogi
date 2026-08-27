@@ -17,7 +17,9 @@
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use parking_lot::Mutex;
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
@@ -198,7 +200,8 @@ pub async fn run_capture_session(
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
-    if let Ok(mut slot) = channel_slot.write() {
+    {
+        let mut slot = channel_slot.write();
         *slot = Some(SharedChannel::new(Arc::clone(&chan), route.clone()));
     }
 
@@ -225,7 +228,7 @@ pub async fn run_capture_session(
             {
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
-                let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut acc = accum.lock();
                 handle_reprog(&mut acc, event, &gesture_cids, &dpi_set, &button_set, &sink);
                 return;
             }
@@ -295,12 +298,14 @@ pub async fn run_capture_session(
     // while it still holds *this* session's channel — evicting the sibling's
     // would silently demote its DPI/SmartShift writes to the fresh-open slow
     // path.
-    if let Ok(mut slot) = channel_slot.write()
-        && slot
+    {
+        let mut slot = channel_slot.write();
+        if slot
             .as_ref()
             .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
-    {
-        *slot = None;
+        {
+            *slot = None;
+        }
     }
     if channel_dead {
         // Disarm writes would each burn a timeout on a channel that no longer

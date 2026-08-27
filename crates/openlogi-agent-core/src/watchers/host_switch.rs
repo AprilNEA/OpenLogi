@@ -1,6 +1,7 @@
 //! Keep configured keyboard → pointing-device host-switch links armed.
 
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -61,7 +62,7 @@ async fn manage(
                 let wanted = if receiver_access.exclusive_requested() {
                     Vec::new()
                 } else {
-                    links.read().map_or_else(|_| Vec::new(), |guard| guard.clone())
+                    links.read().clone()
                 };
                 stop_unwanted(&mut sessions, &wanted).await;
                 for link in wanted {
@@ -182,9 +183,7 @@ async fn run_transition(
 async fn wait_for_departure(links: &HostSwitchLinks, keyboard: &DeviceRoute) {
     let deadline = Instant::now() + DEPARTURE_TIMEOUT;
     while Instant::now() < deadline {
-        let departed = links.read().map_or(true, |current| {
-            !current.iter().any(|link| link.keyboard == *keyboard)
-        });
+        let departed = !links.read().iter().any(|link| link.keyboard == *keyboard);
         if departed {
             return;
         }

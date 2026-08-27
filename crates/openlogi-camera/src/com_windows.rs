@@ -23,8 +23,8 @@
     reason = "COM apartment and Media Foundation platform initialization"
 )]
 
+use parking_lot::Mutex;
 use std::marker::PhantomData;
-use std::sync::{Mutex, PoisonError};
 
 use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_LITE, MFShutdown, MFStartup};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
@@ -120,9 +120,9 @@ impl Drop for MediaFoundation<'_> {
 }
 
 /// How many [`MediaFoundation`] guards are alive process-wide.
-fn live_guards() -> std::sync::MutexGuard<'static, usize> {
+fn live_guards() -> parking_lot::MutexGuard<'static, usize> {
     static LIVE: Mutex<usize> = Mutex::new(0);
     // Poisoning is impossible — no holder panics — but recover rather than
     // unwrap, so a panic elsewhere could not strand the platform.
-    LIVE.lock().unwrap_or_else(PoisonError::into_inner)
+    LIVE.lock()
 }

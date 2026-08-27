@@ -11,8 +11,9 @@
 //! excludes) both. Like the gesture watcher, this needs no macOS Accessibility
 //! permission — the key events arrive over HID++.
 
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -152,10 +153,7 @@ fn wanted_session(
     if receiver_access.exclusive_requested() {
         return None;
     }
-    spec.read()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .map(KeyboardTarget::for_spec)
+    spec.read().clone().map(KeyboardTarget::for_spec)
 }
 
 /// Keep one keyboard capture session alive for the published spec, restarting
@@ -183,7 +181,7 @@ async fn manage(
                 let Some(running) = current.as_ref() else {
                     continue;
                 };
-                let live_spec = spec.read().ok().and_then(|guard| guard.clone());
+                let live_spec = spec.read().clone();
                 let current_target = live_spec.as_ref().is_some_and(|live| running.target.matches(live));
                 if input.session != running.id
                     || receiver_access.exclusive_requested()

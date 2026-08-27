@@ -1,8 +1,9 @@
 //! Serialized standalone-light writes and reconnect re-application.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, mpsc};
 use std::thread;
 
 use openlogi_core::config::LightSettings;
@@ -76,23 +77,14 @@ pub fn set_light_in_background(
 /// newer explicit command therefore remains the final state.
 pub fn cancel_light_reapply(target: &DeviceRoute) {
     let key = target.to_string();
-    let Ok(workers) = LIGHT_WORKERS.lock() else {
-        warn!(route = %key, "light worker registry poisoned — cannot cancel stale write");
-        return;
-    };
+    let workers = LIGHT_WORKERS.lock();
     if let Some(worker) = workers.get(&key) {
         worker.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 fn light_worker(key: &str, target: DeviceRoute) -> Option<LightWorkerHandle> {
-    let Ok(mut workers) = LIGHT_WORKERS.lock() else {
-        warn!(
-            route = key,
-            "light worker registry poisoned — write skipped"
-        );
-        return None;
-    };
+    let mut workers = LIGHT_WORKERS.lock();
     if let Some(worker) = workers.get(key) {
         return Some(worker.clone());
     }
@@ -114,9 +106,7 @@ fn light_worker(key: &str, target: DeviceRoute) -> Option<LightWorkerHandle> {
 }
 
 fn remove_light_worker(key: &str, generation: u64) {
-    let Ok(mut workers) = LIGHT_WORKERS.lock() else {
-        return;
-    };
+    let mut workers = LIGHT_WORKERS.lock();
     if workers
         .get(key)
         .is_some_and(|worker| worker.generation.load(Ordering::Acquire) == generation)
@@ -219,10 +209,7 @@ async fn apply_light_unlocked(
 
 fn light_write_lock(route: &DeviceRoute) -> LightWriteLock {
     let key = route.to_string();
-    let Ok(mut locks) = LIGHT_WRITE_LOCKS.lock() else {
-        warn!(route = %key, "light write lock registry poisoned — using an isolated lock");
-        return Arc::new(tokio::sync::Mutex::new(()));
-    };
+    let mut locks = LIGHT_WRITE_LOCKS.lock();
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))

@@ -4,9 +4,9 @@
 //! snapshot. Executable actions remain in the agent, and IPC commands can
 //! select only a slot from that authoritative snapshot.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
@@ -277,7 +277,7 @@ impl ActionRingManager {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock()
     }
 }
 

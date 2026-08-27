@@ -28,6 +28,8 @@ openlogi-device = { version = "0.8.1", path = "../openlogi-device" }
 # Native Win32 HID report writes (windows_hid.rs) — a fallback for async-hid's
 # write path on Windows, plus the composite short/long endpoint handling in
 # transport.rs.
+parking_lot = { workspace = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Devices_HumanInterfaceDevice",

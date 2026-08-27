@@ -4,11 +4,12 @@
 //! `pub(crate)` rather than private.
 
 use super::*;
+use parking_lot::Mutex;
 use std::{
     error::Error,
     io,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -139,7 +140,7 @@ fn late_response_after_timeout_is_ignored() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener_events = Arc::clone(&events);
         channel.add_msg_listener(move |msg, matched| {
-            listener_events.lock().unwrap().push((msg, matched));
+            listener_events.lock().push((msg, matched));
         });
 
         let request = short_msg(0x10);
@@ -158,7 +159,7 @@ fn late_response_after_timeout_is_ignored() {
 
         handle.send_incoming(late_response).await;
         wait_for_event_count(&events, 1).await;
-        assert_eq!(events.lock().unwrap()[0], (late_response, false));
+        assert_eq!(events.lock()[0], (late_response, false));
         assert_pending_empty(&channel);
 
         let followup_request = short_msg(0x30);
@@ -175,7 +176,7 @@ fn late_response_after_timeout_is_ignored() {
 
         assert_eq!(actual, followup_response);
         wait_for_event_count(&events, 2).await;
-        assert_eq!(events.lock().unwrap()[1], (followup_response, true));
+        assert_eq!(events.lock()[1], (followup_response, true));
         assert_pending_empty(&channel);
     });
 }
@@ -348,7 +349,7 @@ fn send_v20_broadcast_event_does_not_resolve_pending_request() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener_events = Arc::clone(&events);
         channel.add_msg_listener(move |msg, matched| {
-            listener_events.lock().unwrap().push((msg, matched));
+            listener_events.lock().push((msg, matched));
         });
 
         let header = v20::MessageHeader {
@@ -386,7 +387,7 @@ fn send_v20_broadcast_event_does_not_resolve_pending_request() {
         // The oneshot resolves before the listener loop runs on the read
         // thread; wait for both deliveries before asserting on them.
         wait_for_event_count(&events, 2).await;
-        let recorded = events.lock().unwrap().clone();
+        let recorded = events.lock().clone();
         assert_eq!(
             recorded,
             vec![
@@ -502,10 +503,7 @@ pub(crate) struct MockRawHidHandle {
 
 impl MockRawHidHandle {
     pub(crate) fn queue_response(&self, msg: HidppMessage) {
-        self.responses_on_write
-            .lock()
-            .unwrap()
-            .push_back(raw_report(msg));
+        self.responses_on_write.lock().push_back(raw_report(msg));
     }
 
     async fn send_incoming(&self, msg: HidppMessage) {
@@ -513,7 +511,7 @@ impl MockRawHidHandle {
     }
 
     pub(crate) fn written_reports(&self) -> Vec<Vec<u8>> {
-        self.written_reports.lock().unwrap().clone()
+        self.written_reports.lock().clone()
     }
 
     fn park_writes(&self) {
@@ -567,11 +565,11 @@ impl RawHidChannel for MockRawHidChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
-        self.written_reports.lock().unwrap().push(src.to_vec());
+        self.written_reports.lock().push(src.to_vec());
         if self.park_writes.load(Ordering::SeqCst) {
             return std::future::pending().await;
         }
-        let response = self.responses_on_write.lock().unwrap().pop_front();
+        let response = self.responses_on_write.lock().pop_front();
         if let Some(response) = response {
             self.incoming_tx.send(response).await.unwrap();
         }
@@ -609,13 +607,13 @@ fn raw_report(msg: HidppMessage) -> Vec<u8> {
 }
 
 fn assert_pending_empty(channel: &HidppChannel) {
-    assert!(channel.pending_messages.lock().unwrap().is_empty());
+    assert!(channel.pending_messages.lock().is_empty());
 }
 
 async fn wait_for_event_count(events: &Arc<Mutex<Vec<(HidppMessage, bool)>>>, count: usize) {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        if events.lock().unwrap().len() >= count {
+        if events.lock().len() >= count {
             return;
         }
         futures_timer::Delay::new(Duration::from_millis(10)).await;

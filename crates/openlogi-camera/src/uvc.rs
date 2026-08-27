@@ -147,10 +147,8 @@ const AE_MANUAL: u8 = 0x01;
 const AE_AUTO_MODES: [u8; 3] = [0x02, 0x08, 0x04];
 
 /// Hold the process-wide seize/enumeration lock — see [`crate::USB_QUIESCE`].
-fn quiesce() -> std::sync::MutexGuard<'static, ()> {
-    crate::USB_QUIESCE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn quiesce() -> parking_lot::MutexGuard<'static, ()> {
+    crate::USB_QUIESCE.lock()
 }
 
 /// Read a control's min/max/default/current straight from the device.

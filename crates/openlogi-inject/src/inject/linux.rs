@@ -5,8 +5,9 @@
 //! (missing group membership or udev rule) every call logs a `warn` and returns
 //! without panicking.
 
+use parking_lot::Mutex;
 use std::io;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
@@ -314,12 +315,8 @@ fn build() -> io::Result<VirtualDevice> {
 
 fn emit(events: &[InputEvent]) {
     if let Some(m) = &*VIRTUAL_INPUT {
-        if let Ok(mut guard) = m.lock() {
-            if let Err(e) = guard.emit(events) {
-                tracing::warn!("uinput action emit failed: {e}");
-            }
-        } else {
-            tracing::warn!("uinput action device mutex poisoned");
+        if let Err(e) = m.lock().emit(events) {
+            tracing::warn!("uinput action emit failed: {e}");
         }
     } else {
         // Device creation failed at init; already logged once in LazyLock.
@@ -390,10 +387,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         tracing::debug!("pixel scroll output is unsupported on Linux");
         return;
     };
-    let Ok(mut output) = SCROLL_OUTPUT.lock() else {
-        tracing::warn!("Linux scroll quantizer mutex poisoned");
-        return;
-    };
+    let mut output = SCROLL_OUTPUT.lock();
     let high_resolution = output
         .high_resolution
         .quantize(delta, HIGH_RES_UNITS_PER_TICK);
@@ -445,10 +439,13 @@ pub(super) fn device_node() -> Option<std::path::PathBuf> {
     let _ = &*VIRTUAL_INPUT;
     // Give udev a moment to create the /dev node.
     std::thread::sleep(std::time::Duration::from_millis(150));
-    if let Some(m) = &*VIRTUAL_INPUT
-        && let Ok(mut guard) = m.lock()
-    {
-        return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
+    if let Some(m) = &*VIRTUAL_INPUT {
+        return m
+            .lock()
+            .enumerate_dev_nodes_blocking()
+            .ok()?
+            .flatten()
+            .next();
     }
     None
 }

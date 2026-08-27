@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 use hidpp::{
@@ -105,17 +106,17 @@ impl<T: Clone> EpochGuarded<T> {
     }
 }
 
-static CACHED_FEATURE: std::sync::Mutex<EpochGuarded<Arc<HapticFeedbackFeature>>> =
-    std::sync::Mutex::new(EpochGuarded::new());
+static CACHED_FEATURE: Mutex<EpochGuarded<Arc<HapticFeedbackFeature>>> =
+    Mutex::new(EpochGuarded::new());
 
 /// Snapshot the cache epoch before starting a feature open; pass the result to
 /// [`store_cached_feature`] so a clear that lands mid-open wins over the store.
 fn cache_epoch() -> u64 {
-    CACHED_FEATURE.lock().map_or(0, |guard| guard.epoch)
+    CACHED_FEATURE.lock().epoch
 }
 
 fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFeedbackFeature>> {
-    let guard = CACHED_FEATURE.lock().ok()?;
+    let guard = CACHED_FEATURE.lock();
     guard.get(Arc::as_ptr(channel) as usize, index)
 }
 
@@ -127,7 +128,8 @@ fn store_cached_feature(
     shared: &SharedChannel,
     feature: &Arc<HapticFeedbackFeature>,
 ) {
-    if let Ok(mut guard) = CACHED_FEATURE.lock() {
+    {
+        let mut guard = CACHED_FEATURE.lock();
         guard.store(
             epoch,
             Arc::as_ptr(shared.channel()) as usize,
@@ -139,7 +141,8 @@ fn store_cached_feature(
 }
 
 fn clear_cached_feature() {
-    if let Ok(mut guard) = CACHED_FEATURE.lock() {
+    {
+        let mut guard = CACHED_FEATURE.lock();
         guard.clear();
     }
 }
@@ -163,7 +166,8 @@ pub fn clear_haptic_feature_cache() {
 /// trigger is itself a diverted control that died with capture. The cache
 /// entry then pins the retired channel forever and the node never reopens.
 pub(crate) fn clear_haptic_feature_cache_for(channel: &Arc<HidppChannel>) {
-    if let Ok(mut guard) = CACHED_FEATURE.lock() {
+    {
+        let mut guard = CACHED_FEATURE.lock();
         guard.clear_for(Arc::as_ptr(channel) as usize);
     }
 }

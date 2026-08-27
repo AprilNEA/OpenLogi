@@ -1,8 +1,9 @@
 //! Registry of HID++ channels owned by the persistent inventory enumerator.
 
+use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::hash::Hash;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::Arc;
 
 use crate::backend::NodeId;
 use hidpp::channel::HidppChannel;
@@ -117,40 +118,29 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
         routes: impl IntoIterator<Item = DeviceRoute>,
         channel: Channel,
     ) {
-        self.state
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace_node(node, routes, channel);
+        self.state.write().replace_node(node, routes, channel);
     }
 
     fn remove_node(&self, node: &Node) {
-        self.state
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove_node(node);
+        self.state.write().remove_node(node);
     }
 }
 
 impl<Node: Eq + Hash, Channel> Registry<Node, Channel> {
     fn retain_nodes(&self, nodes: &HashSet<Node>) {
-        self.state
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain_nodes(nodes);
+        self.state.write().retain_nodes(nodes);
     }
 }
 
 impl<Node: Eq, Channel: Clone> Registry<Node, Channel> {
     fn lookup(&self, route: &DeviceRoute) -> Option<Channel> {
-        self.state.read().ok()?.lookup(route).cloned()
+        self.state.read().lookup(route).cloned()
     }
 }
 
 impl<Node: Eq, Channel> Registry<Node, Channel> {
     fn any_current(&self, predicate: impl FnMut(&DeviceRoute, &Channel) -> bool) -> bool {
-        self.state
-            .read()
-            .is_ok_and(|state| state.any_current(predicate))
+        self.state.read().any_current(predicate)
     }
 }
 
@@ -212,24 +202,21 @@ mod tests {
 
     use crate::DeviceRoute;
 
-    use super::{PoisonError, Registry};
+    use super::Registry;
 
     impl<Node, Channel> Registry<Node, Channel> {
-        fn poison_for_test(&self) {
+        /// Panic with the write lock held, and unwind out of it.
+        fn panic_while_holding_the_write_lock(&self) {
             let _ = catch_unwind(AssertUnwindSafe(|| {
-                let _guard = self.state.write().unwrap_or_else(PoisonError::into_inner);
-                panic!("poison registry for test");
+                let _guard = self.state.write();
+                panic!("panic while the registry write lock is held");
             }));
         }
     }
 
     impl<Node: Eq, Channel: Clone> Registry<Node, Channel> {
         fn publisher_lookup_for_test(&self, route: &DeviceRoute) -> Option<Channel> {
-            self.state
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .lookup(route)
-                .cloned()
+            self.state.read().lookup(route).cloned()
         }
     }
 
@@ -341,14 +328,19 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_read_fails_closed_but_publishers_can_clean_up() {
+    fn a_panicking_holder_does_not_take_the_registry_down_with_it() {
         let registry = Registry::<u8, &'static str>::default();
         registry.replace_node(1, [direct(0xb35b)], "a");
-        registry.poison_for_test();
+        registry.panic_while_holding_the_write_lock();
 
-        assert_eq!(registry.lookup(&direct(0xb35b)), None);
-        assert!(!registry.any_current(|_, _| true));
+        // The lock does not poison, so the unwind just released it. Readers
+        // keep working — under the previous std lock this returned `None` from
+        // here on, which is how a single panic could silently strand every
+        // later route lookup for the life of the process (#383).
+        assert_eq!(registry.lookup(&direct(0xb35b)), Some("a"));
+        assert!(registry.any_current(|_, _| true));
 
+        // Publishers are unaffected too.
         registry.remove_node(&1);
         registry.replace_node(2, [direct(0xb36b)], "b");
         registry.retain_nodes(&HashSet::from([2]));

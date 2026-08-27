@@ -8,8 +8,9 @@
 //! plan of the session it arrived on, never against a global selected-device
 //! map.
 
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};

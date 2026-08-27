@@ -9,7 +9,9 @@
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::LazyLock;
+
+use parking_lot::Mutex;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
@@ -264,7 +266,7 @@ pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
 fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {
-            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut output = HELD_OUTPUT.lock();
             let modifiers = output.modifiers();
             let transition = output.transition(released, pressed);
             let modifiers = macos::hold_keys(&transition.up, KeyPhase::Up, modifiers);
@@ -272,13 +274,13 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
             debug_assert_eq!(modifiers, output.modifiers());
         }
         target_os = "linux" => {
-            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut output = HELD_OUTPUT.lock();
             let transition = output.transition(released, pressed);
             linux::hold_keys(&transition.up, KeyPhase::Up);
             linux::hold_keys(&transition.down, KeyPhase::Down);
         }
         target_os = "windows" => {
-            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut output = HELD_OUTPUT.lock();
             let transition = output.transition(released, pressed);
             windows::hold_keys(&transition.up, KeyPhase::Up);
             windows::hold_keys(&transition.down, KeyPhase::Down);
