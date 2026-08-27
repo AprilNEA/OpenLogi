@@ -238,33 +238,52 @@ pub fn execute(action: &Action) {
     }
 }
 
-/// Synthesise the down edge of `combo`, leaving its output held.
+/// One synthetic held chord, released exactly once when dropped.
 ///
-/// Every successful lifecycle start must be paired with [`release_hold`],
-/// including cancellation and shutdown paths. Prefer [`execute`] when the
-/// caller does not own a matching terminal event.
-pub fn press_hold(combo: &KeyCombo) {
-    hold_transition(None, Some(combo));
+/// Keep this value with the physical press lifecycle. Replacing its chord
+/// preserves physical keys shared by the old and new chords; cancellation,
+/// shutdown, and unwinding all release the current chord through [`Drop`].
+#[must_use = "dropping the held chord immediately releases its synthetic output"]
+pub struct HeldChord {
+    combo: KeyCombo,
 }
 
-/// Synthesise the up edge matching a prior [`press_hold`].
-///
-/// Each successful [`press_hold`] must be released exactly once. The lifecycle
-/// owner provides that guarantee; duplicate releases would consume ownership
-/// retained for an overlapping chord.
-pub fn release_hold(combo: &KeyCombo) {
-    hold_transition(Some(combo), None);
+impl HeldChord {
+    /// Replace this held chord without releasing physical keys shared by both.
+    pub fn replace(&mut self, combo: &KeyCombo) {
+        let old = std::mem::replace(&mut self.combo, combo.clone());
+        hold_transition(Some(&old), Some(&self.combo));
+    }
 }
 
-/// Replace one held chord without releasing physical keys shared by both.
-pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
-    hold_transition(Some(old), Some(new));
+impl Drop for HeldChord {
+    fn drop(&mut self) {
+        hold_transition(Some(&self.combo), None);
+    }
+}
+
+/// Synthesise the down edge of `combo` and return its release owner.
+///
+/// Keep the returned [`HeldChord`] until the physical press ends. Prefer
+/// [`execute`] when the caller does not own a matching terminal event.
+pub fn press_hold(combo: &KeyCombo) -> HeldChord {
+    // Construct the owner before posting the edge so unwinding from the
+    // platform backend still balances any ownership transition it completed.
+    let held = HeldChord {
+        combo: combo.clone(),
+    };
+    hold_transition(None, Some(&held.combo));
+    held
 }
 
 fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            // `HeldOutput::owners` is the only persistent modifier state. This
+            // bitmask is an event-ordering cursor: derive it from the map while
+            // holding the same mutex, advance it through the exact transition
+            // edges, then prove it reached the map's post-transition state.
             let modifiers = output.modifiers();
             let transition = output.transition(released, pressed);
             let modifiers = macos::hold_keys(&transition.up, KeyPhase::Up, modifiers);
