@@ -478,6 +478,8 @@ input_interception_detected = "Başka bir uygulama fare girdisine araya giriyor;
 [camera]
 camera = "Kamera"
 starting_preview = "Önizleme başlatılıyor…"
+camera_in_use_by_another_app = "Bu kamerayı başka bir uygulama kullanıyor."
+camera_preview_start_failed = "Kamera önizlemesi başlatılamadı."
 camera_preview_permission_required = "Önizleme için Ayarlar'dan Kamera erişimini etkinleştirin."
 click_to_enable_camera_access = "Kamera erişimini etkinleştirmek için tıklayın."
 brightness = "Parlaklık"

@@ -478,6 +478,8 @@ input_interception_detected = "Μια άλλη εφαρμογή υποκλέπτ
 [camera]
 camera = "Κάμερα"
 starting_preview = "Έναρξη προεπισκόπησης…"
+camera_in_use_by_another_app = "Μια άλλη εφαρμογή χρησιμοποιεί αυτήν την κάμερα."
+camera_preview_start_failed = "Δεν ήταν δυνατή η έναρξη της προεπισκόπησης της κάμερας."
 camera_preview_permission_required = "Ενεργοποιήστε την πρόσβαση στην κάμερα στις Ρυθμίσεις για προεπισκόπηση."
 click_to_enable_camera_access = "Κάντε κλικ για να ενεργοποιήσετε την πρόσβαση στην κάμερα."
 brightness = "Φωτεινότητα"

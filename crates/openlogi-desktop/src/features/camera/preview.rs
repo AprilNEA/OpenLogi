@@ -18,6 +18,10 @@
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
 //! camera's ~30 fps delivery rate.
+//!
+//! When the camera cannot be opened at all the placeholder says why rather than
+//! waiting on a first frame that is never coming — most usefully when another
+//! application already holds the device.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +33,7 @@ use gpui::{
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
-use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
+use openlogi_camera::{CameraAuthorization, CameraStream, CaptureError, Frame};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -49,6 +53,9 @@ pub struct CameraPreview {
     /// Target is set but the stream isn't running because Camera permission
     /// wasn't granted yet; retried once access appears.
     awaiting_access: bool,
+    /// Why the last [`Self::start_stream`] failed, so the placeholder can say
+    /// so instead of sitting on "Starting preview…" forever.
+    start_error: Option<CaptureError>,
     _permission_obs: Subscription,
 }
 
@@ -74,6 +81,7 @@ impl CameraPreview {
             last_generation: 0,
             repaint_task: None,
             awaiting_access: false,
+            start_error: None,
             _permission_obs: permission_obs,
         }
     }
@@ -99,6 +107,7 @@ impl CameraPreview {
         self.repaint_task = None;
         self.last_generation = 0;
         self.awaiting_access = false;
+        self.start_error = None;
         if let Some(old) = self.current_image.take() {
             cx.drop_image(old, None);
         }
@@ -122,7 +131,17 @@ impl CameraPreview {
         let Some(uid) = self.streaming_uid.as_deref() else {
             return;
         };
-        self.stream = openlogi_camera::start_stream(uid).ok();
+        match openlogi_camera::start_stream(uid) {
+            Ok(stream) => {
+                self.stream = Some(stream);
+                self.start_error = None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "camera preview failed to start");
+                self.stream = None;
+                self.start_error = Some(e);
+            }
+        }
         if self.stream.is_some() {
             self.repaint_task = Some(cx.spawn(async move |this, cx| {
                 loop {
@@ -198,7 +217,14 @@ impl Render for CameraPreview {
             })
             .when(
                 show_placeholder && capture_supported && granted,
-                |surface| surface.child(note(tr!("camera.starting_preview"), pal)),
+                |surface| {
+                    surface.child(note(
+                        self.start_error
+                            .as_ref()
+                            .map_or_else(|| tr!("camera.starting_preview"), failure_note),
+                        pal,
+                    ))
+                },
             )
             .when(
                 show_placeholder && capture_supported && !granted && authorization_undetermined,
@@ -232,6 +258,17 @@ impl Render for CameraPreview {
 fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     let buffer = RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
+}
+
+/// What the placeholder says when the camera could not be opened. Only the
+/// in-use case gets its own wording: it is the one failure the user can act on
+/// (close the other application), and the one that used to render as an
+/// indefinite "Starting preview…" over a black box.
+fn failure_note(error: &CaptureError) -> SharedString {
+    match error {
+        CaptureError::InUse => tr!("camera.camera_in_use_by_another_app"),
+        _ => tr!("camera.camera_preview_start_failed"),
+    }
 }
 
 fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {

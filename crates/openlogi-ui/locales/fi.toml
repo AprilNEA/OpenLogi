@@ -478,6 +478,8 @@ input_interception_detected = "Toinen sovellus sieppaa hiiren syötettä, mikä 
 [camera]
 camera = "Kamera"
 starting_preview = "Käynnistetään esikatselua…"
+camera_in_use_by_another_app = "Toinen sovellus käyttää tätä kameraa."
+camera_preview_start_failed = "Kameran esikatselua ei voitu käynnistää."
 camera_preview_permission_required = "Ota kameran käyttöoikeus käyttöön asetuksissa esikatselua varten."
 click_to_enable_camera_access = "Napsauta ottaaksesi kameran käyttöoikeuden käyttöön."
 brightness = "Kirkkaus"

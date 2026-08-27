@@ -478,6 +478,8 @@ input_interception_detected = "另一个应用正在拦截鼠标输入，可能�
 [camera]
 camera = "摄像头"
 starting_preview = "正在启动预览…"
+camera_in_use_by_another_app = "另一个应用正在使用此摄像头。"
+camera_preview_start_failed = "无法启动摄像头预览。"
 camera_preview_permission_required = "在设置中启用摄像头访问权限以进行预览。"
 click_to_enable_camera_access = "点击以启用摄像头访问。"
 brightness = "亮度"

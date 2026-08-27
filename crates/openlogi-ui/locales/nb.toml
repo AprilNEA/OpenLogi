@@ -478,6 +478,8 @@ input_interception_detected = "En annen app fanger opp museinndata, noe som kan 
 [camera]
 camera = "Kamera"
 starting_preview = "Starter forhåndsvisning…"
+camera_in_use_by_another_app = "En annen app bruker dette kameraet."
+camera_preview_start_failed = "Kunne ikke starte kameraforhåndsvisningen."
 camera_preview_permission_required = "Aktiver kameratilgang i Innstillinger for å forhåndsvise."
 click_to_enable_camera_access = "Klikk for å aktivere kameratilgang."
 brightness = "Lysstyrke"
