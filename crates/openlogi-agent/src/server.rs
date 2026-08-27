@@ -5,6 +5,7 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::ActionDispatcher;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{Action, ActionRingSlot, ButtonId};
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -288,6 +289,19 @@ impl Agent for AgentServer {
         // A failed send is the designed steady state: the gate drops its
         // receiver at arming, and an armed agent no longer cares.
         let _ = self.demand.send(kind);
+    }
+
+    async fn read_onboard_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<BTreeMap<ButtonId, Action>, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::OnboardProfiles, |c| async move {
+                openlogi_hid::read_onboard_button_bindings_on(&c).await
+            })
+            .await
     }
 
     async fn action_ring_hover(

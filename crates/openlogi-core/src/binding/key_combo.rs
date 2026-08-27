@@ -161,6 +161,32 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
+    /// Build a chord from a HID keyboard report's modifier bitmap and usage ID.
+    ///
+    /// Left and right HID modifiers collapse into OpenLogi's four modifier
+    /// bits. Returns `None` when `usage` is not a [`KeyboardUsage`] we persist.
+    #[must_use]
+    pub fn from_hid_report(modifiers: u8, usage: u8) -> Option<Self> {
+        let key = KeyboardUsage::try_from(usage).ok()?;
+        let mut bits = 0u8;
+        if modifiers & (0x01 | 0x10) != 0 {
+            bits |= MOD_CONTROL;
+        }
+        if modifiers & (0x02 | 0x20) != 0 {
+            bits |= MOD_SHIFT;
+        }
+        if modifiers & (0x04 | 0x40) != 0 {
+            bits |= MOD_OPTION;
+        }
+        if modifiers & (0x08 | 0x80) != 0 {
+            bits |= MOD_COMMAND;
+        }
+        Some(Self {
+            modifiers: bits,
+            key,
+        })
+    }
+
     /// USB HID keyboard usage for the ordinary key.
     #[must_use]
     pub const fn key(&self) -> KeyboardUsage {
@@ -354,6 +380,18 @@ mod tests {
         let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
         assert_eq!(combo.key().code(), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
+    }
+
+    #[test]
+    fn hid_report_collapses_left_and_right_modifiers() {
+        let combo = KeyCombo::from_hid_report(0x01 | 0x20 | 0x80, 0x04)
+            .expect("0x04 is a valid keyboard usage");
+        assert!(combo.has_control());
+        assert!(combo.has_shift());
+        assert!(combo.has_command());
+        assert!(!combo.has_option());
+        assert_eq!(combo.key().code(), 0x04);
+        assert!(KeyCombo::from_hid_report(0, 0xff).is_none());
     }
 
     #[test]

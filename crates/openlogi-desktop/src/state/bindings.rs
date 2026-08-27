@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui::App;
+use gpui::{App, Context};
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, KeyTrigger};
@@ -173,6 +173,88 @@ impl AppState {
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string);
         self.bindings.refresh_device(&self.config, key.as_deref());
+    }
+
+    /// Pull the active onboard-profile button table into config when this
+    /// device has no stored overrides yet, so the Buttons tab shows G HUB /
+    /// Piper mappings instead of OpenLogi defaults.
+    pub(super) fn load_onboard_bindings(&mut self, cx: &mut Context<Self>) {
+        let Some(record) = self.current_record() else {
+            return;
+        };
+        if !record
+            .capabilities
+            .is_some_and(|capabilities| capabilities.buttons)
+        {
+            return;
+        }
+        let Some(route) = record.route.clone() else {
+            return;
+        };
+        let Some(persistent_key) = record.persistent_config_key().map(str::to_string) else {
+            return;
+        };
+        if !self.config.bindings_for(&persistent_key).is_empty() {
+            return;
+        }
+        let key = record.device_key();
+        if !self.onboard_import_attempted.insert(key.clone()) {
+            return;
+        }
+        let commands = self.ipc_sender();
+        cx.spawn(async move |this, cx| {
+            let (reply, result) = tokio::sync::oneshot::channel();
+            if commands
+                .send(crate::services::ipc::Command::ReadOnboardBindings(
+                    route, reply,
+                ))
+                .is_err()
+            {
+                return;
+            }
+            let Ok(reply) = result.await else {
+                return;
+            };
+            this.update(cx, |state, cx| {
+                let Ok(bindings) = reply else {
+                    return;
+                };
+                if state.import_onboard_bindings(&persistent_key, bindings) {
+                    cx.emit(StateEvent::BindingsChanged(key));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn import_onboard_bindings(
+        &mut self,
+        persistent_key: &str,
+        bindings: BTreeMap<ButtonId, Action>,
+    ) -> bool {
+        if bindings.is_empty() {
+            return false;
+        }
+        let Some(current) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+        else {
+            return false;
+        };
+        if current != persistent_key {
+            return false;
+        }
+        if !self.config.bindings_for(persistent_key).is_empty() {
+            return false;
+        }
+        self.config.edit(|config| {
+            for (button, action) in bindings {
+                config.set_binding(persistent_key, button, Binding::Single(action));
+            }
+        });
+        self.refresh_binding_projections();
+        self.persist_and_reload("onboard bindings")
     }
 
     pub(super) fn restore_binding_projections(&mut self) {
