@@ -5,7 +5,7 @@
 //! sessions stop, then wait for an exclusive write lease.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -18,7 +18,14 @@ pub struct ReceiverAccess {
 #[derive(Default)]
 struct ReceiverAccessInner {
     lease: Arc<RwLock<()>>,
-    exclusive_requests: Arc<AtomicU8>,
+    exclusive_requests: Arc<ExclusiveRequests>,
+}
+
+#[derive(Default)]
+struct ExclusiveRequests {
+    total: AtomicUsize,
+    pairing: AtomicUsize,
+    host_transition: AtomicUsize,
 }
 
 /// Operation requiring sole ownership of a receiver transport.
@@ -31,11 +38,21 @@ pub enum ExclusiveAccessReason {
 }
 
 impl ExclusiveAccessReason {
-    const fn bit(self) -> u8 {
+    fn counter(self, requests: &ExclusiveRequests) -> &AtomicUsize {
         match self {
-            Self::Pairing => 1 << 0,
-            Self::HostTransition => 1 << 1,
+            Self::Pairing => &requests.pairing,
+            Self::HostTransition => &requests.host_transition,
         }
+    }
+}
+
+impl ExclusiveRequests {
+    fn any(&self) -> bool {
+        self.total.load(Ordering::Acquire) != 0
+    }
+
+    fn requested(&self, reason: ExclusiveAccessReason) -> bool {
+        reason.counter(self).load(Ordering::Acquire) != 0
     }
 }
 
@@ -54,13 +71,13 @@ impl ReceiverAccess {
     /// Whether any exclusive operation is waiting for or holding receiver access.
     #[must_use]
     pub fn exclusive_requested(&self) -> bool {
-        self.inner.exclusive_requests.load(Ordering::Acquire) != 0
+        self.inner.exclusive_requests.any()
     }
 
     /// Whether `reason` is waiting for or holding receiver access.
     #[must_use]
     pub fn requested(&self, reason: ExclusiveAccessReason) -> bool {
-        self.inner.exclusive_requests.load(Ordering::Acquire) & reason.bit() != 0
+        self.inner.exclusive_requests.requested(reason)
     }
 
     /// Try to acquire receiver access for a pooled HID++ session.
@@ -104,21 +121,24 @@ impl ReceiverAccess {
 }
 
 struct ExclusiveRequest {
-    requests: Arc<AtomicU8>,
+    requests: Arc<ExclusiveRequests>,
     reason: ExclusiveAccessReason,
 }
 
 impl ExclusiveRequest {
-    fn new(requests: Arc<AtomicU8>, reason: ExclusiveAccessReason) -> Self {
-        requests.fetch_or(reason.bit(), Ordering::AcqRel);
+    fn new(requests: Arc<ExclusiveRequests>, reason: ExclusiveAccessReason) -> Self {
+        requests.total.fetch_add(1, Ordering::AcqRel);
+        reason.counter(&requests).fetch_add(1, Ordering::AcqRel);
         Self { requests, reason }
     }
 }
 
 impl Drop for ExclusiveRequest {
     fn drop(&mut self) {
-        self.requests
-            .fetch_and(!self.reason.bit(), Ordering::AcqRel);
+        self.reason
+            .counter(&self.requests)
+            .fetch_sub(1, Ordering::AcqRel);
+        self.requests.total.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -181,6 +201,26 @@ mod tests {
         assert!(!access.exclusive_requested());
         drop(capture);
         assert!(access.try_acquire_for_session().is_some());
+    }
+
+    #[test]
+    fn same_reason_overlap_stays_requested_until_every_request_drops() {
+        let access = ReceiverAccess::default();
+        let first = ExclusiveRequest::new(
+            Arc::clone(&access.inner.exclusive_requests),
+            ExclusiveAccessReason::Pairing,
+        );
+        let second = ExclusiveRequest::new(
+            Arc::clone(&access.inner.exclusive_requests),
+            ExclusiveAccessReason::Pairing,
+        );
+
+        drop(first);
+        assert!(access.requested(ExclusiveAccessReason::Pairing));
+        assert!(access.exclusive_requested());
+
+        drop(second);
+        assert!(!access.exclusive_requested());
     }
 
     #[tokio::test]
