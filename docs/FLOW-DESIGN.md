@@ -358,7 +358,9 @@ milestone 2 onward:
    peer may list hostnames or IPs, resolved through the OS resolver so
    `/etc/hosts`, ordinary DNS, and overlay magic-DNS names all work
    (lan-mouse precedent). mDNS is an optimization for the flat-LAN case,
-   never a requirement for a link to form.
+   never a requirement for a link to form. An omitted port uses Flow's
+   default UDP port, **42424**; an explicit `host:port` overrides it, while
+   mDNS always uses the port in the resolved service record.
 2. **Trust never derives from reachability.** Identity is the pinned key and
    the session is mutually authenticated E2E, so a shared or hostile overlay
    network adds no risk and no trusted party.
