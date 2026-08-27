@@ -69,6 +69,7 @@ num_enum = "0.7.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 buffa = "0.9"
+hkdf = "0.12"
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 core-foundation = { version = "0.10", default-features = false, features = ["link"] }
 opener = "0.8.5"
