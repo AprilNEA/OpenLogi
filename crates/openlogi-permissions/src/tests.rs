@@ -1,44 +1,54 @@
-//! Pure `classify` cases — no device nodes involved.
+//! Pure probe-classification cases — no device nodes involved.
 
 use crate::PermissionStatus;
-use crate::linux::{HidrawProbe, classify};
+use crate::linux::{HidrawProbe, Probes};
 
 #[test]
-fn classify_granted_when_both_ok() {
+fn granted_when_both_probes_pass() {
     assert_eq!(
-        classify(true, HidrawProbe::Accessible),
+        PermissionStatus::from(Probes {
+            uinput_writable: true,
+            hidraw: HidrawProbe::Accessible,
+        }),
         PermissionStatus::Granted
     );
 }
 
 #[test]
-fn classify_denied_when_uinput_not_ok() {
+fn denied_when_uinput_is_not_writable() {
+    for hidraw in [
+        HidrawProbe::Accessible,
+        HidrawProbe::Denied,
+        HidrawProbe::NonePresent,
+    ] {
+        assert_eq!(
+            PermissionStatus::from(Probes {
+                uinput_writable: false,
+                hidraw,
+            }),
+            PermissionStatus::Denied
+        );
+    }
+}
+
+#[test]
+fn denied_when_hidraw_is_denied() {
     assert_eq!(
-        classify(false, HidrawProbe::Accessible),
-        PermissionStatus::Denied
-    );
-    assert_eq!(
-        classify(false, HidrawProbe::Denied),
-        PermissionStatus::Denied
-    );
-    assert_eq!(
-        classify(false, HidrawProbe::NonePresent),
+        PermissionStatus::from(Probes {
+            uinput_writable: true,
+            hidraw: HidrawProbe::Denied,
+        }),
         PermissionStatus::Denied
     );
 }
 
 #[test]
-fn classify_denied_when_hidraw_denied() {
+fn unknown_when_no_logitech_device_is_connected() {
     assert_eq!(
-        classify(true, HidrawProbe::Denied),
-        PermissionStatus::Denied
-    );
-}
-
-#[test]
-fn classify_unknown_when_no_logitech_device_connected() {
-    assert_eq!(
-        classify(true, HidrawProbe::NonePresent),
+        PermissionStatus::from(Probes {
+            uinput_writable: true,
+            hidraw: HidrawProbe::NonePresent,
+        }),
         PermissionStatus::Unknown
     );
 }

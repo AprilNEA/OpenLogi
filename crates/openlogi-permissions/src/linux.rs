@@ -21,7 +21,11 @@ use crate::PermissionStatus;
 /// - `Unknown` — uinput is fine but no Logitech hidraw is connected.
 #[must_use]
 pub fn input_device_access() -> PermissionStatus {
-    classify(probe_uinput(), probe_logitech_hidraw())
+    Probes {
+        uinput_writable: probe_uinput(),
+        hidraw: probe_logitech_hidraw(),
+    }
+    .into()
 }
 
 /// What probing the Logitech `/dev/hidraw*` nodes established.
@@ -35,12 +39,23 @@ pub(crate) enum HidrawProbe {
     NonePresent,
 }
 
-/// Split from the probes so it is testable without device nodes.
-pub(crate) fn classify(uinput_ok: bool, hidraw: HidrawProbe) -> PermissionStatus {
-    match (uinput_ok, hidraw) {
-        (true, HidrawProbe::Accessible) => PermissionStatus::Granted,
-        (false, _) | (_, HidrawProbe::Denied) => PermissionStatus::Denied,
-        (true, HidrawProbe::NonePresent) => PermissionStatus::Unknown,
+/// Both probes, taken together.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Probes {
+    /// `/dev/uinput` opened for writing.
+    pub(crate) uinput_writable: bool,
+    pub(crate) hidraw: HidrawProbe,
+}
+
+/// The verdict is a total function of the two probes — split from the
+/// probing itself so it is testable without device nodes.
+impl From<Probes> for PermissionStatus {
+    fn from(probes: Probes) -> Self {
+        match (probes.uinput_writable, probes.hidraw) {
+            (true, HidrawProbe::Accessible) => Self::Granted,
+            (false, _) | (_, HidrawProbe::Denied) => Self::Denied,
+            (true, HidrawProbe::NonePresent) => Self::Unknown,
+        }
     }
 }
 
