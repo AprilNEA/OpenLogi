@@ -129,7 +129,6 @@ pub struct MouseModelView {
     action_search: Entity<InputState>,
     shortcut_input: Entity<InputState>,
     custom_shortcut_editor_open: bool,
-    custom_shortcut_error: bool,
     _state_obs: Subscription,
 }
 
@@ -146,13 +145,6 @@ impl MouseModelView {
         .detach();
         let shortcut_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Shortcut, e.g. Cmd+Shift+P")));
-        cx.subscribe(&shortcut_input, |view, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                view.custom_shortcut_error = false;
-                cx.notify();
-            }
-        })
-        .detach();
         let state = AppState::global(cx);
         let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
             let relevant = match event {
@@ -180,7 +172,6 @@ impl MouseModelView {
             action_search,
             shortcut_input,
             custom_shortcut_editor_open: false,
-            custom_shortcut_error: false,
             _state_obs: state_obs,
         }
     }
@@ -205,7 +196,6 @@ impl MouseModelView {
     pub(super) fn open_custom_shortcut_editor(&mut self) {
         self.action_picker_open = true;
         self.custom_shortcut_editor_open = true;
-        self.custom_shortcut_error = false;
     }
 
     pub(super) fn close_custom_shortcut_editor(&mut self) {
@@ -214,10 +204,6 @@ impl MouseModelView {
 
     pub(super) fn shortcut_input(&self) -> Entity<InputState> {
         self.shortcut_input.clone()
-    }
-
-    pub(super) fn set_custom_shortcut_error(&mut self, error: bool) {
-        self.custom_shortcut_error = error;
     }
 
     fn reset_for_device(&mut self, device_key: Option<&str>) {
@@ -230,7 +216,6 @@ impl MouseModelView {
         self.gesture_active_dir = None;
         self.action_picker_open = false;
         self.custom_shortcut_editor_open = false;
-        self.custom_shortcut_error = false;
     }
 
     fn select(&mut self, control: MouseControlId) {
@@ -239,7 +224,6 @@ impl MouseModelView {
             self.gesture_active_dir = None;
             self.action_picker_open = false;
             self.custom_shortcut_editor_open = false;
-            self.custom_shortcut_error = false;
         }
     }
 }
@@ -360,7 +344,6 @@ impl Render for MouseModelView {
             &self.action_search,
             &self.shortcut_input,
             self.custom_shortcut_editor_open,
-            self.custom_shortcut_error,
             &view,
             cx,
         );
@@ -1014,7 +997,6 @@ mod tests {
                 &view.action_search,
                 &view.shortcut_input,
                 view.custom_shortcut_editor_open,
-                view.custom_shortcut_error,
                 &entity,
                 cx,
             );

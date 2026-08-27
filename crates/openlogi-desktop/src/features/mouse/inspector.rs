@@ -49,7 +49,6 @@ struct ActionPickerContext<'a> {
     search: &'a Entity<InputState>,
     shortcut_input: &'a Entity<InputState>,
     shortcut_editor_open: bool,
-    shortcut_error: bool,
     view: &'a Entity<MouseModelView>,
 }
 
@@ -58,7 +57,6 @@ pub(super) fn binding_inspector(
     action_search: &Entity<InputState>,
     shortcut_input: &Entity<InputState>,
     shortcut_editor_open: bool,
-    shortcut_error: bool,
     view: &Entity<MouseModelView>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -68,7 +66,6 @@ pub(super) fn binding_inspector(
         search: action_search,
         shortcut_input,
         shortcut_editor_open,
-        shortcut_error,
         view,
     };
     let body = match data.selected {
@@ -722,14 +719,6 @@ fn custom_shortcut_editor(
                         .text_color(pal.text_muted)
                         .child(tr!("Shortcut, e.g. Cmd+Shift+P")),
                 )
-                .when(picker.shortcut_error, |panel| {
-                    panel.child(
-                        div()
-                            .text_caption()
-                            .text_color(rgb(theme::STATUS_DISABLED))
-                            .child(tr!("Invalid shortcut")),
-                    )
-                })
                 .child(
                     h_flex()
                         .gap_2()
@@ -759,10 +748,7 @@ fn custom_shortcut_editor(
                                                 cx.notify();
                                             });
                                         }
-                                        Err(_) => view_save.update(cx, |view, cx| {
-                                            view.set_custom_shortcut_error(true);
-                                            cx.notify();
-                                        }),
+                                        Err(_) => {}
                                     }
                                 }),
                         ),
