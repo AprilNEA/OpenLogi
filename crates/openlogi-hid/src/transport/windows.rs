@@ -89,7 +89,7 @@ impl HidEndpoint {
 pub(super) struct WindowsHidppChannel {
     info: DeviceInfo,
     short: Option<HidEndpoint>,
-    long: Option<HidEndpoint>,
+    long: HidEndpoint,
     /// Cleared the first time either endpoint reports a permanently dead
     /// handle. Read by [`RawHidChannel::is_connected`], which is what lets
     /// `inventory::ledger` evict this channel — the node-vanish path never
@@ -105,7 +105,7 @@ impl WindowsHidppChannel {
     ) -> Result<Self, async_hid::HidError> {
         let short_dev = find_windows_short_collection(&long_info).await?;
         let (long_reader, long_writer) = long_dev.open().await?;
-        let long = Some(HidEndpoint::new(long_reader, long_writer, &long_info));
+        let long = HidEndpoint::new(long_reader, long_writer, &long_info);
 
         let short = match short_dev {
             Some(dev) => {
@@ -137,7 +137,7 @@ impl WindowsHidppChannel {
             name = %long_info.name,
             pid = format_args!("{:04x}", long_info.product_id),
             supports_short = short.is_some(),
-            supports_long = long.is_some(),
+            supports_long = true,
             "opened Windows HID++ composite channel"
         );
 
@@ -249,7 +249,7 @@ impl RawHidChannel for WindowsHidppChannel {
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
-            Some(ReportEndpoint::Long) => self.long.as_ref(),
+            Some(ReportEndpoint::Long) => Some(&self.long),
             _ => None,
         }
         .ok_or_else(|| {
@@ -272,43 +272,36 @@ impl RawHidChannel for WindowsHidppChannel {
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        match (&self.short, &self.long) {
-            (Some(short), Some(long)) => {
-                let mut short_buf = [0u8; SHORT_REPORT_LENGTH];
-                let mut long_buf = [0u8; LONG_REPORT_LENGTH];
-                let mut short_reader = short.reader.lock().await;
-                let mut long_reader = long.reader.lock().await;
-                // `select!` drops the losing read future, but no report is lost:
-                // async-hid's win32 `IoBuffer` owns the in-flight OVERLAPPED read and
-                // its buffer (not the future), so the pending operation survives the
-                // drop, and the next `read_report` — re-locking this same endpoint —
-                // resumes it and retrieves the report. This relies on reusing the
-                // per-endpoint reader across calls; do not reopen readers per read.
-                tokio::select! {
-                    res = short_reader.read_input_report(&mut short_buf) => match res {
-                        Ok(len) => copy_report(&short_buf, len, buf),
-                        Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
-                        Err(e) => Err(e.into()),
-                    },
-                    res = long_reader.read_input_report(&mut long_buf) => match res {
-                        Ok(len) => copy_report(&long_buf, len, buf),
-                        Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
-                        Err(e) => Err(e.into()),
-                    },
-                }
-            }
-            (Some(endpoint), None) | (None, Some(endpoint)) => {
-                let mut reader = endpoint.reader.lock().await;
-                match reader.read_input_report(buf).await {
-                    Ok(len) => Ok(len),
+        if let Some(short) = &self.short {
+            let mut short_buf = [0u8; SHORT_REPORT_LENGTH];
+            let mut long_buf = [0u8; LONG_REPORT_LENGTH];
+            let mut short_reader = short.reader.lock().await;
+            let mut long_reader = self.long.reader.lock().await;
+            // `select!` drops the losing read future, but no report is lost:
+            // async-hid's win32 `IoBuffer` owns the in-flight OVERLAPPED read and
+            // its buffer (not the future), so the pending operation survives the
+            // drop, and the next `read_report` — re-locking this same endpoint —
+            // resumes it and retrieves the report. This relies on reusing the
+            // per-endpoint reader across calls; do not reopen readers per read.
+            return tokio::select! {
+                res = short_reader.read_input_report(&mut short_buf) => match res {
+                    Ok(len) => copy_report(&short_buf, len, buf),
                     Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
                     Err(e) => Err(e.into()),
-                }
-            }
-            (None, None) => Err(Box::new(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "no Windows HID++ endpoints are open",
-            ))),
+                },
+                res = long_reader.read_input_report(&mut long_buf) => match res {
+                    Ok(len) => copy_report(&long_buf, len, buf),
+                    Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
+                    Err(e) => Err(e.into()),
+                },
+            };
+        }
+
+        let mut reader = self.long.reader.lock().await;
+        match reader.read_input_report(buf).await {
+            Ok(len) => Ok(len),
+            Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -317,7 +310,7 @@ impl RawHidChannel for WindowsHidppChannel {
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some((self.short.is_some(), self.long.is_some()))
+        Some((self.short.is_some(), true))
     }
 
     async fn get_report_descriptor(
