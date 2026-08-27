@@ -74,6 +74,12 @@ impl FlowEndpoint {
         self.endpoint.local_addr().map_err(TransportError::from)
     }
 
+    /// Returns this endpoint's stable machine identity.
+    #[must_use]
+    pub const fn public_key(&self) -> PublicKey {
+        self.identity.public_key()
+    }
+
     /// Dials and performs the control-stream Hello exchange.
     pub async fn connect(&self, address: SocketAddr) -> Result<FlowConnection, TransportError> {
         let connection = self.endpoint.connect(address, "openlogi-flow")?.await?;
@@ -447,6 +453,10 @@ impl FlowConnection {
     pub fn close(&self) {
         self.connection
             .close(VarInt::from_u32(0), b"Flow connection closed");
+    }
+
+    pub(crate) async fn wait_closed(&self) {
+        let _ = self.connection.closed().await;
     }
 
     fn ensure_send_allowed(&self, kind: FrameKind) -> Result<(), TransportError> {
