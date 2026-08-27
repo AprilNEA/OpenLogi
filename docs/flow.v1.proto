@@ -1,0 +1,532 @@
+// OpenLogi Flow peer protocol, version 1.
+//
+// This file is the authoritative wire contract between two OpenLogi agents
+// (see FLOW-PROTOCOL.md for framing, stream binding, state machines, and the
+// evolution rules that bind every edit to this file). It lives in docs/ until
+// crates/openlogi-flow exists, then moves there verbatim.
+//
+// Ground rules (enforced in review, restated from FLOW-PROTOCOL.md):
+//   - Field numbers and FrameKind values are never reused or renumbered.
+//     Removal means `reserved`, never deletion.
+//   - Every enum has an UNSPECIFIED = 0 entry. Receiving UNSPECIFIED or an
+//     unknown value where a decision is required is an error, never a silent
+//     default (same rule as the HID++ crate).
+//   - New messages/fields are usable only after version or capability
+//     negotiation permits sending them (send-gating).
+//   - No type in this file is shared with openlogi-core / openlogi-ipc.
+//     Conversion happens in openlogi-agent-core.
+
+syntax = "proto3";
+
+package openlogi.flow.v1;
+
+// ---------------------------------------------------------------------------
+// Frame kinds
+// ---------------------------------------------------------------------------
+
+// Discriminator carried in the frame envelope (see FLOW-PROTOCOL.md §Framing).
+// Values are the wire u16. Ranges are partitioned by family; allocate new
+// kinds at the end of their family range.
+enum FrameKind {
+  FRAME_KIND_UNSPECIFIED = 0x0000;  // never sent; Hello is 0x0001 so that an
+                                    // all-zero header is invalid, not a Hello
+
+  // Link family, 0x0001-0x000F — frozen forever (pre-negotiation).
+  FRAME_KIND_HELLO = 0x0001;
+  FRAME_KIND_HELLO_REJECT = 0x0002;
+  FRAME_KIND_ERROR = 0x0003;
+  FRAME_KIND_PING = 0x0004;
+  FRAME_KIND_PONG = 0x0005;
+
+  // Pairing family, 0x0010-0x001F — allowed on untrusted sessions.
+  FRAME_KIND_PAIR_START = 0x0010;
+  FRAME_KIND_PAIR_PROMPTED = 0x0011;
+  FRAME_KIND_PAIR_CONFIRM = 0x0012;
+  FRAME_KIND_PAIR_OUTCOME = 0x0013;
+  FRAME_KIND_PAIR_ABORT = 0x0014;
+
+  // Peer info / state family, 0x0020-0x002F.
+  FRAME_KIND_GET_PEER_INFO = 0x0020;
+  FRAME_KIND_PEER_INFO = 0x0021;
+  FRAME_KIND_ANNOUNCE_DEVICES = 0x0022;
+  FRAME_KIND_PEER_STATE = 0x0023;
+
+  // Handoff family, 0x0030-0x003F.
+  FRAME_KIND_HANDOFF_REQUEST = 0x0030;
+  FRAME_KIND_HANDOFF_ACCEPT = 0x0031;
+  FRAME_KIND_HANDOFF_REJECT = 0x0032;
+  FRAME_KIND_HANDOFF_RESULT = 0x0033;
+  FRAME_KIND_HANDOFF_CANCEL = 0x0034;
+
+  // Clipboard family, 0x0040-0x004F — capability-gated.
+  FRAME_KIND_CLIPBOARD_ANNOUNCE = 0x0040;
+  FRAME_KIND_CLIPBOARD_FETCH = 0x0041;
+  FRAME_KIND_CLIPBOARD_DATA = 0x0042;
+  FRAME_KIND_CHUNK = 0x0043;
+  FRAME_KIND_CHUNK_END = 0x0044;
+  FRAME_KIND_FILE_FETCH = 0x0045;
+}
+
+// ---------------------------------------------------------------------------
+// Link family (frozen)
+// ---------------------------------------------------------------------------
+
+// First frame on the control stream, both directions. Its encoding is frozen:
+// existing fields never change meaning or number; new fields may be appended
+// (old peers ignore them by protobuf rules).
+message Hello {
+  // Inclusive range of protocol versions this peer speaks. Version 1 peers
+  // send [1, 1]. agreed = min(max_a, max_b); reject if agreed < max(min_a,
+  // min_b).
+  uint32 proto_min = 1;
+  uint32 proto_max = 2;
+
+  // Raw 32-byte Ed25519 public key. MUST match the key in the TLS
+  // certificate; mismatch closes the connection (Error INVALID).
+  bytes public_key = 3;
+
+  // 16 random bytes per connection, consumed by the pairing-code derivation
+  // (FLOW-PROTOCOL.md §Pairing). Fresh on every connection.
+  bytes session_nonce = 4;
+
+  // Presentation for pairing prompts and peer lists.
+  string machine_name = 5;
+  Platform platform = 6;
+
+  // Diagnostics only. Logic MUST NOT parse or branch on it; versioned
+  // behavior hangs off proto_min/max and capabilities exclusively.
+  string app_version = 7;
+
+  // Optional message families this peer implements (packed varints).
+  // Orthogonal to the protocol version: a capability never requires a
+  // version bump, a version bump never implies a capability.
+  repeated Capability capabilities = 8;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_MACOS = 1;
+  PLATFORM_WINDOWS = 2;
+  PLATFORM_LINUX_X11 = 3;
+  PLATFORM_LINUX_WAYLAND = 4;
+  PLATFORM_OTHER = 5;
+}
+
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  CAPABILITY_CLIPBOARD_TEXT = 1;
+  CAPABILITY_CLIPBOARD_FILES = 2;
+}
+
+message HelloReject {
+  RejectReason reason = 1;
+  // The rejecting side's own range, so the stale side can be named in UI.
+  uint32 proto_min = 2;
+  uint32 proto_max = 3;
+  string detail = 4;
+}
+
+enum RejectReason {
+  REJECT_REASON_UNSPECIFIED = 0;
+  REJECT_REASON_VERSION_DISJOINT = 1;
+  REJECT_REASON_KEY_MISMATCH = 2;   // Hello.public_key ≠ TLS identity
+  REJECT_REASON_MALFORMED = 3;
+}
+
+// Generic failure response. Valid as the response frame on any RPC stream;
+// the stream itself is the correlation, so no request id is needed.
+message Error {
+  ErrorCode code = 1;
+  string detail = 2;
+  // Whether retrying the same request later can succeed (BUSY yes,
+  // UNSUPPORTED_KIND no).
+  bool retryable = 3;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNSUPPORTED_KIND = 1;   // unknown FrameKind in a request
+  ERROR_CODE_UNSUPPORTED_FLAGS = 2;  // unknown envelope flag bits
+  ERROR_CODE_NOT_PAIRED = 3;         // non-pairing frame on untrusted session
+  ERROR_CODE_BUSY = 4;
+  ERROR_CODE_INVALID = 5;            // semantically invalid payload
+  ERROR_CODE_TOO_LARGE = 6;          // frame exceeds the size cap
+  ERROR_CODE_DISABLED = 7;           // flow disabled on this peer
+  ERROR_CODE_INTERNAL = 8;
+}
+
+// Application-level liveness/RTT probe (QUIC keepalive proves the transport,
+// Ping/Pong proves the agent). Sent as datagrams.
+message Ping {
+  uint64 seq = 1;
+}
+
+message Pong {
+  uint64 seq = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Pairing family (allowed pre-trust)
+// ---------------------------------------------------------------------------
+//
+// Both sides derive the same 6-digit code from the two public keys and the
+// two session nonces (exact derivation: FLOW-PROTOCOL.md §Pairing). A
+// man-in-the-middle terminates two different sessions and therefore produces
+// two different codes; the user comparing screens is the authentication.
+
+// Request: begin pairing. The responder shows its prompt (key fingerprint,
+// machine name, the code) to its user.
+message PairStart {}
+
+// Response to PairStart: the prompt is on screen; the requester may now show
+// its own prompt and both users compare codes.
+message PairPrompted {
+  // How long the responder will keep the session pending before it aborts.
+  uint32 timeout_ms = 1;
+}
+
+// Request: this side's user confirmed the code matches. Pairing completes
+// when each side has both sent and received a confirm.
+message PairConfirm {}
+
+// Response to PairConfirm.
+message PairOutcome {
+  PairResult result = 1;
+}
+
+enum PairResult {
+  PAIR_RESULT_UNSPECIFIED = 0;
+  PAIR_RESULT_PAIRED = 1;           // both confirms present; keys persisted
+  PAIR_RESULT_PENDING_LOCAL = 2;    // your confirm recorded; mine still absent
+  PAIR_RESULT_REJECTED = 3;         // user declined
+  PAIR_RESULT_TIMEOUT = 4;
+}
+
+// Notification: abandon the pairing session (user cancelled, code mismatch).
+message PairAbort {
+  PairAbortReason reason = 1;
+}
+
+enum PairAbortReason {
+  PAIR_ABORT_REASON_UNSPECIFIED = 0;
+  PAIR_ABORT_REASON_USER_CANCELLED = 1;
+  PAIR_ABORT_REASON_CODE_MISMATCH = 2;
+  PAIR_ABORT_REASON_TIMEOUT = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Peer info / state family
+// ---------------------------------------------------------------------------
+
+// Request the peer's descriptive state (for the GUI's layout editor and peer
+// list). Also delivered unsolicited-fresh via PeerState revisions.
+message GetPeerInfo {}
+
+message PeerInfo {
+  string machine_name = 1;
+  Platform platform = 2;
+  // Display arrangement in the peer's own virtual coordinate space.
+  // Informational: handoff never carries absolute peer coordinates.
+  repeated Display displays = 3;
+  // Monotonic per-peer counter; a PeerInfo with a lower revision than one
+  // already seen is stale and discarded.
+  uint64 revision = 4;
+}
+
+message Display {
+  uint64 id = 1;
+  Rect bounds_px = 2;
+  // Backing-store scale (e.g. 2.0 on Retina), for rendering the layout
+  // editor faithfully.
+  double scale = 3;
+  bool primary = 4;
+}
+
+message Rect {
+  sint32 x = 1;
+  sint32 y = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+// Notification: the complete set of Flow-relevant devices as seen by the
+// announcing peer — sent when a session becomes trusted and again on every
+// inventory change (level-triggered whole state, never a delta, so a lost or
+// reordered announce heals on the next one).
+message AnnounceDevices {
+  repeated DeviceView devices = 1;
+  // Monotonic per-peer counter, same staleness rule as PeerInfo.revision.
+  uint64 revision = 2;
+}
+
+// One device as seen from the announcing peer.
+message DeviceView {
+  DeviceIdentity identity = 1;
+  // Easy-Switch slot (0-based, as in HID++ 0x1814) the device uses to reach
+  // the ANNOUNCING peer. This is the field the receiver of this message
+  // stores as "to hand off to that peer, command the device to this slot".
+  uint32 channel_to_me = 2;
+  // Whether the device is currently live on that slot (present and awake).
+  bool connected = 3;
+  // Total host slots, from 0x1814 get_host_info.
+  uint32 host_count = 4;
+  // Slot metadata from 0x1815 HostsInfo, informational (setup UI).
+  repeated HostSlot host_slots = 5;
+}
+
+message HostSlot {
+  uint32 index = 1;
+  string name = 2;
+  bool paired = 3;
+}
+
+// Cross-peer device identity. Two DeviceIdentity values denote the same
+// physical device iff their identifier sets intersect on any single entry.
+// The set form keeps identity open-ended: a transport whose best identifier
+// we have not modeled yet becomes a new IdentifierKind, not a schema change.
+message DeviceIdentity {
+  repeated DeviceIdentifier ids = 1;
+  // Presentation only — never used for correlation.
+  string name = 2;
+  DeviceCategory category = 3;
+  // Model numbers per transport, presentation/diagnostics only (model ids
+  // are model-scoped: two identical mice share them).
+  repeated ModelId models = 4;
+}
+
+message DeviceIdentifier {
+  IdentifierKind kind = 1;
+  // Canonical bytes for that kind (FLOW-PROTOCOL.md §Device identity):
+  // SERIAL = UTF-8 string bytes, UNIT_ID = big-endian u32,
+  // BLUETOOTH_ADDRESS = 6 bytes.
+  bytes value = 2;
+}
+
+enum IdentifierKind {
+  IDENTIFIER_KIND_UNSPECIFIED = 0;
+  IDENTIFIER_KIND_SERIAL = 1;
+  IDENTIFIER_KIND_UNIT_ID = 2;
+  IDENTIFIER_KIND_BLUETOOTH_ADDRESS = 3;
+}
+
+enum DeviceCategory {
+  DEVICE_CATEGORY_UNSPECIFIED = 0;
+  DEVICE_CATEGORY_MOUSE = 1;
+  DEVICE_CATEGORY_KEYBOARD = 2;
+  DEVICE_CATEGORY_TRACKBALL = 3;
+  DEVICE_CATEGORY_TOUCHPAD = 4;
+  DEVICE_CATEGORY_PRESENTER = 5;
+  DEVICE_CATEGORY_OTHER = 6;
+}
+
+message ModelId {
+  DeviceTransport transport = 1;
+  uint32 vendor_id = 2;
+  uint32 product_id = 3;
+}
+
+enum DeviceTransport {
+  DEVICE_TRANSPORT_UNSPECIFIED = 0;
+  DEVICE_TRANSPORT_RECEIVER = 1;
+  DEVICE_TRANSPORT_BLUETOOTH = 2;
+  DEVICE_TRANSPORT_USB = 3;
+}
+
+// Notification: coarse peer state for remote GUIs. Quantized on purpose —
+// never per-heartbeat facts (the same churn rule as the local IPC snapshot).
+message PeerState {
+  bool flow_enabled = 1;
+  // Devices this peer currently holds (is the live host of).
+  repeated DeviceIdentity held = 2;
+  uint64 revision = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Handoff family
+// ---------------------------------------------------------------------------
+//
+// Sequence (FLOW-PROTOCOL.md §Handoff has the full state machine):
+//   sender  --HandoffRequest-->  receiver          (bi-stream)
+//   sender  <--HandoffAccept--   receiver          (same stream)
+//   sender: ChangeHost.set_current_host(...)       (the point of no return)
+//   receiver: positive arrival evidence (0x41)     (or arm-timeout)
+//   sender  <--HandoffResult--   receiver          (uni-stream, by transfer_id)
+// The sender NEVER switches before Accept. HandoffCancel (either direction)
+// disarms a transfer that Accept has opened but the switch cannot complete.
+
+message HandoffRequest {
+  // Random per attempt; the dedupe key. A retransmitted request with a known
+  // transfer_id is answered from existing state, not re-armed.
+  uint64 transfer_id = 1;
+  // Devices being moved; the pointing device first, linked devices after.
+  repeated DeviceIdentity devices = 2;
+  EntryPoint entry = 3;
+  // Sender wall clock, unix milliseconds. Diagnostics only.
+  uint64 sent_at_ms = 4;
+}
+
+// Where the cursor should materialize on the receiver.
+message EntryPoint {
+  // The RECEIVER's edge being entered (already translated by the sender's
+  // layout: exiting my right edge toward you = entering your left edge).
+  Side side = 1;
+  // Normalized 0..1 along that edge (top→bottom for vertical edges,
+  // left→right for horizontal), measured on the sender's exiting edge. The
+  // receiver maps it proportionally onto its own exposed edge segments and
+  // clamps to the nearest valid point.
+  double t = 2;
+  // Cursor velocity at exit, in normalized edge lengths per second
+  // (perpendicular, parallel). Optional; enables entry momentum.
+  optional Vec2 velocity = 3;
+}
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_LEFT = 1;
+  SIDE_RIGHT = 2;
+  SIDE_TOP = 3;
+  SIDE_BOTTOM = 4;
+}
+
+message Vec2 {
+  double x = 1;
+  double y = 2;
+}
+
+message HandoffAccept {
+  uint64 transfer_id = 1;
+  // How long the receiver will watch for device arrival before reporting
+  // HANDOFF_OUTCOME_TIMEOUT. The sender sizes its own give-up deadline as
+  // arm_timeout_ms plus network slack.
+  uint32 arm_timeout_ms = 2;
+}
+
+message HandoffReject {
+  uint64 transfer_id = 1;
+  HandoffRejectReason reason = 2;
+  string detail = 3;
+}
+
+enum HandoffRejectReason {
+  HANDOFF_REJECT_REASON_UNSPECIFIED = 0;
+  HANDOFF_REJECT_REASON_DISABLED = 1;        // flow off on the receiver
+  HANDOFF_REJECT_REASON_UNKNOWN_DEVICE = 2;  // no identity intersection
+  HANDOFF_REJECT_REASON_ALREADY_PENDING = 3; // a transfer is already armed
+  HANDOFF_REJECT_REASON_NOT_READY = 4;       // e.g. receiver's HID stack down
+}
+
+// Notification: terminal outcome of an accepted transfer.
+message HandoffResult {
+  uint64 transfer_id = 1;
+  HandoffOutcome outcome = 2;
+  repeated DeviceArrival arrivals = 3;
+}
+
+enum HandoffOutcome {
+  HANDOFF_OUTCOME_UNSPECIFIED = 0;
+  HANDOFF_OUTCOME_ARRIVED = 1;    // every requested device arrived
+  HANDOFF_OUTCOME_PARTIAL = 2;    // some arrived (per-device detail attached)
+  HANDOFF_OUTCOME_TIMEOUT = 3;    // nothing arrived within arm_timeout_ms
+  HANDOFF_OUTCOME_CANCELLED = 4;  // a HandoffCancel disarmed it
+}
+
+message DeviceArrival {
+  DeviceIdentity device = 1;
+  bool arrived = 2;
+  // Milliseconds from Accept to this device's arrival evidence.
+  uint32 elapsed_ms = 3;
+}
+
+// Notification, either direction: disarm/abort a transfer after Accept.
+message HandoffCancel {
+  uint64 transfer_id = 1;
+  HandoffCancelReason reason = 2;
+}
+
+enum HandoffCancelReason {
+  HANDOFF_CANCEL_REASON_UNSPECIFIED = 0;
+  HANDOFF_CANCEL_REASON_SWITCH_FAILED = 1;  // sender's HID++ write failed
+  HANDOFF_CANCEL_REASON_SUPERSEDED = 2;     // a newer transfer replaces it
+  HANDOFF_CANCEL_REASON_SHUTDOWN = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard family (capability-gated)
+// ---------------------------------------------------------------------------
+//
+// Lazy model: an announce names what is available; bytes move only when the
+// holder of the announce actually pastes (every target OS supports promised/
+// delayed clipboard rendering). CLIPBOARD_TEXT gates text mimes;
+// CLIPBOARD_FILES additionally gates the file-list mime and FileFetch.
+
+// Notification: my clipboard changed; these representations are available.
+message ClipboardAnnounce {
+  // Monotonic per-peer clipboard generation. Fetches quote it; a fetch for a
+  // superseded sequence is answered with Error INVALID (the data is gone).
+  uint64 sequence = 1;
+  repeated ClipboardFormat formats = 2;
+}
+
+message ClipboardFormat {
+  // IANA media type, e.g. "text/plain;charset=utf-8", "image/png", or the
+  // private "application/x-openlogi-files" whose payload is FileList.
+  // An open set by design: a new representation is a new mime string, not a
+  // schema change.
+  string mime = 1;
+  uint64 size_bytes = 2;
+  // Content hash, when cheap to compute; lets an unchanged re-announce be
+  // deduplicated by the fetcher.
+  optional bytes sha256 = 3;
+}
+
+// Request: send me one representation of clipboard generation `sequence`.
+message ClipboardFetch {
+  uint64 sequence = 1;
+  string mime = 2;
+  // Resume offset in bytes (0 for a fresh fetch); lets an interrupted bulk
+  // transfer continue instead of restarting.
+  uint64 offset = 3;
+}
+
+// Response head, followed on the same stream by Chunk frames and ChunkEnd.
+message ClipboardData {
+  uint64 sequence = 1;
+  string mime = 2;
+  uint64 total_size = 3;
+}
+
+// One slice of a bulk payload. Ordering is the stream's; size cap is
+// CHUNK_MAX (FLOW-PROTOCOL.md §Framing).
+message Chunk {
+  bytes data = 1;
+}
+
+// Terminates a bulk payload; integrity check for the assembled bytes
+// starting at the requested offset.
+message ChunkEnd {
+  optional bytes sha256 = 1;
+}
+
+// The decoded payload of "application/x-openlogi-files".
+message FileList {
+  repeated FileEntry files = 1;
+}
+
+message FileEntry {
+  // Relative path using '/' separators; no absolute paths, no "..". The
+  // receiver places files under its own download location.
+  string relative_path = 1;
+  uint64 size_bytes = 2;
+  // Unix milliseconds; 0 when unknown.
+  uint64 modified_at_ms = 3;
+}
+
+// Request: stream one file from the announced file list.
+// Response: ClipboardData head (mime "application/octet-stream"), Chunks,
+// ChunkEnd — identical shape to any other bulk fetch.
+message FileFetch {
+  uint64 sequence = 1;
+  // Index into the FileList of that sequence.
+  uint32 file_index = 2;
+  uint64 offset = 3;
+}
