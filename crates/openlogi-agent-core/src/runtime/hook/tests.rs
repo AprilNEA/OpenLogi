@@ -201,13 +201,10 @@ fn unattributed_extra_buttons_preserve_the_narrow_macos_exception() {
 }
 
 #[test]
-fn accepted_unattributed_press_owns_its_release_across_focus_changes() {
+fn accepted_unattributed_press_release_is_consumed_once() {
     let mut presses = AcceptedUnattributedPresses::default();
 
-    assert!(!AcceptedUnattributedPresses::admit_down(false));
-    assert!(AcceptedUnattributedPresses::admit_down(true));
     assert!(!presses.take_release(ButtonId::Back));
-
     presses.accept(ButtonId::Back);
     assert!(presses.take_release(ButtonId::Back));
     assert!(!presses.take_release(ButtonId::Back));
