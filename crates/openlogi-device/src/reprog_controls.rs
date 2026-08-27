@@ -250,7 +250,11 @@ impl ReprogControlsV4 {
     pub async fn divert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
         self.set_cid_reporting_full(
             cid,
-            hidpp_reprog::CidReportingChange::temporary_diversion(true, false),
+            hidpp_reprog::CidReportingChange {
+                diverted: Some(true),
+                raw_xy: Some(false),
+                ..Default::default()
+            },
         )
         .await?;
         Ok(())
@@ -260,7 +264,11 @@ impl ReprogControlsV4 {
     pub async fn undivert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
         self.set_cid_reporting_full(
             cid,
-            hidpp_reprog::CidReportingChange::temporary_diversion(false, false),
+            hidpp_reprog::CidReportingChange {
+                diverted: Some(false),
+                raw_xy: Some(false),
+                ..Default::default()
+            },
         )
         .await?;
         Ok(())

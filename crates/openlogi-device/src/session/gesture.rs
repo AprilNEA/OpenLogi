@@ -46,15 +46,6 @@ const LIVENESS_PING_STRIKES: u8 = 2;
 /// whenever no session is connected.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
 
-/// Why a capture session is shutting down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureStop {
-    /// Normal stop — restore diverted controls.
-    Graceful,
-    /// Lease revoked / channel dying — skip restore writes.
-    Revoked,
-}
-
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedInput {
@@ -354,34 +345,6 @@ fn thumbwheel_input(
         .then_some(CapturedInput::ButtonPulse(ButtonId::Thumbwheel))
 }
 
-/// Reason-aware capture: maps stop reasons onto a unit oneshot shutdown.
-pub async fn run_capture_session_with_stop_reason(
-    backend: &dyn HidBackend,
-    route: DeviceRoute,
-    capture_thumbwheel: bool,
-    divert_gesture_button: bool,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<CaptureStop>,
-    channel_slot: CaptureChannel,
-) -> Result<(), GestureError> {
-    let (tx, rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let _ = shutdown.await;
-        let _ = tx.send(());
-    });
-    let spec = CaptureSpec {
-        capture_thumbwheel,
-        // The bool-era API only ever meant the dedicated gesture button; the
-        // haptic panel is reachable through [`CaptureSpec`] itself.
-        divert_gesture_sources: divert_gesture_button
-            .then_some(reprog_controls::GESTURE_BUTTON_CID)
-            .into_iter()
-            .collect(),
-        divert_buttons: Vec::new(),
-    };
-    run_capture_session(backend, route, spec, sink, rx, channel_slot).await
-}
-
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
 #[derive(Default)]
@@ -559,8 +522,12 @@ async fn arm_reprog_control(
         // replayed on restore, leaving the button dead.
         debug!(cid, "control was already diverted before arming");
     }
-    let mut change = reprog_controls::CidReportingChange::temporary_diversion(true, raw_xy);
-    change.remap = original.remap;
+    let change = reprog_controls::CidReportingChange {
+        diverted: Some(true),
+        raw_xy: Some(raw_xy),
+        remap: original.remap,
+        ..Default::default()
+    };
     if let Err(error) = rc.set_cid_reporting_full(cid, change).await {
         let error = GestureError::Hidpp(format!("{error:?}"));
         restore_reporting(rc, ArmedCid { cid, original }, "failed diversion").await;
@@ -583,9 +550,12 @@ async fn arm_reprog_control(
 fn undivert_change(
     reporting: reprog_controls::CidReporting,
 ) -> reprog_controls::CidReportingChange {
-    let mut change = reprog_controls::CidReportingChange::temporary_diversion(false, false);
-    change.remap = reporting.remap;
-    change
+    reprog_controls::CidReportingChange {
+        diverted: Some(false),
+        raw_xy: Some(false),
+        remap: reporting.remap,
+        ..Default::default()
+    }
 }
 
 async fn restore_reporting(rc: &ReprogControlsV4, armed: ArmedCid, what: &str) {
