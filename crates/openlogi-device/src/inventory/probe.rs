@@ -398,7 +398,11 @@ async fn walk_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename: identity.codename.clone(),
+        codename: probe
+            .marketing_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| identity.codename.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.

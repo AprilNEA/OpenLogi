@@ -313,22 +313,12 @@ impl DeviceModelInfo {
 /// Whether model metadata identifies a Logitech G502-family mouse.
 #[must_use]
 pub fn is_g502_family(model: Option<&DeviceModelInfo>, name: Option<&str>) -> bool {
-    const MODEL_IDS: [u16; 11] = [
-        0x407e, 0x407f, 0x4099, 0x409a, 0xc08b, 0xc090, 0xc091, 0xc095, 0xc098, 0xc09d, 0xc332,
-    ];
-
     model.is_some_and(|info| {
         info.model_ids
             .iter()
-            .any(|id| *id != 0 && MODEL_IDS.contains(id))
-    }) || name.is_some_and(|value| {
-        value
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .collect::<String>()
-            .to_ascii_lowercase()
-            .contains("g502")
-    })
+            .copied()
+            .any(openlogi_device_registry::g502::is_model_id)
+    }) || name.is_some_and(openlogi_device_registry::g502::is_marketing_name)
 }
 
 /// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the

@@ -97,7 +97,7 @@ impl<'a> MouseWorkspaceData<'a> {
                 layout: record.map_or(MouseButtonLayout::Default, |record| {
                     MouseButtonLayout::for_device(
                         record.model_info.as_ref(),
-                        Some(&record.model_name),
+                        Some(record.model_identity_name()),
                     )
                 }),
             }

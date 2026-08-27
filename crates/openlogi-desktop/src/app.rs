@@ -108,7 +108,10 @@ impl DetailTab {
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
         let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball)
-            || is_g502_family(record.model_info.as_ref(), Some(&record.model_name));
+            || is_g502_family(
+                record.model_info.as_ref(),
+                Some(record.model_identity_name()),
+            );
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
