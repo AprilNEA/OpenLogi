@@ -294,7 +294,7 @@ fn channel_cache_retires_and_defers_reopen_until_a_later_tick() {
     let channel = Arc::new(());
     cache.insert(1, Arc::clone(&channel));
 
-    assert!(cache.retire_node(&1).is_some());
+    assert!(cache.retire_node(&1));
     assert!(cache.get(&1).is_none());
     assert!(!cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1));
 
