@@ -63,7 +63,9 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::switch_host` + [`SwitchHostError`] appended — software-initiated
 ///      multi-host device switching.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v31: `AgentSnapshot::flow` appended — configured Flow peers and their
+///      coarse connection state.
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -140,6 +142,45 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// Cross-machine Flow availability and coarse peer connection state.
+    pub flow: FlowStatus,
+}
+
+/// Cross-machine Flow state suitable for the low-frequency agent snapshot.
+///
+/// Ping sequence numbers, RTT, and last-seen timestamps deliberately stay out
+/// of IPC: they would churn the observable generation without changing a UI
+/// decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowStatus {
+    /// Whether the loaded config enables Flow.
+    pub enabled: bool,
+    /// Configured peers in config order.
+    pub peers: Vec<FlowPeerStatus>,
+}
+
+/// One configured Flow peer's display identity and coarse link state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPeerStatus {
+    /// User-visible name from `[flow].peers`.
+    pub name: String,
+    /// Canonical `ed25519:<64 lowercase hex>` pinned identity.
+    pub public_key: String,
+    /// Current application-level session state.
+    pub state: FlowLinkState,
+}
+
+/// Churn-safe state of one configured Flow peer session.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowLinkState {
+    /// QUIC and Flow Hello are established and application liveness is healthy.
+    Connected,
+    /// QUIC remains established, but application Pong liveness is stale.
+    Degraded,
+    /// No established Flow connection exists.
+    Lost,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
