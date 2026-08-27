@@ -215,6 +215,31 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
+/// Validate and switch several devices to independently configured host slots.
+///
+/// Every target is prepared before the first write, so an invalid or explicitly
+/// empty destination cannot strand an earlier device. Callers choose the apply
+/// order; Flow places pointing devices first and keyboards last because a
+/// keyboard leaving a shared receiver can remove the command path used by the
+/// other devices. A successful write remains fire-and-forget — destination
+/// arrival requires receiver-side connection evidence.
+pub async fn switch_hosts(
+    targets: &[(DeviceRoute, u8)],
+    channel_pool: &ChannelPool,
+) -> Result<(), HostSwitchError> {
+    let mut prepared = Vec::with_capacity(targets.len());
+    for (route, host) in targets {
+        let channel = open_channel(channel_pool, route, "opening Flow device channel")
+            .await?
+            .ok_or(HostSwitchError::TargetNotFound)?;
+        prepared.push(prepare_host_change_on(&channel, route.device_index(), *host).await?);
+    }
+    for change in prepared {
+        apply_host_change(change).await?;
+    }
+    Ok(())
+}
+
 /// Switch one device on an already-open shared channel to the zero-based `host`.
 ///
 /// The device's reported host count is validated before writing, and an
