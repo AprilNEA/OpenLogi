@@ -198,10 +198,7 @@ async fn run_keyboard_capture_session_on(
         *slot = None;
     }
     for &cid in diverted.keys() {
-        restore(
-            rc.set_cid_reporting(cid, false, false).await,
-            "keyboard key",
-        );
+        restore(rc.undivert_cid(cid).await, "keyboard key");
     }
     debug!(index = device_index, "keyboard key capture stopped");
     Ok(())
@@ -243,7 +240,7 @@ async fn arm_keys(
     let mut diverted = BTreeMap::new();
     for (&cid, &button) in wanted {
         if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-            rc.set_cid_reporting(cid, true, false)
+            rc.divert_cid(cid)
                 .await
                 .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
             diverted.insert(cid, button);
@@ -265,7 +262,7 @@ async fn rearm_keys(rc: &ReprogControlsV4, diverted: &BTreeMap<u16, ButtonId>) {
     // occasionally before the device accepts feature writes again.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     for &cid in diverted.keys() {
-        if let Err(e) = rc.set_cid_reporting(cid, true, false).await {
+        if let Err(e) = rc.divert_cid(cid).await {
             warn!(
                 cid = format_args!("{cid:#06x}"),
                 error = ?e,

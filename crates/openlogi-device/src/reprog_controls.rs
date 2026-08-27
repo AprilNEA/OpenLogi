@@ -244,20 +244,23 @@ impl ReprogControlsV4 {
         self.inner.reset_all_cid_report_settings().await
     }
 
-    /// Set (or clear) temporary diversion and raw-XY reporting for `cid`.
-    ///
-    /// `remap` is left at `0` (no persistent remapping). After enabling, the
-    /// device emits [`RawControlEvent`]s on this feature index; clear both flags
-    /// on teardown to hand the control back to the firmware.
-    pub async fn set_cid_reporting(
-        &self,
-        cid: u16,
-        diverted: bool,
-        raw_xy: bool,
-    ) -> Result<(), Hidpp20Error> {
+    /// Divert `cid`'s reports to software. Raw XY stays off and remapping is
+    /// left untouched; the device then emits [`RawControlEvent`]s on this
+    /// feature index.
+    pub async fn divert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
         self.set_cid_reporting_full(
             cid,
-            hidpp_reprog::CidReportingChange::temporary_diversion(diverted, raw_xy),
+            hidpp_reprog::CidReportingChange::temporary_diversion(true, false),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Hand `cid` back to the firmware: clear temporary diversion and raw XY.
+    pub async fn undivert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
+        self.set_cid_reporting_full(
+            cid,
+            hidpp_reprog::CidReportingChange::temporary_diversion(false, false),
         )
         .await?;
         Ok(())

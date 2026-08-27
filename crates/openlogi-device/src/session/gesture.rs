@@ -30,7 +30,7 @@ use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
-use crate::thumbwheel::{self, Thumbwheel, WheelResolution};
+use crate::thumbwheel::{self, Thumbwheel, WheelDirection, WheelResolution};
 
 /// How often the capture session pings its device to prove the channel still
 /// delivers input reports. Cheap: one HID++ round-trip per interval.
@@ -418,7 +418,7 @@ impl ArmedControls {
             }
         }
         if let Some((tw, _, _)) = self.thumb.as_ref() {
-            restore(tw.set_reporting(false, false).await, "thumb wheel");
+            restore(tw.undivert().await, "thumb wheel");
         }
     }
 }
@@ -534,12 +534,9 @@ async fn arm_controls_into(
         if !supports_single_tap {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
-        if let Err(error) = tw.set_reporting(true, false).await {
+        if let Err(error) = tw.divert(WheelDirection::Default).await {
             let error = GestureError::Hidpp(format!("{error:?}"));
-            restore(
-                tw.set_reporting(false, false).await,
-                "failed thumb wheel diversion",
-            );
+            restore(tw.undivert().await, "failed thumb wheel diversion");
             return Err(error);
         }
         armed.thumb = Some((tw, info.index, resolution));
