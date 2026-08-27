@@ -311,51 +311,78 @@ pub async fn enumerate(
     // probe must keep using the full retry budget so the next attempt can reopen
     // the channel and recover.
     let mut enumerator = Enumerator::with_backend(backend);
-    let mut previous_inventories: Option<Vec<DeviceInventory>> = None;
-    let mut attempt = 1u8;
+    let mut scan = OneShotScan::new();
     loop {
         let (inventories, all_complete, all_healthy) =
             enumerator.enumerate_reporting_completeness().await?;
-        if one_shot_should_stop(
-            previous_inventories.as_deref(),
-            &inventories,
-            all_complete,
-            all_healthy,
-            attempt,
-        ) {
+        let pass = ScanPass {
+            complete: all_complete,
+            healthy: all_healthy,
+        };
+        if scan.is_settled(&inventories, pass) {
             return Ok(inventories);
         }
         debug!(
-            attempt,
-            all_complete,
-            all_healthy,
+            attempt = scan.attempt,
+            complete = pass.complete,
+            healthy = pass.healthy,
             "one-shot enumerate inventory incomplete or still changing — retrying"
         );
-        // Only a healthy pass is valid evidence for the unchanged-inventory
-        // stop, so the equality check below only ever compares two consecutive
-        // healthy snapshots. A failed/timed-out probe (replayed last-good or
-        // partial live result) is cleared so it can't count as one of the two
-        // "stable" reads and short-circuit a later healthy-but-short pass.
-        previous_inventories = if all_healthy { Some(inventories) } else { None };
+        scan.advance(inventories, pass);
         tokio::time::sleep(ONESHOT_RETRY_DELAY).await;
-        attempt += 1;
     }
 }
 
-/// Stop the one-shot retry loop when the snapshot is complete, when a healthy
-/// but short pass has stabilized (the expected Unifying offline-drain case), or
-/// when the explicit attempt cap is reached. An unchanged inventory from a
-/// failed probe is not stable evidence; it must keep retrying until the cap.
-fn one_shot_should_stop(
-    previous: Option<&[DeviceInventory]>,
-    current: &[DeviceInventory],
-    all_complete: bool,
-    all_healthy: bool,
+/// What one enumerate pass established about its own trustworthiness.
+#[derive(Clone, Copy)]
+struct ScanPass {
+    /// Every expected device is present in the snapshot.
+    complete: bool,
+    /// Every probe answered — the only kind of pass that counts as stability
+    /// evidence.
+    healthy: bool,
+}
+
+/// The one-shot retry loop's memory: the snapshot that may serve as stability
+/// evidence, and how many passes have run. [`Self::is_settled`] is the stop
+/// rule the tests pin.
+struct OneShotScan {
+    /// The previous pass's snapshot, kept only when that pass was healthy —
+    /// the unchanged-inventory stop only ever compares two consecutive
+    /// healthy snapshots. A failed/timed-out probe (a replayed last-good or
+    /// partial live result) is cleared so it can't count as one of the two
+    /// "stable" reads and short-circuit a later healthy-but-short pass.
+    stable_candidate: Option<Vec<DeviceInventory>>,
     attempt: u8,
-) -> bool {
-    all_complete
-        || (all_healthy && previous.is_some_and(|previous| previous == current))
-        || attempt >= ONESHOT_ATTEMPTS
+}
+
+impl OneShotScan {
+    fn new() -> Self {
+        Self {
+            stable_candidate: None,
+            attempt: 1,
+        }
+    }
+
+    /// Stop when the snapshot is complete, when a healthy but short pass has
+    /// stabilized (the expected Unifying offline-drain case), or when the
+    /// attempt cap is reached.
+    fn is_settled(&self, current: &[DeviceInventory], pass: ScanPass) -> bool {
+        pass.complete
+            || (pass.healthy
+                && self
+                    .stable_candidate
+                    .as_deref()
+                    .is_some_and(|previous| previous == current))
+            || self.attempt >= ONESHOT_ATTEMPTS
+    }
+
+    /// Fold one finished, unsettled pass in: a healthy snapshot becomes the
+    /// stability candidate, an unhealthy one clears it.
+    fn advance(&mut self, inventories: Vec<DeviceInventory>, pass: ScanPass) {
+        self.stable_candidate = pass.healthy.then_some(inventories);
+        self.attempt += 1;
+    }
 }
 
 /// Attempts a one-shot [`enumerate`] makes before returning whatever it last
