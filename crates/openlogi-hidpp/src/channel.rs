@@ -208,7 +208,7 @@ impl Drop for HidppChannel {
 
 /// Represents a message that was sent and is waiting for a response.
 struct PendingMessage {
-    /// Unique ID used to remove this request if it times out.
+    /// Unique ID used to remove this request when its waiter goes away.
     id: u64,
 
     /// The predicate that has to match for an incoming message to be classified
@@ -218,6 +218,52 @@ struct PendingMessage {
     /// The oneshot sender used to provide the response message to the receiving
     /// end.
     sender: oneshot::Sender<HidppMessage>,
+}
+
+/// One registered request and the receiver waiting for its response.
+///
+/// Dropping this value unregisters the request, including when an outer async
+/// deadline cancels [`HidppChannel::send_with_timeout`] during its write.
+struct PendingRequest {
+    id: u64,
+    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    receiver: oneshot::Receiver<HidppMessage>,
+}
+
+impl PendingRequest {
+    fn register(
+        id: u64,
+        pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = oneshot::channel();
+        let request = Self {
+            id,
+            pending_messages,
+            receiver,
+        };
+        lock(&request.pending_messages).push_back(PendingMessage {
+            id,
+            response_predicate: Box::new(response_predicate),
+            sender,
+        });
+        request
+    }
+
+    async fn receive(mut self) -> Result<HidppMessage, ChannelError> {
+        (&mut self.receiver)
+            .await
+            .map_err(|_| ChannelError::NoResponse)
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        let mut pending = lock(&self.pending_messages);
+        if let Some(pos) = pending.iter().position(|message| message.id == self.id) {
+            pending.remove(pos);
+        }
+    }
 }
 
 impl HidppChannel {
@@ -386,41 +432,29 @@ impl HidppChannel {
         let (dev, feat, func) = msg.header();
         trace!(dev, feat, func, "hidpp request");
 
-        let (sender, receiver) = oneshot::channel::<HidppMessage>();
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
-
-        {
-            let mut pending = lock(&self.pending_messages);
-            // Drop abandoned requests before queuing this one. Timeouts and
-            // write failures remove their entry eagerly below, but a caller
-            // cancelled mid-flight (an outer `timeout(..)` dropping the whole
-            // future) still leaves its `PendingMessage` behind. On a channel
-            // reused across inventory ticks those would accumulate unboundedly
-            // — and a late response could be mis-delivered to a recycled
-            // software id. `is_canceled()` is true once the receiver is gone,
-            // so this prunes exactly the give-ups.
-            pending.retain(|m| !m.sender.is_canceled());
-            pending.push_back(PendingMessage {
-                id: pending_id,
-                response_predicate: Box::new(response_predicate),
-                sender,
-            });
-        }
+        let pending_request = PendingRequest::register(
+            pending_id,
+            Arc::clone(&self.pending_messages),
+            response_predicate,
+        );
 
         // The deadline covers the write as well: `write_report` has no
         // bounded-time contract of its own, so a wedged device could otherwise
         // park `send` forever before the response wait even starts.
-        let mut request = std::pin::pin!(
-            async {
-                self.send_and_forget(msg).await?;
-                receiver.await.map_err(|_| ChannelError::NoResponse)
-            }
-            .fuse()
-        );
+        let result = {
+            let mut request = std::pin::pin!(
+                async move {
+                    self.send_and_forget(msg).await?;
+                    pending_request.receive().await
+                }
+                .fuse()
+            );
 
-        let result = select! {
-            result = request => result,
-            () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            select! {
+                result = request => result,
+                () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            }
         };
 
         match &result {
@@ -428,21 +462,7 @@ impl HidppChannel {
             Err(e) => trace!(dev, feat, error = ?e, "hidpp no response"),
         }
 
-        if result.is_err() {
-            // A timeout or write failure leaves the entry queued — remove it
-            // eagerly. After a matched response the read thread has already
-            // taken it, so this is a no-op then.
-            self.remove_pending_message(pending_id);
-        }
-
         result
-    }
-
-    fn remove_pending_message(&self, id: u64) {
-        let mut pending = lock(&self.pending_messages);
-        if let Some(pos) = pending.iter().position(|msg| msg.id == id) {
-            pending.remove(pos);
-        }
     }
 
     /// Sends a HID++ message across the channel and does not wait for a

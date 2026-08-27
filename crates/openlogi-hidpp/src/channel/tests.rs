@@ -139,6 +139,37 @@ fn send_times_out_and_removes_pending_message() {
 }
 
 #[test]
+fn cancelled_send_removes_pending_before_a_late_response() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        handle.park_writes();
+        let channel = channel_with_reader(raw).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        channel.add_msg_listener(move |msg, matched| {
+            listener_events.lock().unwrap().push((msg, matched));
+        });
+
+        let late_response = short_msg(0x20);
+        let mut send = Box::pin(channel.send_with_timeout(
+            short_msg(0x10),
+            move |candidate| *candidate == late_response,
+            Duration::from_secs(1),
+        ));
+
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        assert_eq!(channel.pending_messages.lock().unwrap().len(), 1);
+
+        drop(send);
+        assert_pending_empty(&channel);
+
+        handle.send_incoming(late_response).await;
+        wait_for_event_count(&events, 1).await;
+        assert_eq!(events.lock().unwrap()[0], (late_response, false));
+    });
+}
+
+#[test]
 fn timeout_removes_only_its_own_pending_message() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
