@@ -21,7 +21,7 @@ When a panel needs a device value the app cannot currently see, the fix is a new
 call in `openlogi-ipc` plus a handler in `openlogi-agent`/`openlogi-agent-core`
 — never an `openlogi-hid` call from here, and never a "just this once" direct
 read. Wire changes are append-only and versioned; see
-[`.claude/rules/ipc-protocol.md`](../../.claude/rules/ipc-protocol.md).
+[`crates/openlogi-ipc/AGENTS.md`](../openlogi-ipc/AGENTS.md).
 
 Two more things this crate is not:
 
@@ -82,7 +82,7 @@ Panels gate on `Capabilities`, never on device `kind`; commits go through
   binary (`desktop-dev`, `agent-release`, `overlay-release`). `cargo xtask`
   packaging reads them; they are the app's macOS identity, not decoration —
   changing one changes what TCC sees. See
-  [`.claude/rules/xtask.md`](../../.claude/rules/xtask.md).
+  [`xtask/AGENTS.md`](../../xtask/AGENTS.md).
 
 ## Related rules
 
@@ -90,6 +90,6 @@ Panels gate on `Capabilities`, never on device `kind`; commits go through
 |---|---|
 | any `.rs` here (GPUI house style) | [`.claude/rules/gui.md`](../../.claude/rules/gui.md) |
 | `services/i18n.rs`, any user-facing string | [`.claude/rules/i18n.md`](../../.claude/rules/i18n.md) |
-| anything crossing the agent boundary | [`.claude/rules/ipc-protocol.md`](../../.claude/rules/ipc-protocol.md) |
+| anything crossing the agent boundary | [`crates/openlogi-ipc/AGENTS.md`](../openlogi-ipc/AGENTS.md) |
 | `platform/**` or any macOS FFI | [`.claude/rules/objc-ffi.md`](../../.claude/rules/objc-ffi.md) |
 | a permission symptom or the bundle identity | [`.claude/skills/openlogi-macos-permissions/SKILL.md`](../../.claude/skills/openlogi-macos-permissions/SKILL.md) |
