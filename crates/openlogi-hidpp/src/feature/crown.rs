@@ -101,8 +101,7 @@ pub struct CrownInfo {
     pub ratchets: u16,
 }
 
-/// The crown's mode, from [`get_mode`](CrownFeature::get_mode) and echoed by
-/// [`set_mode`](CrownFeature::set_mode).
+/// The crown's current mode, from [`get_mode`](CrownFeature::get_mode).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -182,11 +181,17 @@ impl CrownFeature {
         CrownMode::from_payload(&payload)
     }
 
-    /// Sets the crown's mode and returns the resulting mode echoed by the device.
+    /// Sets the crown's mode.
     ///
     /// Divert the crown ([`ReportingMode::Diverted`]) for [`CrownEvent`]s to be
     /// emitted.
-    pub async fn set_mode(&self, mode: SetCrownMode) -> Result<CrownMode, Hidpp20Error> {
+    ///
+    /// The spec's `SetMode` response merely echoes the request bytes — `None`
+    /// sentinels included — so it carries no statement about the device's
+    /// resulting mode and is deliberately not decoded (a `None` field's echo
+    /// would even trip the strict [`CrownMode`] decoder). Read the mode back
+    /// with [`get_mode`](Self::get_mode) when it is needed.
+    pub async fn set_mode(&self, mode: SetCrownMode) -> Result<(), Hidpp20Error> {
         let mut args = [0; 16];
         args[..5].copy_from_slice(&[
             mode.diverting.map_or(0, u8::from),
@@ -195,7 +200,7 @@ impl CrownFeature {
             mode.short_long_timeout.map_or(0, NonZeroU8::get),
             mode.double_tap_speed.map_or(0, NonZeroU8::get),
         ]);
-        let payload = self.endpoint.call_long(2, args).await?.extend_payload();
-        CrownMode::from_payload(&payload)
+        self.endpoint.call_long(2, args).await?;
+        Ok(())
     }
 }
