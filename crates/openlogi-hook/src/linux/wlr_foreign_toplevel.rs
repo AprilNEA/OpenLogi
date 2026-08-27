@@ -77,14 +77,28 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_CAP_MS: u64 = 25;
 
 /// Accumulated per-toplevel data. wlr sends individual property events and then
-/// a `done` marking a consistent snapshot, so updates are staged in `pending_*`
-/// and committed on `done`.
+/// a `done` marking a consistent snapshot. Despite their names, `pending_*`
+/// hold the latest protocol-reported values, not one-shot unconsumed events:
+/// properties omitted from a later batch retain their previous value.
 #[derive(Default)]
 struct Toplevel {
     app_id: Option<String>,
     activated: bool,
     pending_app_id: Option<String>,
     pending_activated: bool,
+}
+
+impl Toplevel {
+    fn commit_latest(&mut self) {
+        // `app_id` may arrive after an initial State + Done, so None means
+        // "not reported yet", not "clear the committed id". Do not `take`
+        // either pending field: Wayland may omit unchanged properties from
+        // later batches, and these fields are the latest known snapshot.
+        if self.pending_app_id.is_some() {
+            self.app_id = self.pending_app_id.clone();
+        }
+        self.activated = self.pending_activated;
+    }
 }
 
 /// Dispatch state: the bound manager plus the toplevels seen so far.
@@ -184,16 +198,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
             }
             Event::Done => {
                 if let Some(toplevel) = state.toplevels.get_mut(&id) {
-                    // app_id is sent only when it changes, and a compositor may
-                    // emit State + Done before the first AppId. Committing
-                    // `pending_app_id` unconditionally would clobber a known id
-                    // (or the initial one) with None, so only overwrite when a
-                    // value is actually pending. `activated` defaults to false,
-                    // which is the correct state for a window that sent none.
-                    if toplevel.pending_app_id.is_some() {
-                        toplevel.app_id = toplevel.pending_app_id.clone();
-                    }
-                    toplevel.activated = toplevel.pending_activated;
+                    toplevel.commit_latest();
                 }
             }
             Event::Closed => {
@@ -475,7 +480,26 @@ pub(super) fn candidate() -> Option<Box<dyn FrontmostSource>> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::millis_until;
+    use super::{Toplevel, millis_until};
+
+    #[test]
+    fn done_reuses_latest_values_for_omitted_properties() {
+        let mut toplevel = Toplevel {
+            pending_app_id: Some("org.example.App".into()),
+            pending_activated: true,
+            ..Toplevel::default()
+        };
+
+        toplevel.commit_latest();
+        assert_eq!(toplevel.app_id.as_deref(), Some("org.example.App"));
+        assert!(toplevel.activated);
+
+        // A later Done with no new AppId or State event must preserve both
+        // latest values; pending means latest, not unconsumed.
+        toplevel.commit_latest();
+        assert_eq!(toplevel.app_id.as_deref(), Some("org.example.App"));
+        assert!(toplevel.activated);
+    }
 
     #[test]
     fn millis_until_elapsed_deadline_is_zero() {
