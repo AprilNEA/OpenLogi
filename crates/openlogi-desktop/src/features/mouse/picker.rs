@@ -94,8 +94,11 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::VolumeUp => "action-icons/volume-2.svg",
         Action::VolumeDown => "action-icons/volume-1.svg",
         Action::MuteVolume => "action-icons/volume-x.svg",
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
-        Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
+        Action::CycleDpiPresets
+        | Action::NextDpiPreset
+        | Action::PrevDpiPreset
+        | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
+        Action::ToggleSmartShift | Action::CycleOnboardProfile => "action-icons/refresh-cw.svg",
         Action::ScrollUp => "action-icons/chevrons-up.svg",
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",

@@ -101,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -257,6 +257,7 @@ fn action_ring_types() {
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
+    assert_wire(&HidppOperation::OnboardProfiles, "0f");
 }
 
 #[test]

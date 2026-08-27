@@ -187,6 +187,12 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Step to the next onboard DPI preset (G-series `0x8100` special).
+    NextDpiPreset,
+    /// Step to the previous onboard DPI preset.
+    PrevDpiPreset,
+    /// Cycle the mouse's onboard flash profiles.
+    CycleOnboardProfile,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -279,6 +285,9 @@ macro_rules! for_each_unit_action {
             MuteVolume "Mute" Media Mute,
             // DPI
             CycleDpiPresets "Cycle DPI Presets" Dpi Gauge,
+            NextDpiPreset "DPI Up" Dpi Gauge,
+            PrevDpiPreset "DPI Down" Dpi Gauge,
+            CycleOnboardProfile "Cycle Profile" Dpi Refresh,
             ToggleSmartShift "Toggle SmartShift" Dpi Refresh,
             // Scroll
             ScrollUp "Scroll Up" Scroll ArrowUp,

@@ -51,6 +51,9 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::Back => Action::BrowserBack,
         ButtonId::Forward => Action::BrowserForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
+        ButtonId::DpiUp => Action::NextDpiPreset,
+        ButtonId::DpiDown => Action::PrevDpiPreset,
+        ButtonId::ProfileCycle => Action::CycleOnboardProfile,
         #[expect(
             clippy::match_same_arms,
             reason = "the tap is inert because its captured events are noise (see above), \

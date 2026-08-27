@@ -70,6 +70,10 @@ pub struct Assignment {
     /// `map_slot_name`-style consumers treat unknown names as "no hotspot".
     #[serde(rename = "slotName", default)]
     pub slot_name: String,
+    /// G-series depots (G502) identify slots by `slotId` only, e.g.
+    /// `g502core_g7_m1`. Empty when the depot uses `slotName`.
+    #[serde(rename = "slotId", default)]
+    pub slot_id: String,
     /// Camera depots ship marker-less settings-slot assignments (under the
     /// `device_camera_image` entry, which no hotspot consumer reads); a
     /// missing marker defaults to the origin rather than failing the file.
@@ -104,15 +108,38 @@ impl Metadata {
         self.images.first().map(|i| i.origin)
     }
 
-    /// Raw assignment iterator over the `device_buttons_image` entry.
-    /// Slot-name → application-button mapping is intentionally left to
-    /// the consumer (the GUI owns the ButtonId enum).
+    /// Raw assignment iterator over the images Logi calibrates hotspots
+    /// against. MX-class depots put them on `device_buttons_image`; G-series
+    /// depots put them on `device_image` and `device_side` (no buttons
+    /// image). Camera settings slots stay out.
     pub fn assignments(&self) -> impl Iterator<Item = &Assignment> + '_ {
+        self.hotspot_images().flat_map(|img| img.assignments.iter())
+    }
+
+    /// Assignments authored against a single metadata image key.
+    pub fn assignments_on<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a Assignment> + 'a {
         self.images
             .iter()
-            .find(|i| i.key == "device_buttons_image")
-            .into_iter()
+            .filter(move |img| img.key == key)
             .flat_map(|img| img.assignments.iter())
+    }
+
+    /// Image entries that carry remappable-button markers.
+    pub fn hotspot_images(&self) -> impl Iterator<Item = &ImageEntry> + '_ {
+        let has_buttons_image = self
+            .images
+            .iter()
+            .any(|img| img.key == "device_buttons_image" && !img.assignments.is_empty());
+        self.images.iter().filter(move |img| {
+            if img.assignments.is_empty() {
+                return false;
+            }
+            if has_buttons_image {
+                img.key == "device_buttons_image"
+            } else {
+                matches!(img.key.as_str(), "device_image" | "device_side")
+            }
+        })
     }
 }
 
@@ -144,6 +171,8 @@ mod tests {
         let origin = meta.origin().expect("origin survives");
         assert_eq!((origin.width, origin.height), (3598, 1315));
         assert_eq!(meta.images[0].assignments[0].slot_name, "");
+        assert_eq!(meta.images[0].assignments[0].slot_id, "g513_g1_m1");
+        assert_eq!(meta.assignments().count(), 1);
     }
 
     /// Camera depots (StreamCam) list settings-slot assignments with no
@@ -170,5 +199,30 @@ mod tests {
         let origin = meta.origin().expect("origin survives");
         assert_eq!((origin.width, origin.height), (1280, 800));
         assert_eq!(meta.assignments().count(), 0);
+    }
+
+    #[test]
+    fn g502_slot_id_assignments_on_front_and_side_are_visible() {
+        let json = r#"{
+          "images": [
+            {
+              "key": "device_image",
+              "origin": { "width": 1391, "height": 2700 },
+              "assignments": [
+                { "slotId": "g502core_g3_m1", "marker": { "x": 800, "y": 869 } }
+              ]
+            },
+            {
+              "key": "device_side",
+              "origin": { "width": 936, "height": 2700 },
+              "assignments": [
+                { "slotId": "g502core_g4_m1", "marker": { "x": 580, "y": 1800 } }
+              ]
+            }
+          ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("g502 schema must parse");
+        assert_eq!(meta.assignments().count(), 2);
+        assert_eq!(meta.assignments_on("device_side").count(), 1);
     }
 }
