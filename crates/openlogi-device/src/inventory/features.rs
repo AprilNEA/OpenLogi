@@ -39,9 +39,19 @@ pub(super) struct ProbedFeatures {
     /// such as Windows Bluetooth's plain `"Mouse"`.
     pub(super) marketing_name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
+    ///
+    /// Invariant: `capabilities_incomplete` implies this is `Some`. The sole
+    /// non-test writer, [`probe_features`], returns `Default` when the feature
+    /// table is unavailable and only sets the qualifier after constructing the
+    /// capability set. The cache only replaces that set with another `Some`,
+    /// and persistence only round-trips probes produced here. If another writer
+    /// is added, preserve this proof or replace the pair with a sum type.
     pub(super) capabilities: Option<Capabilities>,
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
     /// the identity fields above may be missing data the device does have.
+    /// This is intentionally independent of `model_info`: `true` with `Some`
+    /// means only the serial-number read failed, while `true` with `None` means
+    /// the whole device-information read failed.
     pub(super) identity_incomplete: bool,
     /// A capability read *failed* (vs. the device not having the capability),
     /// so `capabilities` above understates what the device can do. Memoizing
