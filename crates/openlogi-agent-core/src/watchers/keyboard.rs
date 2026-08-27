@@ -24,6 +24,7 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use super::gesture::DoneAction;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
@@ -74,7 +75,32 @@ impl KeyboardTarget {
 struct RunningKeyboardSession {
     id: HidppSessionId,
     target: KeyboardTarget,
-    stop: oneshot::Sender<()>,
+    /// Present while the session runs; taken to request a stop. `None` means
+    /// the session is draining — deliberately stopped, but its task (and the
+    /// control-restore writes in its teardown) may still be in flight.
+    stop: Option<oneshot::Sender<()>>,
+}
+
+/// Decide the [`DoneAction`] for a completion report, given the session the
+/// manager currently tracks. The gesture manager's rule, applied to the
+/// single keyboard slot: only the current session's report settles anything;
+/// one whose stop sender is gone was stopped deliberately and merely frees
+/// the slot, while one still holding it exited on its own and warrants a
+/// warning alongside the re-arm.
+fn on_done(done_session: &HidppSessionId, live: Option<&RunningKeyboardSession>) -> DoneAction {
+    match live {
+        Some(session) if session.id == *done_session => DoneAction::Remove {
+            unexpected: session.stop.is_some(),
+        },
+        _ => DoneAction::Ignore,
+    }
+}
+
+/// Whether an input belongs to the current, still-live session. A draining
+/// session has already had its presses cancelled, so even its correctly
+/// tagged queued events must not enter the replacement lifecycle.
+fn accepts_input(input_session: &HidppSessionId, live: Option<&RunningKeyboardSession>) -> bool {
+    live.is_some_and(|session| session.id == *input_session && session.stop.is_some())
 }
 
 struct KeyboardInput {
@@ -179,15 +205,14 @@ async fn manage(
     loop {
         tokio::select! {
             Some(input) = rx.recv() => {
-                let Some(running) = current.as_ref() else {
-                    continue;
-                };
                 let live_spec = spec.read().ok().and_then(|guard| guard.clone());
-                let current_target = live_spec.as_ref().is_some_and(|live| running.target.matches(live));
-                if input.session != running.id
-                    || receiver_access.exclusive_requested()
-                    || !current_target
-                {
+                let deliverable = accepts_input(&input.session, current.as_ref())
+                    && !receiver_access.exclusive_requested()
+                    && current
+                        .as_ref()
+                        .zip(live_spec.as_ref())
+                        .is_some_and(|(running, live)| running.target.matches(live));
+                if !deliverable {
                     dispatcher.cancel_hidpp_session(&input.session);
                     debug!(epoch = input.session.epoch(), "input from a stale keyboard session — ignored");
                     continue;
@@ -201,18 +226,22 @@ async fn manage(
                 // While pairing is waiting or active, release the capture
                 // session so run_pairing can own the receiver's HID node.
                 let want = wanted_session(&receiver_access, &spec);
-                if current
-                    .as_ref()
-                    .is_some_and(|running| Some(&running.target) == want.as_ref())
-                {
-                    continue;
-                }
-                // Spec changed (or first tick): stop the old session and start
-                // one for the new state. Sending on the oneshot lets the old
-                // session restore the diverted controls.
-                if let Some(running) = current.take() {
-                    dispatcher.cancel_hidpp_session(&running.id);
-                    let _ = running.stop.send(());
+                if let Some(running) = current.as_mut() {
+                    // Stop a session that no longer matches the spec; sending
+                    // on the oneshot lets it restore the diverted controls.
+                    // The entry stays tracked — stop sender taken — until its
+                    // task reports completion below, and a tracked keyboard
+                    // is never re-armed: arming the replacement while the old
+                    // task may still be mid-restore could interleave its
+                    // divert writes with the restore writes on the same
+                    // device, leaving a control un-diverted while the new
+                    // session believes it owns it (the gesture manager
+                    // documents the same hazard).
+                    let keep = want.as_ref() == Some(&running.target);
+                    if !keep && let Some(stop) = running.stop.take() {
+                        dispatcher.cancel_hidpp_session(&running.id);
+                        let _ = stop.send(());
+                    }
                     continue;
                 }
                 if let Some(target) = want {
@@ -257,19 +286,98 @@ async fn manage(
                     current = Some(RunningKeyboardSession {
                         id,
                         target,
-                        stop: stop_tx,
+                        stop: Some(stop_tx),
                     });
                 }
             }
             Some(done_session) = done_rx.recv() => {
-                // A capture session ended on its own; re-arm only the live one
-                // (see gesture watcher for the epoch/pacing rationale).
-                if current.as_ref().is_some_and(|running| running.id == done_session) {
+                // The session's task has fully exited — restore writes
+                // included — so clearing the slot lets the next tick arm a
+                // successor, paced by TARGET_POLL; a stale epoch belongs to a
+                // session already superseded (see `on_done`).
+                if let DoneAction::Remove { unexpected } = on_done(&done_session, current.as_ref()) {
                     dispatcher.cancel_hidpp_session(&done_session);
-                    warn!("keyboard capture session ended unexpectedly, re-arming");
+                    if unexpected {
+                        warn!("keyboard capture session ended unexpectedly, re-arming");
+                    }
                     current = None;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target() -> KeyboardTarget {
+        KeyboardTarget {
+            config_key: "keyboard-a".to_string(),
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+            },
+            wanted: BTreeMap::new(),
+        }
+    }
+
+    fn session_id(epoch: u64) -> HidppSessionId {
+        HidppSessionId::with_epoch("keyboard-a", epoch)
+    }
+
+    fn draining_session(epoch: u64) -> RunningKeyboardSession {
+        RunningKeyboardSession {
+            id: session_id(epoch),
+            target: target(),
+            stop: None,
+        }
+    }
+
+    fn live_session(epoch: u64) -> RunningKeyboardSession {
+        let (stop, _rx) = oneshot::channel();
+        RunningKeyboardSession {
+            stop: Some(stop),
+            ..draining_session(epoch)
+        }
+    }
+
+    #[test]
+    fn rearms_when_the_current_session_dies() {
+        assert_eq!(
+            on_done(&session_id(7), Some(&live_session(7))),
+            DoneAction::Remove { unexpected: true }
+        );
+    }
+
+    #[test]
+    fn settles_a_draining_session_quietly() {
+        assert_eq!(
+            on_done(&session_id(7), Some(&draining_session(7))),
+            DoneAction::Remove { unexpected: false }
+        );
+    }
+
+    #[test]
+    fn ignores_stale_and_untracked_completions() {
+        assert_eq!(
+            on_done(&session_id(6), Some(&live_session(7))),
+            DoneAction::Ignore
+        );
+        assert_eq!(on_done(&session_id(7), None), DoneAction::Ignore);
+    }
+
+    #[test]
+    fn accepts_inputs_only_from_the_current_live_session() {
+        assert!(accepts_input(&session_id(7), Some(&live_session(7))));
+        assert!(
+            !accepts_input(&session_id(6), Some(&live_session(7))),
+            "a superseded session's queued input is stale"
+        );
+        assert!(
+            !accepts_input(&session_id(7), Some(&draining_session(7))),
+            "a draining session's queued input must not enter the replacement lifecycle"
+        );
+        assert!(!accepts_input(&session_id(7), None));
     }
 }

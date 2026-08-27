@@ -173,9 +173,11 @@ struct SessionChannels {
     capture: CaptureChannel,
 }
 
-/// What the manager should do with one session-completion report.
+/// What a capture-session manager should do with one session-completion
+/// report. Shared with the keyboard manager, which tracks its single session
+/// under the same rules.
 #[derive(Debug, PartialEq)]
-enum DoneAction {
+pub(super) enum DoneAction {
     /// A stale report from a session the manager no longer tracks — ignore it.
     Ignore,
     /// The tracked session's task has fully exited: drop its entry so the next
