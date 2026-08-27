@@ -48,9 +48,7 @@ struct ProfileChoice {
 
 struct AddAppChoices {
     recent: Vec<ProfileChoice>,
-    applications: Vec<ProfileChoice>,
-    loading: bool,
-    failed: bool,
+    catalog: CatalogPresentation,
 }
 
 /// Installed application icons are immutable for a GUI session. The store
@@ -86,6 +84,12 @@ enum AppIconState {
 enum CatalogLoad {
     Loading,
     Ready(Vec<Application>),
+    Failed,
+}
+
+enum CatalogPresentation {
+    Loading,
+    Ready(Vec<ProfileChoice>),
     Failed,
 }
 
@@ -203,9 +207,11 @@ impl AppCatalogPicker {
         &self,
         observed: &HashSet<String>,
         unavailable: &HashSet<String>,
-    ) -> Vec<ProfileChoice> {
-        let CatalogLoad::Ready(applications) = &self.load else {
-            return Vec::new();
+    ) -> CatalogPresentation {
+        let applications = match &self.load {
+            CatalogLoad::Loading => return CatalogPresentation::Loading,
+            CatalogLoad::Ready(applications) => applications,
+            CatalogLoad::Failed => return CatalogPresentation::Failed,
         };
         let mut seen = HashSet::new();
         let mut profiles = applications
@@ -229,7 +235,7 @@ impl AppCatalogPicker {
                 .cmp(&right.name.to_lowercase())
                 .then_with(|| left.app.cmp(&right.app))
         });
-        profiles
+        CatalogPresentation::Ready(profiles)
     }
 }
 
@@ -363,20 +369,16 @@ pub(crate) fn profile_scope_bar(
             picker.ensure_icon(&profile.app, cx);
         }
     });
-    let available_catalog = catalog
+    let catalog_presentation = catalog
         .read(cx)
         .available_profiles(&observed_ids, &unavailable);
-    let loading = matches!(catalog.read(cx).load, CatalogLoad::Loading);
-    let failed = matches!(catalog.read(cx).load, CatalogLoad::Failed);
 
     Some(ProfileScopeBar {
         editing_app,
         profiles,
         choices: AddAppChoices {
             recent: available_recent,
-            applications: available_catalog,
-            loading,
-            failed,
+            catalog: catalog_presentation,
         },
         catalog: catalog.clone(),
         icons: icons.clone(),
@@ -690,15 +692,16 @@ fn add_app_content(
             application_row(choice, icon, pal, popover.clone())
         })
         .collect::<Vec<_>>();
-    let application_rows = choices
-        .applications
-        .iter()
-        .filter(|choice| profile_matches_query(choice, &query))
-        .cloned()
-        .collect::<Vec<_>>();
-    let no_matches = application_rows.is_empty()
-        && !choices.loading
-        && !choices.failed
+    let application_rows = match &choices.catalog {
+        CatalogPresentation::Ready(applications) => applications
+            .iter()
+            .filter(|choice| profile_matches_query(choice, &query))
+            .cloned()
+            .collect::<Vec<_>>(),
+        CatalogPresentation::Loading | CatalogPresentation::Failed => Vec::new(),
+    };
+    let no_matches = matches!(&choices.catalog, CatalogPresentation::Ready(_))
+        && application_rows.is_empty()
         && (query.is_empty() || recent_rows.is_empty());
     let catalog_for_toggle = catalog.clone();
     let list_catalog = catalog.clone();
@@ -733,15 +736,19 @@ fn add_app_content(
             catalog_for_toggle,
             pal,
         ))
-        .when(show_applications && choices.loading, |card| {
-            card.child(catalog_message(tr!("Loading applications…"), pal))
-        })
-        .when(show_applications && choices.failed, |card| {
-            card.child(catalog_message(
-                tr!("Application catalog unavailable."),
-                pal,
-            ))
-        })
+        .when(
+            show_applications && matches!(&choices.catalog, CatalogPresentation::Loading),
+            |card| card.child(catalog_message(tr!("Loading applications…"), pal)),
+        )
+        .when(
+            show_applications && matches!(&choices.catalog, CatalogPresentation::Failed),
+            |card| {
+                card.child(catalog_message(
+                    tr!("Application catalog unavailable."),
+                    pal,
+                ))
+            },
+        )
         .when(show_applications && list_len > 0, |card| {
             card.child(catalog_list(
                 application_rows,
