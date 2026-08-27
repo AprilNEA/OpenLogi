@@ -54,7 +54,7 @@ use openlogi_ipc::{
     ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
     MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
     PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig,
+    RingObservation, SavedConfig, SwitchHostError,
 };
 use succession::{Compat, Run};
 
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 38);
 }
 
 #[test]
@@ -214,6 +214,48 @@ fn request_variant_order() {
             kind: ClientKind::Overlay,
         },
         "1902",
+    );
+    assert_wire(
+        &AgentRequest::SwitchHost {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            host: 2,
+        },
+        "25000846303044434146450102",
+    );
+}
+
+#[test]
+fn switch_host_errors() {
+    assert_wire(&SwitchHostError::DeviceNotFound, "00");
+    assert_wire(&SwitchHostError::FeatureUnsupported, "01");
+    assert_wire(
+        &SwitchHostError::HostOutOfRange {
+            host: 2,
+            host_count: 2,
+        },
+        "020202",
+    );
+    assert_wire(&SwitchHostError::HostSlotEmpty { host: 2 }, "0302");
+    assert_wire(
+        &SwitchHostError::Hid {
+            message: "gone".into(),
+        },
+        "0404676f6e65",
+    );
+    assert_wire(
+        &SwitchHostError::Hidpp {
+            message: "busy".into(),
+        },
+        "050462757379",
+    );
+    assert_wire(
+        &SwitchHostError::TimedOut {
+            operation: "reading current host".into(),
+        },
+        "061472656164696e672063757272656e7420686f7374",
     );
 }
 
