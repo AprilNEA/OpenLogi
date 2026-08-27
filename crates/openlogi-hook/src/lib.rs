@@ -39,6 +39,8 @@ pub use openlogi_core::binding::ButtonId;
 pub use openlogi_core::config::KeyModifiers;
 pub use openlogi_core::scroll::ScrollDelta;
 
+pub mod edge;
+
 mod pointer;
 pub use pointer::{
     PointerContext, PointerTarget, pointer_context, pointer_context_supported,
