@@ -136,8 +136,11 @@ pub struct AppInfo {
     /// Explicit UI-language override, or `None` for "follow system".
     pub ui_language: Option<String>,
     /// Input-monitoring/Accessibility permission state — macOS gates the
-    /// input hook on it.
-    pub accessibility_granted: bool,
+    /// input hook on it. `None` when the agent is unreachable: the permission
+    /// belongs to the agent process, so with the agent down its state is
+    /// unknown, not denied — a support ticket claiming "denied" here sent
+    /// triage down the wrong path.
+    pub accessibility_granted: Option<bool>,
     /// `None` when the agent status is unavailable.
     pub hook_installed: Option<bool>,
     /// Launch-at-login setting, `None` when unknown.
@@ -239,7 +242,7 @@ impl DiagnosticsReport {
         let _ = writeln!(
             out,
             "- Accessibility: {} · Input hook: {}",
-            granted(a.accessibility_granted),
+            opt_state(a.accessibility_granted, "granted", "denied"),
             opt_state(a.hook_installed, "installed", "not installed"),
         );
         let _ = writeln!(
@@ -486,10 +489,6 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-fn granted(value: bool) -> &'static str {
-    if value { "granted" } else { "denied" }
-}
-
 fn opt_state(value: Option<bool>, yes: &'static str, no: &'static str) -> &'static str {
     match value {
         Some(true) => yes,
@@ -525,7 +524,7 @@ mod tests {
             arch: "arm64".to_string(),
             system_locale: Some("en-US".to_string()),
             ui_language: None,
-            accessibility_granted: true,
+            accessibility_granted: Some(true),
             hook_installed: Some(true),
             launch_at_login: Some(true),
             show_in_menu_bar: Some(true),
@@ -707,12 +706,17 @@ mod tests {
         report.app.agent_version = None;
         report.app.protocol_agent = None;
         report.app.inventory = None;
+        report.app.accessibility_granted = None;
         report.app.hook_installed = None;
         report.app.launch_at_login = None;
         let md = report.to_markdown();
         assert!(md.contains("- Agent: not connected"));
         assert!(md.contains("GUI 1 / agent —"));
         assert!(md.contains("- Inventory: —"));
+        assert!(
+            md.contains("Accessibility: unknown"),
+            "an unreachable agent must not claim the permission was denied"
+        );
         assert!(md.contains("Input hook: unknown"));
     }
 
