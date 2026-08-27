@@ -434,6 +434,8 @@ _version: 1
 "Palette": "パレット"
 "Book": "本"
 "Custom shortcut": "カスタムショートカット"
+"Invalid shortcut": "Invalid shortcut"
+"Example: Cmd+Ctrl+Alt+S": "Example: Cmd+Ctrl+Alt+S"
 "Shortcut, e.g. Cmd+Shift+P": "ショートカット（例: Cmd+Shift+P）"
 "Application, folder path, or URL": "アプリ、フォルダのパス、またはURL"
 "Open application or folder": "アプリまたはフォルダを開く"

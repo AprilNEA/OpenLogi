@@ -9,15 +9,19 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
-    scroll::ScrollableElement as _, v_flex,
+    Icon, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants},
+    h_flex,
+    input::InputState,
+    scroll::ScrollableElement as _,
+    v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo, default_binding};
 
 use super::hotspots::MouseControlId;
 use super::picker::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
-    gesture_direction_icon,
+    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, compact_panel, divider,
+    editor_section, gesture_direction_icon, title,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -43,12 +47,18 @@ pub(super) struct BindingInspectorData<'a> {
 struct ActionPickerContext<'a> {
     open: bool,
     search: &'a Entity<InputState>,
+    shortcut_input: &'a Entity<InputState>,
+    shortcut_editor_open: bool,
+    shortcut_error: bool,
     view: &'a Entity<MouseModelView>,
 }
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     action_search: &Entity<InputState>,
+    shortcut_input: &Entity<InputState>,
+    shortcut_editor_open: bool,
+    shortcut_error: bool,
     view: &Entity<MouseModelView>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -56,6 +66,9 @@ pub(super) fn binding_inspector(
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,
+        shortcut_input,
+        shortcut_editor_open,
+        shortcut_error,
         view,
     };
     let body = match data.selected {
@@ -211,7 +224,7 @@ fn button_inspector(
             panel.child(action_library(
                 "inspector-action",
                 Some(&action),
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -264,7 +277,7 @@ fn inherited_gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-override",
                 None,
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -327,7 +340,7 @@ fn gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-action",
                 Some(&current),
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -619,18 +632,54 @@ fn selection_card(
 fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
-    action_search: &Entity<InputState>,
+    picker: ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
-    let query = action_search.read(cx).value();
+    if picker.shortcut_editor_open {
+        return custom_shortcut_editor(picker, on_pick, pal);
+    }
+    let query = picker.search.read(cx).value();
     let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let custom_shortcut = {
+        let view = picker.view.clone();
+        let seed = current.and_then(|action| match action {
+            Action::CustomShortcut(combo) => Some(combo.rendered_label()),
+            _ => None,
+        });
+        let selected = current.is_some_and(|action| matches!(action, Action::CustomShortcut(_)));
+        MenuRow::new(format!("{id_prefix}-custom-shortcut"))
+            .selected(selected)
+            .role(Role::MenuItem)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        svg()
+                            .path("action-icons/keyboard.svg")
+                            .size_4()
+                            .flex_none()
+                            .text_color(pal.text_muted),
+                    )
+                    .child(div().child(tr!("Custom shortcut"))),
+            )
+            .on_click(move |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.shortcut_input().update(cx, |input, cx| {
+                        input.set_value(seed.as_deref().unwrap_or_default(), window, cx);
+                    });
+                    view.open_custom_shortcut_editor();
+                    cx.notify();
+                });
+            })
+    };
     v_flex()
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("Actions"), pal))
-        .child(control_input(action_search).cleanable(true))
+        .child(control_input(picker.search).cleanable(true))
         .child(
             v_flex()
                 .gap_0p5()
@@ -644,6 +693,80 @@ fn action_library(
                     )
                 })
                 .children(rows),
+        )
+        .child(editor_section(tr!("Power User"), pal))
+        .child(custom_shortcut)
+}
+
+fn custom_shortcut_editor(
+    picker: ActionPickerContext<'_>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> gpui::Div {
+    let view_cancel = picker.view.clone();
+    let view_save = picker.view.clone();
+    let input = picker.shortcut_input.clone();
+    let on_pick = on_pick.clone();
+    compact_panel(pal)
+        .w(px(300.))
+        .child(title(tr!("Custom shortcut"), pal))
+        .child(divider(pal))
+        .child(
+            v_flex()
+                .p_2()
+                .gap_2()
+                .child(control_input(&input))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("Example: Cmd+Ctrl+Alt+S")),
+                )
+                .when(picker.shortcut_error, |panel| {
+                    panel.child(
+                        div()
+                            .text_caption()
+                            .text_color(rgb(theme::STATUS_DISABLED))
+                            .child(tr!("Invalid shortcut")),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("mouse-shortcut-cancel")
+                                .ghost()
+                                .label(tr!("Cancel"))
+                                .on_click(move |_, _, cx| {
+                                    view_cancel.update(cx, |view, cx| {
+                                        view.close_custom_shortcut_editor();
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("mouse-shortcut-save")
+                                .primary()
+                                .label(tr!("Save"))
+                                .on_click(move |_, window, cx| {
+                                    let value = input.read(cx).value().to_string();
+                                    match value.parse::<KeyCombo>() {
+                                        Ok(combo) => {
+                                            on_pick(Action::CustomShortcut(combo), window, cx);
+                                            view_save.update(cx, |view, cx| {
+                                                view.close_custom_shortcut_editor();
+                                                cx.notify();
+                                            });
+                                        }
+                                        Err(_) => view_save.update(cx, |view, cx| {
+                                            view.set_custom_shortcut_error(true);
+                                            cx.notify();
+                                        }),
+                                    }
+                                }),
+                        ),
+                ),
         )
 }
 

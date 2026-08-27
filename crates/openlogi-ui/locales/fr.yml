@@ -434,6 +434,8 @@ _version: 1
 "Palette": "Palette"
 "Book": "Livre"
 "Custom shortcut": "Raccourci personnalisé"
+"Invalid shortcut": "Invalid shortcut"
+"Example: Cmd+Ctrl+Alt+S": "Example: Cmd+Ctrl+Alt+S"
 "Shortcut, e.g. Cmd+Shift+P": "Raccourci, p. ex. Cmd+Shift+P"
 "Application, folder path, or URL": "Application, chemin de dossier ou URL"
 "Open application or folder": "Ouvrir une application ou un dossier"

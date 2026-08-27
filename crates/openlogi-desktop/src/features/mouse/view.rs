@@ -127,6 +127,9 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    shortcut_input: Entity<InputState>,
+    custom_shortcut_editor_open: bool,
+    custom_shortcut_error: bool,
     _state_obs: Subscription,
 }
 
@@ -137,6 +140,15 @@ impl MouseModelView {
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search actions…")));
         cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        let shortcut_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Shortcut, e.g. Cmd+Shift+P")));
+        cx.subscribe(&shortcut_input, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.custom_shortcut_error = false;
                 cx.notify();
             }
         })
@@ -166,6 +178,9 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            shortcut_input,
+            custom_shortcut_editor_open: false,
+            custom_shortcut_error: false,
             _state_obs: state_obs,
         }
     }
@@ -179,10 +194,30 @@ impl MouseModelView {
 
     pub(super) fn toggle_action_picker(&mut self) {
         self.action_picker_open = !self.action_picker_open;
+        self.custom_shortcut_editor_open = false;
     }
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
+        self.custom_shortcut_editor_open = false;
+    }
+
+    pub(super) fn open_custom_shortcut_editor(&mut self) {
+        self.action_picker_open = true;
+        self.custom_shortcut_editor_open = true;
+        self.custom_shortcut_error = false;
+    }
+
+    pub(super) fn close_custom_shortcut_editor(&mut self) {
+        self.custom_shortcut_editor_open = false;
+    }
+
+    pub(super) fn shortcut_input(&self) -> Entity<InputState> {
+        self.shortcut_input.clone()
+    }
+
+    pub(super) fn set_custom_shortcut_error(&mut self, error: bool) {
+        self.custom_shortcut_error = error;
     }
 
     fn reset_for_device(&mut self, device_key: Option<&str>) {
@@ -194,6 +229,8 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
+        self.custom_shortcut_editor_open = false;
+        self.custom_shortcut_error = false;
     }
 
     fn select(&mut self, control: MouseControlId) {
@@ -201,6 +238,8 @@ impl MouseModelView {
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
+            self.custom_shortcut_editor_open = false;
+            self.custom_shortcut_error = false;
         }
     }
 }
@@ -319,6 +358,9 @@ impl Render for MouseModelView {
                 overridden,
             },
             &self.action_search,
+            &self.shortcut_input,
+            self.custom_shortcut_editor_open,
+            self.custom_shortcut_error,
             &view,
             cx,
         );
@@ -970,6 +1012,9 @@ mod tests {
                     overridden: None,
                 },
                 &view.action_search,
+                &view.shortcut_input,
+                view.custom_shortcut_editor_open,
+                view.custom_shortcut_error,
                 &entity,
                 cx,
             );
