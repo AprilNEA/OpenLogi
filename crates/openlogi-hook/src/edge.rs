@@ -1,10 +1,13 @@
-//! Platform-neutral screen-edge geometry for Flow.
+//! Platform-neutral screen-edge geometry and crossing detection for Flow.
 //!
-//! Platform code supplies display rectangles; this module computes the exposed
-//! handoff edges. It performs no display enumeration or input I/O.
+//! Platform code supplies display rectangles and timestamped cursor positions;
+//! this module computes the handoff edges and turns a sustained or fast approach
+//! into one crossing event. It performs no display enumeration or input I/O.
 
+mod detector;
 mod geometry;
 
+pub use detector::{ArmedSides, EdgeCrossing, EdgeDetector, EdgeDetectorParams, Velocity};
 pub use geometry::{DisplayGeometryProvider, DisplayRect, EdgeSegment, ExposedEdges};
 
 /// A side of a display in a coordinate space where x increases rightward and y
