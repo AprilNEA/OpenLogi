@@ -874,14 +874,14 @@ unsafe fn find_button(
     found
 }
 
-/// Press the Back (`forward=false`) or Forward (`forward=true`) navigation
-/// button in the frontmost application via the Accessibility API.
+/// Press Safari's Back (`forward=false`) or Forward (`forward=true`)
+/// navigation button when Safari is frontmost via the Accessibility API.
 ///
 /// Safari's WKWebView ignores synthetic `CGEvent` mouse-button and keyboard
 /// events posted at the HID or Session tap levels. However it does respond
-/// correctly to `AXPress` on its toolbar's "Go back" / "Go forward" button,
-/// because that path goes through AppKit's normal action dispatch rather than
-/// the input event pipeline.
+/// correctly to `AXPress` on its toolbar button selected by stable
+/// `AXIdentifier`, because that path goes through AppKit's normal action
+/// dispatch rather than the input event pipeline.
 ///
 /// Returns `true` when an AX button was found and pressed (result `kAXErrorSuccess`),
 /// `false` on any failure — the caller should fall back to a keyboard shortcut.

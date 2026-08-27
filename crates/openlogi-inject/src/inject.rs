@@ -310,12 +310,12 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     }
 }
 
-/// Navigate the browser identified by `pid` backwards or forwards using the
-/// Accessibility API (`AXPress` on the "Go back" / "Go forward" toolbar button).
+/// Navigate Safari backwards or forwards using `AXPress` on its toolbar
+/// button's stable Accessibility identifier.
 ///
 /// Call this from the gesture watcher **at the moment the button press arrives**
-/// so `pid` reflects the correct frontmost app rather than whatever happens to
-/// be frontmost when the async dispatch completes. Returns `true` on success.
+/// so `pid` identifies Safari while it is frontmost. The call returns `false`
+/// if that process is no longer frontmost or the frontmost app is not Safari.
 /// No-op (returns `false`) on non-macOS platforms.
 #[must_use]
 pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
@@ -330,12 +330,12 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
-/// Navigate the frontmost browser backwards or forwards through its
-/// Accessibility toolbar button.
+/// Navigate the frontmost Safari window backwards or forwards through a stable
+/// Accessibility toolbar-button identifier.
 ///
 /// Safari ignores the synthetic keyboard events used by the ordinary browser
-/// shortcuts, so callers should try this first and fall back to
-/// [`execute`](crate::execute) when it returns `false`. No-op (returns `false`)
+/// shortcuts, so callers should try this first and fall back to [`execute`]
+/// when it returns `false`. No-op (returns `false`)
 /// on non-macOS platforms.
 #[must_use]
 pub fn ax_navigate_frontmost_browser(forward: bool) -> bool {
