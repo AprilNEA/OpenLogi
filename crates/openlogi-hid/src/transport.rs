@@ -344,22 +344,28 @@ fn free_sw_id(id: u8) {
     }
 }
 
-/// Give `channel` a process-unique fixed software id for its lifetime.
+/// Give `channel` a process-unique fixed software id for its lifetime, or
+/// refuse when all 15 ids are leased.
 ///
 /// The `Leased` policy is fixed-id by construction — rotation cannot be
 /// combined with it, which is the point: concurrent channels that share a
 /// rotating `1..=15` sequence eventually reuse the same id and cross-match.
-fn configure_channel_sw_ids(channel: &mut HidppChannel) {
-    let Some(id) = try_lease_sw_id() else {
-        // More than 15 simultaneous opens is unexpected; keep the default id
-        // rather than colliding with a live lease deliberately.
-        debug!("all HID++ software ids are leased; channel keeps default id 1");
-        return;
-    };
+/// Refusing on exhaustion is equally deliberate: with the pool empty, the
+/// default id 1 is by construction held by a live channel, so falling back to
+/// it would silently recreate the response cross-matching this allocator
+/// exists to prevent. A refused open surfaces as a failed probe, which the
+/// ledger replays and retries next tick.
+fn configure_channel_sw_ids(channel: &mut HidppChannel) -> Result<(), BackendError> {
+    let id = try_lease_sw_id().ok_or_else(|| {
+        BackendError::Backend(
+            "all 15 HID++ software ids are leased — refusing an open that would share one".into(),
+        )
+    })?;
     channel.set_sw_id_policy(SwIdPolicy::Leased {
         id,
         free: free_sw_id,
     });
+    Ok(())
 }
 
 pub(crate) async fn open_hidpp_channel(
@@ -379,7 +385,7 @@ pub(crate) async fn open_hidpp_channel(
             .map_err(backend_error)?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
-                configure_channel_sw_ids(&mut c);
+                configure_channel_sw_ids(&mut c)?;
                 Arc::new(c)
             }
             Err(e) => {
@@ -399,7 +405,7 @@ pub(crate) async fn open_hidpp_channel(
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
-                configure_channel_sw_ids(&mut c);
+                configure_channel_sw_ids(&mut c)?;
                 Arc::new(c)
             }
             Err(e) => {
