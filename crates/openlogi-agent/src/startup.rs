@@ -1,38 +1,32 @@
-//! The agent's startup ladder: bootstrap, the dormancy gate, arming.
+//! The agent's startup construction: everything built *before* arming.
 //!
-//! [`bootstrap`] builds everything that is safe *before* the agent is armed —
-//! pure construction plus the IPC socket bind, no permission prompt, no
-//! device open, no helper spawn. Between it and arming sits the macOS
-//! dormancy gate ([`await_demand`]): with `launch_at_login` off, a launchd
-//! login start waits here for the demand signal (the first accepted IPC
-//! connection) and otherwise leaves with a clean `exit(0)`. The state
-//! watchers ([`spawn_state_watchers`]) spawn at arming, feeding the select
-//! loop in `main`.
+//! [`bootstrap`] assembles the [`Core`] — pure construction plus the IPC
+//! socket bind, no permission prompt, no device open, no helper spawn. The
+//! watcher fleets ([`spawn_hidpp_watchers`], [`spawn_state_watchers`]) spawn
+//! later, at arming. The ladder itself — bootstrap, the dormancy gate,
+//! arming, the select loop — is `crate::lifecycle`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
-use openlogi_agent_core::watchers;
+use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
+use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
+use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 use crate::server::AgentServer;
-use crate::{InputServices, pairing, server};
+use crate::{pairing, server};
 
-/// How long a dormant agent waits for a client before leaving. Generous next
-/// to the seconds a kickstarting GUI needs to connect; the only cost of the
-/// window is an idle process that has opened no device and prompted for
-/// nothing.
-#[cfg(target_os = "macos")]
-const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
-
-/// Everything [`run`] needs alive after [`bootstrap`]: the shared state plus
-/// the running IPC server's handles.
+/// Everything the lifecycle keeps alive after [`bootstrap`]: the shared state
+/// plus the running IPC server's handles.
 pub(crate) struct Core {
     pub(crate) orchestrator: Arc<Mutex<Orchestrator>>,
     pub(crate) shared: SharedRuntime,
@@ -127,7 +121,89 @@ fn spawn_ipc_server(
     ring_haptics
 }
 
+/// The input-action runtimes: the Actions Ring, the button-lifecycle worker,
+/// and the smooth-scroll worker. Started inside [`bootstrap`] — they are pure
+/// in-process workers that touch no device until an action is dispatched.
+pub(crate) struct InputServices {
+    pub(crate) ring: Arc<ActionRingManager>,
+    pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    pub(crate) dispatcher: ActionDispatcher,
+    action_runtime: ActionRuntime,
+    pub(crate) scroll_input: ScrollInputHandle,
+    scroll_runtime: ScrollRuntime,
+}
+
+impl InputServices {
+    fn start(shared: &SharedRuntime) -> Option<Self> {
+        let ring = Arc::new(ActionRingManager::default());
+        let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
+        let action_runtime = match ActionRuntime::new(
+            shared.dpi_cycle.clone(),
+            shared.capture_channel.clone(),
+            shared.channel_registry.clone(),
+            shared.receiver_access.clone(),
+            sender,
+        ) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!(error = %e, "could not start button lifecycle worker — agent exiting");
+                return None;
+            }
+        };
+        let scroll_runtime = match ScrollRuntime::spawn(Arc::clone(&shared.scroll_preferences)) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                warn!(error = %e, "could not start smooth-scroll worker — agent exiting");
+                return None;
+            }
+        };
+        let dispatcher = action_runtime.dispatcher();
+        let scroll_input = scroll_runtime.input();
+        Some(Self {
+            ring,
+            triggers,
+            dispatcher,
+            action_runtime,
+            scroll_input,
+            scroll_runtime,
+        })
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        self.scroll_runtime.shutdown();
+        self.action_runtime.shutdown();
+    }
+}
+
+/// Start the HID++ background sessions that do not need Accessibility.
+pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
+    watchers::gesture::spawn(
+        shared.capture_plans.clone(),
+        shared.capture_channel.clone(),
+        shared.receiver_access.clone(),
+        GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
+    );
+    watchers::host_switch::spawn(
+        shared.host_switch_links.clone(),
+        shared.channel_pool.clone(),
+        shared.receiver_access.clone(),
+    );
+    watchers::keyboard::spawn(
+        shared.keyboard_spec.clone(),
+        shared.keyboard_channel.clone(),
+        shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
+        inputs.dispatcher.clone(),
+    );
+}
+
 /// The per-source state watchers the select loop drains, spawned at arming.
+///
+/// Everything in here — and everything else the lifecycle's select loop
+/// listens to — is low-frequency by contract: second-scale polls and one-shot
+/// signals. That contract is what makes the unbounded channels safe. The
+/// input hot path (hook → dispatcher → inject) never passes through the
+/// select loop; do not route a high-rate source through it.
 pub(crate) struct StateWatchers {
     pub(crate) inventory: tokio::sync::mpsc::UnboundedReceiver<watchers::inventory::InventoryEvent>,
     pub(crate) camera: tokio::sync::mpsc::UnboundedReceiver<bool>,
@@ -157,22 +233,4 @@ pub(crate) fn spawn_state_watchers(shared: &SharedRuntime) -> StateWatchers {
 fn seed_permission_facts(observable: &ObservableState) {
     observable.set_accessibility_granted(Hook::has_accessibility());
     observable.set_input_monitoring_granted(openlogi_hid::permissions::has_access());
-}
-
-/// The dormancy gate's verdict: wait for a client to connect (the demand that
-/// arms a dormant agent), giving up on the deadline, a shutdown signal, or an
-/// uninstall.
-#[cfg(target_os = "macos")]
-pub(crate) async fn await_demand(
-    connected: &tokio::sync::Notify,
-    sigterm: &mut Option<tokio::signal::unix::Signal>,
-    sigint: &mut Option<tokio::signal::unix::Signal>,
-    uninstalled: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
-) -> bool {
-    tokio::select! {
-        () = connected.notified() => true,
-        () = tokio::time::sleep(DORMANT_DEADLINE) => false,
-        () = crate::shutdown::shutdown_signal(sigterm, sigint) => false,
-        Some(()) = uninstalled.recv() => false,
-    }
 }

@@ -6,7 +6,7 @@ use tracing::info;
 #[cfg(unix)]
 use tracing::warn;
 
-use crate::InputServices;
+use crate::startup::InputServices;
 
 /// A future that fires when `signal` does, or never when the handler could not
 /// be installed.
@@ -20,48 +20,57 @@ async fn fires(signal: &mut Option<tokio::signal::unix::Signal>) {
     }
 }
 
-/// Resolves on the first signal that means *stop now*: `SIGTERM` from launchd
-/// (logout, `bootout`) or from an incoming agent's takeover, `SIGINT` from a
-/// dev-run Ctrl-C. Both default to killing the process where it stands, which
-/// on macOS would strand an armed HID event tap in the system's tap chain.
-#[cfg(unix)]
-pub(crate) async fn shutdown_signal(
-    sigterm: &mut Option<tokio::signal::unix::Signal>,
-    sigint: &mut Option<tokio::signal::unix::Signal>,
-) {
-    tokio::select! {
-        () = fires(sigterm) => {}
-        () = fires(sigint) => {}
+/// The process's stop-signal listeners, installed once right after bootstrap
+/// and consumed by whichever lifecycle stage is currently in charge — the
+/// dormancy gate first, the run loop after arming. Owning them as one value
+/// is what hands them from stage to stage without a loose pair of receivers.
+pub(crate) struct ShutdownSignals {
+    #[cfg(unix)]
+    sigterm: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    sigint: Option<tokio::signal::unix::Signal>,
+}
+
+impl ShutdownSignals {
+    /// Install the shutdown-signal handlers. A handler that cannot be
+    /// installed is `None`, which simply never fires.
+    #[cfg(unix)]
+    pub(crate) fn install() -> Self {
+        fn listen(kind: tokio::signal::unix::SignalKind) -> Option<tokio::signal::unix::Signal> {
+            tokio::signal::unix::signal(kind)
+                .inspect_err(|error| warn!(%error, ?kind, "could not install signal handler"))
+                .ok()
+        }
+        Self {
+            sigterm: listen(tokio::signal::unix::SignalKind::terminate()),
+            sigint: listen(tokio::signal::unix::SignalKind::interrupt()),
+        }
     }
-}
 
-/// No signal to wait for off unix; the arm simply never fires.
-#[cfg(not(unix))]
-pub(crate) async fn shutdown_signal(_sigterm: &mut Option<()>, _sigint: &mut Option<()>) {
-    std::future::pending::<()>().await;
-}
-
-/// Install the shutdown-signal handlers, `(SIGTERM, SIGINT)`. A handler that
-/// cannot be installed is `None`, which simply never fires.
-#[cfg(unix)]
-pub(crate) fn shutdown_signals() -> (
-    Option<tokio::signal::unix::Signal>,
-    Option<tokio::signal::unix::Signal>,
-) {
-    fn listen(kind: tokio::signal::unix::SignalKind) -> Option<tokio::signal::unix::Signal> {
-        tokio::signal::unix::signal(kind)
-            .inspect_err(|error| warn!(%error, ?kind, "could not install signal handler"))
-            .ok()
+    /// No signals exist off unix.
+    #[cfg(not(unix))]
+    pub(crate) fn install() -> Self {
+        Self {}
     }
-    (
-        listen(tokio::signal::unix::SignalKind::terminate()),
-        listen(tokio::signal::unix::SignalKind::interrupt()),
-    )
-}
 
-#[cfg(not(unix))]
-pub(crate) fn shutdown_signals() -> (Option<()>, Option<()>) {
-    (None, None)
+    /// Resolves on the first signal that means *stop now*: `SIGTERM` from
+    /// launchd (logout, `bootout`) or from an incoming agent's takeover,
+    /// `SIGINT` from a dev-run Ctrl-C. Both default to killing the process
+    /// where it stands, which on macOS would strand an armed HID event tap in
+    /// the system's tap chain.
+    #[cfg(unix)]
+    pub(crate) async fn recv(&mut self) {
+        tokio::select! {
+            () = fires(&mut self.sigterm) => {}
+            () = fires(&mut self.sigint) => {}
+        }
+    }
+
+    /// No signal to wait for off unix; the future simply never resolves.
+    #[cfg(not(unix))]
+    pub(crate) async fn recv(&mut self) {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Release the input hook, then end the process.
