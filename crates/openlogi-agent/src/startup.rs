@@ -270,9 +270,10 @@ pub(crate) fn spawn_state_watchers(
 }
 
 /// Seed the permission facts with non-prompting reads, so a client that
-/// connects before the watchers' first tick doesn't see a default.
+/// connects before the watchers' first tick doesn't see a default. No hook is
+/// installed this early — arming is what may install one.
 #[cfg(target_os = "macos")]
 fn seed_permission_facts(observable: &ObservableState) {
-    observable.set_accessibility_granted(Hook::has_accessibility());
+    observable.set_accessibility_and_hook(Hook::has_accessibility(), false);
     observable.set_input_monitoring_granted(openlogi_hid::permissions::has_access());
 }

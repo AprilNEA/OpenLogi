@@ -346,17 +346,19 @@ impl Armed {
         }
     }
 
-    /// Fold one Accessibility-grant change into the hook and publish the
-    /// resulting hook state — one publish on every path.
+    /// Fold one Accessibility-grant change into the hook, then publish the
+    /// permission and the hook state it produced as one generation — no
+    /// observation can claim the hook is installed without the permission it
+    /// requires.
     fn apply_accessibility(&mut self, granted: bool) {
-        self.observable.set_accessibility_granted(granted);
         if !granted {
             self.stop_hook();
         }
         if granted && self.hook.is_none() {
             self.hook = self.start_hook();
         }
-        self.observable.set_hook_installed(self.hook.is_some());
+        self.observable
+            .set_accessibility_and_hook(granted, self.hook.is_some());
     }
 
     /// Install the OS mouse hook, or say why it stays off.
