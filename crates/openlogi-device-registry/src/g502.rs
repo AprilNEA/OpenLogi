@@ -26,10 +26,8 @@ pub fn is_marketing_name(name: &str) -> bool {
     {
         matched = if byte == FAMILY[matched] {
             matched + 1
-        } else if byte == FAMILY[0] {
-            1
         } else {
-            0
+            usize::from(byte == FAMILY[0])
         };
         if matched == FAMILY.len() {
             return true;
