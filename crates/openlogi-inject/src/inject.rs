@@ -313,9 +313,9 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
 /// Navigate Safari backwards or forwards using `AXPress` on its toolbar
 /// button's stable Accessibility identifier.
 ///
-/// Call this from the gesture watcher **at the moment the button press arrives**
-/// so `pid` identifies Safari while it is frontmost. The call returns `false`
-/// if that process is no longer frontmost or the frontmost app is not Safari.
+/// Capture `pid` with [`frontmost_safari_pid`] when the button press arrives,
+/// then pass it here from asynchronous dispatch. The call returns `false` if
+/// that process is no longer frontmost or the frontmost app is not Safari.
 /// No-op (returns `false`) on non-macOS platforms.
 #[must_use]
 pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
@@ -327,6 +327,24 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     {
         let _ = (pid, forward);
         false
+    }
+}
+
+/// Return the process identifier of the frontmost Safari application.
+///
+/// This captures the bundle identity and PID in one platform query so an
+/// asynchronous caller can bind later navigation to the application that was
+/// active when the physical press arrived. Returns `None` when Safari is not
+/// frontmost and on non-macOS platforms.
+#[must_use]
+pub fn frontmost_safari_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_safari_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
     }
 }
 

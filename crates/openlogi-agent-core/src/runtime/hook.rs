@@ -20,7 +20,7 @@ use openlogi_hook::{
 use tracing::{info, warn};
 
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
@@ -237,14 +237,14 @@ fn button_source_may_remap(
     }
 }
 
-fn safari_is_frontmost() -> bool {
+fn press_time_safari_target() -> Option<ActionDispatchTarget> {
     #[cfg(target_os = "macos")]
     {
-        openlogi_hook::frontmost_application().is_some_and(|app| app.id == "com.apple.Safari")
+        openlogi_inject::frontmost_safari_pid().map(ActionDispatchTarget::SafariProcess)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        false
+        None
     }
 }
 
@@ -304,7 +304,10 @@ fn handle_button(
         && !pressed
         && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take_release(id));
     let unattributed_browser_down = macos_browser_button && pressed && device.is_none();
-    let safari_exception = unattributed_browser_down && safari_is_frontmost();
+    let action_target = unattributed_browser_down
+        .then(press_time_safari_target)
+        .flatten();
+    let safari_exception = action_target.is_some();
     if !accepted_unattributed_release && !button_source_may_remap(id, device, safari_exception) {
         if !pressed && macos_browser_button && device.is_none() {
             FAIL_OPEN_PRESSES.with_borrow_mut(|presses| {
@@ -326,7 +329,7 @@ fn handle_button(
             if let Some(HoldAdmission::Replace(stale)) = &admission {
                 dispatcher.cancel_stale_hook_press(stale);
             }
-            if let Some(press) = dispatcher.try_hook_button_down(id, None) {
+            if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
                 if unattributed_browser_down {
                     ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
                 }
@@ -371,7 +374,7 @@ fn handle_button(
     if pressed {
         info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
         let queued = dispatcher
-            .try_hook_button_down(id, Some(&binding))
+            .try_hook_button_down(id, Some(&binding), action_target)
             .is_some();
         if queued && unattributed_browser_down {
             ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));

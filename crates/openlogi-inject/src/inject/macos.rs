@@ -874,6 +874,27 @@ unsafe fn find_button(
     found
 }
 
+/// Return the frontmost Safari process identity from one `NSWorkspace` read.
+#[expect(
+    unsafe_code,
+    reason = "NSString::to_str borrows a UTF-8 view scoped to the autorelease pool"
+)]
+pub(super) fn frontmost_safari_pid() -> Option<i32> {
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSWorkspace;
+
+    autoreleasepool(|pool| {
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        let bundle_id = app.bundleIdentifier()?;
+        // SAFETY: the borrowed UTF-8 view is consumed before `pool` ends.
+        if unsafe { bundle_id.to_str(pool) } != "com.apple.Safari" {
+            return None;
+        }
+        let pid = app.processIdentifier();
+        (pid > 0).then_some(pid)
+    })
+}
+
 /// Press Safari's Back (`forward=false`) or Forward (`forward=true`)
 /// navigation button when Safari is frontmost via the Accessibility API.
 ///
