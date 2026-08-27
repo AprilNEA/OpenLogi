@@ -430,6 +430,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    flow: crate::flow::FlowInputHandle,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -454,8 +455,11 @@ pub fn start(
                     device,
                 } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
                 MouseEvent::Moved {
-                    delta_x, delta_y, ..
+                    delta_x,
+                    delta_y,
+                    modifiers,
                 } => {
+                    flow.try_moved(modifiers.control);
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {

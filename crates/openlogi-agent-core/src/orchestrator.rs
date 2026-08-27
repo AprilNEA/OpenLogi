@@ -31,6 +31,7 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
+use crate::flow::{FlowController, FlowDeviceSnapshot};
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -103,6 +104,8 @@ pub struct SharedRuntime {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Flow network, handoff, and edge runtime. Dormant until the agent arms.
+    pub flow: FlowController,
 }
 
 impl SharedRuntime {
@@ -194,6 +197,14 @@ impl Orchestrator {
     /// it carries are seeded here.
     #[must_use]
     pub fn new(config: Config, observable: Arc<ObservableState>) -> Self {
+        let channel_pool = openlogi_hid::host::channel_pool();
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            config.flow.clone(),
+            Arc::clone(&observable),
+            channel_pool.clone(),
+            receiver_access.clone(),
+        );
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -205,12 +216,13 @@ impl Orchestrator {
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
-            channel_pool: openlogi_hid::host::channel_pool(),
+            channel_pool,
             keyboard_spec: Arc::new(RwLock::new(None)),
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            flow,
         };
         let orch = Self {
             config,
@@ -347,6 +359,19 @@ impl Orchestrator {
             &self.shared.keyboard_spec,
             self.keyboard_spec_for(),
             "keyboard_spec",
+        );
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .map(|device| FlowDeviceSnapshot {
+                    config_key: device.config_key.clone(),
+                    route: device.route.clone(),
+                    serial: device.serial.clone(),
+                    unit_id: device.unit_id,
+                    kind: device.kind,
+                    online: device.online,
+                })
+                .collect(),
         );
     }
 
@@ -763,6 +788,7 @@ impl Orchestrator {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.config = config;
+        self.shared.flow.update_config(&self.config.flow);
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,

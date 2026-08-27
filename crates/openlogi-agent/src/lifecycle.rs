@@ -216,6 +216,7 @@ impl Wanted {
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);
+        shared.flow.arm();
         Armed {
             orchestrator,
             shared,
@@ -419,6 +420,7 @@ impl Armed {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.flow.input(),
         )
     }
 

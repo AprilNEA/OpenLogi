@@ -16,7 +16,10 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+openlogi-flow = { path = "../openlogi-flow" }
 futures-lite = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
@@ -27,3 +30,4 @@ workspace = true
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
