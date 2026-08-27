@@ -2,14 +2,15 @@
 
 use super::language::{LanguageOption, language_select_field};
 use gpui::{ElementId, img};
+use gpui_base::Button as BaseButton;
 use openlogi_core::config::AppIcon;
 
 use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
-    IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
-    Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
-    StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
-    ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
+    Icon, IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc,
+    SelectState, Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
+    SharedString, StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig,
+    ThemeFilter, ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
 use crate::platform::app_icon;
 use crate::ui::choice_card::ChoiceCard;
@@ -485,55 +486,101 @@ fn theme_picker(
     v_flex()
         .w_full()
         .gap_3()
+        .child(theme_toolbar(view, theme_search, filter, pal))
+        .child(grid)
+}
+
+fn theme_toolbar(
+    view: &Entity<SettingsView>,
+    theme_search: &Entity<InputState>,
+    filter: ThemeFilter,
+    pal: Palette,
+) -> impl IntoElement {
+    // Translated chip labels may wrap so the fixed-width search and actions
+    // remain available in narrower Settings windows.
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_3()
         .child(
             h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    // Translated chip labels vary in width; let the chip row
-                    // yield (wrapping onto a second line if it must) so the
-                    // fixed-width search input is never pushed out of view.
-                    h_flex()
-                        .gap_2()
-                        .flex_1()
-                        .min_w_0()
-                        .flex_wrap()
-                        .child(filter_chip(
-                            view,
-                            "filter-all",
-                            tr!("All"),
-                            ThemeFilter::All,
-                            filter,
-                            pal,
-                        ))
-                        .child(filter_chip(
-                            view,
-                            "filter-light",
-                            tr!("Light"),
-                            ThemeFilter::Light,
-                            filter,
-                            pal,
-                        ))
-                        .child(filter_chip(
-                            view,
-                            "filter-dark",
-                            tr!("Dark"),
-                            ThemeFilter::Dark,
-                            filter,
-                            pal,
-                        )),
-                )
-                .child(
-                    div().w(px(200.)).flex_shrink_0().child(
-                        control_input(theme_search)
-                            .cleanable(true)
-                            .prefix(IconName::Search),
-                    ),
-                ),
+                .gap_2()
+                .flex_1()
+                .min_w_0()
+                .flex_wrap()
+                .child(filter_chip(
+                    view,
+                    "filter-all",
+                    tr!("All"),
+                    ThemeFilter::All,
+                    filter,
+                    pal,
+                ))
+                .child(filter_chip(
+                    view,
+                    "filter-light",
+                    tr!("Light"),
+                    ThemeFilter::Light,
+                    filter,
+                    pal,
+                ))
+                .child(filter_chip(
+                    view,
+                    "filter-dark",
+                    tr!("Dark"),
+                    ThemeFilter::Dark,
+                    filter,
+                    pal,
+                )),
         )
-        .child(grid)
+        .child(
+            div().w(px(200.)).flex_shrink_0().child(
+                control_input(theme_search)
+                    .cleanable(true)
+                    .prefix(IconName::Search),
+            ),
+        )
+        .child(theme_action_button(
+            "themes-open",
+            tr!("Open"),
+            IconName::FolderOpen,
+            pal,
+            |_| theme::open_user_themes_dir(),
+        ))
+        .child(theme_action_button(
+            "themes-refresh",
+            tr!("Refresh"),
+            IconName::Undo,
+            pal,
+            theme::reload_themes,
+        ))
+}
+
+fn theme_action_button(
+    id: &'static str,
+    label: SharedString,
+    icon: IconName,
+    pal: Palette,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    BaseButton::new(id)
+        .accessibility_label(label.clone())
+        .flex_shrink_0()
+        .px_2()
+        .py_1()
+        .gap_1()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(pal.border)
+        .text_caption()
+        .cursor_pointer()
+        .bg(pal.control)
+        .hover(move |style| style.bg(pal.control_hover))
+        .focus_visible(move |style| style.bg(pal.control_hover))
+        .child(Icon::new(icon).size_3())
+        .child(label)
+        .on_click(move |_, _, cx| on_click(cx))
 }
 
 /// Resolve a theme config's colours into a concrete [`ThemeColor`] for its

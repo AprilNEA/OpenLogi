@@ -17,6 +17,7 @@ use gpui::rgb;
 use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::{Appearance, UiScale};
+use std::path::{Path, PathBuf};
 
 use crate::state::AppState;
 
@@ -261,6 +262,105 @@ pub fn register_builtin_themes(cx: &mut App) {
     }
 }
 
+/// Register user theme files from `<config directory>/themes`.
+///
+/// Each `.json` file uses the same gpui-component theme-set schema as
+/// `themes/openlogi.json`. Files are loaded in filename order after the bundled
+/// themes, so a custom theme must use a unique display name. Invalid files are
+/// ignored without preventing the app from starting.
+pub fn register_user_themes(cx: &mut App) {
+    let Ok(themes_dir) = user_themes_dir() else {
+        tracing::warn!("could not resolve the custom themes directory");
+        return;
+    };
+    register_user_themes_from(&themes_dir, cx);
+}
+
+/// Create and open the user's custom-theme directory in the OS file manager.
+pub fn open_user_themes_dir() {
+    let Ok(themes_dir) = user_themes_dir() else {
+        tracing::warn!("could not resolve the custom themes directory");
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&themes_dir) {
+        tracing::warn!(
+            %error,
+            path = %themes_dir.display(),
+            "could not create the custom themes directory"
+        );
+        return;
+    }
+    if let Err(error) = opener::open(&themes_dir) {
+        tracing::warn!(
+            %error,
+            path = %themes_dir.display(),
+            "could not open the custom themes directory"
+        );
+    }
+}
+
+/// Reload bundled and user themes from disk, then reapply the stored selection.
+///
+/// Replacing the registry first removes user themes whose files were deleted;
+/// registering the bundled set again keeps the framework reload from reducing
+/// the picker to only its two defaults.
+pub fn reload_themes(cx: &mut App) {
+    cx.set_global(ThemeRegistry::default());
+    register_builtin_themes(cx);
+    register_user_themes(cx);
+    apply_from_settings(None, cx);
+}
+
+fn user_themes_dir() -> Result<PathBuf, openlogi_core::paths::PathsError> {
+    Ok(openlogi_core::paths::config_dir()?.join("themes"))
+}
+
+fn register_user_themes_from(themes_dir: &Path, cx: &mut App) {
+    if let Err(error) = std::fs::create_dir_all(themes_dir) {
+        tracing::warn!(
+            %error,
+            path = %themes_dir.display(),
+            "could not create the custom themes directory"
+        );
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(themes_dir) else {
+        tracing::warn!(path = %themes_dir.display(), "could not read the custom themes directory");
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry.path()),
+            Err(error) => {
+                tracing::warn!(%error, path = %themes_dir.display(), "could not read a custom theme entry");
+                None
+            }
+        })
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        })
+        .collect();
+    files.sort();
+
+    let registry = ThemeRegistry::global_mut(cx);
+    for path in files {
+        match std::fs::read_to_string(&path) {
+            Ok(json) => {
+                if let Err(error) = registry.load_themes_from_str(&json) {
+                    tracing::warn!(%error, path = %path.display(), "ignored invalid custom theme file");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "could not read custom theme file");
+            }
+        }
+    }
+}
+
 fn rem_size(scale: UiScale) -> Pixels {
     px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
 }
@@ -463,6 +563,108 @@ impl<E: Styled> Typography for E {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn user_theme_files_are_loaded_and_the_directory_is_created(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temporary config directory");
+        let themes_dir = temp.path().join("themes");
+
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            register_user_themes_from(&themes_dir, cx);
+            assert!(themes_dir.is_dir());
+        });
+
+        std::fs::write(
+            themes_dir.join("custom.json"),
+            r##"{
+                "name": "Custom",
+                "themes": [{
+                    "name": "Custom Test Theme",
+                    "mode": "dark",
+                    "colors": { "background": "#101010" }
+                }]
+            }"##,
+        )
+        .expect("write custom theme");
+        std::fs::write(themes_dir.join("ignored.txt"), "not a theme").expect("write ignored file");
+
+        cx.update(|cx| {
+            register_user_themes_from(&themes_dir, cx);
+            assert!(
+                ThemeRegistry::global(cx)
+                    .themes()
+                    .contains_key("Custom Test Theme")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn invalid_user_theme_does_not_block_valid_theme(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temporary themes directory");
+        std::fs::write(temp.path().join("a-invalid.json"), "{").expect("write invalid theme");
+        std::fs::write(
+            temp.path().join("b-valid.json"),
+            r##"{
+                "name": "Custom",
+                "themes": [{
+                    "name": "Valid After Invalid",
+                    "mode": "light",
+                    "colors": { "background": "#fafafa" }
+                }]
+            }"##,
+        )
+        .expect("write valid theme");
+
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            register_user_themes_from(temp.path(), cx);
+            assert!(
+                ThemeRegistry::global(cx)
+                    .themes()
+                    .contains_key("Valid After Invalid")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn rebuilding_registry_removes_deleted_user_theme(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("create temporary themes directory");
+        let theme_path = temp.path().join("removed.json");
+        std::fs::write(
+            &theme_path,
+            r##"{
+                "name": "Custom",
+                "themes": [{
+                    "name": "Removed Theme",
+                    "mode": "dark",
+                    "colors": { "background": "#101010" }
+                }]
+            }"##,
+        )
+        .expect("write custom theme");
+
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            register_builtin_themes(cx);
+            register_user_themes_from(temp.path(), cx);
+            assert!(
+                ThemeRegistry::global(cx)
+                    .themes()
+                    .contains_key("Removed Theme")
+            );
+        });
+
+        std::fs::remove_file(theme_path).expect("remove custom theme");
+        cx.update(|cx| {
+            cx.set_global(ThemeRegistry::default());
+            register_builtin_themes(cx);
+            register_user_themes_from(temp.path(), cx);
+            let registry = ThemeRegistry::global(cx);
+            assert!(!registry.themes().contains_key("Removed Theme"));
+            assert!(registry.themes().contains_key(OPENLOGI_DARK));
+        });
+    }
 
     #[test]
     fn content_width_scale_preserves_the_standard_layout() {

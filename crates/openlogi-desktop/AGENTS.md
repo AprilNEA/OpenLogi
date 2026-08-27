@@ -78,6 +78,9 @@ Panels gate on `Capabilities`, never on device `kind`; commits go through
   ship them. **Do not vendor copies of those themes into this repo.**
   `OPENLOGI_THEMES_DIR` overrides the lookup.
 - `themes/openlogi.json` is the app's own theme, layered on that upstream set.
+- User themes are individual gpui-component theme-set JSON files under
+  `<config directory>/themes`; the desktop creates that directory and loads its
+  `.json` files at startup after the bundled themes.
 - `bundle/` holds `OpenLogi.entitlements` and one `Info.plist` per bundled
   binary (`desktop-dev`, `agent-release`, `overlay-release`). `cargo xtask`
   packaging reads them; they are the app's macOS identity, not decoration —
