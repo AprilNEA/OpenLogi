@@ -204,10 +204,6 @@ impl AcceptedUnattributedPresses {
         self.buttons.insert(id);
     }
 
-    fn admit_down(safari_is_frontmost: bool) -> bool {
-        safari_is_frontmost
-    }
-
     fn take_release(&mut self, id: ButtonId) -> bool {
         self.buttons.remove(&id)
     }
@@ -302,19 +298,15 @@ fn handle_button(
     if !id.is_os_hook_button() {
         return EventDisposition::PassThrough;
     }
-    let unattributed_browser_button = cfg!(target_os = "macos")
-        && device.is_none()
-        && matches!(id, ButtonId::Back | ButtonId::Forward);
-    let safari_exception = unattributed_browser_button
-        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| {
-            if pressed {
-                AcceptedUnattributedPresses::admit_down(safari_is_frontmost())
-            } else {
-                presses.take_release(id)
-            }
-        });
-    if !button_source_may_remap(id, device, safari_exception) {
-        if !pressed && unattributed_browser_button {
+    let macos_browser_button =
+        cfg!(target_os = "macos") && matches!(id, ButtonId::Back | ButtonId::Forward);
+    let accepted_unattributed_release = macos_browser_button
+        && !pressed
+        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take_release(id));
+    let unattributed_browser_down = macos_browser_button && pressed && device.is_none();
+    let safari_exception = unattributed_browser_down && safari_is_frontmost();
+    if !accepted_unattributed_release && !button_source_may_remap(id, device, safari_exception) {
+        if !pressed && macos_browser_button && device.is_none() {
             FAIL_OPEN_PRESSES.with_borrow_mut(|presses| {
                 presses.remove(&id);
             });
@@ -335,7 +327,7 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None) {
-                if unattributed_browser_button {
+                if unattributed_browser_down {
                     ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
                 }
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
@@ -360,7 +352,7 @@ fn handle_button(
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
-        if unattributed_browser_button {
+        if accepted_unattributed_release {
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
@@ -381,7 +373,7 @@ fn handle_button(
         let queued = dispatcher
             .try_hook_button_down(id, Some(&binding))
             .is_some();
-        if queued && unattributed_browser_button {
+        if queued && unattributed_browser_down {
             ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
         }
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
