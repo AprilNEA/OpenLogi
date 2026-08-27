@@ -1,7 +1,7 @@
 //! Implements the `Thumbwheel` feature (ID `0x2150`) that allows configuration
 //! and diversion of thumbwheel events.
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
 
 use crate::{
@@ -27,12 +27,10 @@ impl DecodeEvent for ThumbwheelEvent {
             return None;
         }
 
-        let rotation_status = ThumbwheelRotationStatus::try_from(payload[4]).ok()?;
-
         Some(ThumbwheelEvent::StatusUpdate(ThumbwheelStatusUpdate {
             rotation: i16::from_be_bytes([payload[0], payload[1]]),
             time_elapsed: u16::from_be_bytes([payload[2], payload[3]]),
-            rotation_status,
+            rotation_status: ThumbwheelRotationStatus::from(payload[4]),
             touch: payload[5] & (1 << 1) != 0,
             proxy: payload[5] & (1 << 2) != 0,
             single_tap: payload[5] & (1 << 3) != 0,
@@ -255,7 +253,12 @@ pub struct ThumbwheelStatusUpdate {
 
 /// Represents a thumbwheel rotation status as reported in
 /// [`ThumbwheelStatusUpdate::rotation_status`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+///
+/// Infallible decode on purpose: this rides a *diverted* input event, so
+/// failing on an unknown byte would silently drop the whole update — rotation
+/// delta included — input the user already produced and the OS no longer
+/// sees. The unknown byte is preserved instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -271,4 +274,8 @@ pub enum ThumbwheelRotationStatus {
 
     /// The thumbwheel was released.
     Stop = 3,
+
+    /// A status this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
