@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 buffa = { workspace = true }
 hkdf = { workspace = true }
+mdns-sd = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
