@@ -194,7 +194,16 @@ async fn run_keyboard_capture_session_on(
     }
 
     drop(listener);
-    if let Ok(mut slot) = channel_slot.write() {
+    // The slot is a last-writer-wins cell, so a sibling session may have
+    // published its own channel after ours. Clear it only while it still
+    // holds *this* session's channel — evicting the sibling's would silently
+    // demote its hardware writes to the fresh-open slow path (the gesture
+    // session applies the same discipline).
+    if let Ok(mut slot) = channel_slot.write()
+        && slot
+            .as_ref()
+            .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
+    {
         *slot = None;
     }
     for &cid in diverted.keys() {
