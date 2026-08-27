@@ -34,9 +34,11 @@ pub(crate) struct Core {
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
     pub(crate) ring_haptics: server::RingHapticPlayer,
-    /// Notified on every accepted IPC connection — the dormancy gate's
-    /// demand signal.
-    pub(crate) connected: Arc<tokio::sync::Notify>,
+    /// Client declarations forwarded by the IPC server's `declare_client`
+    /// handler — the dormancy gate's demand channel. The channel buffers, so
+    /// a declaration that lands before the gate starts listening is not
+    /// lost; unbounded is safe because declarations are one per connection.
+    pub(crate) demand: tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
 }
 
 /// Build the agent's shared state and start the IPC server — everything that
@@ -77,15 +79,13 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
-    let connected = Arc::new(tokio::sync::Notify::new());
-    let ring_haptics = spawn_ipc_server(
+    let (ring_haptics, demand) = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
         Arc::clone(&observable),
         Arc::clone(&pairing),
         Arc::clone(&event_monitor),
         &inputs,
-        Arc::clone(&connected),
     );
     Some(Core {
         orchestrator,
@@ -94,7 +94,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         event_monitor,
         inputs,
         ring_haptics,
-        connected,
+        demand,
     })
 }
 
@@ -105,9 +105,11 @@ fn spawn_ipc_server(
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
     inputs: &InputServices,
-    connected: Arc<tokio::sync::Notify>,
-) -> server::RingHapticPlayer {
-    let server = AgentServer::new(
+) -> (
+    server::RingHapticPlayer,
+    tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
+) {
+    let (server, demand) = AgentServer::new(
         orchestrator,
         shared.clone(),
         observable,
@@ -117,8 +119,8 @@ fn spawn_ipc_server(
         inputs.dispatcher.clone(),
     );
     let ring_haptics = server.ring_haptics.clone();
-    tokio::spawn(server::run(server, connected));
-    ring_haptics
+    tokio::spawn(server::run(server));
+    (ring_haptics, demand)
 }
 
 /// The input-action runtimes: the Actions Ring, the button-lifecycle worker,

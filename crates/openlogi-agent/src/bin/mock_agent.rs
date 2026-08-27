@@ -55,7 +55,7 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
     PairingPhase, PairingUpdate, RingObservation,
@@ -731,6 +731,10 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
 impl Agent for MockAgent {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
+    }
+
+    async fn declare_client(self, _: Context, _kind: ClientKind) {
+        // The mock has no dormancy gate; declarations are accepted and ignored.
     }
 
     async fn identity(self, _: Context) -> Identity {

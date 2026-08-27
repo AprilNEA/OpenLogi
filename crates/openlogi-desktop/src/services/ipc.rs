@@ -29,8 +29,8 @@ use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -328,6 +328,16 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
         })?;
         match connection.version {
             version if version == PROTOCOL_VERSION => {
+                // Declare before any other RPC: a dormant agent arms only on
+                // this — merely connecting no longer wakes it.
+                connection
+                    .client
+                    .declare_client(context::current(), ClientKind::Gui)
+                    .await
+                    .map_err(|error| {
+                        debug!(%error, "agent dropped during the declare handshake");
+                        ConnectFailure::Unreachable
+                    })?;
                 *client = Some(connection.client);
                 debug!("connected to agent IPC socket");
             }

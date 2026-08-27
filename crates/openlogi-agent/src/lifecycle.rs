@@ -40,6 +40,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{info, warn};
 
 #[cfg(target_os = "macos")]
+use openlogi_ipc::ClientKind;
+
+#[cfg(target_os = "macos")]
 use crate::binary_watch;
 use crate::shutdown::{self, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
@@ -135,38 +138,52 @@ impl Booted {
     /// demands it — `SuccessfulExit` implies `RunAtLoad`), so with the
     /// preference off, being started with no client in sight means "launchd
     /// ran us at login the user opted out of". Wait briefly for demand — a
-    /// GUI kickstart connects within seconds — and otherwise leave with a
-    /// clean `exit(0)` launchd will not respawn.
+    /// GUI kickstart connects and declares itself within seconds — and
+    /// otherwise leave with a clean `exit(0)` launchd will not respawn.
+    ///
+    /// Demand is a [`ClientKind::Gui`] declaration, not a mere connection:
+    /// the CLI and an orphaned overlay are served from the already-bound
+    /// socket without waking anything, and the takeover probe never declares
+    /// at all.
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Self> {
         if self.launch_at_login {
             return Some(self);
         }
-        info!("launch_at_login is off — dormant until a client connects");
-        tokio::select! {
-            () = self.core.connected.notified() => {
-                info!("client connected — arming");
-                Some(self)
-            }
-            () = tokio::time::sleep(DORMANT_DEADLINE) => {
-                info!("no client arrived — exiting until wanted");
-                None
-            }
-            () = self.signals.recv() => {
-                info!("shutdown signal while dormant — exiting");
-                None
-            }
-            Some(()) = self.uninstalled.recv() => {
-                info!("uninstalled while dormant — exiting");
-                None
+        info!("launch_at_login is off — dormant until a client demands arming");
+        // The deadline is absolute: a served-but-not-arming client does not
+        // buy the dormant agent more time.
+        let deadline = tokio::time::sleep(DORMANT_DEADLINE);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                Some(kind) = self.core.demand.recv() => match kind {
+                    ClientKind::Gui => {
+                        info!("GUI connected — arming");
+                        return Some(self);
+                    }
+                    kind => info!(client = ?kind, "served while dormant — not arming"),
+                },
+                () = &mut deadline => {
+                    info!("no arming demand — exiting until wanted");
+                    return None;
+                }
+                () = self.signals.recv() => {
+                    info!("shutdown signal while dormant — exiting");
+                    return None;
+                }
+                Some(()) = self.uninstalled.recv() => {
+                    info!("uninstalled while dormant — exiting");
+                    return None;
+                }
             }
         }
     }
 
     /// The arming point: the tray may show, the overlay may start,
     /// permissions may prompt, devices may open. Demand dies here —
-    /// [`Core`]'s `connected` is dropped, because a running agent no longer
-    /// cares who connects.
+    /// [`Core`]'s `demand` receiver is dropped, because a running agent no
+    /// longer cares who connects.
     fn arm(self) -> Armed {
         let Self {
             core,
@@ -191,10 +208,12 @@ impl Booted {
             event_monitor,
             inputs,
             ring_haptics,
-            connected,
+            demand,
         } = core;
-        // Demand is a pre-arming concept: only the gate listens for it.
-        drop(connected);
+        // Demand is a pre-arming concept: dropping the receiver closes the
+        // channel, turning post-arming declarations into no-ops in the
+        // server's `declare_client` handler.
+        drop(demand);
         Armed {
             orchestrator,
             shared,

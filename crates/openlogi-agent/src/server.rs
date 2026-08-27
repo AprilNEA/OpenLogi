@@ -24,7 +24,7 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingUpdate, RingObservation,
 };
@@ -53,10 +53,17 @@ pub struct AgentServer {
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
+    /// Forwards each connection's [`ClientKind`] declaration to the dormancy
+    /// gate. Sends fail once the gate's receiver is gone (the agent armed) —
+    /// exactly the point where declarations stop mattering.
+    pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
 }
 
 impl AgentServer {
     /// Build a server and start the coalescing Actions Ring haptic worker.
+    ///
+    /// The second return is the receiving end of the demand channel this
+    /// server's `declare_client` handler feeds; the dormancy gate drains it.
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedRuntime,
@@ -65,18 +72,23 @@ impl AgentServer {
         event_monitor: SharedEventMonitor,
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
-    ) -> Self {
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
-        Self {
-            orchestrator,
-            shared,
-            observable,
-            pairing,
-            event_monitor,
-            action_ring,
-            dispatcher,
-            ring_haptics,
-        }
+        let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Self {
+                orchestrator,
+                shared,
+                observable,
+                pairing,
+                event_monitor,
+                action_ring,
+                dispatcher,
+                ring_haptics,
+                demand,
+            },
+            declarations,
+        )
     }
 }
 
@@ -265,6 +277,13 @@ impl Agent for AgentServer {
 
     async fn observe_action_ring(self, _: Context, since: Generation) -> RingObservation {
         self.action_ring.observe(since).await
+    }
+
+    async fn declare_client(self, _: Context, kind: ClientKind) {
+        // A failed send is the designed steady state: the dormancy gate drops
+        // its receiver at arming (and never listens off macOS), and an armed
+        // agent no longer cares who connects.
+        let _ = self.demand.send(kind);
     }
 
     async fn action_ring_hover(
@@ -543,7 +562,7 @@ impl RingHapticPlayer {
 /// exits. A stale socket left by a prior crash is reclaimed by the listener —
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
-pub async fn run(server: AgentServer, connected: Arc<tokio::sync::Notify>) {
+pub async fn run(server: AgentServer) {
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -561,10 +580,6 @@ pub async fn run(server: AgentServer, connected: Arc<tokio::sync::Notify>) {
                 continue;
             }
         };
-        // Wake the dormancy gate: a client connecting is the agent's "demand"
-        // signal (`notify_one` stores a permit, so a connection that lands
-        // before the gate starts waiting still wakes it).
-        connected.notify_one();
         let server = server.clone();
         let channel = BaseChannel::with_defaults(transport::wrap(stream));
         tokio::spawn(
