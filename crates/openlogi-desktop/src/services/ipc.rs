@@ -327,12 +327,36 @@ fn spawn_agent() {
     // A registered launchd service is launchd's to start: kickstart is
     // idempotent (a no-op on a running service), the process comes up
     // *supervised* (crash respawn per the service plist), and launchd makes it
-    // its own TCC responsible process. Every failure falls through to the
-    // legacy direct-launch paths below, so a broken registration degrades to
-    // today's behavior instead of wedging the retry loop.
+    // its own TCC responsible process. Every failure falls through rung by
+    // rung to the legacy direct-launch paths below, so a broken registration
+    // degrades to today's behavior instead of wedging the retry loop.
     #[cfg(target_os = "macos")]
-    if kickstart_registered_agent() {
-        return;
+    {
+        if kickstart_registered_agent() {
+            return;
+        }
+        // Second rung: the service may simply never have been registered —
+        // on a fresh install this reflex outruns the backgrounded startup
+        // ensure, and the direct launch below would bring up an *unmanaged*
+        // agent that then shadows the service for the rest of the session (a
+        // same-version takeover never displaces it). Registering here IS the
+        // supervised start: `register` bootstraps the job immediately. Dev
+        // profiles never register implicitly (a login item pointing into
+        // `target/` goes stale); the master switch and register failures fall
+        // through, with the re-run kickstart doubling as the "did the
+        // registration actually take?" check.
+        if !openlogi_core::paths::is_dev_profile() {
+            match crate::platform::registration::ensure_registered() {
+                Ok(()) => {
+                    if kickstart_registered_agent() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    warn!(error, "on-demand agent service registration failed");
+                }
+            }
+        }
     }
     let Some(path) = agent_binary_path() else {
         warn!(

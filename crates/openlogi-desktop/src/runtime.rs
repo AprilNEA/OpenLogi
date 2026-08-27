@@ -175,7 +175,11 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
 /// Ensure the agent's launchd service is registered, at startup: a fresh
 /// install registers on its first GUI launch, and an app update triggers the
 /// re-registration Apple requires for a changed executable (the
-/// version-marker check inside `registration::ensure_registered`).
+/// version-marker check inside `registration::ensure_registered`). The spawn
+/// cascade in `services::ipc` also registers on demand when it finds the
+/// service absent — whichever path runs first wins and the other becomes a
+/// no-op; this one still covers the update re-register while the agent is
+/// alive and no spawn is ever needed.
 /// Registration is deliberately independent of `launch_at_login` — the
 /// preference is a config value the agent itself reads and acts on (keep
 /// working, or idle out), so there is no preference to capture here and no

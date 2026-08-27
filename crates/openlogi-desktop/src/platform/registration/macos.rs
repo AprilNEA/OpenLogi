@@ -48,10 +48,14 @@ fn ensure_action(status: ServiceStatus, stale: bool) -> Option<EnsureAction> {
 
 pub(super) fn ensure_registered() -> Result<(), String> {
     match ensure_action(backend::status(), registration_is_stale()) {
-        Some(EnsureAction::Register) => backend::register()?,
+        Some(EnsureAction::Register) => {
+            backend::register()?;
+            tracing::info!("registered the agent service with launchd");
+        }
         Some(EnsureAction::Reregister) => {
             backend::unregister()?;
             backend::register()?;
+            tracing::info!("re-registered the agent service (executable changed)");
         }
         None => return Ok(()),
     }
