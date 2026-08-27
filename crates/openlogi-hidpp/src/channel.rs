@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -61,6 +61,69 @@ impl Drop for MessageListenerGuard {
     }
 }
 
+/// A software id a request may carry: `1..=15`.
+///
+/// Id `0` is the wire's device-notification marker (event decoding treats
+/// `software_id == 0` as "not a response"), so a request sent with it would
+/// have its response indistinguishable from an event — made unrepresentable
+/// here by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestSwId(U4);
+
+impl RequestSwId {
+    /// The id as a request software id, or `None` for the reserved id `0`.
+    #[must_use]
+    pub fn new(id: U4) -> Option<Self> {
+        (id.to_lo() != 0).then_some(Self(id))
+    }
+
+    /// The nibble the wire carries.
+    #[must_use]
+    pub fn get(self) -> U4 {
+        self.0
+    }
+}
+
+/// How the channel assigns the software id each outgoing request carries.
+///
+/// One value instead of three cooperating fields (a rotate flag, the current
+/// id, an optional lease): the triple admitted states the wire cannot mean —
+/// rotation walking over ids other channels hold leases on, or a leased id
+/// different from the id actually sent. Constructed whole, those states are
+/// unrepresentable.
+pub enum SwIdPolicy {
+    /// Every request carries the same id.
+    Fixed(RequestSwId),
+    /// Walk `1..=15`, one id per request — eases mapping responses to
+    /// requests for a single exclusive user of a node. The counter is this
+    /// policy's own; the id `0` slot is skipped in the wrap.
+    Rotating(AtomicU8),
+    /// A fixed id owned process-wide: `free(id)` runs when the channel drops,
+    /// handing the lease back to the allocator — so concurrent opens of one
+    /// HID node never share a correlation id. (OpenLogi local addition.)
+    Leased {
+        /// The leased id every request carries.
+        id: RequestSwId,
+        /// Returns the id to the allocator on drop.
+        free: fn(u8),
+    },
+}
+
+impl SwIdPolicy {
+    /// A fresh rotation, starting at id `1`.
+    #[must_use]
+    pub fn rotating() -> Self {
+        Self::Rotating(AtomicU8::new(0x01))
+    }
+}
+
+impl Default for SwIdPolicy {
+    /// Fixed id `1`, matching the protocol's conventional default.
+    fn default() -> Self {
+        Self::Fixed(RequestSwId(U4::from_lo(0x01)))
+    }
+}
+
 /// Represents a HID communication channel supporting HID++.
 pub struct HidppChannel {
     /// Whether the channel supports short (7 bytes) HID++ messages.
@@ -78,11 +141,8 @@ pub struct HidppChannel {
     /// The underlying raw HID channel.
     raw_channel: Arc<dyn RawHidChannel>,
 
-    /// Whether to rotate the [`Self::software_id`].
-    rotate_software_id: AtomicBool,
-
-    /// The software ID to provide at the next call to [`Self::get_sw_id`].
-    software_id: AtomicU8,
+    /// The software-id policy for outgoing requests (see [`SwIdPolicy`]).
+    sw_id_policy: SwIdPolicy,
 
     /// All sent messages that are waiting for a response.
     pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
@@ -107,19 +167,12 @@ pub struct HidppChannel {
     /// The handle to the read thread. Should be joined after signaling
     /// [`Self::read_thread_close`].
     read_thread_hdl: Option<JoinHandle<()>>,
-
-    /// Optional process-wide software-id lease: `(id, free)` run on drop.
-    ///
-    /// OpenLogi leases a unique HID++ software id per open so concurrent
-    /// channels on the same physical HID node never share a correlation id
-    /// (software id `0` is reserved for device notifications). Local addition.
-    sw_id_lease: Option<(u8, fn(u8))>,
 }
 
 impl Drop for HidppChannel {
     fn drop(&mut self) {
-        if let Some((id, free)) = self.sw_id_lease.take() {
-            free(id);
+        if let SwIdPolicy::Leased { id, free } = &self.sw_id_policy {
+            free(id.get().to_lo());
         }
 
         if let Some(read_thread_close) = self.read_thread_close.take() {
@@ -200,15 +253,13 @@ impl HidppChannel {
             vendor_id: raw_channel_rc.vendor_id(),
             product_id: raw_channel_rc.product_id(),
             raw_channel: raw_channel_rc,
-            rotate_software_id: AtomicBool::new(false),
-            software_id: AtomicU8::new(0x01),
+            sw_id_policy: SwIdPolicy::default(),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
             next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
-            sw_id_lease: None,
         })
     }
 
@@ -217,61 +268,41 @@ impl HidppChannel {
         self.raw_channel.is_connected()
     }
 
-    /// Sets the software ID that should be returned by the next call to
-    /// [`Self::get_sw_id`].
+    /// Replace the software-id policy for outgoing requests.
     ///
-    /// Using software ID `0` is highly discouraged as it is used for device
-    /// notifications.
-    pub fn set_sw_id(&self, sw_id: U4) {
-        self.software_id.store(sw_id.to_lo(), Ordering::SeqCst);
-    }
-
-    /// Sets whether the software ID returned by a call to [`Self::get_sw_id`]
-    /// should increment (and potentially wrap around) after each call.
-    ///
-    /// This comes in handy when trying to map responses to requests
-    /// consistently.
-    ///
-    /// Software ID `0` will be skipped in the rotation process as it is
-    /// reserved for device notifications.
-    pub fn set_rotating_sw_id(&self, enable: bool) {
-        self.rotate_software_id.store(enable, Ordering::SeqCst);
-    }
-
-    /// Lease software id `id` until this channel is dropped, then call `free(id)`.
-    ///
-    /// Replaces any previous lease. Used by OpenLogi so concurrent opens of the
-    /// same HID node hold distinct correlation ids for their full lifetime.
-    ///
-    /// OpenLogi local addition.
-    pub fn set_sw_id_lease(&mut self, id: u8, free: fn(u8)) {
-        self.sw_id_lease = Some((id, free));
+    /// `&mut self` on purpose: the policy is decided while the channel is
+    /// still exclusively owned (right after opening, before it is shared), so
+    /// no request can race a policy change. A `Leased` policy replacing an
+    /// earlier one would leak the earlier lease — but with `&mut` access the
+    /// caller *is* the sole owner, and the one production caller sets the
+    /// policy exactly once.
+    pub fn set_sw_id_policy(&mut self, policy: SwIdPolicy) {
+        self.sw_id_policy = policy;
     }
 
     /// Provides a software ID that can be used to send a HID++ message across
     /// the channel.
     ///
-    /// This method should be called separately for every message to send as it
-    /// may rotate (as indicated by [`Self::set_rotating_sw_id`]).
+    /// This method should be called separately for every message to send, as a
+    /// [`SwIdPolicy::Rotating`] policy advances per call.
     pub fn get_sw_id(&self) -> U4 {
-        if self.rotate_software_id.load(Ordering::SeqCst) {
-            // The closure always returns `Some`, so `fetch_update` never
-            // reports `Err`; both arms carry the same pre-update value.
-            let previous =
-                match self
-                    .software_id
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+        match &self.sw_id_policy {
+            SwIdPolicy::Fixed(id) | SwIdPolicy::Leased { id, .. } => id.get(),
+            SwIdPolicy::Rotating(counter) => {
+                // The closure always returns `Some`, so `fetch_update` never
+                // reports `Err`; both arms carry the same pre-update value.
+                let previous =
+                    match counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
                         Some(if old & 0x0f == 0x0f {
                             0x01
                         } else {
                             old.wrapping_add(1)
                         })
                     }) {
-                    Ok(previous) | Err(previous) => previous,
-                };
-            U4::from_lo(previous)
-        } else {
-            U4::from_lo(self.software_id.load(Ordering::SeqCst))
+                        Ok(previous) | Err(previous) => previous,
+                    };
+                U4::from_lo(previous)
+            }
         }
     }
 
