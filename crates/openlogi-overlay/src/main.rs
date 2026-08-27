@@ -69,7 +69,6 @@ fn main() -> Result<()> {
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
-                    live_session.clear();
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
@@ -78,10 +77,9 @@ fn main() -> Result<()> {
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
                     match cx.open_window(options, |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands))
+                        cx.new(|_| RingView::new(invocation, commands, &live_session))
                     }) {
                         Ok(handle) => {
-                            live_session.set(session_id);
                             platform::configure_windows();
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
