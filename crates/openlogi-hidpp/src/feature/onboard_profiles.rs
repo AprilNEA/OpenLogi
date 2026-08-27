@@ -81,6 +81,33 @@ pub const BUTTON_BINDING_LEN: usize = 4;
 /// Maximum G402-format button slots (`buttons[16]`).
 pub const G402_BUTTON_SLOTS: usize = 16;
 
+/// DPI slots in a G402-family profile (`dpi[5]`).
+///
+/// Reverse-engineered: libratbag packed `hidpp20_internal_profile`.
+pub const G402_DPI_COUNT: usize = 5;
+
+/// Byte offset of `dpi[0]` (little-endian `u16`s).
+///
+/// Reverse-engineered: libratbag `get_unaligned_le_u16(&data[2 * i + 3])`.
+pub const G402_DPI_TABLE_OFFSET: usize = 3;
+
+/// Packed onboard LED records in a G402-family profile (logo, then side).
+///
+/// Reverse-engineered: libratbag `hidpp20_internal_led leds[2]` after the
+/// button tables and name field.
+pub const G402_LED_COUNT: usize = 2;
+
+/// Size of one packed onboard LED record.
+///
+/// Reverse-engineered: libratbag `_Static_assert(sizeof(hidpp20_internal_led) == 11)`.
+pub const G402_INTERNAL_LED_LEN: usize = 11;
+
+/// Byte offset of `leds[0]` in a 256-byte G402-family profile sector.
+///
+/// Reverse-engineered layout: report-rate/DPI/colour header (32) +
+/// `buttons[16]` (64) + `alternate_buttons[16]` (64) + name (48) = 208.
+pub const G402_LEDS_OFFSET: usize = 208;
+
 /// Directory-entry size in the user-profile directory sector.
 pub const PROFILE_DIRECTORY_ENTRY_LEN: usize = 4;
 
@@ -454,6 +481,40 @@ pub fn read_g402_button(sector: &[u8], slot: usize) -> Option<ButtonBinding> {
     Some(ButtonBinding { bytes })
 }
 
+/// Read the five little-endian DPI slots from a G402-family profile sector.
+///
+/// A slot of `0` is firmware-disabled. Reverse-engineered offset: see
+/// [`G402_DPI_TABLE_OFFSET`].
+#[must_use]
+pub fn read_g402_dpi_table(sector: &[u8]) -> [u16; G402_DPI_COUNT] {
+    let mut values = [0u16; G402_DPI_COUNT];
+    for (i, slot) in values.iter_mut().enumerate() {
+        let start = G402_DPI_TABLE_OFFSET + i * 2;
+        let Some(bytes) = sector.get(start..start + 2) else {
+            break;
+        };
+        *slot = u16::from_le_bytes([bytes[0], bytes[1]]);
+    }
+    values
+}
+
+/// Read the two packed LED records from a G402-family profile sector.
+///
+/// Reverse-engineered offset: see [`G402_LEDS_OFFSET`].
+#[must_use]
+pub fn read_g402_leds(sector: &[u8]) -> Option<[[u8; G402_INTERNAL_LED_LEN]; G402_LED_COUNT]> {
+    let end = G402_LEDS_OFFSET + G402_LED_COUNT * G402_INTERNAL_LED_LEN;
+    if sector.len() < end {
+        return None;
+    }
+    let mut leds = [[0u8; G402_INTERNAL_LED_LEN]; G402_LED_COUNT];
+    for (i, led) in leds.iter_mut().enumerate() {
+        let start = G402_LEDS_OFFSET + i * G402_INTERNAL_LED_LEN;
+        led.copy_from_slice(&sector[start..start + G402_INTERNAL_LED_LEN]);
+    }
+    Some(leds)
+}
+
 /// Parse the user-profile directory (sector 0). Each entry is a big-endian
 /// sector address plus an enabled flag at byte 2 (`0x02` = enabled).
 #[must_use]
@@ -490,9 +551,10 @@ pub struct ProfileDirectoryEntry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ButtonBinding, G402_BUTTONS_OFFSET, ProfilesDescription, crc_ccitt,
-        decode_active_profile_index, parse_profile_directory, patch_g402_button,
-        profile_index_is_one_based, read_g402_button, sector_crc_valid, special,
+        ButtonBinding, G402_BUTTONS_OFFSET, G402_DPI_TABLE_OFFSET, G402_LEDS_OFFSET,
+        ProfilesDescription, crc_ccitt, decode_active_profile_index, parse_profile_directory,
+        patch_g402_button, profile_index_is_one_based, read_g402_button, read_g402_dpi_table,
+        read_g402_leds, sector_crc_valid, special,
     };
 
     #[test]
@@ -582,5 +644,33 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].address, 1);
         assert!(entries[0].enabled);
+    }
+
+    #[test]
+    fn g402_led_offset_follows_the_packed_profile_layout() {
+        let header = 32;
+        let buttons = 16 * 4;
+        let alternate = 16 * 4;
+        let name = 16 * 3;
+        assert_eq!(header + buttons + alternate + name, G402_LEDS_OFFSET);
+        assert_eq!(G402_DPI_TABLE_OFFSET, 3);
+    }
+
+    #[test]
+    fn reads_g402_dpi_table_and_leds() {
+        let mut sector = vec![0u8; 256];
+        sector[G402_DPI_TABLE_OFFSET..G402_DPI_TABLE_OFFSET + 2]
+            .copy_from_slice(&400u16.to_le_bytes());
+        sector[G402_DPI_TABLE_OFFSET + 2..G402_DPI_TABLE_OFFSET + 4]
+            .copy_from_slice(&800u16.to_le_bytes());
+        sector[G402_LEDS_OFFSET] = 0x01;
+        sector[G402_LEDS_OFFSET + 1] = 0x12;
+        sector[G402_LEDS_OFFSET + 2] = 0x34;
+        sector[G402_LEDS_OFFSET + 3] = 0x56;
+        assert_eq!(read_g402_dpi_table(&sector)[0], 400);
+        assert_eq!(read_g402_dpi_table(&sector)[1], 800);
+        let leds = read_g402_leds(&sector).expect("256-byte sector has LED records");
+        assert_eq!(leds[0][0], 0x01);
+        assert_eq!(&leds[0][1..4], &[0x12, 0x34, 0x56]);
     }
 }

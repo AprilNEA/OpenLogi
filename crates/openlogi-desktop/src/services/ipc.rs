@@ -23,15 +23,14 @@
 //! forever. A dead agent is noticed the moment the socket closes; a *hung* one
 //! is noticed when its hold window passes without an answer.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfileSnapshot, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
@@ -115,9 +114,9 @@ pub enum Command {
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
     ),
-    ReadOnboardBindings(
+    ReadOnboardProfile(
         DeviceRoute,
-        oneshot::Sender<Result<BTreeMap<ButtonId, Action>, WriteError>>,
+        oneshot::Sender<Result<OnboardProfileSnapshot, WriteError>>,
     ),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -560,8 +559,8 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
-        Command::ReadOnboardBindings(route, reply) => {
-            let _ = reply.send(rpc_result(client.read_onboard_bindings(ctx, route).await)?);
+        Command::ReadOnboardProfile(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_onboard_profile(ctx, route).await)?);
         }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
@@ -681,7 +680,7 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
-        Command::ReadOnboardBindings(_, reply) => {
+        Command::ReadOnboardProfile(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

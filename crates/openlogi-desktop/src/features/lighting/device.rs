@@ -7,7 +7,8 @@
 
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -105,6 +106,18 @@ impl Render for LightingPanel {
         let lighting = AppState::try_read(cx)
             .map(AppState::lighting)
             .unwrap_or_default();
+        let onboard_effect = AppState::try_read(cx).and_then(|state| {
+            let leds = state.onboard_leds();
+            if leds.is_empty() {
+                return None;
+            }
+            Some(
+                leds.iter()
+                    .map(|led| tr!(led.mode.label_key()).to_string())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+            )
+        });
 
         // Pull the slider thumb to the active device's brightness whenever it
         // changed in `AppState` (device switch / external edit), without
@@ -150,6 +163,14 @@ impl Render for LightingPanel {
                             }),
                     ),
             )
+            .when_some(onboard_effect, |this, effect| {
+                this.child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("Onboard effect: %{effect}", effect => effect)),
+                )
+            })
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
                 h_flex()

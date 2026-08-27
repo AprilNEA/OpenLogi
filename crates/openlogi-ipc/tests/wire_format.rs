@@ -101,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 }
 
 #[test]
@@ -117,6 +117,10 @@ fn config_reload_result() {
 /// tarpc encodes the request enum's variant index, so trait *method order* is
 /// wire format. `protocol_version` must stay variant 0 forever — it is the
 /// cross-version handshake (and the takeover probe) — and new methods append.
+#[expect(
+    clippy::too_many_lines,
+    reason = "each AgentRequest variant must appear here so a reorder cannot slip past the golden"
+)]
 #[test]
 fn request_variant_order() {
     assert_wire(&AgentRequest::ProtocolVersion {}, "00");
@@ -214,6 +218,15 @@ fn request_variant_order() {
             },
         },
         "1a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadOnboardProfile {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1b0008463030444341464501",
     );
 }
 

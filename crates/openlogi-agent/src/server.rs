@@ -304,6 +304,19 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_onboard_profile(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardProfileSnapshot, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::OnboardProfiles, |c| async move {
+                openlogi_hid::read_onboard_profile_on(&c).await
+            })
+            .await
+    }
+
     async fn action_ring_hover(
         self,
         _: Context,

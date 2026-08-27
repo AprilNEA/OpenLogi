@@ -1050,4 +1050,14 @@ impl Agent for MockAgent {
             feature_hex: 0x8100,
         })
     }
+
+    async fn read_onboard_profile(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardProfileSnapshot, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
+    }
 }
