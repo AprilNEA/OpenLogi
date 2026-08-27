@@ -12,9 +12,12 @@
 //! every answer is the complete state, a reconnect needs no resynchronisation:
 //! ask again with generation 0 and the next answer is the whole truth.
 //!
-//! What is left to time is failure. `launch::spawn_agent` relaunches the binary when
-//! the socket stays down (no launchd dependency: `KeepAlive` only acts when the
-//! agent *exits*, and autostart may be off entirely), and a stretch without a
+//! What is left to time is failure. `launch::spawn_agent` brings the agent up
+//! when the socket stays down — gated by [`should_spawn`], which fires
+//! immediately for an agent that was never reachable but gives a lost
+//! connection [`SPAWN_AFTER_LOSS`] first (the deliberate quits and the
+//! supervised restarts announce themselves within that window) and never
+//! fires at a live agent newer than this GUI. A stretch without a
 //! usable connection longer than [`UNREACHABLE_AFTER`] is pushed to the GUI as
 //! [`GuiUpdate::Unreachable`] so the window can say so instead of waiting
 //! forever. A dead agent is noticed the moment the socket closes; a *hung* one
@@ -40,6 +43,14 @@ use tracing::{debug, warn};
 /// Long enough that a missing or crash-looping binary can't be respawned in a
 /// tight loop, short enough that a quit / crashed agent is recovered promptly.
 const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
+
+/// How long a *lost* connection must stay down before the spawn reflex may
+/// fire. Every cause of a warm loss has a better first responder — launchd's
+/// crash respawn, the agent's self-exec on update, the tray-Quit deep link —
+/// and the reflex is the responder of last resort, so it waits them out
+/// (~8 reconnect attempts). A connection that never existed has no first
+/// responder; the cold path fires on the first failed attempt.
+const SPAWN_AFTER_LOSS: Duration = Duration::from_secs(2);
 
 /// How long to wait before retrying a connect that failed. This is a retry
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
@@ -176,14 +187,18 @@ async fn observe_loop(
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
     let mut client: Option<AgentClient> = None;
-    // The agent is normally started by launchd, but the GUI launches it if the
-    // socket is down — invaluable in dev (one `cargo run` of the GUI brings
-    // the whole system up) and a prod fallback. Retry while the socket stays
-    // down, but rate-limited (see SPAWN_RETRY_PERIOD) so a missing / failing
-    // binary can't become a tight respawn loop.
+    // The agent is normally started by launchd, but the GUI brings it up when
+    // the socket is down (see `launch::spawn_agent`), gated by `should_spawn`.
     let mut last_spawn_attempt: Option<Instant> = None;
-    let started = Instant::now();
-    let mut connected_since: Option<Instant> = None;
+    // `Some(t)` while no usable connection exists (down since `t`, initially
+    // process start); `None` while connected. Times both the unreachable
+    // banner and the spawn reflex.
+    let mut down_since: Option<Instant> = Some(Instant::now());
+    let mut ever_connected = false;
+    // The last connect attempt found a live agent *newer* than this GUI:
+    // spawning cannot help (kickstart is a no-op on a running service and a
+    // fresh copy exits as a duplicate) — only a GUI relaunch does.
+    let mut agent_is_newer = false;
     let mut notified_unreachable = false;
     let mut notified_outdated = false;
     // Generation 0 means "I have seen nothing", so the first answer is the
@@ -205,7 +220,8 @@ async fn observe_loop(
             // The poll answered: apply it and arm the next one. `pending` is
             // finished, so it is deliberately not handed back.
             Woken::Observed(Ok(observation)) => {
-                connected_since = Some(Instant::now());
+                down_since = None;
+                ever_connected = true;
                 notified_unreachable = false;
                 notified_outdated = false;
                 if observation.generation != seen {
@@ -221,7 +237,7 @@ async fn observe_loop(
             Woken::Observed(Err(())) => {
                 client = None;
                 seen = 0;
-                connected_since = None;
+                down_since = Some(Instant::now());
             }
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             Woken::Command(Some(cmd)) => {
@@ -229,13 +245,21 @@ async fn observe_loop(
                 if handle(&mut client, update_tx, cmd).await.is_err() {
                     client = None;
                     seen = 0;
-                    connected_since = None;
+                    if down_since.is_none() {
+                        down_since = Some(Instant::now());
+                    }
                 }
             }
             Woken::Reconnect => match ensure(&mut client).await {
-                Ok(client) => inflight = Some(observe(client, seen)),
-                Err(ConnectFailure::Unreachable) => {}
+                Ok(client) => {
+                    down_since = None;
+                    ever_connected = true;
+                    agent_is_newer = false;
+                    inflight = Some(observe(client, seen));
+                }
+                Err(ConnectFailure::Unreachable) => agent_is_newer = false,
                 Err(ConnectFailure::NewerAgent) => {
+                    agent_is_newer = true;
                     if !notified_outdated {
                         notified_outdated = true;
                         let _ = update_tx.send(GuiUpdate::OutdatedGui);
@@ -243,18 +267,40 @@ async fn observe_loop(
                 }
             },
         }
-        if client.is_none() {
-            let down_since = connected_since.unwrap_or(started);
-            if !notified_unreachable && down_since.elapsed() >= UNREACHABLE_AFTER {
+        if let Some(down_at) = down_since {
+            if !notified_unreachable && down_at.elapsed() >= UNREACHABLE_AFTER {
                 notified_unreachable = true;
                 let _ = update_tx.send(GuiUpdate::Unreachable);
             }
-            if last_spawn_attempt.is_none_or(|t| t.elapsed() >= SPAWN_RETRY_PERIOD) {
+            if should_spawn(
+                down_at.elapsed(),
+                ever_connected,
+                agent_is_newer,
+                last_spawn_attempt.map(|t| t.elapsed()),
+            ) {
                 spawn_agent();
                 last_spawn_attempt = Some(Instant::now());
             }
         }
     }
+}
+
+/// The spawn reflex's trigger rule — all timing, no I/O, so the tests can pin
+/// it. `down_for` is how long no usable connection has existed;
+/// `last_attempt` is the time since the reflex last fired, `None` for never.
+fn should_spawn(
+    down_for: Duration,
+    ever_connected: bool,
+    agent_is_newer: bool,
+    last_attempt: Option<Duration>,
+) -> bool {
+    if agent_is_newer {
+        return false;
+    }
+    if ever_connected && down_for < SPAWN_AFTER_LOSS {
+        return false;
+    }
+    last_attempt.is_none_or(|elapsed| elapsed >= SPAWN_RETRY_PERIOD)
 }
 
 /// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
@@ -566,6 +612,44 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_never_reached_agent_is_spawned_immediately() {
+        assert!(should_spawn(Duration::ZERO, false, false, None));
+    }
+
+    #[test]
+    fn a_lost_connection_waits_out_the_first_responders() {
+        // A supervised restart, a self-exec, or the quit deep link announce
+        // themselves within the grace window; the reflex must not race them.
+        assert!(!should_spawn(Duration::from_millis(500), true, false, None));
+        assert!(should_spawn(SPAWN_AFTER_LOSS, true, false, None));
+    }
+
+    #[test]
+    fn a_live_newer_agent_is_never_spawned_at() {
+        // Kickstart would no-op and a fresh copy exits as a duplicate; only
+        // relaunching the GUI helps, so firing is pure churn.
+        assert!(!should_spawn(Duration::from_secs(120), false, true, None));
+        assert!(!should_spawn(
+            Duration::from_secs(120),
+            true,
+            true,
+            Some(Duration::from_secs(120))
+        ));
+    }
+
+    #[test]
+    fn retries_are_rate_limited() {
+        let recent = Some(Duration::from_secs(29));
+        assert!(!should_spawn(Duration::from_secs(120), true, false, recent));
+        assert!(should_spawn(
+            Duration::from_secs(120),
+            true,
+            false,
+            Some(SPAWN_RETRY_PERIOD),
+        ));
+    }
 
     #[test]
     fn a_reload_that_never_reached_the_agent_is_reported() {
