@@ -22,13 +22,14 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, HostSwitchError,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
+use openlogi_ipc::SwitchHostError;
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
 
-use crate::receiver_access::ReceiverAccess;
+use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess};
 
 mod light;
 
@@ -128,6 +129,28 @@ impl<'a> DeviceOp<'a> {
         timed(op, f(shared)).await
     }
 
+    /// Switch this device to a zero-based host slot through its authoritative
+    /// shared channel.
+    ///
+    /// The ChangeHost write is fire-and-forget because the device leaves this
+    /// radio channel when it takes effect. Success therefore means the write
+    /// was issued (or the device was already on that host), not that arrival at
+    /// the destination was confirmed.
+    pub async fn switch_host(self, host: u8) -> Result<(), SwitchHostError> {
+        let _lease = self
+            .receiver_access
+            .acquire_exclusive(ExclusiveAccessReason::HostTransition)
+            .await;
+        let shared = self.resolve().map_err(map_route_error)?;
+        tokio::time::timeout(WRITE_BUDGET, openlogi_hid::switch_host_on(&shared, host))
+            .await
+            .map_err(|_| SwitchHostError::TimedOut {
+                operation: "switching host".into(),
+            })?
+            .map(|_changed| ())
+            .map_err(map_host_switch_error)
+    }
+
     /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
     /// standard three-arm outcome logging: a completed write and a failed
     /// write both log at their own level, keyed by `label`; a device that
@@ -188,6 +211,38 @@ impl<'a> DeviceOp<'a> {
             });
             log(result);
         });
+    }
+}
+
+fn map_route_error(error: WriteError) -> SwitchHostError {
+    match error {
+        WriteError::DeviceNotFound => SwitchHostError::DeviceNotFound,
+        error => SwitchHostError::Hid {
+            message: error.to_string(),
+        },
+    }
+}
+
+fn map_host_switch_error(error: HostSwitchError) -> SwitchHostError {
+    match error {
+        HostSwitchError::Hid(error) => SwitchHostError::Hid {
+            message: error.to_string(),
+        },
+        HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
+            SwitchHostError::DeviceNotFound
+        }
+        HostSwitchError::Hidpp(message) => SwitchHostError::Hidpp { message },
+        HostSwitchError::FeatureUnsupported => SwitchHostError::FeatureUnsupported,
+        HostSwitchError::TimedOut { operation } => SwitchHostError::TimedOut {
+            operation: operation.into(),
+        },
+        HostSwitchError::UnsupportedKeyboard => SwitchHostError::Hidpp {
+            message: error.to_string(),
+        },
+        HostSwitchError::HostSlotEmpty { host } => SwitchHostError::HostSlotEmpty { host },
+        HostSwitchError::HostOutOfRange { host, host_count } => {
+            SwitchHostError::HostOutOfRange { host, host_count }
+        }
     }
 }
 
@@ -585,6 +640,20 @@ mod tests {
             !called.load(Ordering::SeqCst),
             "f must not run when the route can't be resolved"
         );
+    }
+
+    #[tokio::test]
+    async fn switch_host_on_a_registry_miss_returns_device_not_found() {
+        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let route = unresolvable_route();
+
+        let result = DeviceOp::new(&capture, &registry, &receiver_access, &route)
+            .switch_host(1)
+            .await;
+
+        assert!(matches!(result, Err(SwitchHostError::DeviceNotFound)));
     }
 
     /// `DeviceOp::detach` resolves before spawning, so a registry miss must

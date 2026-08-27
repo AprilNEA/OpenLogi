@@ -26,7 +26,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    PairingCommandError, PairingUpdate, RingObservation, SwitchHostError,
 };
 use succession::Compat;
 
@@ -207,6 +207,15 @@ impl Agent for AgentServer {
                 openlogi_hid::get_smartshift_status_on(&c).await
             })
             .await
+    }
+
+    async fn switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        host: u8,
+    ) -> Result<(), SwitchHostError> {
+        self.shared.device(&route).switch_host(host).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

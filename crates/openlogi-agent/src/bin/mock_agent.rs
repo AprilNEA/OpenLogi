@@ -58,7 +58,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    PairingPhase, PairingUpdate, RingObservation, SwitchHostError,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -911,6 +911,21 @@ impl Agent for MockAgent {
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })
+    }
+
+    async fn switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        host: u8,
+    ) -> Result<(), SwitchHostError> {
+        self.state
+            .lock()
+            .await
+            .settings_for(&route)
+            .map_err(|_error| SwitchHostError::DeviceNotFound)?;
+        info!(%route, host, "switch_host (no-op in the mock)");
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
