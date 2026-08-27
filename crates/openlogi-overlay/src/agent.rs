@@ -16,7 +16,9 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::{ActionRingInvocation, AgentClient, Generation, OBSERVE_HOLD, PROTOCOL_VERSION};
+use openlogi_ipc::{
+    ActionRingInvocation, AgentClient, ClientKind, Generation, OBSERVE_HOLD, PROTOCOL_VERSION,
+};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -93,6 +95,13 @@ async fn connect() -> Option<AgentClient> {
         ));
     }
     let client = connection.client;
+    // Declare before anything else: an overlay reconnecting on its own is an
+    // orphan of a previous run and must not wake a dormant agent — an armed
+    // agent spawns its own overlay.
+    client
+        .declare_client(context::current(), ClientKind::Overlay)
+        .await
+        .ok()?;
     let identity = client.identity(context::current()).await.ok()?;
     if let Standing::Superseded(because) = allegiance().observe(identity) {
         stand_down(&because.to_string());

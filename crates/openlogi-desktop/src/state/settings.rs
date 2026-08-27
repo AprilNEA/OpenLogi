@@ -1,7 +1,7 @@
 //! App-level settings (launch-at-login, theme, assets, language).
 
-use super::AppState;
-use gpui::App;
+use super::{AppState, StateEvent};
+use gpui::Context;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
     UiScale, VerticalScrollSensitivity,
@@ -15,19 +15,23 @@ impl AppState {
     pub fn app_settings(&self) -> &AppSettings {
         &self.config.app_settings
     }
-    /// Toggle launch-at-login, persist to `config.toml`, and reconcile the
-    /// macOS `LaunchAgent` plist so the change takes effect without a
-    /// restart. No-op when the value is unchanged. Disk failures restore the
-    /// persisted value and surface a configuration error without crashing.
+    /// Toggle launch-at-login by persisting it to `config.toml` — which *is*
+    /// the switch: the agent reads it (see `platform::registration`), and on
+    /// Linux/Windows reconciles its autostart on config reload. Registration
+    /// is only ensured opportunistically here, healing drift without
+    /// re-prompting — and giving a dev build its explicit way in. Disk
+    /// failures restore the persisted value and surface a config error.
     pub fn set_launch_at_login(&mut self, enabled: bool) {
         if self.config.app_settings.launch_at_login == enabled {
             return;
         }
         self.config
             .edit(|config| config.app_settings.launch_at_login = enabled);
-        // The agent owns autostart now; it reconciles its LaunchAgent (which
-        // points at the agent, not the GUI) when it reloads the config.
-        self.persist_and_reload("launch-at-login setting");
+        if self.persist_and_reload("launch-at-login setting")
+            && let Err(error) = crate::platform::registration::ensure_registered()
+        {
+            tracing::warn!(error, enabled, "service registration failed");
+        }
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The
     /// icon is hosted by the always-on agent, which reads this on startup and
@@ -306,7 +310,7 @@ impl AppState {
     /// Set the UI language (`None` = follow system), persist it, switch the
     /// process-global locale via [`openlogi_ui::locale`], and repaint open UI.
     /// No-op when unchanged.
-    pub fn set_language(&mut self, language: Option<String>, cx: &mut App) {
+    pub fn set_language(&mut self, language: Option<String>, cx: &mut Context<Self>) {
         if self.config.app_settings.language == language {
             return;
         }
@@ -314,8 +318,17 @@ impl AppState {
             .edit(|config| config.app_settings.language = language);
         self.persist_config("language setting");
         openlogi_ui::locale::activate(self.config.app_settings.language.as_deref());
-        // Locale lookup is process-global, so every open window must repaint.
+        // Locale lookup is process-global, so every open window must repaint;
+        // localized text cached in view state re-derives on this event.
+        cx.emit(StateEvent::LanguageChanged);
         cx.refresh_windows();
-        crate::app::menu::rebuild(cx);
+        // Deferred: the Device menu reads this entity, whose lease is still
+        // held here (callers switch language inside `AppState::update`), and a
+        // re-entrant read panics. The native window titles ride along — they
+        // are stamped at open and don't re-render with the refresh.
+        cx.defer(|cx| {
+            crate::app::menu::rebuild(cx);
+            crate::windows::retitle_open(cx);
+        });
     }
 }

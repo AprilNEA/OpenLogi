@@ -136,6 +136,12 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Snapshot of the agent service's registration status, taken when the
+    /// window opens and after every settings change (the status read is an
+    /// XPC round-trip, so it must not run per frame). Drives the General
+    /// page's "switched off in System Settings" notice; a flip made outside
+    /// the app shows up on the next settings change or reopen.
+    registration_status: crate::platform::registration::ServiceStatus,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -153,7 +159,13 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
+        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
+            if matches!(event, StateEvent::LanguageChanged) {
+                // The cache-size line is localized text cached in view state
+                // (it interpolates an IO-derived size); rebuild it in the new
+                // locale.
+                this.asset_cache_desc = assets::cache_size_description();
+            }
             if matches!(
                 event,
                 StateEvent::AgentChanged
@@ -161,7 +173,13 @@ impl SettingsView {
                     | StateEvent::InventoryChanged
                     | StateEvent::CameraPermissionChanged
                     | StateEvent::SettingsChanged
+                    | StateEvent::LanguageChanged
             ) {
+                // A settings change may have run the opportunistic
+                // registration ensure, so re-read the status snapshot.
+                if matches!(event, StateEvent::SettingsChanged) {
+                    this.registration_status = crate::platform::registration::status();
+                }
                 cx.notify();
             }
         });
@@ -246,6 +264,7 @@ impl SettingsView {
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
+            registration_status: crate::platform::registration::status(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
@@ -404,10 +423,16 @@ pub fn open(cx: &mut App) {
 /// Open the Settings window on a specific page, or focus it if it's already
 /// open. The page only steers a *fresh* open — an already-open window is just
 /// focused on whatever page it last showed (the Settings widget owns selection).
+/// The window's native title — one definition for open and the live-language
+/// retitle ([`windows::retitle_open`]), so the two cannot drift.
+pub(crate) fn window_title() -> SharedString {
+    tr!("Settings")
+}
+
 pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
-        tr!("Settings"),
+        window_title(),
         // Wide enough that the pages' custom rows keep slack under fonts wider
         // than the macOS system font (Segoe UI tipped the old 840 into
         // clipping the hero rows' trailing buttons on Windows).
@@ -420,6 +445,12 @@ pub fn open_at(page: SettingsPage, cx: &mut App) {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply_ui_scale(window, cx);
+        crate::ui::components::localize_placeholder(
+            &self.theme_search,
+            tr!("Filter themes…"),
+            window,
+            cx,
+        );
         let pal = theme::palette(cx);
         let view = cx.entity();
         // Only surface the Camera permission when a webcam is actually present,
@@ -440,8 +471,11 @@ impl Render for SettingsView {
                 group_ix: None,
             })
             .page(general::general_page(
-                self.vertical_scroll_sensitivity_slider.clone(),
-                self.thumbwheel_sensitivity_slider.clone(),
+                general::SensitivitySliders {
+                    vertical_scroll: self.vertical_scroll_sensitivity_slider.clone(),
+                    thumbwheel: self.thumbwheel_sensitivity_slider.clone(),
+                },
+                self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod

@@ -21,15 +21,41 @@ use crate::PermissionStatus;
 /// - `Unknown` — uinput is fine but no Logitech hidraw is connected.
 #[must_use]
 pub fn input_device_access() -> PermissionStatus {
-    classify(probe_uinput(), probe_logitech_hidraw())
+    Probes {
+        uinput_writable: probe_uinput(),
+        hidraw: probe_logitech_hidraw(),
+    }
+    .into()
 }
 
-/// Split from the probes so it is testable without device nodes.
-pub(crate) fn classify(uinput_ok: bool, hidraw_ok: Option<bool>) -> PermissionStatus {
-    match (uinput_ok, hidraw_ok) {
-        (true, Some(true)) => PermissionStatus::Granted,
-        (false, _) | (_, Some(false)) => PermissionStatus::Denied,
-        (true, None) => PermissionStatus::Unknown,
+/// What probing the Logitech `/dev/hidraw*` nodes established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HidrawProbe {
+    /// At least one Logitech hidraw opened read/write.
+    Accessible,
+    /// A Logitech hidraw is present but `open()` was refused.
+    Denied,
+    /// No Logitech hidraw is connected to probe.
+    NonePresent,
+}
+
+/// Both probes, taken together.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Probes {
+    /// `/dev/uinput` opened for writing.
+    pub(crate) uinput_writable: bool,
+    pub(crate) hidraw: HidrawProbe,
+}
+
+/// The verdict is a total function of the two probes — split from the
+/// probing itself so it is testable without device nodes.
+impl From<Probes> for PermissionStatus {
+    fn from(probes: Probes) -> Self {
+        match (probes.uinput_writable, probes.hidraw) {
+            (true, HidrawProbe::Accessible) => Self::Granted,
+            (false, _) | (_, HidrawProbe::Denied) => Self::Denied,
+            (true, HidrawProbe::NonePresent) => Self::Unknown,
+        }
     }
 }
 
@@ -41,13 +67,13 @@ fn probe_uinput() -> bool {
         .is_ok()
 }
 
-/// `Some(true)` — a Logitech hidraw is accessible; `Some(false)` — one is
-/// present but permission is denied; `None` — none connected.
-fn probe_logitech_hidraw() -> Option<bool> {
-    let mut any_accessible = false;
+fn probe_logitech_hidraw() -> HidrawProbe {
     let mut any_denied = false;
 
-    for entry in fs::read_dir("/dev").ok()?.filter_map(Result::ok) {
+    let Ok(entries) = fs::read_dir("/dev") else {
+        return HidrawProbe::NonePresent;
+    };
+    for entry in entries.filter_map(Result::ok) {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
@@ -59,21 +85,16 @@ fn probe_logitech_hidraw() -> Option<bool> {
             .write(true)
             .open(Path::new("/dev").join(&name))
         {
-            Ok(_) => {
-                any_accessible = true;
-                break; // one accessible device is enough
-            }
+            Ok(_) => return HidrawProbe::Accessible, // one accessible device is enough
             Err(e) if matches!(e.kind(), ErrorKind::PermissionDenied) => any_denied = true,
             Err(_) => {} // device gone or other transient error — skip
         }
     }
 
-    if any_accessible {
-        Some(true)
-    } else if any_denied {
-        Some(false)
+    if any_denied {
+        HidrawProbe::Denied
     } else {
-        None
+        HidrawProbe::NonePresent
     }
 }
 

@@ -1,9 +1,11 @@
----
-paths:
-  - "crates/openlogi-hook/**"
----
+# openlogi-hook — OS input capture
 
-# Input hook (CGEventTap / evdev / WH_MOUSE_LL)
+The event-tap crate: CGEventTap on macOS, evdev+uinput on Linux, WH_MOUSE_LL
+on Windows. Cross-platform cfg discipline is
+[`.claude/rules/cross-platform.md`](../../.claude/rules/cross-platform.md), and
+the macOS FFI contract is
+[`.claude/rules/objc-ffi.md`](../../.claude/rules/objc-ffi.md); this file is the
+crate's own load-bearing behavior.
 
 - macOS: the CGEventTap freeze-hazard state machine is load-bearing. The tap must
   self-disable when Accessibility is revoked, on its own thread, with the bounded

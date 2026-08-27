@@ -24,6 +24,11 @@
 use openlogi_core::config::AppSettings;
 use openlogi_ui::locale::activate;
 
+/// Serializes tests that mutate `rust_i18n`'s process-global locale, so a
+/// locale switch in one test cannot interleave with another's assertions.
+#[cfg(test)]
+pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Apply the configured language to the process-global locale at startup.
 /// Safe to call before any window opens — the locale is a plain atomic.
 pub fn apply(settings: &AppSettings) {
@@ -32,19 +37,24 @@ pub fn apply(settings: &AppSettings) {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+
+    use crate::features::mouse::thumbwheel::ThumbwheelPreset;
+
     /// End-to-end check that `locales/*.yml` loaded and the gettext-style
     /// English keys match — a typo'd key silently falls back to English, which
     /// this catches. All locale-dependent assertions live in this one test on
     /// purpose: `rust_i18n`'s locale is a process-global, so splitting them into
-    /// separate `#[test]`s would race under the parallel harness.
+    /// separate `#[test]`s would race under the parallel harness. Tests that
+    /// must switch the locale for other reasons hold [`super::LOCALE_LOCK`].
     #[test]
     fn locale_file_resolves_keys() {
-        use openlogi_core::binding::{Action, ButtonId, GestureDirection};
-
-        use crate::features::mouse::thumbwheel::ThumbwheelPreset;
-
         // The accessibility blurb is the longest, most typo-prone key.
         const BLURB: &str = "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.";
+
+        // A poisoned lock still holds the guard inside the `Err`, so a panic
+        // in one locale test cannot unlock the others.
+        let _locale = super::LOCALE_LOCK.lock();
 
         rust_i18n::set_locale("zh-CN");
         assert_eq!(rust_i18n::t!("Settings"), "设置"); // GUI chrome

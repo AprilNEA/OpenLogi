@@ -261,10 +261,13 @@ impl AppView {
                             && active_key.as_ref() == Some(key))
                 }
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
-                // Child entities own these surfaces and subscribe directly.
+                // Child entities own these surfaces and subscribe directly. A
+                // language switch already refreshes every window, and the root
+                // caches no localized text.
                 StateEvent::SmartShiftChanged(_)
                 | StateEvent::CameraPermissionChanged
-                | StateEvent::DiagnosticsChanged => false,
+                | StateEvent::DiagnosticsChanged
+                | StateEvent::LanguageChanged => false,
                 // App-wide settings render in their own window. The root only
                 // cares when a persistence/reload failure opens or closes its
                 // fail-closed configuration-error screen.

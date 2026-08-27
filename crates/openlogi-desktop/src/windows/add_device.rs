@@ -70,11 +70,17 @@ pub fn open(cx: &mut App) {
     }
     windows::open_or_focus(
         |reg| &mut reg.add_device,
-        tr!("Add Device"),
+        window_title(),
         Size::new(px(520.), px(460.)),
         AddDeviceView::new,
         cx,
     );
+}
+
+/// The window's native title — one definition for open and the live-language
+/// retitle ([`windows::retitle_open`]), so the two cannot drift.
+pub(crate) fn window_title() -> SharedString {
+    tr!("Add Device")
 }
 
 /// Show the agent's pairing session. `None` is no session — including after a

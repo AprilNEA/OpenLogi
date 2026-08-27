@@ -59,7 +59,9 @@ pub use succession::Identity;
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
-pub const PROTOCOL_VERSION: u32 = 28;
+/// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
+///      the macOS dormancy gate.
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -412,6 +414,21 @@ pub enum ActionRingCommandError {
     SlotEmpty,
 }
 
+/// What kind of client a connection is, declared through
+/// [`Agent::declare_client`] right after the version handshake.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientKind {
+    /// The desktop app. The only kind whose declaration arms a dormant agent.
+    Gui,
+    /// The `openlogi` CLI reading a snapshot; served without arming.
+    Cli,
+    /// The Actions Ring overlay helper; served without arming — one that
+    /// connects on its own is an orphan of a previous run.
+    Overlay,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -533,4 +550,9 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Declare what kind of client this connection is. Informational for an
+    /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
+    /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
+    /// it speaks only [`Agent::protocol_version`] — and so never arms.
+    async fn declare_client(kind: ClientKind);
 }

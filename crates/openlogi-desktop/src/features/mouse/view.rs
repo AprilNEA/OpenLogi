@@ -16,8 +16,8 @@ use gpui_component::{
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
-    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, labels_from_hotspots,
+    LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
+    asset_hotspots_for_png, default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
@@ -33,7 +33,6 @@ use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
-const LABEL_H: f32 = 56.;
 const LABEL_GUTTER: f32 = LABEL_W + SIDE_GAP;
 const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
 
@@ -252,6 +251,12 @@ fn set_control_hovered(
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::components::localize_placeholder(
+            &self.action_search,
+            tr!("Search actions…"),
+            window,
+            cx,
+        );
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
@@ -289,7 +294,7 @@ impl Render for MouseModelView {
         } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
         let canvas_h = mouse_h;
 
-        let highlight = self.hovered.or(active);
+        let highlight = self.hovered.or(active).or(self.selected);
         let view = cx.entity();
         let hovered = self.hovered;
         let profile_status = profile_canvas_status(cx);

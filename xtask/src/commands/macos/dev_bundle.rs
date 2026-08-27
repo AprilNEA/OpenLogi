@@ -26,7 +26,7 @@ use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::bundle::identity::{self, Channel, Component};
-use super::bundle::{HELPERS, Helper};
+use super::bundle::{HELPERS, Helper, write_agent_launch_plist};
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
@@ -84,12 +84,15 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     // Clear the whole login-items directory rather than the bundles about to be
     // written: helper directory names have changed more than once, and a
     // leftover from an older checkout is a second row in every macOS list that
-    // names these processes.
+    // names these processes. Same for the launchd service plists: one from an
+    // earlier build could name a helper this build does not embed.
     remove_bundle(&app.join("Contents/Library/LoginItems"))?;
+    remove_bundle(&app.join("Contents/Library/LaunchAgents"))?;
     let components = if helpers_wanted() {
         for helper in &HELPERS {
             embed_helper(&root, &app, &profile, helper, &icon, &signing)?;
         }
+        write_agent_launch_plist(&app, CHANNEL)?;
         Component::VARIANTS
     } else {
         println!("==> helpers: skipped (OPENLOGI_DEV_AGENT=0)");
@@ -105,7 +108,60 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     signing.run(&sign_order(&app, components))?;
     register_with_launch_services(&app)?;
 
+    // Start the freshly built agent before the GUI launches, so its first
+    // IPC connect succeeds instead of riding the production
+    // spawn-on-unreachable fallback through every dev run.
+    #[cfg(unix)]
+    if helpers_wanted() {
+        start_agent(&app)?;
+    }
+
     println!("Dev bundle ready: {}", app.display());
+    Ok(())
+}
+
+/// How long to wait for the started agent's IPC socket to accept a
+/// connection. Generous: a cold agent start enumerates HID before serving,
+/// but the socket itself comes up in well under a second — the budget only
+/// matters when the agent is broken, and then the GUI's own retry loop is the
+/// backstop.
+#[cfg(unix)]
+const AGENT_SOCKET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(unix)]
+const AGENT_SOCKET_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Launch the dev agent helper and wait for its IPC socket.
+///
+/// `open -g -n`, exactly like the GUI's own fallback: LaunchServices parents
+/// the agent under launchd, so it is its own TCC responsible process and the
+/// dev identity's Accessibility / Input Monitoring grants stick. A timeout is
+/// a warning, not an error — the GUI retries on its own.
+#[cfg(unix)]
+fn start_agent(app: &Path) -> Result<()> {
+    let agent_bundle = Component::Agent.root(app, CHANNEL);
+    let sh = Shell::new()?;
+    println!("==> agent (start)");
+    cmd!(sh, "open -g -n {agent_bundle}").run()?;
+
+    // The dev agent serves the sibling `openlogi-dev` profile's socket; xtask
+    // itself is not a dev-profile process, so build the path by hand the way
+    // `signing::state_path` does rather than via `paths::agent_socket_path`.
+    let socket = openlogi_core::paths::xdg_config_home()
+        .map_err(|error| anyhow::anyhow!("could not resolve the dev socket: {error}"))?
+        .join(openlogi_core::paths::DEV_APP_DIR)
+        .join("agent.sock");
+    let started = std::time::Instant::now();
+    while started.elapsed() < AGENT_SOCKET_DEADLINE {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            println!("    agent ready ({:.1}s)", started.elapsed().as_secs_f32());
+            return Ok(());
+        }
+        std::thread::sleep(AGENT_SOCKET_POLL);
+    }
+    println!(
+        "    warning: agent socket not reachable after {}s — the GUI will keep retrying",
+        AGENT_SOCKET_DEADLINE.as_secs()
+    );
     Ok(())
 }
 

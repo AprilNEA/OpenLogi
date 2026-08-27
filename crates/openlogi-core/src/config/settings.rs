@@ -145,12 +145,17 @@ pub enum AssetSourcePreference {
     reason = "independent on/off user preferences, not a state machine"
 )]
 pub struct AppSettings {
-    /// When true, a macOS `LaunchAgent` plist at
-    /// `~/Library/LaunchAgents/org.openlogi.openlogi.plist` is installed
-    /// so the app starts on login (P2.2). The plist is reconciled with
-    /// this field on every startup; flipping the flag and relaunching is
-    /// enough to install / remove it.
-    #[serde(default)]
+    /// Start the background agent at login. **On by default**: the agent is
+    /// what keeps remaps working, so a fresh install that silently died on
+    /// reboot would be broken-by-default. On macOS this is a *sunk* switch:
+    /// the `SMAppService` login item stays registered either way (visible and
+    /// revocable under System Settings › Login Items — that consent surface
+    /// is what makes the default defensible), and the agent itself reads this
+    /// value when launchd starts it — off, and with no client connecting, it
+    /// idles out instead of arming. On Linux/Windows the agent reconciles its
+    /// autostart unit / Run-key with it. A config written before the flip
+    /// keeps the value it saved.
+    #[serde(default = "default_true")]
     pub launch_at_login: bool,
     /// Opt-in update check (P2.8). **Off by default** to honour the
     /// README's "no telemetry, no auto-update poller" promise. When true,
@@ -447,7 +452,7 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            launch_at_login: false,
+            launch_at_login: true,
             check_for_updates: false,
             auto_install_updates: false,
             update_prompt_seen: false,

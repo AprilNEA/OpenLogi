@@ -44,7 +44,7 @@ protocol-correctness contract:
   (`UnsupportedResponse`-style) — never falls back to a silent default.
 - Feature `0x0005` (`device_type_and_name`) is one of four incompatible "device
   kind" vocabularies used across the workspace; the cross-crate rule about never
-  mixing them by raw value lives in `.claude/rules/hidpp.md` (the
+  mixing them by raw value lives in `crates/openlogi-device/AGENTS.md` (the
   `openlogi-hid` side), not duplicated here.
 
 ## Settled: this crate answers to the workspace like any other

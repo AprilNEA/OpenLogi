@@ -18,8 +18,8 @@ use super::probe::{
     preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
 };
 use super::{
-    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
-    one_shot_should_stop, retained_nodes, routes_for_inventories, settle_unhealthy_node,
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
+    UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories, settle_unhealthy_node,
 };
 use crate::channel::scripted::{
     ScriptedBackend, ScriptedNode, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
@@ -369,9 +369,16 @@ fn retiring_node_inventory_expires_after_the_existing_ledger_grace() {
 #[test]
 fn one_shot_retry_stops_when_first_attempt_is_complete() {
     let current = inventory(&[1, 2]);
+    let scan = OneShotScan::new();
 
     assert!(
-        one_shot_should_stop(None, &current, true, true, 1),
+        scan.is_settled(
+            &current,
+            ScanPass {
+                complete: true,
+                healthy: true
+            }
+        ),
         "complete inventories keep the one-pass happy path"
     );
 }
@@ -380,17 +387,24 @@ fn one_shot_retry_stops_when_first_attempt_is_complete() {
 fn one_shot_retry_waits_for_healthy_incomplete_inventory_to_stabilize() {
     let partial = inventory(&[1]);
     let full = inventory(&[1, 2]);
+    let healthy = ScanPass {
+        complete: false,
+        healthy: true,
+    };
+    let mut scan = OneShotScan::new();
 
     assert!(
-        !one_shot_should_stop(None, &partial, false, true, 1),
+        !scan.is_settled(&partial, healthy),
         "the first incomplete pass has no previous inventory to compare"
     );
+    scan.advance(partial, healthy);
     assert!(
-        !one_shot_should_stop(Some(partial.as_slice()), &full, false, true, 2),
+        !scan.is_settled(&full, healthy),
         "a changed inventory should get another retry window"
     );
+    scan.advance(full.clone(), healthy);
     assert!(
-        one_shot_should_stop(Some(full.as_slice()), &full, false, true, 3),
+        scan.is_settled(&full, healthy),
         "once the returned inventory stabilizes, retrying stops"
     );
 }
@@ -398,9 +412,15 @@ fn one_shot_retry_waits_for_healthy_incomplete_inventory_to_stabilize() {
 #[test]
 fn one_shot_retry_stops_on_unchanged_incomplete_inventory() {
     let partial = inventory(&[1]);
+    let healthy = ScanPass {
+        complete: false,
+        healthy: true,
+    };
+    let mut scan = OneShotScan::new();
 
+    scan.advance(partial.clone(), healthy);
     assert!(
-        one_shot_should_stop(Some(partial.as_slice()), &partial, false, true, 2),
+        scan.is_settled(&partial, healthy),
         "stable partial inventories should not burn every retry attempt"
     );
 }
@@ -408,26 +428,48 @@ fn one_shot_retry_stops_on_unchanged_incomplete_inventory() {
 #[test]
 fn one_shot_retry_keeps_unchanged_inventory_after_unhealthy_probe() {
     let partial = inventory(&[1]);
+    let mut scan = OneShotScan::new();
 
+    // The replayed snapshot arrived from an earlier healthy pass…
+    scan.advance(
+        partial.clone(),
+        ScanPass {
+            complete: false,
+            healthy: true,
+        },
+    );
+    // …but this pass failed, so the unchanged replay is not stability
+    // evidence.
     assert!(
-        !one_shot_should_stop(Some(partial.as_slice()), &partial, false, false, 2),
+        !scan.is_settled(
+            &partial,
+            ScanPass {
+                complete: false,
+                healthy: false
+            }
+        ),
         "unchanged replay after a failed probe must keep retrying before the cap"
     );
 }
 
 #[test]
 fn one_shot_retry_stops_at_attempt_cap_when_inventory_keeps_changing() {
-    let previous = inventory(&[1]);
-    let current = inventory(&[1, 2]);
+    let unhealthy = ScanPass {
+        complete: false,
+        healthy: false,
+    };
+    let mut scan = OneShotScan::new();
 
+    while scan.attempt < ONESHOT_ATTEMPTS {
+        let changing = inventory(&[scan.attempt]);
+        assert!(
+            !scan.is_settled(&changing, unhealthy),
+            "attempts below the cap keep retrying"
+        );
+        scan.advance(changing, unhealthy);
+    }
     assert!(
-        one_shot_should_stop(
-            Some(previous.as_slice()),
-            &current,
-            false,
-            false,
-            ONESHOT_ATTEMPTS
-        ),
+        scan.is_settled(&inventory(&[1, 2]), unhealthy),
         "the retry loop must remain bounded even if the inventory changes every time"
     );
 }

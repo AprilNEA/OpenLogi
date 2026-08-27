@@ -78,6 +78,75 @@ fn shipped_helper_plists_declare_the_shared_icon() {
     }
 }
 
+/// The launchd labels are frozen once shipped: `SMAppService` registrations
+/// users approved in Login Items key on them, so a rename orphans every
+/// existing registration. Pinned as literals on purpose — routing the
+/// expectation through `brand::` would make a rename pass silently.
+#[test]
+fn agent_service_labels_are_frozen() {
+    assert_eq!(
+        agent_service_label(Channel::Production),
+        "org.openlogi.agent.service"
+    );
+    assert_eq!(
+        agent_service_label(Channel::Dev),
+        "org.openlogi.agent.service-dev"
+    );
+}
+
+/// The embedded service plist is what launchd starts the agent from: its
+/// `BundleProgram` must name the channel's real helper layout, and its
+/// `KeepAlive` must respawn crashes without resurrecting a deliberate Quit
+/// (`SuccessfulExit: false`).
+#[test]
+fn agent_launch_plist_targets_the_channel_helper_and_keeps_alive() {
+    for (channel, helper_dir) in [
+        (Channel::Production, "OpenLogi Agent.app"),
+        (Channel::Dev, "OpenLogi Agent Dev.app"),
+    ] {
+        let content = agent_launch_plist(channel).unwrap();
+
+        assert_eq!(
+            content.get("Label").and_then(plist::Value::as_string),
+            Some(agent_service_label(channel).as_str())
+        );
+        assert_eq!(
+            content
+                .get("BundleProgram")
+                .and_then(plist::Value::as_string),
+            Some(
+                format!("Contents/Library/LoginItems/{helper_dir}/Contents/MacOS/openlogi-agent")
+                    .as_str()
+            )
+        );
+        let keep_alive = content
+            .get("KeepAlive")
+            .and_then(plist::Value::as_dictionary)
+            .unwrap();
+        assert_eq!(
+            keep_alive
+                .get("SuccessfulExit")
+                .and_then(plist::Value::as_boolean),
+            Some(false)
+        );
+    }
+}
+
+/// `write_agent_launch_plist` must refuse a bundle whose helper is absent —
+/// a registration pointing at nothing is a login item that silently never
+/// starts.
+#[test]
+fn agent_launch_plist_refuses_a_bundle_without_the_helper() {
+    let app = tempfile::tempdir().unwrap();
+
+    let error = write_agent_launch_plist(app.path(), Channel::Dev).unwrap_err();
+
+    assert!(
+        error.to_string().contains("after the helpers are embedded"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn verify_bundle_binaries_names_each_missing_binary() {
     let channel = Channel::Production;

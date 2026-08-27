@@ -94,6 +94,30 @@ Encode invariants in the type system instead of checking them at runtime:
   surface as **errors** (`UnsupportedResponse`-style), never as silent fallbacks.
 - Replace long parameter lists with Change/Params structs; make illegal combinations
   unrepresentable rather than validated.
+- A `bool` parameter is boolean-blind at its call sites. When only a couple of
+  combinations are ever used, split into intent-named methods
+  (`divert_cid`/`undivert_cid`, not `set_cid_reporting(cid, bool, bool)`).
+  Otherwise name the facts: a struct with named fields when they are independent
+  (`ScanPass { complete, healthy }`), a sum type only when the erased
+  combinations are truly meaningless — checked against persisted state, not
+  just the current UI branches: `HiresWheel { Here, Elsewhere, Nowhere }`
+  collapses a display precedence, while collapsing
+  `(inversion_supported, inverted)` erased the configured-but-unsupported
+  state a disabled toggle must still show. An `Option<bool>` encoding a genuine
+  three-state is the same defect (`HidrawProbe { Accessible, Denied,
+  NonePresent }`). `struct_excessive_bools` firing is the signal to re-type,
+  not to `expect`.
+- When a loop scatters mutable locals that feed one free decision function, fold
+  the state and the rule into a sans-I/O object: events become named methods,
+  the decision method is pure and takes an explicit `now`, and all I/O stays in
+  the loop (`SpawnReflex`, `OneShotScan`; older precedents `RearmBudget`, the
+  haptics `Budget`, `QueryState`). Tests then drive real transitions and cannot
+  construct unreachable states; a total decision function earns one exhaustive
+  truth-table test rather than scattered single-case asserts.
+- Lifecycles are typestate: stages are types, transitions consume `self`
+  (`Booted::arm(self) -> Armed`), and a resource legal in only some stages
+  travels inside the stage that may hold it — a third consumer then cannot
+  exist by construction.
 - Ownership models resources (`Retained<T>` in the ObjC FFI) and thread affinity is
   proven by types (`MainThreadMarker`, `!Send` handles), not by runtime checks.
 - Libraries return `thiserror` types; binaries may use `anyhow`.
@@ -110,6 +134,19 @@ House style:
   the lock; restore with `cargo update -p gpui --precise <rev>`).
 - Module layout: a module with its own semantics is `foo.rs` (children in a sibling
   `foo/`); `foo/mod.rs` is only for pure namespace shells. Never both for one module.
+- Platform-divergent code: once more than one function diverges, use one module per
+  OS selected by a single `cfg` at the module declaration, with a thin facade owning
+  the shared types and dispatch — `inject.rs` → `inject/{macos,linux,windows}.rs`,
+  `autostart.rs` likewise — not a file interleaved with repeated
+  `#[cfg(target_os = …)]` arms. Each platform file implements the same function
+  names; a missing one fails that platform's compile, which is the same guarantee a
+  trait would give here. Reach for a trait only when implementations genuinely
+  coexist — runtime backend selection, test doubles, or a cross-crate seam
+  (`HidBackend`) — never as ceremony around a compile-time-exclusive choice. A
+  single small divergent function (`platform/os.rs`) stays inline. Splitting does
+  not lift the cross-platform rule: the non-host files are only ever compiled by
+  that platform's CI or a cross-lint, so `.claude/rules/cross-platform.md` applies
+  with full force.
 - Keep files reasonably sized (split around ~500 lines) into real modules — never
   simulate structure with `// ---- section ----` banner comments. But don't
   over-extract either: inline single-use helpers.

@@ -261,11 +261,7 @@ async fn arm_host_controls_inner(
             });
             match mode {
                 ReportingMode::Diverted => {
-                    timed_hidpp(
-                        "diverting host control",
-                        controls.set_cid_reporting(info.cid, true, false),
-                    )
-                    .await?;
+                    timed_hidpp("diverting host control", controls.divert_cid(info.cid)).await?;
                 }
                 ReportingMode::Analytics => {
                     timed_hidpp(
@@ -707,15 +703,17 @@ mod tests {
         assert!(!change.required);
     }
 
-    fn reporting(diverted: bool, raw_xy: bool, analytics_key_events: bool) -> CidReporting {
+    /// A reporting snapshot with unrelated bits deliberately set, so the
+    /// cleanup tests prove that only the bits they vary are restored.
+    fn noisy_reporting() -> CidReporting {
         CidReporting {
             cid: ControlId(0x00d3),
-            diverted,
+            diverted: false,
             persistently_diverted: true,
             force_raw_xy: true,
-            raw_xy,
+            raw_xy: false,
             remap: Some(ControlId(0x1234)),
-            analytics_key_events,
+            analytics_key_events: false,
             raw_wheel: true,
         }
     }
@@ -758,7 +756,7 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Analytics,
-            original: reporting(false, false, false),
+            original: noisy_reporting(),
         }];
         let mut events = [AnalyticsKeyEvent::default(); 5];
         events[0] = AnalyticsKeyEvent {
@@ -795,7 +793,11 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Diverted,
-            original: reporting(true, true, false),
+            original: CidReporting {
+                diverted: true,
+                raw_xy: true,
+                ..noisy_reporting()
+            },
         });
 
         assert_eq!(change.diverted, Some(true));
@@ -811,7 +813,10 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Analytics,
-            original: reporting(false, false, true),
+            original: CidReporting {
+                analytics_key_events: true,
+                ..noisy_reporting()
+            },
         });
 
         assert_eq!(change.analytics_key_events, Some(true));

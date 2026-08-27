@@ -28,7 +28,7 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
@@ -42,8 +42,8 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.0" }
-openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.0" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.1" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.1" }
 async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
@@ -81,6 +81,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2-application-services = { version = "0.3.2", default-features = false }
 objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }
+objc2-service-management = { version = "0.3.2", default-features = false }
 block2 = "0.6.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component

@@ -1,10 +1,7 @@
----
-paths:
-  - "crates/openlogi-device/**"
-  - "crates/openlogi-hid/**"
----
+# openlogi-device / openlogi-hid — the HID++ device layer
 
-# openlogi-device / openlogi-hid
+This guide covers the two-crate seam; it lives here because `openlogi-device`
+owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
 
 - The HID++ layer is split at `openlogi_device::backend::HidBackend`.
   `openlogi-device` holds everything that knows the protocol and nothing about

@@ -863,9 +863,9 @@ fn app_settings_default_omits_block() {
 #[test]
 fn app_settings_launch_at_login_roundtrips() {
     let mut cfg = Config::default();
-    cfg.app_settings.launch_at_login = true;
+    cfg.app_settings.launch_at_login = false;
     let parsed = write_and_read(&cfg);
-    assert!(parsed.app_settings.launch_at_login);
+    assert!(!parsed.app_settings.launch_at_login);
 }
 
 #[test]

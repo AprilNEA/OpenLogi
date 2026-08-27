@@ -40,7 +40,7 @@ sits beneath both.
 | `xtask` | `cargo xtask` maintenance: bundling, packaging, release manifest |
 
 - GUI ↔ agent speak tarpc/bincode over an `interprocess` local socket. The wire format
-  is versioned and **append-only** — read `.claude/rules/ipc-protocol.md` before touching
+  is versioned and **append-only** — read `crates/openlogi-ipc/AGENTS.md` before touching
   it.
 - Three processes ship in the bundle — GUI, agent, overlay — and the overlay is a
   *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never
@@ -197,7 +197,7 @@ backstop, not a substitute for running the gate yourself after a rebase.
    `.claude/rules/cross-platform.md`.
 5. If wire types changed: `PROTOCOL_VERSION` bumped and
    `cargo test -p openlogi-ipc --test wire_format` green — see
-   `.claude/rules/ipc-protocol.md`.
+   `crates/openlogi-ipc/AGENTS.md`.
 6. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
    as `en.yml` (new keys at the same position); run
    `cargo test -p openlogi-desktop i18n` — see `.claude/rules/i18n.md`.
@@ -214,8 +214,10 @@ backstop, not a substitute for running the gate yourself after a rebase.
   "not applied".
 - Each dev run first stops the agent and overlay the previous one left behind — they
   are LaunchServices-launched (for their own TCC identity), not children of the GUI,
-  and a surviving agent relaunches itself ~20 s later. `OPENLOGI_DEV_AGENT=0` opts
-  out of all of it.
+  and a surviving agent relaunches itself ~20 s later — then starts the freshly
+  built agent and waits for its socket, so the GUI's first IPC connect succeeds
+  instead of exercising the production spawn-on-unreachable fallback.
+  `OPENLOGI_DEV_AGENT=0` opts out of all of it.
 - No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock` serves
   a scripted inventory over the dev IPC socket, so the GUI runs unmodified and the
   production app stays untouched.
@@ -290,7 +292,8 @@ never re-run a failed release job or re-dispatch on an existing tag.
 
 ## Subsystem rules — read before touching
 
-Claude Code loads these automatically per path; other agents: read the listed file
+Claude Code loads the `.claude/rules/` files per matching path and a crate's
+own `AGENTS.md` when working inside it; other agents: read the listed file
 before editing that area.
 
 | Area | Rule file |
@@ -298,13 +301,14 @@ before editing that area.
 | reproducing CI jobs locally (every `ci.yml` job → command) | `.claude/rules/ci.md` |
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
+| `crates/openlogi-desktop/**` (that crate's own contract and map) | `crates/openlogi-desktop/AGENTS.md` |
 | `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |
-| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**`, plus `openlogi-core`/`openlogi-device` (their serde types ride the wire) | `.claude/rules/ipc-protocol.md` |
+| `crates/openlogi-ipc/**`, plus every crate whose serde types ride the wire (`openlogi-agent-core`, `openlogi-agent`, `openlogi-core`, `openlogi-hid`) | `crates/openlogi-ipc/AGENTS.md` |
 | `crates/openlogi-hook/**`, `crates/openlogi-inject/**`, `crates/openlogi-hid/**` (cfg-gated platform code) | `.claude/rules/cross-platform.md` |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
-| `crates/openlogi-device/**`, `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
-| `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
-| `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
+| `crates/openlogi-device/**`, `crates/openlogi-hid/**` (the HID++ layer seam) | `crates/openlogi-device/AGENTS.md` |
+| `crates/openlogi-hook/**` (event taps) | `crates/openlogi-hook/AGENTS.md` |
+| `xtask/**`, `packaging/**`, `.github/scripts/**` | `xtask/AGENTS.md` (+ `xtask/README.md`) |
 | macOS native FFI wherever it lives — `openlogi-{agent,camera,hook,inject,overlay,permissions}` + `openlogi-desktop/src/platform/**` | `.claude/rules/objc-ffi.md` |
 
 ## Task skills — invoke when the task matches, not when a path matches

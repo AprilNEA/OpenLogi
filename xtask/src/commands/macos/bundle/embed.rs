@@ -1,9 +1,11 @@
-//! What goes inside the finished `.app`: the login-item helpers, the CLI, and
-//! the check that every Mach-O the bundle promises is actually there.
+//! What goes inside the finished `.app`: the login-item helpers, the CLI, the
+//! agent's launchd service plist, and the check that every Mach-O the bundle
+//! promises is actually there.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
+use openlogi_core::brand;
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
@@ -127,6 +129,85 @@ fn embed_helper(
         .with_context(|| format!("could not copy the app icon into the {label} bundle"))?;
 
     println!("    embedded {}", bundle.display());
+    Ok(())
+}
+
+/// The launchd service label `channel`'s bundle carries — what its embedded
+/// LaunchAgent plist declares, `SMAppService` registers, and `launchctl`
+/// addresses. Frozen once shipped; see [`brand::AGENT_SERVICE_LABEL`].
+pub(crate) fn agent_service_label(channel: Channel) -> String {
+    match channel {
+        Channel::Production => brand::AGENT_SERVICE_LABEL.to_owned(),
+        Channel::Dev => brand::dev_id(brand::AGENT_SERVICE_LABEL),
+    }
+}
+
+/// The launchd property list `SMAppService` registers the agent from.
+///
+/// `BundleProgram` (not `Program`) so launchd resolves the helper relative to
+/// wherever the app bundle lives — the registration survives the user moving
+/// the app. The key exists only in the `SMAppService` layer, which supplies
+/// the bundle context: a raw `launchctl bootstrap` of this file fails with
+/// `Input/output error` (verified) — registration through the framework is
+/// the sole loading path. `KeepAlive = {SuccessfulExit: false}` is the
+/// supervision contract: a crash is respawned, the tray's Quit (a clean
+/// `exit(0)`) stays down. Per launchd.plist(5), `SuccessfulExit` implies
+/// `RunAtLoad`, so a registered service also starts at login and immediately
+/// upon registration — and an explicit `RunAtLoad = false` does not override
+/// the implication (verified: the job still runs once at load).
+///
+/// `SuccessfulExit` is deliberate over the narrower `KeepAlive = {Crashed:
+/// true}`: this plist wants the implied autostart anyway, and `SuccessfulExit`
+/// respawns every failure mode — a Rust panic under the default
+/// `panic = "unwind"` is an `exit(101)`, not a signal, which `Crashed` would
+/// leave down (verified live, alongside `Crashed` not respawning SIGKILL).
+///
+/// One plist for both `launch_at_login` states: the preference is sunk into
+/// the agent, which idles out with a clean `exit(0)` — left down by
+/// `SuccessfulExit` — when started unwanted (the GUI's
+/// `platform::registration` doc has the model).
+fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
+    let helper = HELPERS
+        .iter()
+        .find(|helper| helper.component == Component::Agent)
+        .ok_or_else(|| anyhow!("HELPERS carries no agent entry"))?;
+    let nested = Component::Agent
+        .nested_bundle(channel)
+        .ok_or_else(|| anyhow!("the agent component is always a nested bundle"))?;
+
+    let mut keep_alive = plist::Dictionary::new();
+    keep_alive.insert("SuccessfulExit".into(), plist::Value::Boolean(false));
+    let mut root = plist::Dictionary::new();
+    root.insert(
+        "Label".into(),
+        plist::Value::String(agent_service_label(channel)),
+    );
+    root.insert(
+        "BundleProgram".into(),
+        plist::Value::String(format!("{nested}/Contents/MacOS/{}", helper.binary)),
+    );
+    root.insert("KeepAlive".into(), plist::Value::Dictionary(keep_alive));
+    Ok(root)
+}
+
+/// Write `channel`'s agent service plist into the app bundle at
+/// `Contents/Library/LaunchAgents/<label>.plist` — the location
+/// `SMAppService.agent(plistName:)` resolves against. Must run after the
+/// helpers are embedded (the `BundleProgram` target is verified to exist) and
+/// before signing (the app signature seals `Contents`).
+pub(crate) fn write_agent_launch_plist(app: &Path, channel: Channel) -> Result<()> {
+    let content = agent_launch_plist(channel)?;
+    if let Some(plist::Value::String(bundle_program)) = content.get("BundleProgram") {
+        ensure_file(&app.join(bundle_program))
+            .context("the agent service plist must be written after the helpers are embedded")?;
+    }
+    let dir = app.join("Contents/Library/LaunchAgents");
+    fs_err::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    let path = dir.join(format!("{}.plist", agent_service_label(channel)));
+    plist::Value::Dictionary(content)
+        .to_file_xml(&path)
+        .with_context(|| format!("could not write {}", path.display()))?;
+    println!("    wrote {}", path.display());
     Ok(())
 }
 

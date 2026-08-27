@@ -24,7 +24,7 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingUpdate, RingObservation,
 };
@@ -53,10 +53,14 @@ pub struct AgentServer {
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
+    /// Forwards each connection's [`ClientKind`] declaration to the
+    /// dormancy gate.
+    pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
 }
 
 impl AgentServer {
     /// Build a server and start the coalescing Actions Ring haptic worker.
+    /// The second return is the demand channel the dormancy gate drains.
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedRuntime,
@@ -65,18 +69,23 @@ impl AgentServer {
         event_monitor: SharedEventMonitor,
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
-    ) -> Self {
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
-        Self {
-            orchestrator,
-            shared,
-            observable,
-            pairing,
-            event_monitor,
-            action_ring,
-            dispatcher,
-            ring_haptics,
-        }
+        let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Self {
+                orchestrator,
+                shared,
+                observable,
+                pairing,
+                event_monitor,
+                action_ring,
+                dispatcher,
+                ring_haptics,
+                demand,
+            },
+            declarations,
+        )
     }
 }
 
@@ -116,7 +125,7 @@ impl Agent for AgentServer {
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
-                crate::launch_agent::reconcile(launch_at_login);
+                crate::autostart::reconcile(launch_at_login);
                 // So does the app icon, and the menu-bar item is ours to
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]
@@ -265,6 +274,12 @@ impl Agent for AgentServer {
 
     async fn observe_action_ring(self, _: Context, since: Generation) -> RingObservation {
         self.action_ring.observe(since).await
+    }
+
+    async fn declare_client(self, _: Context, kind: ClientKind) {
+        // A failed send is the designed steady state: the gate drops its
+        // receiver at arming, and an armed agent no longer cares.
+        let _ = self.demand.send(kind);
     }
 
     async fn action_ring_hover(

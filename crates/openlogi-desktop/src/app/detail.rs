@@ -336,20 +336,54 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
         .child(card)
 }
 
+/// What the scrolling card shows for the selected device — `Default` is the
+/// no-device (or unreadable-state) blank.
+#[derive(Default)]
+struct ScrollingFacts {
+    /// The persisted inversion setting. Independent of
+    /// `inversion_supported` — a configured inversion on a link without
+    /// support still renders, checked and disabled — so these are two named
+    /// fields, not a sum type.
+    inverted: bool,
+    /// Whether the current link reports HID++ inversion support.
+    inversion_supported: bool,
+    resolution: Option<openlogi_core::config::ScrollResolution>,
+    hires: HiresWheel,
+}
+
+/// Where the device offers hi-res wheel control.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum HiresWheel {
+    /// On the current link.
+    Here,
+    /// Only on another of its links.
+    Elsewhere,
+    /// Nowhere.
+    #[default]
+    Nowhere,
+}
+
 /// Scrolling card: per-device native inversion and wheel-resolution controls.
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, inversion_supported, resolution, hires_supported, hires_elsewhere) =
-        AppState::try_read(cx).map_or((false, false, None, false, false), |state| {
-            (
-                state.current_invert_scroll(),
-                state.current_scroll_inversion_supported(),
-                state.current_scroll_resolution(),
-                state.current_hires_wheel_supported(),
-                state.hires_wheel_supported_on_another_link(),
-            )
-        });
+    let ScrollingFacts {
+        inverted,
+        inversion_supported,
+        resolution,
+        hires,
+    } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
+        inverted: state.current_invert_scroll(),
+        inversion_supported: state.current_scroll_inversion_supported(),
+        resolution: state.current_scroll_resolution(),
+        hires: if state.current_hires_wheel_supported() {
+            HiresWheel::Here
+        } else if state.hires_wheel_supported_on_another_link() {
+            HiresWheel::Elsewhere
+        } else {
+            HiresWheel::Nowhere
+        },
+    });
     let inversion_description = if inversion_supported {
         tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
     } else {
@@ -389,18 +423,18 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     });
                 }),
         );
-    let resolution_description = if hires_supported {
-        match resolution {
+    let resolution_description = match hires {
+        HiresWheel::Here => match resolution {
             None => tr!("OpenLogi does not change the wheel resolution."),
             Some(ScrollResolution::Low) => tr!("Scrolls once per physical ratchet step."),
             Some(ScrollResolution::High) => {
                 tr!("Detects finer movement between ratchet steps.")
             }
+        },
+        HiresWheel::Elsewhere => {
+            tr!("This device supports wheel resolution on its other connection, but not this one.")
         }
-    } else if hires_elsewhere {
-        tr!("This device supports wheel resolution on its other connection, but not this one.")
-    } else {
-        tr!("This device does not support wheel resolution control.")
+        HiresWheel::Nowhere => tr!("This device does not support wheel resolution control."),
     };
     let resolution_row = v_flex()
         .gap_2()
@@ -419,7 +453,10 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(resolution_description),
                 ),
         )
-        .child(wheel_resolution_control(resolution, hires_supported));
+        .child(wheel_resolution_control(
+            resolution,
+            hires == HiresWheel::Here,
+        ));
     PanelCard::new(
         tr!("Scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
@@ -556,7 +593,12 @@ fn light_tab(
             .gap_4()
             .flex_wrap()
             .items_start()
-            .child(light_visual::detail(asset, online, enabled, settings, pal))
+            .child(light_visual::detail(
+                asset,
+                light_visual::LightView { online, enabled },
+                settings,
+                pal,
+            ))
             .child(
                 div()
                     .w(LIGHT_CONTROLS_W)

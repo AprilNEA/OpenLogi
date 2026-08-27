@@ -650,7 +650,16 @@ fn add_app_popover(
                 catalog_on_open.update(cx, |catalog, cx| catalog.clear_search(window, cx));
             }
         })
-        .content(move |_state, _window, cx| add_app_content(&choices, &catalog, &icons, pal, cx))
+        .content(move |_state, window, cx| {
+            let search = catalog.read(cx).search.clone();
+            crate::ui::components::localize_placeholder(
+                &search,
+                tr!("Search applications…"),
+                window,
+                cx,
+            );
+            add_app_content(&choices, &catalog, &icons, pal, cx)
+        })
 }
 
 fn add_app_content(

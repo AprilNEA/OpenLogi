@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn hidpp_smoothing_does_not_apply_main_wheel_sensitivity() {
         let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
-        let session = HidppSessionId::new("mouse-a", 7);
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
         assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)));
 
         let queued = queued_input(&receiver);
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn hidpp_cancellation_targets_its_session() {
         let (input, commands, _controls) = standalone_input(1, preferences(true, 14));
-        let session = HidppSessionId::new("mouse-a", 7);
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
         input.cancel_hidpp_session(&session);
 
         let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
@@ -542,8 +542,8 @@ mod tests {
     fn cancellation_overtakes_a_full_queue_without_discarding_another_source() {
         let preferences = preferences(true, 14);
         let (input, commands, controls) = standalone_input(2, Arc::clone(&preferences));
-        let cancelled = HidppSessionId::new("mouse-a", 7);
-        let survivor = HidppSessionId::new("mouse-b", 3);
+        let cancelled = HidppSessionId::with_epoch("mouse-a", 7);
+        let survivor = HidppSessionId::with_epoch("mouse-b", 3);
         assert!(input.try_hidpp_scroll(&cancelled, ScrollDelta::wheel_ticks(1.0, 0.0)));
         assert!(input.try_hidpp_scroll(&survivor, ScrollDelta::wheel_ticks(0.0, 1.0)));
 
