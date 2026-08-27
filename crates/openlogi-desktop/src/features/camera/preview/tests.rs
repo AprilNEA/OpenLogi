@@ -194,7 +194,7 @@ fn failed_start_does_not_retry_on_same_target_renders_or_permission_events(
     *capture.failure.borrow_mut() = Some(CaptureError::Setup("test failure".into()));
     view.update(cx, |view, cx| {
         view.set_target(Some("a".into()), cx);
-        assert!(matches!(&view.lifecycle, PreviewLifecycle::StartFailed(id) if id == "a"));
+        assert!(matches!(&view.lifecycle, PreviewLifecycle::StartFailed { target, .. } if target == "a"));
         for _ in 0..3 {
             view.set_target(Some("a".into()), cx);
         }

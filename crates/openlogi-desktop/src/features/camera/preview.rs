@@ -18,6 +18,10 @@
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
 //! camera's ~30 fps delivery rate.
+//!
+//! When the camera cannot be opened at all the placeholder says why rather than
+//! waiting on a first frame that is never coming — most usefully when another
+//! application already holds the device.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +33,7 @@ use gpui::{
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
-use openlogi_camera::{CameraAuthorization, Frame};
+use openlogi_camera::{CameraAuthorization, CaptureError, Frame};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -56,7 +60,7 @@ enum PreviewLifecycle {
     Stopped,
     /// A target remains selected after opening its stream failed. Same-target
     /// renders stay idempotent rather than retrying the open in a hot loop.
-    StartFailed(String),
+    StartFailed { target: String, error: CaptureError },
     /// A target is selected but waits for Camera permission before opening.
     AwaitingAccess(String),
     Streaming {
@@ -72,7 +76,7 @@ impl PreviewLifecycle {
     fn target(&self) -> Option<&str> {
         match self {
             Self::Stopped => None,
-            Self::StartFailed(target)
+            Self::StartFailed { target, .. }
             | Self::AwaitingAccess(target)
             | Self::Streaming { target, .. } => Some(target),
         }
@@ -150,9 +154,13 @@ impl CameraPreview {
     }
 
     fn start_stream(&mut self, target: String, cx: &mut Context<Self>) {
-        let Ok(stream) = self.capture.start_stream(&target) else {
-            self.lifecycle = PreviewLifecycle::StartFailed(target);
-            return;
+        let stream = match self.capture.start_stream(&target) {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(%error, "camera preview failed to start");
+                self.lifecycle = PreviewLifecycle::StartFailed { target, error };
+                return;
+            }
         };
         let repaint_task = cx.spawn(async move |this, cx| {
             loop {
@@ -169,7 +177,7 @@ impl CameraPreview {
                             ..
                         } => stream.frame_generation() != *last_generation,
                         PreviewLifecycle::Stopped
-                        | PreviewLifecycle::StartFailed(_)
+                        | PreviewLifecycle::StartFailed { .. }
                         | PreviewLifecycle::AwaitingAccess(_) => false,
                     };
                     if has_new {
@@ -244,7 +252,15 @@ impl Render for CameraPreview {
             })
             .when(
                 show_placeholder && capture_supported && granted,
-                |surface| surface.child(note(tr!("camera.starting_preview"), pal)),
+                |surface| {
+                    surface.child(note(
+                        match &self.lifecycle {
+                            PreviewLifecycle::StartFailed { error, .. } => failure_note(error),
+                            _ => tr!("camera.starting_preview"),
+                        },
+                        pal,
+                    ))
+                },
             )
             .when(
                 show_placeholder && capture_supported && !granted && authorization_undetermined,
@@ -278,6 +294,17 @@ impl Render for CameraPreview {
 fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     let buffer = RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
+}
+
+/// What the placeholder says when the camera could not be opened. Only the
+/// in-use case gets its own wording: it is the one failure the user can act on
+/// (close the other application), and the one that used to render as an
+/// indefinite "Starting preview…" over a black box.
+fn failure_note(error: &CaptureError) -> SharedString {
+    match error {
+        CaptureError::InUse => tr!("camera.camera_in_use_by_another_app"),
+        _ => tr!("camera.camera_preview_start_failed"),
+    }
 }
 
 fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {

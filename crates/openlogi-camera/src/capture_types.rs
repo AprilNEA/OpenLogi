@@ -29,6 +29,12 @@ pub enum CaptureError {
     /// The session ran but produced no frame within the timeout.
     #[error("camera produced no frame in time")]
     Timeout,
+    /// Another application is streaming the camera and this backend cannot
+    /// open it a second time. Windows-only today: the Media Foundation reader
+    /// activates and negotiates a format for a camera in use, and only fails
+    /// once it asks the driver for a sample.
+    #[error("camera is in use by another application")]
+    InUse,
     /// A platform capture object failed to construct.
     #[error("capture setup failed: {0}")]
     Setup(String),
