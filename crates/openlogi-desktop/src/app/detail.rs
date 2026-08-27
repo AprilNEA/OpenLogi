@@ -32,7 +32,9 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profiles::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
+use crate::features::profiles::{
+    AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
+};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
@@ -114,7 +116,9 @@ pub(super) fn detail_content(
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
+        DetailTab::ActionsRing => {
+            action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
+        }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
@@ -255,7 +259,7 @@ fn buttons_tab(
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(profile_icons, app_catalog, cx))
+        .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
 }
 
@@ -278,8 +282,22 @@ fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement 
     tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
 }
 
-fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
-    tab_body(ContentWidth::Medium, panel.clone())
+fn action_ring_tab(
+    panel: &gpui::Entity<ActionRingPanel>,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .children(action_ring_profile_scope_bar(
+            profile_icons,
+            app_catalog,
+            cx,
+        ))
+        .child(tab_body(ContentWidth::Medium, panel.clone()))
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the

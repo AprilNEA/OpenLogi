@@ -246,7 +246,15 @@ impl AppView {
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
                 StateEvent::ForegroundChanged => !on_home,
-                StateEvent::BindingsChanged(key) | StateEvent::DpiChanged(key) => {
+                StateEvent::BindingsChanged(key) => {
+                    !on_home
+                        && matches!(
+                            view.active_tab,
+                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                        )
+                        && active_key.as_ref() == Some(key)
+                }
+                StateEvent::DpiChanged(key) => {
                     !on_home
                         && view.active_tab == DetailTab::Device
                         && active_key.as_ref() == Some(key)

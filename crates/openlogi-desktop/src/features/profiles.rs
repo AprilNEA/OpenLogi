@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
 use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
+use openlogi_core::binding::{ActionRingConfig, ActionRingLayout, ActionRingSlot};
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
 use self::shell::ProfileScopeShell;
@@ -70,10 +71,8 @@ impl ProfileScopeActions {
     }
 }
 
-/// Build the Buttons workspace's profile selector. The foreground app may
-/// change which profile is active, but never changes which profile this editor
-/// has open.
-pub(crate) fn profile_scope_bar(
+/// Build the Buttons workspace's profile selector.
+pub(crate) fn button_profile_scope_bar(
     icons: &ProfileIconCache,
     catalog: &Entity<AppCatalogPicker>,
     cx: &mut App,
@@ -83,35 +82,114 @@ pub(crate) fn profile_scope_bar(
         return None;
     }
     let editing_app = state.editing_app().map(str::to_string);
-    let mut profiles: Vec<ProfileChoice> = state
+    let profiles: Vec<ProfileChoice> = state
         .app_profiles()
-        .map(|(app, count)| ProfileChoice {
+        .map(|(app, override_count)| ProfileChoice {
             app: app.to_string(),
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
-            override_count: count,
+            override_count,
             persisted: true,
         })
         .collect();
+    let recent_apps: Vec<(String, String)> = state
+        .recent_apps()
+        .map(|(app, name)| (app.to_string(), name.to_string()))
+        .collect();
+    let model = profile_scope_model(editing_app, profiles, &recent_apps, catalog, cx);
+    let actions = ProfileScopeActions::new(
+        |app, cx| {
+            AppState::update_bindings(cx, |state| {
+                state.set_editing_app(app);
+            });
+        },
+        |profile, window, cx| open_button_remove_confirmation(window, cx, &profile),
+    );
 
+    Some(ProfileScopeShell::new(
+        "button-profile",
+        model,
+        catalog.clone(),
+        icons.clone(),
+        actions,
+    ))
+}
+
+/// Build the Actions Ring workspace's independent profile selector.
+pub(crate) fn action_ring_profile_scope_bar(
+    icons: &ProfileIconCache,
+    catalog: &Entity<AppCatalogPicker>,
+    cx: &mut App,
+) -> Option<ProfileScopeShell> {
+    let state = AppState::try_read(cx)?;
+    if !state.current_device_is_persistent() {
+        return None;
+    }
+    let editing_app = state.editing_action_ring_app().map(str::to_string);
+    let ring = state.current_action_ring();
+    let profiles: Vec<ProfileChoice> = ring
+        .per_app
+        .iter()
+        .map(|(app, layout)| ProfileChoice {
+            app: app.clone(),
+            name: state
+                .recent_app_name(app)
+                .map_or_else(|| friendly_app_name(app), str::to_string),
+            override_count: action_ring_override_count(&ring, layout),
+            persisted: true,
+        })
+        .collect();
+    let recent_apps: Vec<(String, String)> = state
+        .recent_apps()
+        .map(|(app, name)| (app.to_string(), name.to_string()))
+        .collect();
+    let model = profile_scope_model(editing_app, profiles, &recent_apps, catalog, cx);
+    let actions = ProfileScopeActions::new(
+        |app, cx| {
+            AppState::update(cx, |state, cx| {
+                let key = state
+                    .current_record()
+                    .map(crate::state::DeviceRecord::device_key);
+                state.set_editing_action_ring_app(app);
+                if let Some(key) = key {
+                    cx.emit(crate::state::StateEvent::BindingsChanged(key));
+                }
+            });
+        },
+        |profile, window, cx| open_action_ring_remove_confirmation(window, cx, &profile),
+    );
+
+    Some(ProfileScopeShell::new(
+        "action-ring-profile",
+        model,
+        catalog.clone(),
+        icons.clone(),
+        actions,
+    ))
+}
+
+fn profile_scope_model(
+    editing_app: Option<String>,
+    mut profiles: Vec<ProfileChoice>,
+    recent_apps: &[(String, String)],
+    catalog: &Entity<AppCatalogPicker>,
+    cx: &mut App,
+) -> ProfileScopeModel {
     if let Some(app) = editing_app.as_deref()
         && !profiles.iter().any(|profile| profile.app == app)
     {
         profiles.push(ProfileChoice {
             app: app.to_string(),
-            name: state
-                .recent_app_name(app)
-                .map_or_else(|| friendly_app_name(app), str::to_string),
+            name: recent_apps
+                .iter()
+                .find(|(identifier, _)| identifier == app)
+                .map_or_else(|| friendly_app_name(app), |(_, name)| name.clone()),
             override_count: 0,
             persisted: false,
         });
     }
     profiles.sort_by_key(|profile| profile.name.to_lowercase());
-    let recent_apps: Vec<(String, String)> = state
-        .recent_apps()
-        .map(|(app, name)| (app.to_string(), name.to_string()))
-        .collect();
 
     let persisted_ids: HashSet<String> = profiles
         .iter()
@@ -146,27 +224,18 @@ pub(crate) fn profile_scope_bar(
         recent: available_recent,
         catalog: catalog_presentation,
     };
-    let actions = ProfileScopeActions::new(
-        |app, cx| {
-            AppState::update_bindings(cx, |state| {
-                state.set_editing_app(app);
-            });
-        },
-        |profile, window, cx| open_remove_confirmation(window, cx, &profile),
-    );
-
-    let model = ProfileScopeModel {
+    ProfileScopeModel {
         editing_app,
         profiles,
         choices,
-    };
-    Some(ProfileScopeShell::new(
-        "button-profile",
-        model,
-        catalog.clone(),
-        icons.clone(),
-        actions,
-    ))
+    }
+}
+
+fn action_ring_override_count(ring: &ActionRingConfig, layout: &ActionRingLayout) -> usize {
+    ActionRingSlot::ALL
+        .into_iter()
+        .filter(|slot| layout.slots.get(slot) != ring.default.slots.get(slot))
+        .count()
 }
 
 /// Profile inheritance and active-app context shown above the device canvas.
@@ -227,18 +296,8 @@ fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::Sh
     }
 }
 
-fn open_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {
-    let question = match profile.override_count {
-        1 => tr!(
-            "Remove %{app} profile and its 1 override?",
-            app => profile.name.clone()
-        ),
-        count => tr!(
-            "Remove %{app} profile and its %{count} overrides?",
-            app => profile.name.clone(),
-            count => count
-        ),
-    };
+fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {
+    let question = remove_profile_question(profile);
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
             .title(question.clone())
@@ -259,6 +318,51 @@ fn open_remove_confirmation(window: &mut Window, cx: &mut App, profile: &Profile
                 true
             })
     });
+}
+
+fn open_action_ring_remove_confirmation(
+    window: &mut Window,
+    cx: &mut App,
+    profile: &ProfileChoice,
+) {
+    let question = remove_profile_question(profile);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert
+            .title(question.clone())
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(tr!("Remove profile"))
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text(tr!("Cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_event, _window, cx| {
+                AppState::update(cx, |state, cx| {
+                    let key = state
+                        .current_record()
+                        .map(crate::state::DeviceRecord::device_key);
+                    state.remove_editing_action_ring_profile();
+                    if let Some(key) = key {
+                        cx.emit(crate::state::StateEvent::BindingsChanged(key));
+                    }
+                });
+                true
+            })
+    });
+}
+
+fn remove_profile_question(profile: &ProfileChoice) -> gpui::SharedString {
+    match profile.override_count {
+        1 => tr!(
+            "Remove %{app} profile and its 1 override?",
+            app => profile.name.clone()
+        ),
+        count => tr!(
+            "Remove %{app} profile and its %{count} overrides?",
+            app => profile.name.clone(),
+            count => count
+        ),
+    }
 }
 
 /// Derive a readable fallback from a profile identifier when the agent has not

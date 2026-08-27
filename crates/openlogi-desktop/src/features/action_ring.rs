@@ -13,7 +13,9 @@ use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
     v_flex,
 };
-use openlogi_core::binding::{ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot};
+use openlogi_core::binding::{
+    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+};
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
@@ -68,9 +70,7 @@ impl Focusable for ActionRingPanel {
 impl Render for ActionRingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let ring = AppState::try_read(cx)
-            .map(AppState::current_action_ring)
-            .unwrap_or_default();
+        let (ring, layout) = action_ring_editor_state(cx);
         let haptics_supported = current_device_supports_haptics(cx);
         let application_input = editor_input(
             &mut self.application_input,
@@ -108,10 +108,10 @@ impl Render for ActionRingPanel {
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(&ring.default, self.selected_slot, &view, pal))
+                    .child(ring_preview(&layout, self.selected_slot, &view, pal))
                     .child(action_library(
                         self.selected_slot,
-                        ring.default.slots.get(&self.selected_slot),
+                        layout.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
                         &self.library_scroll,
@@ -167,6 +167,21 @@ impl Render for ActionRingPanel {
                 )
             })
     }
+}
+
+fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
+    AppState::try_read(cx).map_or_else(
+        || {
+            let ring = ActionRingConfig::default();
+            let layout = ring.default.clone();
+            (ring, layout)
+        },
+        |state| {
+            let ring = state.current_action_ring();
+            let layout = state.current_action_ring_layout();
+            (ring, layout)
+        },
+    )
 }
 
 fn editor_input(
