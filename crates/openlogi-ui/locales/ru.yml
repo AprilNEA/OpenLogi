@@ -435,7 +435,6 @@ _version: 1
 "Book": "Книга"
 "Custom shortcut": "Пользовательское сочетание клавиш"
 "Invalid shortcut": "Invalid shortcut"
-"Example: Cmd+Ctrl+Alt+S": "Example: Cmd+Ctrl+Alt+S"
 "Shortcut, e.g. Cmd+Shift+P": "Сочетание, например Cmd+Shift+P"
 "Application, folder path, or URL": "Приложение, путь к папке или URL"
 "Open application or folder": "Открыть приложение или папку"

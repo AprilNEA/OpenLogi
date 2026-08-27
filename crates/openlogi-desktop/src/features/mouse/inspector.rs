@@ -720,7 +720,7 @@ fn custom_shortcut_editor(
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(tr!("Example: Cmd+Ctrl+Alt+S")),
+                        .child(tr!("Shortcut, e.g. Cmd+Shift+P")),
                 )
                 .when(picker.shortcut_error, |panel| {
                     panel.child(

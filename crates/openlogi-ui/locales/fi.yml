@@ -435,7 +435,6 @@ _version: 1
 "Book": "Kirja"
 "Custom shortcut": "Mukautettu pikanäppäin"
 "Invalid shortcut": "Invalid shortcut"
-"Example: Cmd+Ctrl+Alt+S": "Example: Cmd+Ctrl+Alt+S"
 "Shortcut, e.g. Cmd+Shift+P": "Pikanäppäin, esim. Cmd+Shift+P"
 "Application, folder path, or URL": "Sovellus, kansiopolku tai URL"
 "Open application or folder": "Avaa sovellus tai kansio"
