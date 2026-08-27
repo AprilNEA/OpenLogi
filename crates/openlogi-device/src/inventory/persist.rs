@@ -33,9 +33,11 @@ use super::features::{BatteryProbe, ProbedFeatures};
 
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
-/// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
+/// v4 re-probes capabilities so caches written before
+/// `Capabilities::host_switching` cannot hide Easy-Switch support.
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -306,5 +308,16 @@ mod tests {
         snapshot.version = SCHEMA_VERSION + 1;
 
         assert!(snapshot.into_entries().is_empty());
+    }
+
+    #[test]
+    fn a_pre_host_switch_capability_cache_yields_a_cold_start() {
+        let mut snapshot = ProbeCacheSnapshot::of(&HashMap::new());
+        snapshot.version = 3;
+
+        assert!(
+            snapshot.into_entries().is_empty(),
+            "v3 capabilities had no host_switching field and must be re-probed"
+        );
     }
 }

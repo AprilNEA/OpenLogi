@@ -25,6 +25,7 @@ use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::easy_switch::easy_switch_panel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -123,6 +124,7 @@ pub(super) fn detail_content(
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
+        DetailTab::EasySwitch => easy_switch_tab(cx).into_any_element(),
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
@@ -241,6 +243,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Buttons => "action-icons/mouse-pointer-click.svg",
         DetailTab::ActionsRing => "action-icons/layout-grid.svg",
         DetailTab::Keys => "action-icons/keyboard.svg",
+        DetailTab::EasySwitch => "action-icons/refresh-cw.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
@@ -281,6 +284,10 @@ fn tab_body(
 /// Keys tab: the function-row remapper for a keyboard.
 fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
     tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
+}
+
+fn easy_switch_tab(cx: &mut Context<AppView>) -> impl IntoElement {
+    tab_body(ContentWidth::Medium, easy_switch_panel(cx))
 }
 
 fn action_ring_tab(

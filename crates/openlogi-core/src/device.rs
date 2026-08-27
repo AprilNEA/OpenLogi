@@ -128,6 +128,12 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// Multi-host channel selection — HID++ `0x1814 ChangeHost`.
+    #[serde(default)]
+    pub host_switching: bool,
+    /// Reportable physical Easy-Switch controls suitable for linked switching.
+    #[serde(default)]
+    pub host_switch_controls: bool,
 }
 
 impl Capabilities {
@@ -153,6 +159,8 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            host_switching: ids.contains(&0x1814),
+            host_switch_controls: false,
         }
     }
 
@@ -173,6 +181,8 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: false,
+                host_switch_controls: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +488,8 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    host_switching: false,
+                    host_switch_controls: false,
                 }),
             }],
         }
@@ -535,8 +547,9 @@ mod tests {
         use super::Capabilities;
         // A typical MX mouse: ReprogControls (0x1b04) + ExtendedAdjustableDpi
         // (0x2202), no lighting.
-        let mouse =
-            Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2121, 0x2150, 0x2202, 0x2110]);
+        let mouse = Capabilities::from_feature_ids(&[
+            0x0003, 0x1814, 0x1b04, 0x2121, 0x2150, 0x2202, 0x2110,
+        ]);
         assert_eq!(
             mouse,
             Capabilities {
@@ -548,6 +561,8 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: true,
+                host_switch_controls: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -564,6 +579,8 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                host_switching: false,
+                host_switch_controls: false,
             }
         );
         // No driving features → nothing offered.
@@ -590,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_capabilities_without_appended_wheel_fields_load_as_unsupported()
+    fn persisted_capabilities_without_appended_fields_load_as_unsupported()
     -> Result<(), toml::de::Error> {
         use super::Capabilities;
 
@@ -605,6 +622,8 @@ mod tests {
 
         assert!(!capabilities.hires_wheel);
         assert!(!capabilities.thumbwheel);
+        assert!(!capabilities.host_switching);
+        assert!(!capabilities.host_switch_controls);
         assert!(capabilities.scroll_inversion);
         Ok(())
     }

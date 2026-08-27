@@ -132,6 +132,15 @@ device = "Dispositivo"
 manage_this_device = "Manage this device"
 usb = "USB"
 
+[easy_switch]
+easy_switch = "Easy-Switch"
+linked_devices = "Linked devices"
+press_host_key_description = "Press a host key on this keyboard to move selected devices to the same channel."
+no_compatible_devices = "No compatible Easy-Switch devices found."
+before_switching = "Before switching"
+pair_channels_description = "Pair every linked device with the matching Easy-Switch channel on each computer."
+enable_same_links_description = "Enable the same links in OpenLogi on every computer that can start a switch."
+
 [profiles]
 active_profile = "Perfil activo"
 default_profile = "Perfil predeterminado"

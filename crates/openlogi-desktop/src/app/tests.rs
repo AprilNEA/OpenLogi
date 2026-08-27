@@ -1,5 +1,7 @@
 use super::home::{connection_icon_path, ordered_device_indices};
-use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use super::{
+    Capabilities, DetailTab, DeviceKey, DeviceKind, DeviceRecord, device_config_change_is_visible,
+};
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
@@ -187,6 +189,8 @@ fn tabs_follow_capabilities_not_kind() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        host_switching: false,
+        host_switch_controls: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -209,6 +213,8 @@ fn keyboard_without_asset_hides_buttons_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        host_switching: false,
+        host_switch_controls: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -229,10 +235,42 @@ fn keyboard_with_buttons_shows_keys_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        host_switching: false,
+        host_switch_controls: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
     assert!(!tabs.contains(&DetailTab::Buttons));
+}
+
+#[test]
+fn host_switching_keyboard_shows_easy_switch_tab() {
+    let caps = Some(Capabilities {
+        host_switching: true,
+        host_switch_controls: true,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+    assert!(tabs.contains(&DetailTab::EasySwitch));
+}
+
+#[test]
+fn easy_switch_config_changes_refresh_the_selected_toggle() {
+    let active = DeviceKey::from("keyboard-a");
+    let other = DeviceKey::from("keyboard-b");
+
+    assert!(device_config_change_is_visible(
+        false,
+        DetailTab::EasySwitch,
+        Some(&active),
+        &active,
+    ));
+    assert!(!device_config_change_is_visible(
+        false,
+        DetailTab::EasySwitch,
+        Some(&active),
+        &other,
+    ));
 }
 
 /// Each panel is independent: a lighting-only device (e.g. a keyboard with
