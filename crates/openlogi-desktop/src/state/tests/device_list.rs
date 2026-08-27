@@ -65,6 +65,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             recent: vec![editor],
         },
         lights: Vec::new(),
+        flow: openlogi_ipc::FlowStatus::default(),
     }
 }
 

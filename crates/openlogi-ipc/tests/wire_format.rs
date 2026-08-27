@@ -51,10 +51,10 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
-    MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SwitchHostError,
+    FlowLinkState, FlowPeerStatus, FlowStatus, ForegroundApps, FoundDevice, Identity,
+    InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind,
+    NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SwitchHostError,
 };
 use succession::{Compat, Run};
 
@@ -587,15 +587,35 @@ fn agent_snapshot() {
         foreground: ForegroundApps::default(),
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+}
+
+#[test]
+fn flow_status() {
+    assert_wire(&FlowStatus::default(), "0000");
+    assert_wire(
+        &FlowStatus {
+            enabled: true,
+            peers: vec![FlowPeerStatus {
+                name: "desk".into(),
+                public_key: format!("ed25519:{}", "ab".repeat(32)),
+                state: FlowLinkState::Degraded,
+            }],
+        },
+        "0101046465736b48656432353531393a6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616201",
+    );
+    assert_wire(&FlowLinkState::Connected, "00");
+    assert_wire(&FlowLinkState::Degraded, "01");
+    assert_wire(&FlowLinkState::Lost, "02");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
