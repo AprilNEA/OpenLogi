@@ -98,9 +98,10 @@ pub enum SwIdPolicy {
     /// requests for a single exclusive user of a node. The counter is this
     /// policy's own; the id `0` slot is skipped in the wrap.
     Rotating(AtomicU8),
-    /// A fixed id owned process-wide: `free(id)` runs when the channel drops,
-    /// handing the lease back to the allocator — so concurrent opens of one
-    /// HID node never share a correlation id. (OpenLogi local addition.)
+    /// A fixed id owned process-wide: `free(id)` runs exactly once when this
+    /// policy is dropped, handing the lease back to the allocator — so
+    /// concurrent opens of one HID node never share a correlation id.
+    /// (OpenLogi local addition.)
     Leased {
         /// The leased id every request carries.
         id: RequestSwId,
@@ -124,6 +125,14 @@ impl Default for SwIdPolicy {
     }
 }
 
+impl Drop for SwIdPolicy {
+    fn drop(&mut self) {
+        if let Self::Leased { id, free } = self {
+            free(id.get().to_lo());
+        }
+    }
+}
+
 /// Represents a HID communication channel supporting HID++.
 pub struct HidppChannel {
     /// Whether the channel supports short (7 bytes) HID++ messages.
@@ -142,6 +151,10 @@ pub struct HidppChannel {
     raw_channel: Arc<dyn RawHidChannel>,
 
     /// The software-id policy for outgoing requests (see [`SwIdPolicy`]).
+    ///
+    /// This must remain after `raw_channel`: fields drop in declaration order,
+    /// so the final lease is returned only after channel shutdown has joined
+    /// the read thread and released the raw transport.
     sw_id_policy: SwIdPolicy,
 
     /// All sent messages that are waiting for a response.
@@ -171,10 +184,6 @@ pub struct HidppChannel {
 
 impl Drop for HidppChannel {
     fn drop(&mut self) {
-        if let SwIdPolicy::Leased { id, free } = &self.sw_id_policy {
-            free(id.get().to_lo());
-        }
-
         if let Some(read_thread_close) = self.read_thread_close.take() {
             // This only fails if the receiving end, which is owned by the read thread in
             // this case, is dropped.
@@ -184,9 +193,10 @@ impl Drop for HidppChannel {
         }
 
         if let Some(read_thread_hdl) = self.read_thread_hdl.take() {
-            // Joining is not politeness: it is what makes the OS handle closed
-            // by the time this returns, so a caller that drops a channel and
-            // reopens the same node never has two opens of it alive at once.
+            // Joining is not politeness: together with the subsequent
+            // `raw_channel` field drop, it makes the OS handle close before the
+            // software-id lease is returned. A caller can therefore drop a
+            // channel and reopen the same node without overlapping lifetimes.
             #[expect(
                 clippy::unwrap_used,
                 reason = "propagate a read-thread panic instead of ignoring a crashed background worker"
@@ -272,10 +282,9 @@ impl HidppChannel {
     ///
     /// `&mut self` on purpose: the policy is decided while the channel is
     /// still exclusively owned (right after opening, before it is shared), so
-    /// no request can race a policy change. A `Leased` policy replacing an
-    /// earlier one would leak the earlier lease — but with `&mut` access the
-    /// caller *is* the sole owner, and the one production caller sets the
-    /// policy exactly once.
+    /// no request can race a policy change. Replacing a [`SwIdPolicy::Leased`]
+    /// policy returns its lease before this method returns. The channel's final
+    /// lease is returned only after its read thread and raw transport stop.
     pub fn set_sw_id_policy(&mut self, policy: SwIdPolicy) {
         self.sw_id_policy = policy;
     }
