@@ -338,6 +338,13 @@ trait HookBackend {
     /// Stop the hook and join its threads.
     fn stop(running: Self::Running);
 
+    /// Whether the platform worker is still delivering events. Backends whose
+    /// workers are joined only during teardown have no separate terminal
+    /// state, so their live handle is sufficient by default.
+    fn is_running(_running: &Self::Running) -> bool {
+        true
+    }
+
     /// See [`Hook::has_accessibility`]. Platforms that gate the hook below the
     /// privacy layer answer `true`.
     fn has_accessibility() -> bool {
@@ -439,6 +446,16 @@ impl Hook {
         self.shutdown();
     }
 
+    /// Whether the platform worker is still able to deliver events.
+    ///
+    /// A Windows message-pump error is terminal: the worker clears its callback
+    /// so native input passes through, and this method then returns `false`
+    /// even though the [`Hook`] handle has not yet been dropped.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.inner.as_ref().is_some_and(Backend::is_running)
+    }
+
     /// Tear down the platform hook if it is still running. Idempotent: the
     /// first call takes `inner`, so the `Drop` after an explicit [`Self::stop`]
     /// is a no-op.
@@ -527,6 +544,9 @@ mod macos;
 
 #[cfg(target_os = "linux")]
 mod linux;
+
+#[cfg(any(target_os = "windows", test))]
+mod windows_worker;
 
 #[cfg(target_os = "windows")]
 mod windows;

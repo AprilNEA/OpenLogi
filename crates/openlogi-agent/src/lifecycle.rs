@@ -278,9 +278,33 @@ impl Armed {
         }
     }
 
+    /// Retire a terminal Windows hook worker and publish that input capture is
+    /// no longer installed. The native callbacks have already been cleared,
+    /// so the interval before this check remains pass-through rather than
+    /// suppressing input without a consumer.
+    #[cfg(target_os = "windows")]
+    fn apply_hook_health(&mut self) {
+        let Some(hook) = self.hook.as_ref() else {
+            return;
+        };
+        if hook.is_running() {
+            return;
+        }
+        warn!("Windows hook worker exited — marking input capture unavailable");
+        self.stop_hook();
+        self.observable
+            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+    }
+
     /// Fold one watcher event into the agent's state.
     async fn apply_watcher(&mut self, event: startup::WatcherEvent) {
         use startup::{Watcher, WatcherEvent};
+
+        // Inventory and foreground-app samples make this a periodic health
+        // reconciliation without another timer in the control-plane loop.
+        #[cfg(target_os = "windows")]
+        self.apply_hook_health();
+
         match event {
             WatcherEvent::Inventory(event) => self.apply_inventory(event).await,
             WatcherEvent::Camera(active) => {
