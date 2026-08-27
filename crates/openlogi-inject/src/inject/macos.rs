@@ -87,6 +87,23 @@ pub(super) use spaces::natural_scrolling;
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
 
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return false;
+    };
+    let Ok(event) = CGEvent::new_mouse_event(
+        source,
+        CGEventType::MouseMoved,
+        CGPoint::new(x, y),
+        CGMouseButton::Left,
+    ) else {
+        return false;
+    };
+    tag_synthetic(&event);
+    event.post(CGEventTapLocation::HID);
+    true
+}
+
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
 const NX_KEYTYPE_SOUND_DOWN: i32 = 1;

@@ -7,6 +7,7 @@ pub mod uinput;
 pub use inject::{
     HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute,
     natural_scrolling, post_phased_scroll, post_scroll, post_smooth_scroll, press_hold,
+    warp_cursor,
 };
 
 #[cfg(target_os = "linux")]

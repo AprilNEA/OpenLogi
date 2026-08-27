@@ -475,9 +475,9 @@ pub fn start(
                     &dispatcher,
                     openlogi_hook::frontmost_safari_pid,
                 ),
-                MouseEvent::Moved { delta_x, delta_y } => {
-                    handle_moved(delta_x, delta_y, &hooks, &dispatcher)
-                }
+                MouseEvent::Moved {
+                    delta_x, delta_y, ..
+                } => handle_moved(delta_x, delta_y, &hooks, &dispatcher),
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);

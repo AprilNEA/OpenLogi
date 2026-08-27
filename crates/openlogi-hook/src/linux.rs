@@ -45,11 +45,15 @@ use evdev::{
 };
 use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::rust_connection::RustConnection;
 
+use crate::edge::DisplayRect;
 use crate::{
     ButtonId, CursorPosition, Delivery, EventDisposition, ForegroundApp, HookBackend, HookError,
-    HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
+    HookEvent, KeyModifiers, LOGITECH_VENDOR_ID, MouseEvent,
 };
 use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
@@ -109,6 +113,45 @@ impl HookBackend for Backend {
             x: f64::from(reply.root_x),
             y: f64::from(reply.root_y),
         })
+    }
+
+    fn display_rects() -> Vec<DisplayRect> {
+        let Ok((connection, screen_index)) = RustConnection::connect(None) else {
+            return Vec::new();
+        };
+        let screen = &connection.setup().roots[screen_index];
+        let displays: Vec<_> = connection
+            .randr_get_monitors(screen.root, true)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| {
+                reply
+                    .monitors
+                    .into_iter()
+                    .filter_map(|monitor| {
+                        DisplayRect::new(
+                            f64::from(monitor.x),
+                            f64::from(monitor.y),
+                            f64::from(monitor.width),
+                            f64::from(monitor.height),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !displays.is_empty() {
+            return displays;
+        }
+        // RandR 1.5 is optional. Older X servers still provide one useful
+        // virtual-desktop rectangle through the core screen description.
+        DisplayRect::new(
+            0.0,
+            0.0,
+            f64::from(screen.width_in_pixels),
+            f64::from(screen.height_in_pixels),
+        )
+        .into_iter()
+        .collect()
     }
 }
 
@@ -351,10 +394,12 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
             RelativeAxisCode::REL_X => Some(MouseEvent::Moved {
                 delta_x: value,
                 delta_y: 0,
+                modifiers: KeyModifiers::default(),
             }),
             RelativeAxisCode::REL_Y => Some(MouseEvent::Moved {
                 delta_x: 0,
                 delta_y: value,
+                modifiers: KeyModifiers::default(),
             }),
             _ => {
                 let v = f64::from(value);
@@ -724,7 +769,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 7,
-                delta_y: 0
+                delta_y: 0,
+                ..
             })
         );
     }
@@ -736,7 +782,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 0,
-                delta_y: -4
+                delta_y: -4,
+                ..
             })
         );
     }

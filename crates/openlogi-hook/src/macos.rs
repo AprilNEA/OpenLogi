@@ -20,6 +20,7 @@ use std::time::Duration;
 use core_foundation::runloop::{
     CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
+use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
 use core_graphics::event::{
     CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType, CallbackResult,
@@ -29,6 +30,7 @@ use objc2_app_kit::NSWorkspace;
 use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
 use tracing::{debug, error, warn};
 
+use crate::edge::DisplayRect;
 use crate::{
     CursorPosition, Delivery, EventDisposition, EventTapInfo, ForegroundApp, HookBackend,
     HookError, HookEvent, MouseEvent, TapLocation,
@@ -272,6 +274,30 @@ impl HookBackend for Backend {
             x: point.x,
             y: point.y,
         })
+    }
+
+    fn display_rects() -> Vec<DisplayRect> {
+        const MAX_DISPLAYS: u32 = 32;
+        let mut ids = [0u32; MAX_DISPLAYS as usize];
+        let mut count = 0;
+        // SAFETY: the list write is bounded by the capacity passed, and count
+        // reports how many active display ids CoreGraphics initialized.
+        if unsafe { CGGetActiveDisplayList(MAX_DISPLAYS, ids.as_mut_ptr(), &raw mut count) } != 0 {
+            return Vec::new();
+        }
+        ids.iter()
+            .take(count as usize)
+            .filter_map(|&id| {
+                // SAFETY: side-effect-free getter for an id from the active list.
+                let bounds = unsafe { CGDisplayBounds(id) };
+                DisplayRect::new(
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height,
+                )
+            })
+            .collect()
     }
 }
 
