@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour (55 of them), but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -50,8 +50,10 @@ pub enum Effect<'a> {
         /// Vertical direction: -1 down, 1 up, 0 none.
         dy: i8,
     },
-    /// Fire a media/volume key. Every backend reaches these through a
-    /// dedicated OS mechanism rather than an ordinary keyboard chord.
+    /// Fire a media, volume, or display-brightness key. Every backend
+    /// reaches these through a dedicated OS mechanism rather than an ordinary
+    /// keyboard chord, except display brightness on Windows, which has no key
+    /// event at all.
     Media(MediaKey),
     /// A window-manager or power action with no shared cross-platform
     /// chord — each backend has its own dedicated handling, which may be a
@@ -144,11 +146,13 @@ impl Shortcut {
     pub const ALL: &'static [Shortcut] = <Shortcut as strum::VariantArray>::VARIANTS;
 }
 
-/// A media/volume key.
+/// A media, volume, or display-brightness key.
 ///
 /// Every backend reaches these through a dedicated OS mechanism — NX
 /// system-defined keys on macOS, MPRIS/XF86 keys on Linux, dedicated media
-/// virtual keys on Windows — rather than an ordinary keyboard chord.
+/// virtual keys on Windows — rather than an ordinary keyboard chord. Display
+/// brightness is the exception: Windows has no key event for it, so that
+/// backend's `dispatch_media` logs and skips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MediaKey {
     /// Toggle play/pause.
@@ -163,6 +167,12 @@ pub enum MediaKey {
     VolumeDown,
     /// Toggle system mute.
     Mute,
+    /// Increase display brightness. macOS posts the NX system-defined
+    /// brightness key; Linux presses `KEY_BRIGHTNESSUP`; Windows has no key
+    /// event for display brightness and debug-logs a no-op.
+    BrightnessUp,
+    /// Decrease display brightness. Counterpart to [`MediaKey::BrightnessUp`].
+    BrightnessDown,
 }
 
 /// A window-manager or power action with no shared cross-platform chord.
@@ -259,6 +269,8 @@ impl Action {
             Action::VolumeUp => Effect::Media(MediaKey::VolumeUp),
             Action::VolumeDown => Effect::Media(MediaKey::VolumeDown),
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
+            Action::BrightnessUp => Effect::Media(MediaKey::BrightnessUp),
+            Action::BrightnessDown => Effect::Media(MediaKey::BrightnessDown),
 
             // DPI/SmartShift/the Actions Ring/OpenApplication are all handled
             // above (or beside) the injector — see `Effect::AgentSide`.

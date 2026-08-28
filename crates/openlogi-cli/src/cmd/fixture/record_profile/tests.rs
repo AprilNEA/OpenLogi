@@ -666,8 +666,16 @@ async fn protocol_mismatch_aborts_before_snapshot_or_output() {
         .expect_err("protocol mismatch must abort")
         .to_string();
 
-    assert!(error.contains("protocol v29"), "{error}");
-    assert!(error.contains("requires v30"), "{error}");
+    // Derived like `connection.version` above, so a PROTOCOL_VERSION bump
+    // does not have to remember to edit two string literals here.
+    assert!(
+        error.contains(&format!("protocol v{}", PROTOCOL_VERSION - 1)),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("requires v{PROTOCOL_VERSION}")),
+        "{error}"
+    );
     assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 0);
     assert!(!output.exists());
 }
