@@ -145,6 +145,31 @@ pub async fn set_keyboard_color_with(
     device::set_keyboard_color_with(&*native_backend(), route, method, r, g, b).await
 }
 
+/// Enumerate `0x8070` zones and whether per-key lighting is present.
+pub async fn read_lighting_info(
+    route: &DeviceRoute,
+    mouse: bool,
+    screen_sampler: bool,
+    audio_visualizer: bool,
+) -> Result<openlogi_core::hid::LightingInfo, WriteError> {
+    device::read_lighting_info(
+        &*native_backend(),
+        route,
+        mouse,
+        screen_sampler,
+        audio_visualizer,
+    )
+    .await
+}
+
+/// Apply a firmware lighting config, or report that a host renderer must run.
+pub async fn apply_lighting(
+    route: &DeviceRoute,
+    lighting: &openlogi_core::config::Lighting,
+) -> Result<openlogi_device::LightingApply, WriteError> {
+    device::apply_lighting(&*native_backend(), route, lighting).await
+}
+
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await

@@ -41,7 +41,7 @@ pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
 const WRITE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Select the only Agent-authoritative channel for `route`.
-fn authoritative_channel(
+pub(crate) fn authoritative_channel(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
     route: &DeviceRoute,
@@ -76,10 +76,10 @@ fn choose_authoritative<T>(
 /// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
 /// pattern, applied to an already-open channel instead of a fresh one.
 pub struct DeviceOp<'a> {
-    capture: &'a CaptureChannel,
-    registry: &'a ChannelRegistry,
-    receiver_access: &'a ReceiverAccess,
-    route: DeviceRoute,
+    pub(crate) capture: &'a CaptureChannel,
+    pub(crate) registry: &'a ChannelRegistry,
+    pub(crate) receiver_access: &'a ReceiverAccess,
+    pub(crate) route: DeviceRoute,
 }
 
 impl<'a> DeviceOp<'a> {
@@ -194,7 +194,7 @@ impl<'a> DeviceOp<'a> {
 /// Build the one-shot current-thread runtime every background write spawns
 /// its OS thread onto. Logs and returns `None` on the rare case that
 /// initialization itself fails (e.g. OS resource exhaustion).
-fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
+pub(crate) fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -467,26 +467,14 @@ pub fn write_scroll_wheel_mode_in_background(
     );
 }
 
-/// Apply `lighting` to the keyboard at `op`'s device on a background thread.
-///
-/// Resolves the configured colour (scaled by brightness, or black when the
-/// lighting is off) and writes every key over HID++ via
-/// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
-/// failures are logged, not surfaced.
-pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
-    let (r, g, b) = lighting_rgb(lighting);
-    op.spawn_write(
-        "lighting write",
-        move |c| async move { openlogi_hid::set_keyboard_color_on(&c, r, g, b).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(r, g, b, "lighting written to keyboard"),
-            Ok(Err(e)) => warn!(error = ?e, "lighting write failed"),
-            Err(_) => warn!(
-                r,
-                g, b, "lighting write timed out (device asleep/unresponsive)"
-            ),
-        },
-    );
+/// Apply `lighting` on a background thread: firmware `0x8070` when the
+/// prefab is device-owned, otherwise the host renderer loop.
+pub fn set_lighting_in_background(
+    host: &crate::lighting::LightingHost,
+    op: &DeviceOp<'_>,
+    lighting: Lighting,
+) {
+    host.apply_op(op, lighting);
 }
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured

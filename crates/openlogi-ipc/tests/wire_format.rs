@@ -40,8 +40,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    LightCommand, LightingInfo, LightingZone, LightingZoneLocation, PasskeyMethod,
+    ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -101,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 33);
 }
 
 #[test]
@@ -117,6 +118,10 @@ fn config_reload_result() {
 /// tarpc encodes the request enum's variant index, so trait *method order* is
 /// wire format. `protocol_version` must stay variant 0 forever — it is the
 /// cross-version handshake (and the takeover probe) — and new methods append.
+#[expect(
+    clippy::too_many_lines,
+    reason = "each AgentRequest variant must appear here so a reorder cannot slip past the golden"
+)]
 #[test]
 fn request_variant_order() {
     assert_wire(&AgentRequest::ProtocolVersion {}, "00");
@@ -206,6 +211,33 @@ fn request_variant_order() {
         },
         "1902",
     );
+    assert_wire(
+        &AgentRequest::ReadOnboardBindings {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadOnboardProfile {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1b0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadLightingInfo {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1c0008463030444341464501",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -257,6 +289,7 @@ fn action_ring_types() {
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
+    assert_wire(&HidppOperation::OnboardProfiles, "0f");
 }
 
 #[test]
@@ -522,8 +555,24 @@ fn device_settings_payloads() {
             enabled: true,
             color: "8000ff".parse().expect("valid hex"),
             brightness: 80,
+            ..Lighting::default()
         },
-        "010638303030666650",
+        "010638303030666650003200",
+    );
+
+    assert_wire(
+        &LightingInfo {
+            mouse: true,
+            per_key: false,
+            zones: vec![LightingZone {
+                index: 0,
+                location: LightingZoneLocation::Primary,
+                firmware_effects: vec![1, 3],
+            }],
+            screen_sampler: true,
+            audio_visualizer: false,
+        },
+        "01000100010201030100",
     );
 
     assert_wire(

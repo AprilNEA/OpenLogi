@@ -50,6 +50,13 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
             ))
             .item(input_monitoring_item())
             .item(permission_item(
+                "perm-screen-recording",
+                tr!("Screen Recording"),
+                tr!("Needed to sample the display for lighting effects."),
+                Permission::ScreenRecording,
+                |_| permissions::screen_recording(),
+            ))
+            .item(permission_item(
                 "perm-bluetooth",
                 tr!("Bluetooth"),
                 tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),

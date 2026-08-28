@@ -155,8 +155,10 @@ mod tests {
 
         match cli.cmd.expect("subcommand present") {
             Command::Diag(DiagCmd::Lighting(args)) => {
-                assert_eq!(args.color, "ff0000");
+                assert_eq!(args.color.as_deref(), Some("ff0000"));
                 assert!(matches!(args.method, Method::Effects));
+                assert!(!args.list);
+                assert_eq!(args.effect, None);
             }
             other => panic!("expected Diag(Lighting), got {other:?}"),
         }
@@ -168,6 +170,29 @@ mod tests {
             "openlogi", "diag", "lighting", "ff0000", "--method", "bogus",
         ]);
         result.expect_err("an unknown lighting method must be rejected");
+    }
+
+    #[test]
+    fn lighting_list_and_effect_are_flags() {
+        let list = Cli::try_parse_from(["openlogi", "diag", "lighting", "--list"])
+            .expect("lighting --list parses");
+        match list.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Lighting(args)) => {
+                assert!(args.list);
+                assert!(args.color.is_none());
+            }
+            other => panic!("expected Diag(Lighting), got {other:?}"),
+        }
+
+        let effect = Cli::try_parse_from(["openlogi", "diag", "lighting", "--effect", "breathing"])
+            .expect("lighting --effect parses");
+        match effect.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Lighting(args)) => {
+                assert_eq!(args.effect.as_deref(), Some("breathing"));
+                assert!(args.color.is_none());
+            }
+            other => panic!("expected Diag(Lighting), got {other:?}"),
+        }
     }
 
     #[test]

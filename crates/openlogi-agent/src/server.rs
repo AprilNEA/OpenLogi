@@ -5,6 +5,7 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::ActionDispatcher;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{Action, ActionRingSlot, ButtonId};
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -164,13 +165,13 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        let (r, g, b) = hardware::lighting_rgb(&lighting);
-        self.shared
-            .device(&route)
-            .run(HidppOperation::Lighting, |c| async move {
-                openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
-            })
-            .await
+        let host = self.shared.lighting.clone();
+        openlogi_agent_core::hardware::set_lighting_in_background(
+            &host,
+            &self.shared.device(&route),
+            lighting,
+        );
+        Ok(())
     }
 
     async fn set_smartshift(
@@ -288,6 +289,49 @@ impl Agent for AgentServer {
         // A failed send is the designed steady state: the gate drops its
         // receiver at arming, and an armed agent no longer cares.
         let _ = self.demand.send(kind);
+    }
+
+    async fn read_onboard_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<BTreeMap<ButtonId, Action>, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::OnboardProfiles, |c| async move {
+                openlogi_hid::read_onboard_button_bindings_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_onboard_profile(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardProfileSnapshot, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::OnboardProfiles, |c| async move {
+                openlogi_hid::read_onboard_profile_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_lighting_info(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::LightingInfo, WriteError> {
+        let mouse = self.orchestrator.lock().await.route_is_mouse(&route);
+        let screen_sampler = openlogi_agent_core::lighting::screen_available();
+        let audio_visualizer = openlogi_agent_core::lighting::audio_available();
+        self.shared
+            .device(&route)
+            .run(HidppOperation::Lighting, |c| async move {
+                openlogi_hid::read_lighting_info_on(&c, mouse, screen_sampler, audio_visualizer)
+                    .await
+            })
+            .await
     }
 
     async fn action_ring_hover(

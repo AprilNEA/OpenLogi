@@ -23,6 +23,7 @@ mod fn_lock;
 mod haptic;
 mod hires_wheel;
 mod lighting;
+mod lighting_catalog;
 mod litra;
 mod smartshift;
 
@@ -46,6 +47,11 @@ pub use hires_wheel::{
 pub use lighting::{
     LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
     set_keyboard_color_with_on,
+};
+pub use lighting_catalog::{
+    LightingApply, apply_lighting, apply_lighting_on, pack_effect_params, per_key_zone_ids_on,
+    read_lighting_info, read_lighting_info_on, set_led_software_control_on, set_per_key_colors_on,
+    set_zonal_colors_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{

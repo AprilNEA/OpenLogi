@@ -9,13 +9,13 @@
 //! target up front so views can switch instantly when the active device
 //! changes — no synchronous I/O during the device switch.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::{App, Context, Entity, EventEmitter, Global};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{Dpi, SmartShiftStatus};
+use openlogi_core::hid::{Dpi, OnboardLed, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -24,7 +24,7 @@ pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiStatus, LightingLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,14 +166,17 @@ pub struct AppState {
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
-    /// Per-device Actions Ring profile open in this window's editor.
-    action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
     lighting: LightingState,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    /// Devices whose onboard firmware map was already fetched this session.
+    onboard_import_attempted: BTreeSet<DeviceKey>,
+    /// Onboard LED records last read from firmware, used when no lighting
+    /// config has been saved yet.
+    onboard_leds: BTreeMap<DeviceKey, Vec<OnboardLed>>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
     /// entity owns it because permission can resolve after the initiating view
     /// or window closes; dropping the entity at process shutdown cancels it.
@@ -215,6 +218,8 @@ impl AppState {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
+            state.load_onboard_bindings(cx);
+            state.load_current_lighting_info(cx);
         });
     }
 
@@ -267,10 +272,11 @@ impl AppState {
             agent: AgentSession::default(),
             devices: DeviceStore::new(device_list, current_device),
             bindings,
-            action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lighting: LightingState::default(),
             ipc_commands,
+            onboard_import_attempted: BTreeSet::new(),
+            onboard_leds: BTreeMap::new(),
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
         };

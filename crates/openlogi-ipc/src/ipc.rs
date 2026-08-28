@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot, ButtonId};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, LightingInfo, OnboardProfileSnapshot, PairingError,
+    PasskeyMethod, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -61,7 +61,15 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: `ButtonId` G-series extras, `Action` onboard DPI/profile specials, and
+///      [`HidppOperation::OnboardProfiles`] for HID++ `0x8100` writes.
+/// v31: [`Agent::read_onboard_bindings`] appended so the GUI can show the
+///      firmware button table before any OpenLogi override exists.
+/// v32: [`Agent::read_onboard_profile`] appended so the GUI can show onboard
+///      DPI slots and LED effects alongside the button table.
+/// v33: [`Lighting`] appended `effect`/`speed`/`zones`; [`Agent::read_lighting_info`]
+///      appended so the Lighting tab can filter firmware and host prefabs.
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -319,11 +327,6 @@ impl From<PairingError> for PairingFailure {
             PairingError::Timeout => Self::Timeout,
             PairingError::Device(code) => Self::Device { code },
             PairingError::Cancelled => Self::Cancelled,
-            // The public agent API prevents this library-boundary rejection;
-            // retain the existing wire enum if an in-process caller violates it.
-            PairingError::UnsupportedCommand => Self::Hid {
-                message: "pairing command is not supported by the active receiver".into(),
-            },
             // Carried as the generic transport-failure message so the wire
             // format stays unchanged (PairingFailure variants are append-only).
             PairingError::MalformedNotification(what) => Self::Hid {
@@ -560,4 +563,17 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Read the active HID++ `0x8100` onboard profile's buttons as OpenLogi
+    /// actions. Mice without that feature return [`WriteError::FeatureUnsupported`].
+    async fn read_onboard_bindings(
+        route: DeviceRoute,
+    ) -> Result<BTreeMap<ButtonId, Action>, WriteError>;
+    /// Read the active HID++ `0x8100` onboard profile (buttons, DPI slots, LEDs).
+    /// Mice without that feature return [`WriteError::FeatureUnsupported`].
+    async fn read_onboard_profile(route: DeviceRoute)
+    -> Result<OnboardProfileSnapshot, WriteError>;
+    /// Read `0x8070` zones, advertised firmware effect ids, and host-backend
+    /// availability. The GUI caches this per device; it is not polled with
+    /// inventory.
+    async fn read_lighting_info(route: DeviceRoute) -> Result<LightingInfo, WriteError>;
 }

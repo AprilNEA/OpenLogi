@@ -23,6 +23,7 @@ mod settings;
 #[cfg(feature = "fs")]
 mod tests;
 
+pub use crate::hid::LightingEffect;
 pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};

@@ -48,10 +48,7 @@ pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
-pub use session::gesture::{
-    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
-    PendingCaptureRestore, run_capture_session, run_capture_session_with_registry_spec,
-};
+pub use session::gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
 pub use session::host_switch::{
     HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
 };
@@ -59,18 +56,24 @@ pub use session::keyboard::{
     KEYBOARD_KEY_CIDS, run_keyboard_capture_session, run_keyboard_capture_session_with_registry,
 };
 pub use write::{
-    Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
+    ButtonBinding, Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
-    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingMethod, LitraDescriptor, LitraModel,
-    ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError,
-    apply_litra, commands_for_light_settings, dump_features, dump_firmware_entities,
+    LITRA_GLOW_PRODUCT_ID, LightCommand, LightingApply, LightingMethod, LitraDescriptor,
+    LitraModel, OnboardButtonSlot, OnboardMode, OnboardProfilesDump, ProfileDirectoryEntry,
+    ProfilesDescription, ReprogControlEntry, ScrollReportingTarget, ScrollResolution,
+    ScrollWheelMode, WriteError, apply_lighting, apply_lighting_on, apply_litra,
+    apply_onboard_button_bindings, apply_onboard_button_bindings_on, commands_for_light_settings,
+    dump_features, dump_firmware_entities, dump_onboard_profiles, dump_onboard_profiles_on,
     dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, find_litra, get_backlight,
     get_dpi, get_dpi_info, get_dpi_info_on, get_scroll_wheel_mode, get_scroll_wheel_mode_on,
     get_smartshift_status, get_smartshift_status_on, litra_model_for_route, matches_litra,
-    play_haptic, play_haptic_on, read_battery_raw, set_backlight_enabled, set_dpi, set_dpi_on,
-    set_fn_lock, set_fn_lock_on, set_keyboard_color, set_keyboard_color_on,
-    set_keyboard_color_with, set_keyboard_color_with_on, set_scroll_inversion,
+    pack_effect_params, per_key_zone_ids_on, play_haptic, play_haptic_on, read_battery_raw,
+    read_lighting_info, read_lighting_info_on, read_onboard_button_bindings,
+    read_onboard_button_bindings_on, read_onboard_profile, read_onboard_profile_on,
+    set_backlight_enabled, set_dpi, set_dpi_on, set_fn_lock, set_fn_lock_on, set_keyboard_color,
+    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    set_led_software_control_on, set_per_key_colors_on, set_scroll_inversion,
     set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    set_smartshift_sensitivity, set_zonal_colors_on, toggle_smartshift, toggle_smartshift_on,
 };

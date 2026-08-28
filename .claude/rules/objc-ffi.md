@@ -7,6 +7,7 @@ paths:
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
+  - "crates/openlogi-agent-core/src/lighting/screen.rs"
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-inject/src/inject/macos.rs"
   - "crates/openlogi-hid/src/permissions.rs"
@@ -25,6 +26,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
+| `openlogi-agent-core/src/lighting/screen.rs` | Screen Capture TCC prompt (`CGPreflightScreenCaptureAccess` / `CGRequestScreenCaptureAccess`) for the host screen-sampler |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
@@ -34,7 +36,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
-| `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
+| `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup; Screen Recording via `CGPreflightScreenCaptureAccess` |
 
 Every rule below binds all of them, whichever crate they live in.
 

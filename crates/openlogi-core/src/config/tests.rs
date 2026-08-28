@@ -248,6 +248,9 @@ fn lighting_roundtrips_per_device() {
             enabled: true,
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
+            effect: crate::hid::LightingEffect::Breathing,
+            speed: 40,
+            zones: vec![0, 1],
         },
     );
     let restored = write_and_read(&cfg);
@@ -257,6 +260,9 @@ fn lighting_roundtrips_per_device() {
             enabled: true,
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
+            effect: crate::hid::LightingEffect::Breathing,
+            speed: 40,
+            zones: vec![0, 1],
         })
     );
     assert_eq!(restored.lighting("absent"), None);
@@ -367,6 +373,21 @@ fn hash_prefixed_lighting_color_migrates_to_canonical_hex() {
     let saved = fs::read_to_string(path).expect("read saved config");
     assert!(saved.contains("color = \"ff0000\""));
     assert!(!saved.contains("color = \"#"));
+}
+
+#[test]
+fn lighting_defaults_effect_speed_and_zones_when_absent() {
+    let lighting: Lighting = toml::from_str(
+        r#"
+            enabled = true
+            color = "ffffff"
+            brightness = 80
+        "#,
+    )
+    .expect("legacy lighting table");
+    assert_eq!(lighting.effect, crate::hid::LightingEffect::Solid);
+    assert_eq!(lighting.speed, 50);
+    assert!(lighting.zones.is_empty());
 }
 
 #[test]

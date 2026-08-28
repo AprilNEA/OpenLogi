@@ -106,6 +106,8 @@ pub struct SharedRuntime {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Host lighting renderer sessions (screen sampler, visualizer, shows).
+    pub lighting: crate::lighting::LightingHost,
 }
 
 impl SharedRuntime {
@@ -227,6 +229,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            lighting: crate::lighting::LightingHost::default(),
         };
         let orch = Self {
             config,
@@ -256,6 +259,15 @@ impl Orchestrator {
     #[must_use]
     pub fn shared(&self) -> SharedRuntime {
         self.shared.clone()
+    }
+
+    /// Whether `route` addresses a mouse-like device (zonal lighting catalog).
+    #[must_use]
+    pub fn route_is_mouse(&self, route: &DeviceRoute) -> bool {
+        self.devices.iter().any(|dev| {
+            dev.route.as_ref() == Some(route)
+                && matches!(dev.kind, DeviceKind::Mouse | DeviceKind::Trackball)
+        })
     }
 
     fn current_key(&self) -> Option<&str> {
@@ -562,7 +574,12 @@ impl Orchestrator {
             .and_then(|d| d.effective_lighting(&route_key))
             .filter(|l| l.enabled)
         {
-            crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
+            let host = self.shared.lighting.clone();
+            crate::hardware::set_lighting_in_background(
+                &host,
+                &self.shared.device(&route),
+                lighting.clone(),
+            );
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             crate::hardware::write_fn_lock_in_background(

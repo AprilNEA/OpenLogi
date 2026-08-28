@@ -524,12 +524,12 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
         })
 }
 
-/// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
-/// card. Shown when the device reports a lighting capability — see
+/// Lighting tab: effect tiles, parameters, and zone chips in a titled card.
+/// Shown when the device reports a lighting capability — see
 /// [`DetailTab::tabs_for`].
 fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
     tab_body(
-        ContentWidth::Small,
+        ContentWidth::Large,
         PanelCard::new(
             tr!("Lighting"),
             Icon::new(IconName::Palette),

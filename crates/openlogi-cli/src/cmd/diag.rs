@@ -8,6 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
+use openlogi_core::device::DeviceKind;
 use openlogi_hid::{DeviceRoute, dump_features};
 
 pub mod battery;
@@ -30,7 +31,7 @@ pub enum DiagCmd {
     Dpi(dpi::DpiArgs),
     /// Read SmartShift mode → toggle → read back → toggle back → report.
     Smartshift(smartshift::SmartshiftArgs),
-    /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
+    /// List or apply firmware lighting effects (0x8070 / 0x8081).
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
@@ -56,6 +57,7 @@ impl DiagCmd {
 struct Candidate {
     route: DeviceRoute,
     name: String,
+    kind: DeviceKind,
 }
 
 /// Enumerate inventories and resolve every *online* paired device to a route.
@@ -73,7 +75,11 @@ async fn online_devices() -> Result<Vec<Candidate>> {
                 .codename
                 .clone()
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            out.push(Candidate { route, name });
+            out.push(Candidate {
+                route,
+                name,
+                kind: paired.kind,
+            });
         }
     }
     Ok(out)
@@ -157,6 +163,7 @@ pub(crate) async fn select_device(
 
 #[cfg(test)]
 mod no_match_err_tests {
+    use openlogi_core::device::DeviceKind;
     use openlogi_hid::DeviceRoute;
 
     use super::{Candidate, no_match_err};
@@ -168,6 +175,7 @@ mod no_match_err_tests {
                 product_id: 0xc539,
             },
             name: name.to_string(),
+            kind: DeviceKind::Mouse,
         }
     }
 
