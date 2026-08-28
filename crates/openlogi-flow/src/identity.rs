@@ -61,10 +61,14 @@ impl TryFrom<&WireDeviceIdentifier> for CanonicalDeviceIdentifier {
 
     fn try_from(identifier: &WireDeviceIdentifier) -> Result<Self, Self::Error> {
         match identifier.kind.as_known() {
-            Some(IdentifierKind::Serial) => std::str::from_utf8(&identifier.value)
-                .map(str::to_owned)
-                .map(Self::Serial)
-                .map_err(|_| DeviceIdentifierError::InvalidSerialUtf8),
+            Some(IdentifierKind::Serial) => {
+                let serial = std::str::from_utf8(&identifier.value)
+                    .map_err(|_| DeviceIdentifierError::InvalidSerialUtf8)?;
+                if serial.is_empty() {
+                    return Err(DeviceIdentifierError::EmptySerial);
+                }
+                Ok(Self::Serial(serial.to_owned()))
+            }
             Some(IdentifierKind::UnitId) => {
                 let bytes = exact_bytes::<4>(IdentifierKind::UnitId, &identifier.value)?;
                 Ok(Self::UnitId(u32::from_be_bytes(bytes)))
@@ -112,6 +116,9 @@ pub enum DeviceIdentifierError {
     /// A serial identifier does not contain valid UTF-8.
     #[error("serial identifier is not valid UTF-8")]
     InvalidSerialUtf8,
+    /// A serial identifier contains no bytes and cannot identify a device.
+    #[error("serial identifier is empty")]
+    EmptySerial,
     /// A fixed-width identifier has a noncanonical byte count.
     #[error("{kind:?} identifier must be {expected} bytes, received {actual}")]
     InvalidLength {
@@ -219,6 +226,19 @@ mod tests {
                 expected: 4,
                 actual: 3,
             }
+        );
+    }
+
+    #[test]
+    fn empty_serial_is_rejected() {
+        let empty = DeviceIdentifier {
+            kind: IdentifierKind::Serial.into(),
+            ..DeviceIdentifier::default()
+        };
+
+        assert_eq!(
+            CanonicalDeviceIdentifier::try_from(&empty).unwrap_err(),
+            DeviceIdentifierError::EmptySerial
         );
     }
 
