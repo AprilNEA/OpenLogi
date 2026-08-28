@@ -135,6 +135,8 @@ fn dispatch_media(key: MediaKey) {
         MediaKey::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
         MediaKey::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
         MediaKey::Mute => press_key(&[], KeyCode::KEY_MUTE),
+        MediaKey::BrightnessUp => press_key(&[], KeyCode::KEY_BRIGHTNESSUP),
+        MediaKey::BrightnessDown => press_key(&[], KeyCode::KEY_BRIGHTNESSDOWN),
     }
 }
 

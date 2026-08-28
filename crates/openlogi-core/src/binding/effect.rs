@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour (55 of them), but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -163,6 +163,12 @@ pub enum MediaKey {
     VolumeDown,
     /// Toggle system mute.
     Mute,
+    /// Increase display brightness. macOS posts the NX system-defined
+    /// brightness key; Linux presses `KEY_BRIGHTNESSUP`; Windows has no key
+    /// event for display brightness and debug-logs a no-op.
+    BrightnessUp,
+    /// Decrease display brightness. Counterpart to [`MediaKey::BrightnessUp`].
+    BrightnessDown,
 }
 
 /// A window-manager or power action with no shared cross-platform chord.
@@ -259,6 +265,8 @@ impl Action {
             Action::VolumeUp => Effect::Media(MediaKey::VolumeUp),
             Action::VolumeDown => Effect::Media(MediaKey::VolumeDown),
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
+            Action::BrightnessUp => Effect::Media(MediaKey::BrightnessUp),
+            Action::BrightnessDown => Effect::Media(MediaKey::BrightnessDown),
 
             // DPI/SmartShift/the Actions Ring/OpenApplication are all handled
             // above (or beside) the injector — see `Effect::AgentSide`.

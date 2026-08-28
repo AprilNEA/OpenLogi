@@ -73,10 +73,19 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// Keyboard "Backlight Down" control (CID `0x00e2`) — F4 on the MX
+    /// Mechanical Mini for Mac (position varies by model); absent from the
+    /// Signature series. The firmware handles this key internally (dimming
+    /// the keyboard backlight) unless it is diverted, so an unbound key keeps
+    /// its stock behavior.
+    KeyBacklightDown,
+    /// Keyboard "Backlight Up" control (CID `0x00e3`) — F5 on the MX
+    /// Mechanical Mini for Mac. Counterpart to [`ButtonId::KeyBacklightDown`].
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    KeyBacklightUp,
 }
 
 impl ButtonId {
@@ -103,7 +112,12 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 11] = [
+        // First: only the MX Mechanical family carries these two (F4/F5 on
+        // the Mini for Mac; position varies by model). The Signature-series
+        // keys follow in F-row order.
+        ButtonId::KeyBacklightDown,
+        ButtonId::KeyBacklightUp,
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -165,6 +179,8 @@ impl ButtonId {
             ButtonId::KeyMute => "Mute Key",
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
+            ButtonId::KeyBacklightDown => "Backlight Down Key",
+            ButtonId::KeyBacklightUp => "Backlight Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
         }
     }
@@ -194,6 +210,8 @@ impl ButtonId {
             ButtonId::KeyMute => "keyboard.mute_key",
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
+            ButtonId::KeyBacklightDown => "keyboard.backlight_down_key",
+            ButtonId::KeyBacklightUp => "keyboard.backlight_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
         }
     }
