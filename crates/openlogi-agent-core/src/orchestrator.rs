@@ -549,13 +549,20 @@ impl Orchestrator {
         let smartshift = device
             .and_then(|d| d.effective_smartshift(&route_key))
             .map(openlogi_hid::SmartShiftStatus::from);
-        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+        let report_rate = device.and_then(|d| d.effective_report_rate(&route_key));
+        if resolution.is_some()
+            || inverted.is_some()
+            || dpi.is_some()
+            || smartshift.is_some()
+            || report_rate.is_some()
+        {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 resolution,
                 inverted,
                 dpi,
                 smartshift,
+                report_rate,
             );
         }
         if let Some(lighting) = device
