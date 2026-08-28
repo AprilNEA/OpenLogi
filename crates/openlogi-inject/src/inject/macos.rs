@@ -164,32 +164,34 @@ fn dispatch_native(native: NativeAction) {
 /// Post the native Smart Zoom gesture at the current pointer location.
 ///
 /// AppKit identifies this as `NSEventTypeSmartMagnify`. CoreGraphics exposes
-/// neither the generic gesture event nor its subtype in the public Rust enum,
-/// so the event type is set through the underlying C API while the remaining
-/// event construction and posting stays on the safe `core-graphics` wrapper.
+/// neither a named generic gesture event nor its subtype, so their raw values
+/// are passed through the typed `objc2-core-graphics` wrappers.
 fn smart_zoom() {
+    use objc2_core_graphics::{
+        CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
+    };
+
     // Native Smart Zoom events originate from the combined session, not the
     // HID state used for synthetic mouse and keyboard events.
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else {
+    let Some(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else {
         tracing::warn!("CGEventSource::new failed for Smart Zoom");
         return;
     };
-    let Ok(event) = CGEvent::new(src) else {
+    let Some(event) = CGEvent::new(Some(&src)) else {
         tracing::warn!("CGEvent::new failed for Smart Zoom");
         return;
     };
 
     gesture_event::set_smart_magnify(&event);
-    event.post(CGEventTapLocation::HID);
+    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
 }
 
 #[expect(
     unsafe_code,
-    reason = "core-graphics omits generic gesture type 29 and CGEvent timestamp setters"
+    reason = "Mach clock APIs have no safe Rust wrapper"
 )]
 mod gesture_event {
-    use core_graphics::event::CGEvent;
-    use foreign_types::ForeignType as _;
+    use objc2_core_graphics::{CGEvent, CGEventField, CGEventType};
 
     use super::{
         GESTURE_EVENT_TYPE, GESTURE_PAYLOAD_FLAGS, GESTURE_PAYLOAD_FLAGS_FIELD,
@@ -197,26 +199,28 @@ mod gesture_event {
         SMART_MAGNIFY_SUBTYPE,
     };
 
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        fn CGEventSetType(event: core_graphics::sys::CGEventRef, event_type: u32);
-        fn CGEventSetTimestamp(event: core_graphics::sys::CGEventRef, timestamp: u64);
-    }
-
     pub(super) fn set_smart_magnify(event: &CGEvent) {
-        // SAFETY: `event.as_ptr()` is a live, owned CGEventRef and 29 is the
-        // generic gesture event type accepted by WindowServer.
-        unsafe { CGEventSetType(event.as_ptr(), GESTURE_EVENT_TYPE) };
+        CGEvent::set_type(Some(event), CGEventType(GESTURE_EVENT_TYPE));
         // A non-zero CGEvent timestamp also populates the private IOHID queue
         // timestamp carried by real Smart Zoom events. Without it Safari
         // accepts zoom-in but never releases its discrete-gesture latch, so
         // later presses cannot toggle back out.
-        // SAFETY: `event.as_ptr()` remains live and the timestamp uses the
-        // nanosecond scale required by CGEventTimestamp.
-        unsafe { CGEventSetTimestamp(event.as_ptr(), current_timestamp()) };
-        event.set_integer_value_field(GESTURE_SUBTYPE_FIELD, SMART_MAGNIFY_SUBTYPE);
-        event.set_integer_value_field(GESTURE_PAYLOAD_KIND_FIELD, GESTURE_PAYLOAD_KIND);
-        event.set_integer_value_field(GESTURE_PAYLOAD_FLAGS_FIELD, GESTURE_PAYLOAD_FLAGS);
+        CGEvent::set_timestamp(Some(event), current_timestamp());
+        CGEvent::set_integer_value_field(
+            Some(event),
+            CGEventField(GESTURE_SUBTYPE_FIELD),
+            SMART_MAGNIFY_SUBTYPE,
+        );
+        CGEvent::set_integer_value_field(
+            Some(event),
+            CGEventField(GESTURE_PAYLOAD_KIND_FIELD),
+            GESTURE_PAYLOAD_KIND,
+        );
+        CGEvent::set_integer_value_field(
+            Some(event),
+            CGEventField(GESTURE_PAYLOAD_FLAGS_FIELD),
+            GESTURE_PAYLOAD_FLAGS,
+        );
     }
 
     fn current_timestamp() -> u64 {
