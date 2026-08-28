@@ -79,20 +79,52 @@ fn settles_a_draining_session_quietly() {
 
 #[test]
 fn accepts_inputs_from_the_current_session_until_teardown_finishes() {
-    assert!(dispatch_plan_for(&session_id(7), Some(&live_session_with_epoch(7)), false,).is_some());
+    assert!(dispatch_plan_for(&session_id(7), Some(&live_session_with_epoch(7))).is_some());
     assert!(
-        dispatch_plan_for(&session_id(6), Some(&live_session_with_epoch(7)), false).is_none(),
+        dispatch_plan_for(&session_id(6), Some(&live_session_with_epoch(7))).is_none(),
         "a superseded session's queued input is stale"
     );
     assert!(
-        dispatch_plan_for(&session_id(7), Some(&stopped_session_with_epoch(7)), false).is_some(),
+        dispatch_plan_for(&session_id(7), Some(&stopped_session_with_epoch(7))).is_some(),
         "a draining session still owns diverted input until restoration completes"
     );
-    assert!(dispatch_plan_for(&session_id(7), None, false).is_none());
+    assert!(dispatch_plan_for(&session_id(7), None).is_none());
+}
+
+#[tokio::test]
+async fn exclusive_request_stops_rearming_without_rejecting_owned_input() {
+    let access = ReceiverAccess::default();
+    let session_lease = access
+        .try_acquire_for_session()
+        .expect("capture should acquire the receiver before pairing");
+    let pairing = tokio::spawn({
+        let access = access.clone();
+        async move {
+            access
+                .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !access.exclusive_requested() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pairing should announce its exclusive request");
+
+    let plans = Arc::new(std::sync::RwLock::new(vec![
+        live_session_with_epoch(7).plan,
+    ]));
+    assert!(wanted_sessions(&access, &plans).is_empty());
     assert!(
-        dispatch_plan_for(&session_id(7), Some(&live_session_with_epoch(7)), true).is_none(),
-        "pairing exclusivity blocks capture dispatch"
+        dispatch_plan_for(&session_id(7), Some(&live_session_with_epoch(7))).is_some(),
+        "the current session owns diverted input until it reports Done"
     );
+
+    pairing.abort();
+    let _ = pairing.await;
+    drop(session_lease);
 }
 
 #[test]
@@ -121,7 +153,7 @@ fn side_gesture_transition_keeps_the_retiring_plan_until_native_restore() {
     published_without_hook.divert_gesture_buttons.clear();
     assert!(!session_matches_plan(&session, &published_without_hook));
 
-    let retained = dispatch_plan_for(&session.id, Some(&session), false)
+    let retained = dispatch_plan_for(&session.id, Some(&session))
         .expect("the draining session must remain an admissible input owner");
     assert!(
         retained

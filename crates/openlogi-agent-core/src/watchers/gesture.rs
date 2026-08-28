@@ -221,15 +221,13 @@ fn on_done(done_session: &HidppSessionId, live: Option<&RunningSession>) -> Done
 
 /// Return the immutable plan that owns an input from the currently tracked
 /// session. Deliberately stopped sessions remain admissible until their task
-/// reports that native firmware reporting has been restored.
+/// reports that native firmware reporting has been restored. An exclusive
+/// request initiates that stop through reconciliation; it does not revoke the
+/// session's ownership while controls are still diverted.
 fn dispatch_plan_for<'a>(
     input_session: &HidppSessionId,
     live: Option<&'a RunningSession>,
-    exclusive_requested: bool,
 ) -> Option<&'a DeviceCapturePlan> {
-    if exclusive_requested {
-        return None;
-    }
     live.filter(|session| session.id == *input_session)
         .map(|session| &session.plan)
 }
@@ -324,11 +322,7 @@ async fn manage(
                     SessionEvent::Input(event) => {
                         let key = event.session.device_key();
                         let live = sessions.get(key);
-                        let dispatch_plan = dispatch_plan_for(
-                            &event.session,
-                            live,
-                            receiver_access.exclusive_requested(),
-                        );
+                        let dispatch_plan = dispatch_plan_for(&event.session, live);
                         if let Some(plan) = dispatch_plan {
                             input_dispatcher.dispatch(&event.session, plan, event.input);
                         } else {
