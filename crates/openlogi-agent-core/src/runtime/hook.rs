@@ -80,9 +80,10 @@ fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
-/// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
-/// adds only the button identity the accumulator doesn't track; a press that
-/// never commits a direction is a plain click, fired on release.
+/// mid-motion or classifies qualifying accumulated travel on release, like the
+/// HID++ gesture-button path in `openlogi-device`. This wrapper adds only the
+/// button identity the accumulator doesn't track; travel that never qualifies is
+/// a plain click, fired on release.
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
 /// finish in well under a second, and only a lost button-up (with no OS
 /// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
