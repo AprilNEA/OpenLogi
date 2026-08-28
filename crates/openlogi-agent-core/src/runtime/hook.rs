@@ -252,13 +252,15 @@ fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
-fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action> {
-    let (tx, rx) = mpsc::sync_channel::<Action>(64);
+type QueuedAction = (Action, ActionDispatchTarget);
+
+fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedAction> {
+    let (tx, rx) = mpsc::sync_channel::<QueuedAction>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
-            while let Ok(action) = rx.recv() {
-                dispatcher.dispatch(&action, None);
+            while let Ok((action, target)) = rx.recv() {
+                dispatcher.executor.dispatch_to(&action, None, target);
             }
         });
     tx
@@ -266,8 +268,12 @@ fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action>
 
 /// Queue a bound action without blocking the tap callback. Returns `false` if
 /// the queue is full (caller should fail open and pass the physical event).
-fn try_queue_action(tx: &mpsc::SyncSender<Action>, action: Action) -> bool {
-    if tx.try_send(action).is_err() {
+fn try_queue_action(
+    tx: &mpsc::SyncSender<QueuedAction>,
+    action: Action,
+    target: ActionDispatchTarget,
+) -> bool {
+    if tx.try_send((action, target)).is_err() {
         warn!("action queue full — dropping bound action to keep the input hook live");
         false
     } else {
@@ -282,6 +288,7 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
+    capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() {
@@ -301,7 +308,7 @@ fn handle_button(
         && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id));
     let unattributed_browser_down = macos_browser_button && pressed && device.is_none();
     let action_target = if pressed {
-        ActionDispatchTarget::capture()
+        capture_target()
     } else {
         ActionDispatchTarget::Keyboard
     };
@@ -454,8 +461,9 @@ fn handle_moved(
 fn handle_key(
     event: KeyEvent,
     bindings: &SharedKeyboardBindings,
-    action_tx: &mpsc::SyncSender<Action>,
+    action_tx: &mpsc::SyncSender<QueuedAction>,
     dispatcher: &ActionDispatcher,
+    capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     let KeyEvent {
         keycode,
@@ -487,8 +495,9 @@ fn handle_key(
     };
 
     info!(keycode, action = %action.label(), "key → executing bound action");
+    let action_target = capture_target();
     let queued = if action.held_combo().is_some() {
-        let queued = dispatcher.try_hook_key_down(keycode, &action);
+        let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
                 keys.insert(keycode);
@@ -496,7 +505,7 @@ fn handle_key(
         }
         queued
     } else {
-        try_queue_action(action_tx, action)
+        try_queue_action(action_tx, action, action_target)
     };
     queued_event_disposition(queued)
 }
@@ -531,7 +540,14 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
+                } => handle_button(
+                    id,
+                    pressed,
+                    device.as_ref(),
+                    &hooks,
+                    &dispatcher,
+                    ActionDispatchTarget::capture,
+                ),
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
@@ -557,7 +573,11 @@ pub fn start(
                             .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        return queued_event_disposition(try_queue_action(&action_tx, action));
+                        return queued_event_disposition(try_queue_action(
+                            &action_tx,
+                            action,
+                            ActionDispatchTarget::capture(),
+                        ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
@@ -570,7 +590,13 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
-        HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),
+        HookEvent::Key(event) => handle_key(
+            event,
+            &keyboard_bindings,
+            &action_tx,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        ),
     });
 
     match result {

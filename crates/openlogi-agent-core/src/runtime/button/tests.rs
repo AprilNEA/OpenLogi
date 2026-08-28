@@ -814,7 +814,7 @@ fn function_key_hold_has_one_balanced_lifecycle() {
     let input = owner.input();
     let action = Action::HoldShortcut("Ctrl+Space".parse().expect("valid shortcut"));
     let token = input
-        .try_hook_key_down(0x7a, &action)
+        .try_hook_key_down(0x7a, &action, ActionDispatchTarget::Keyboard)
         .expect("key down should be queued");
 
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {

@@ -321,7 +321,7 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
 pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
-        macos::ax_browser_navigate(forward, Some(pid))
+        macos::ax_browser_navigate(forward, pid)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -345,26 +345,6 @@ pub fn frontmost_safari_pid() -> Option<i32> {
     #[cfg(not(target_os = "macos"))]
     {
         None
-    }
-}
-
-/// Navigate the frontmost Safari window backwards or forwards through a stable
-/// Accessibility toolbar-button identifier.
-///
-/// Safari ignores the synthetic keyboard events used by the ordinary browser
-/// shortcuts, so callers should try this first and fall back to [`execute`]
-/// when it returns `false`. No-op (returns `false`)
-/// on non-macOS platforms.
-#[must_use]
-pub fn ax_navigate_frontmost_browser(forward: bool) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        macos::ax_browser_navigate(forward, None)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = forward;
-        false
     }
 }
 

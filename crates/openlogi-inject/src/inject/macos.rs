@@ -905,9 +905,9 @@ pub(super) fn frontmost_safari_pid() -> Option<i32> {
 /// dispatch rather than the input event pipeline.
 ///
 /// Returns `true` when an AX button was found and pressed (result `kAXErrorSuccess`),
-/// `false` on any failure — the caller should fall back to a keyboard shortcut.
+/// or `false` when the captured Safari process is stale or navigation fails.
 #[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
-pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
+pub(super) fn ax_browser_navigate(forward: bool, pid: i32) -> bool {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSWorkspace;
 
@@ -932,13 +932,11 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
             return None::<()>;
         }
         let frontmost_pid = frontmost.processIdentifier();
-        let resolved_pid = match pid {
-            Some(captured_pid) if captured_pid == frontmost_pid => captured_pid,
-            Some(_) => return None,
-            None => frontmost_pid,
-        };
+        if pid != frontmost_pid {
+            return None;
+        }
         // SAFETY: returns +1 retained AXUIElement.
-        let app_ax = unsafe { ax_nav::AXUIElementCreateApplication(resolved_pid) };
+        let app_ax = unsafe { ax_nav::AXUIElementCreateApplication(pid) };
         if app_ax.is_null() {
             return None::<()>;
         }

@@ -447,13 +447,18 @@ impl ButtonInputHandle {
         self.try_up(ButtonSource::current_hook(), button)
     }
 
-    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> Option<PressToken> {
+    pub(crate) fn try_hook_key_down(
+        &self,
+        keycode: u16,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::for_key(ButtonSource::current_hook(), keycode),
             PressBehavior::Immediate(action.clone()),
             generation,
-            ActionDispatchTarget::capture(),
+            target,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
