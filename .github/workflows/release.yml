@@ -123,6 +123,8 @@ jobs:
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
+    outputs:
+      installer_published: ${{ steps.artifacts.outputs.installer }}
     steps:
       # Needed to build & run the xtask manifest generator below.
       - uses: actions/checkout@v7
@@ -367,6 +369,35 @@ jobs:
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
             ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
           fail_on_unmatched_files: true
+
+  installer-site:
+    name: Dispatch installer site update
+    runs-on: ubuntu-latest
+    needs: publish
+    if: ${{ needs.publish.outputs.installer_published == 'true' }}
+    permissions:
+      contents: read
+    steps:
+      # Needed by the local token-minting action.
+      - uses: actions/checkout@v7
+
+      - name: Mint installer-site token (GitHub App)
+        id: installer_site_token
+        uses: ./.github/actions/github-app-token-from-1password
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          owner: openlogi-org
+          repositories: get
+
+      - name: Dispatch installer site update
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ steps.installer_site_token.outputs.token }}
+          repository: openlogi-org/get
+          event-type: publish-openlogi-installer
+          client-payload: |
+            {"tag": "${{ github.ref_name }}"}
 
   homebrew-tap:
     name: Dispatch homebrew-tap update
