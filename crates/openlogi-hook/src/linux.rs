@@ -47,7 +47,7 @@ use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::randr::ConnectionExt as _;
-use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask, Window};
 use x11rb::rust_connection::RustConnection;
 
 use crate::edge::DisplayRect;
@@ -374,7 +374,11 @@ fn scroll(delta_x: f64, delta_y: f64) -> MouseEvent {
     }
 }
 
-fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
+fn translate_with_modifiers(
+    event: &evdev::InputEvent,
+    hires_scroll: bool,
+    modifiers: KeyModifiers,
+) -> Option<MouseEvent> {
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
             let id = key_to_button(key)?;
@@ -394,12 +398,12 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
             RelativeAxisCode::REL_X => Some(MouseEvent::Moved {
                 delta_x: value,
                 delta_y: 0,
-                modifiers: KeyModifiers::default(),
+                modifiers,
             }),
             RelativeAxisCode::REL_Y => Some(MouseEvent::Moved {
                 delta_x: 0,
                 delta_y: value,
-                modifiers: KeyModifiers::default(),
+                modifiers,
             }),
             _ => {
                 let v = f64::from(value);
@@ -446,6 +450,20 @@ fn invert_wheel(event: InputEvent, inverted: bool) -> InputEvent {
             value,
         ) => InputEvent::new(EventType::RELATIVE.0, axis.0, value.saturating_neg()),
         _ => event,
+    }
+}
+
+#[cfg(test)]
+fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
+    translate_with_modifiers(event, hires_scroll, KeyModifiers::default())
+}
+
+fn modifiers_from_mask(mask: KeyButMask) -> KeyModifiers {
+    KeyModifiers {
+        shift: mask & KeyButMask::SHIFT != KeyButMask::default(),
+        control: mask & KeyButMask::CONTROL != KeyButMask::default(),
+        option: mask & KeyButMask::MOD1 != KeyButMask::default(),
+        command: mask & KeyButMask::MOD4 != KeyButMask::default(),
     }
 }
 
@@ -532,9 +550,10 @@ fn dispatch(
     event: InputEvent,
     hires_scroll: bool,
     invert: bool,
+    modifiers: KeyModifiers,
     cb: &dyn Fn(HookEvent) -> EventDisposition,
 ) -> Option<InputEvent> {
-    let delivery = translate(&event, hires_scroll).map_or_else(
+    let delivery = translate_with_modifiers(&event, hires_scroll, modifiers).map_or_else(
         || Delivery::forwarded(invert),
         |mouse| Delivery::run(HookEvent::Mouse(mouse), invert, cb),
     );
@@ -573,12 +592,14 @@ fn device_thread(
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
+    let modifier_source = X11ModifierSource::connect();
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
     let mut companions = LowResCompanions::default();
     // Software scroll inversion, read once per report so a hi-res event and its
     // low-res companion never disagree if the setting flips mid-report.
     let mut report_inverted: Option<bool> = None;
+    let mut report_modifiers = None;
 
     debug!("hook started on {}", path.display());
 
@@ -600,6 +621,7 @@ fn device_thread(
 
         for event in events {
             if let EventSummary::Synchronization(..) = event.destructure() {
+                report_modifiers = None;
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
@@ -632,6 +654,22 @@ fn device_thread(
                     companions.hold(event);
                     continue;
                 }
+                let modifiers = if matches!(
+                    event.destructure(),
+                    EventSummary::RelativeAxis(
+                        _,
+                        RelativeAxisCode::REL_X | RelativeAxisCode::REL_Y,
+                        _
+                    )
+                ) {
+                    *report_modifiers.get_or_insert_with(|| {
+                        modifier_source
+                            .as_ref()
+                            .map_or_else(KeyModifiers::default, X11ModifierSource::current)
+                    })
+                } else {
+                    KeyModifiers::default()
+                };
                 let is_vertical_wheel = matches!(
                     event.destructure(),
                     EventSummary::RelativeAxis(
@@ -642,7 +680,7 @@ fn device_thread(
                 );
                 let invert = is_vertical_wheel
                     && *report_inverted.get_or_insert_with(crate::scroll_inversion);
-                if let Some(forwarded) = dispatch(event, hires_scroll, invert, &*cb) {
+                if let Some(forwarded) = dispatch(event, hires_scroll, invert, modifiers, &*cb) {
                     if let EventSummary::RelativeAxis(_, axis, _) = event.destructure() {
                         companions.hires_forwarded(axis);
                     }
@@ -654,6 +692,34 @@ fn device_thread(
 
     debug!("hook stopped on {}", path.display());
     // Dropping `device` releases the exclusive grab, restoring normal input delivery.
+}
+
+/// Persistent X11 connection used to snapshot keyboard modifiers for pointer
+/// reports. Flow already requires X11 global coordinates on Linux; native
+/// Wayland sessions without XWayland fall back to empty modifiers.
+struct X11ModifierSource {
+    conn: RustConnection,
+    root: Window,
+}
+
+impl X11ModifierSource {
+    fn connect() -> Option<Self> {
+        let (conn, screen_num) = RustConnection::connect(None)
+            .map_err(|error| debug!("X11 modifier state unavailable: {error}"))
+            .ok()?;
+        let root = conn.setup().roots[screen_num].root;
+        Some(Self { conn, root })
+    }
+
+    fn current(&self) -> KeyModifiers {
+        self.conn
+            .query_pointer(self.root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map_or_else(KeyModifiers::default, |reply| {
+                modifiers_from_mask(reply.mask)
+            })
+    }
 }
 
 #[cfg(test)]
@@ -785,6 +851,38 @@ mod tests {
                 delta_y: -4,
                 ..
             })
+        );
+    }
+
+    #[test]
+    fn movement_preserves_current_modifiers() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 1);
+        let modifiers = KeyModifiers {
+            control: true,
+            ..KeyModifiers::default()
+        };
+
+        assert_matches!(
+            translate_with_modifiers(&event, false, modifiers),
+            Some(MouseEvent::Moved {
+                modifiers: observed,
+                ..
+            }) if observed == modifiers
+        );
+    }
+
+    #[test]
+    fn x11_modifier_mask_maps_to_hook_vocabulary() {
+        assert_eq!(
+            modifiers_from_mask(
+                KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4
+            ),
+            KeyModifiers {
+                shift: true,
+                control: true,
+                option: true,
+                command: true,
+            }
         );
     }
 
@@ -1211,12 +1309,18 @@ mod scroll_inversion_tests {
         disposition: EventDisposition,
     ) -> (Option<ScrollDelta>, Option<i32>) {
         let seen = Cell::new(None);
-        let forwarded = dispatch(event, hires_scroll, invert, &|hook_event| {
-            if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
-                seen.set(Some(delta));
-            }
-            disposition
-        });
+        let forwarded = dispatch(
+            event,
+            hires_scroll,
+            invert,
+            KeyModifiers::default(),
+            &|hook_event| {
+                if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
+                    seen.set(Some(delta));
+                }
+                disposition
+            },
+        );
         (seen.get(), forwarded.map(value_of))
     }
 
