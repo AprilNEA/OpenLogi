@@ -204,7 +204,7 @@ impl AcceptedUnattributedPresses {
         self.buttons.insert(id);
     }
 
-    fn take_release(&mut self, id: ButtonId) -> bool {
+    fn take(&mut self, id: ButtonId) -> bool {
         self.buttons.remove(&id)
     }
 
@@ -234,17 +234,6 @@ fn button_source_may_remap(
             safari_is_frontmost && matches!(id, ButtonId::Back | ButtonId::Forward)
         }
         None => true,
-    }
-}
-
-fn press_time_safari_target() -> Option<ActionDispatchTarget> {
-    #[cfg(target_os = "macos")]
-    {
-        openlogi_inject::frontmost_safari_pid().map(ActionDispatchTarget::SafariProcess)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
     }
 }
 
@@ -300,14 +289,24 @@ fn handle_button(
     }
     let macos_browser_button =
         cfg!(target_os = "macos") && matches!(id, ButtonId::Back | ButtonId::Forward);
+    if pressed
+        && macos_browser_button
+        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id))
+    {
+        let _ = HOLD.with_borrow_mut(|hold| hold.end(id));
+        dispatcher.try_hook_button_up(id);
+    }
     let accepted_unattributed_release = macos_browser_button
         && !pressed
-        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take_release(id));
+        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id));
     let unattributed_browser_down = macos_browser_button && pressed && device.is_none();
-    let action_target = unattributed_browser_down
-        .then(press_time_safari_target)
-        .flatten();
-    let safari_exception = action_target.is_some();
+    let action_target = if pressed {
+        ActionDispatchTarget::capture()
+    } else {
+        ActionDispatchTarget::Keyboard
+    };
+    let safari_exception = unattributed_browser_down
+        && matches!(action_target, ActionDispatchTarget::SafariProcess(_));
     if !accepted_unattributed_release && !button_source_may_remap(id, device, safari_exception) {
         if !pressed && macos_browser_button && device.is_none() {
             FAIL_OPEN_PRESSES.with_borrow_mut(|presses| {

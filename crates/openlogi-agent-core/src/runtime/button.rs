@@ -170,7 +170,7 @@ impl PressToken {
 pub(crate) struct ActivePress {
     token: PressToken,
     behavior: PressBehavior,
-    target: Option<ActionDispatchTarget>,
+    target: ActionDispatchTarget,
 }
 
 /// Runtime-only state of the action semantics attached to one active press.
@@ -255,7 +255,7 @@ impl ActivePress {
         self.behavior.start_action()
     }
 
-    pub(crate) fn target(&self) -> Option<ActionDispatchTarget> {
+    pub(crate) fn target(&self) -> ActionDispatchTarget {
         self.target
     }
 
@@ -431,14 +431,14 @@ impl ButtonInputHandle {
         button: ButtonId,
         binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_hook_down_with_target(button, binding, None)
+        self.try_hook_down_with_target(button, binding, ActionDispatchTarget::capture())
     }
 
     pub(crate) fn try_hook_down_with_target(
         &self,
         button: ButtonId,
         binding: Option<&Binding>,
-        target: Option<ActionDispatchTarget>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         self.try_down(ButtonSource::current_hook(), button, binding, target)
     }
@@ -453,7 +453,7 @@ impl ButtonInputHandle {
             PressKey::for_key(ButtonSource::current_hook(), keycode),
             PressBehavior::Immediate(action.clone()),
             generation,
-            None,
+            ActionDispatchTarget::capture(),
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -484,8 +484,14 @@ impl ButtonInputHandle {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::Hidpp(session.clone()), button, binding, None)
+        self.try_down(
+            ButtonSource::Hidpp(session.clone()),
+            button,
+            binding,
+            target,
+        )
     }
 
     pub(crate) fn try_hidpp_up(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -497,13 +503,14 @@ impl ButtonInputHandle {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::new(ButtonSource::Hidpp(session.clone()), button),
             PressBehavior::new(binding, Instant::now()),
             generation,
-            None,
+            target,
         );
         self.try_input(generation, ButtonInput::Pulse(press))
     }
@@ -542,7 +549,7 @@ impl ButtonInputHandle {
         source: ButtonSource,
         button: ButtonId,
         binding: Option<&Binding>,
-        target: Option<ActionDispatchTarget>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
@@ -572,7 +579,7 @@ impl ButtonInputHandle {
         key: PressKey,
         behavior: PressBehavior,
         generation: u64,
-        target: Option<ActionDispatchTarget>,
+        target: ActionDispatchTarget,
     ) -> ActivePress {
         let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
         ActivePress {

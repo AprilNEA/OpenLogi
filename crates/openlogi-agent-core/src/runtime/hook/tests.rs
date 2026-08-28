@@ -204,10 +204,22 @@ fn unattributed_extra_buttons_preserve_the_narrow_macos_exception() {
 fn accepted_unattributed_press_release_is_consumed_once() {
     let mut presses = AcceptedUnattributedPresses::default();
 
-    assert!(!presses.take_release(ButtonId::Back));
+    assert!(!presses.take(ButtonId::Back));
     presses.accept(ButtonId::Back);
-    assert!(presses.take_release(ButtonId::Back));
-    assert!(!presses.take_release(ButtonId::Back));
+    assert!(presses.take(ButtonId::Back));
+    assert!(!presses.take(ButtonId::Back));
+}
+
+#[test]
+fn missing_unattributed_release_is_settled_before_the_next_press() {
+    let mut presses = AcceptedUnattributedPresses::default();
+
+    presses.accept(ButtonId::Back);
+    assert!(presses.take(ButtonId::Back));
+    assert!(
+        !presses.take(ButtonId::Back),
+        "the new application's release must remain native"
+    );
 }
 
 #[test]
