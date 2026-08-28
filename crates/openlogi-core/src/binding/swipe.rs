@@ -136,7 +136,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
     }
 }
 
-/// The mid-swipe state machine shared by both gesture-capture paths: the HID++
+/// The swipe state machine shared by both gesture-capture paths: the HID++
 /// dedicated gesture button (`openlogi-device`'s `0x1b04` raw-XY divert) and the
 /// OS-hook Middle/Back/Forward buttons (`openlogi-agent-core`'s platform hook).
 /// A gesture button's hold accumulates travel; once its configured response-time
@@ -220,9 +220,8 @@ impl SwipeAccumulator {
         None
     }
 
-    /// End the current hold. Returns `true` when an in-progress hold ended
-    /// without committing a swipe — the caller should fire the plain `Click`
-    /// action — and `false` when a swipe already fired mid-motion, or when there
+    /// End the current hold. Returns `true` when it finishes as a plain `Click`,
+    /// and `false` when a swipe commits mid-motion or on release, or when there
     /// was no hold to end (a stray release reports no click).
     pub fn end(&mut self) -> bool {
         self.finish() == Some(GestureDirection::Click)
