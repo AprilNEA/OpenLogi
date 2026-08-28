@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
-use crate::config::{Config, DeviceConfig};
+use crate::config::{Config, DeviceConfig, HorizontalScrollSensitivity};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
 use crate::device::Capabilities;
@@ -288,6 +288,26 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // rightly.
     if device.invert_scroll != legacy.invert_scroll && legacy.invert_scroll {
         link.overrides.invert_scroll = Some(legacy.invert_scroll);
+    }
+
+    // Native horizontal scrolling is a physical-device policy. A non-default
+    // legacy value is evidence of an explicit choice, so retain it when the
+    // canonical entry has no choice of its own. There is intentionally no
+    // per-link override: the macOS event tap can identify a direct mouse, not
+    // which logical connection entry supplied the event.
+    if device.horizontal_scroll_sensitivity == HorizontalScrollSensitivity::DEFAULT {
+        device.horizontal_scroll_sensitivity = legacy.horizontal_scroll_sensitivity;
+    } else if legacy.horizontal_scroll_sensitivity != HorizontalScrollSensitivity::DEFAULT
+        && device.horizontal_scroll_sensitivity != legacy.horizontal_scroll_sensitivity
+    {
+        tracing::warn!(
+            %route_key,
+            field = "horizontal_scroll_sensitivity",
+            "value differs between merged entries; keeping the canonical one"
+        );
+    }
+    if !device.invert_horizontal_scroll && legacy.invert_horizontal_scroll {
+        device.invert_horizontal_scroll = true;
     }
 
     // Scalar values with no per-link override slot: take the legacy value

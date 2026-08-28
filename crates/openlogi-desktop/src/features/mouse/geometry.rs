@@ -3,6 +3,8 @@
 //! These functions keep Logitech asset coordinate translation and fallback
 //! label layout separate from the GPUI element tree in `view`.
 
+#[cfg(target_os = "macos")]
+use openlogi_assets::Metadata;
 use openlogi_core::binding::ButtonId;
 
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
@@ -62,6 +64,27 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
         .metadata
         .assignments()
         .any(|a| map_slot_name(&a.slot_name).is_some())
+}
+
+/// Whether Logitech's model metadata identifies left or right tilt on the
+/// main scroll wheel. This is deliberately separate from `thumbwheel`: a
+/// dedicated side wheel uses HID++ `0x2150`, while these controls arrive as
+/// native macOS Axis 2 events.
+#[cfg(target_os = "macos")]
+pub fn asset_has_main_wheel_tilt(asset: &ResolvedAsset) -> bool {
+    metadata_has_main_wheel_tilt(&asset.metadata)
+}
+
+#[cfg(target_os = "macos")]
+fn metadata_has_main_wheel_tilt(metadata: &Metadata) -> bool {
+    metadata.assignments().any(|assignment| {
+        matches!(
+            map_slot_name(&assignment.slot_name),
+            Some(MouseControlId::Button(
+                ButtonId::WheelTiltLeft | ButtonId::WheelTiltRight
+            ))
+        )
+    })
 }
 
 /// Convert Logitech's percent-based markers into mouse-local pixel rects,
@@ -299,6 +322,26 @@ mod tests {
                 Some(MouseControlId::Button(ButtonId::WheelTiltRight))
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_horizontal_controls_require_main_wheel_tilt_metadata() {
+        let metadata: Metadata = serde_json::from_str(
+            r#"{
+              "images": [{
+                "key": "device_buttons_image",
+                "origin": { "width": 609, "height": 1024 },
+                "assignments": [{
+                  "slotName": "SLOT_NAME_LEFT_SCROLL_BUTTON"
+                }]
+              }]
+            }"#,
+        )
+        .expect("valid tilt-wheel metadata");
+
+        assert!(metadata_has_main_wheel_tilt(&metadata));
+        assert!(!metadata_has_main_wheel_tilt(&Metadata::default()));
     }
 
     #[test]

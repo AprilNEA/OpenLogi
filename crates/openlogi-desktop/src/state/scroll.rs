@@ -1,8 +1,9 @@
-//! Per-device scroll inversion and wheel resolution.
+//! Per-device scroll inversion, sensitivity, and wheel resolution.
 
 use tracing::debug;
 
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, HorizontalScrollSensitivity};
+use openlogi_core::hid::DeviceRoute;
 
 use crate::state::devices::DeviceRecord;
 
@@ -46,6 +47,78 @@ impl AppState {
         self.config
             .edit(|config| config.set_invert_scroll(&key, invert));
         self.persist_and_reload("invert scroll");
+    }
+    /// Effective native horizontal-scroll sensitivity for the active device.
+    /// The default `14` preserves the device's incoming speed.
+    #[must_use]
+    pub fn current_horizontal_scroll_sensitivity(&self) -> HorizontalScrollSensitivity {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map_or(HorizontalScrollSensitivity::DEFAULT, |key| {
+                self.config.horizontal_scroll_sensitivity(key)
+            })
+    }
+    /// Whether the active device's native horizontal axis is reversed.
+    #[must_use]
+    pub fn current_invert_horizontal_scroll(&self) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.invert_horizontal_scroll(key))
+    }
+    /// Whether macOS can attribute native horizontal events to this device.
+    /// Receiver events expose the receiver identity, not a paired slot, so only
+    /// enabled direct devices can safely receive per-device settings. If two
+    /// direct devices share a VID/PID, their settings must also agree because
+    /// the event source cannot distinguish the physical units.
+    #[must_use]
+    pub fn current_horizontal_scroll_supported(&self) -> bool {
+        cfg!(target_os = "macos")
+            && self.current_record().is_some_and(|record| {
+                horizontal_scroll_settings_are_applicable(&self.config, record, self.devices())
+            })
+    }
+    /// Persist the active device's native horizontal-scroll sensitivity and
+    /// reload the agent. No-op when macOS cannot attribute this device.
+    pub fn commit_horizontal_scroll_sensitivity(
+        &mut self,
+        sensitivity: HorizontalScrollSensitivity,
+    ) {
+        let Some((key, supported)) = self.current_record().and_then(|record| {
+            Some((
+                record.persistent_config_key()?.to_string(),
+                self.current_horizontal_scroll_supported(),
+            ))
+        }) else {
+            debug!("no persistent device key — horizontal-scroll change ignored");
+            return;
+        };
+        if !self.config.edit(|config| {
+            set_horizontal_scroll_sensitivity_if_supported(config, &key, supported, sensitivity)
+        }) {
+            debug!("native horizontal scroll is not attributable to the active device");
+            return;
+        }
+        self.persist_and_reload("horizontal scroll sensitivity");
+    }
+    /// Persist horizontal direction for the active direct mouse and reload the
+    /// agent. Vertical wheel inversion remains independent.
+    pub fn commit_invert_horizontal_scroll(&mut self, invert: bool) {
+        let Some((key, supported)) = self.current_record().and_then(|record| {
+            Some((
+                record.persistent_config_key()?.to_string(),
+                self.current_horizontal_scroll_supported(),
+            ))
+        }) else {
+            debug!("no persistent device key — horizontal-scroll change ignored");
+            return;
+        };
+        if !self.config.edit(|config| {
+            set_invert_horizontal_scroll_if_supported(config, &key, supported, invert)
+        }) {
+            debug!("native horizontal scroll is not attributable to the active device");
+            return;
+        }
+        self.persist_and_reload("horizontal scroll direction");
     }
     /// The active device's persisted wheel resolution, or `None` when OpenLogi
     /// leaves the device default untouched.
@@ -116,6 +189,43 @@ impl AppState {
     }
 }
 
+/// Whether editing `selected` can produce an unambiguous per-device transform.
+/// The agent can safely share one already-identical TOML policy across equal
+/// VID/PIDs, but the GUI must not edit only one member and create a conflict.
+fn horizontal_scroll_settings_are_applicable(
+    config: &Config,
+    selected: &DeviceRecord,
+    records: &[DeviceRecord],
+) -> bool {
+    let Some(key) = selected.persistent_config_key() else {
+        return false;
+    };
+    if !config.device_enabled(key) {
+        return false;
+    }
+    let Some(identity) = horizontal_scroll_identity(selected) else {
+        return false;
+    };
+    records
+        .iter()
+        .filter_map(horizontal_scroll_identity)
+        .filter(|other_identity| *other_identity == identity)
+        .count()
+        == 1
+}
+
+fn horizontal_scroll_identity(record: &DeviceRecord) -> Option<(u16, u16)> {
+    record.persistent_config_key()?;
+    let DeviceRoute::Direct {
+        vendor_id,
+        product_id,
+    } = record.route.as_ref()?
+    else {
+        return None;
+    };
+    Some((*vendor_id, *product_id))
+}
+
 pub(crate) fn set_scroll_resolution_if_supported(
     config: &mut Config,
     key: &str,
@@ -129,16 +239,49 @@ pub(crate) fn set_scroll_resolution_if_supported(
     true
 }
 
+pub(crate) fn set_horizontal_scroll_sensitivity_if_supported(
+    config: &mut Config,
+    key: &str,
+    supported: bool,
+    sensitivity: HorizontalScrollSensitivity,
+) -> bool {
+    if !supported {
+        return false;
+    }
+    config.set_horizontal_scroll_sensitivity(key, sensitivity);
+    true
+}
+
+pub(crate) fn set_invert_horizontal_scroll_if_supported(
+    config: &mut Config,
+    key: &str,
+    supported: bool,
+    invert: bool,
+) -> bool {
+    if !supported {
+        return false;
+    }
+    config.set_invert_horizontal_scroll(key, invert);
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use openlogi_core::config::{Config, DeviceConfig, LinkConfig, LinkOverrides};
+    use openlogi_core::config::{
+        Config, DeviceConfig, HorizontalScrollSensitivity, LinkConfig, LinkOverrides,
+    };
     use openlogi_core::device::{Capabilities, DeviceKind};
+    use openlogi_core::hid::DeviceRoute;
 
     use crate::services::assets::AssetResolver;
     use crate::state::ConfigPersistence;
     use crate::state::devices::DeviceRecord;
 
     use super::AppState;
+    use super::{
+        horizontal_scroll_settings_are_applicable, set_horizontal_scroll_sensitivity_if_supported,
+        set_invert_horizontal_scroll_if_supported,
+    };
 
     impl AppState {
         /// Test-only: select a single synthetic record without going through
@@ -213,6 +356,17 @@ mod tests {
         state
     }
 
+    fn direct_record(config_key: &str, product_id: u16) -> DeviceRecord {
+        let mut state = test_state(Config::ephemeral());
+        state.set_current_record_for_test(config_key, "direct:test");
+        let mut record = state.current_record().expect("test record").clone();
+        record.route = Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id,
+        });
+        record
+    }
+
     #[test]
     fn a_capability_present_on_another_link_is_distinguishable() {
         // A G502 has no hi-res wheel over USB and does over its receiver.
@@ -230,5 +384,74 @@ mod tests {
     fn a_device_that_never_had_it_is_not_excused() {
         let state = state_with_links(&[("direct:046d:b012", false)]);
         assert!(!state.hires_wheel_supported_on_another_link());
+    }
+
+    #[test]
+    fn supported_horizontal_scroll_settings_persist_and_unsupported_ones_do_not() {
+        let mut config = Config::ephemeral();
+        let sensitivity = HorizontalScrollSensitivity::try_new(42).expect("valid 3x setting");
+        assert!(set_horizontal_scroll_sensitivity_if_supported(
+            &mut config,
+            "mouse",
+            true,
+            sensitivity,
+        ));
+        assert!(set_invert_horizontal_scroll_if_supported(
+            &mut config,
+            "mouse",
+            true,
+            true,
+        ));
+        assert_eq!(config.horizontal_scroll_sensitivity("mouse"), sensitivity);
+        assert!(config.invert_horizontal_scroll("mouse"));
+
+        assert!(!set_horizontal_scroll_sensitivity_if_supported(
+            &mut config,
+            "receiver-mouse",
+            false,
+            HorizontalScrollSensitivity::MAX,
+        ));
+        assert!(!set_invert_horizontal_scroll_if_supported(
+            &mut config,
+            "receiver-mouse",
+            false,
+            true,
+        ));
+        assert_eq!(
+            config.horizontal_scroll_sensitivity("receiver-mouse"),
+            HorizontalScrollSensitivity::DEFAULT
+        );
+        assert!(!config.invert_horizontal_scroll("receiver-mouse"));
+    }
+
+    #[test]
+    fn horizontal_scroll_support_rejects_disabled_and_ambiguous_devices() {
+        let first = direct_record("first", 0xb01f);
+        let second = direct_record("second", 0xb01f);
+        let sensitivity = HorizontalScrollSensitivity::try_new(42).expect("valid 3x setting");
+
+        let mut config = Config::ephemeral();
+        for key in ["first", "second"] {
+            config.set_horizontal_scroll_sensitivity(key, sensitivity);
+            config.set_invert_horizontal_scroll(key, true);
+        }
+        assert!(horizontal_scroll_settings_are_applicable(
+            &config,
+            &first,
+            std::slice::from_ref(&first),
+        ));
+
+        assert!(!horizontal_scroll_settings_are_applicable(
+            &config,
+            &first,
+            &[first.clone(), second],
+        ));
+
+        config.set_device_enabled("first", false);
+        assert!(!horizontal_scroll_settings_are_applicable(
+            &config,
+            &first,
+            std::slice::from_ref(&first),
+        ));
     }
 }

@@ -36,6 +36,10 @@ pub struct HookMaps {
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
     /// instead — it never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Signed Axis 2 scale percentages keyed by the direct device's exact
+    /// `(vendor_id, product_id)`. Receiver-paired devices are absent because a
+    /// macOS CGEvent identifies the receiver, not its pairing slot.
+    pub horizontal_scroll: BTreeMap<(u32, u32), i16>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -371,6 +375,24 @@ fn handle_moved(
     EventDisposition::PassThrough
 }
 
+/// Resolve a macOS Axis 2 transform without ever blocking the active HID tap.
+/// Unknown devices, trackpads, vertical-only events, and a contended config
+/// lock all fail open.
+#[cfg(target_os = "macos")]
+fn horizontal_scroll_scale(
+    delta_x: f64,
+    from_trackpad: bool,
+    device: Option<&EventDevice>,
+    hooks: &SharedHookMaps,
+) -> Option<i16> {
+    if delta_x == 0.0 || from_trackpad {
+        return None;
+    }
+    let device = device?;
+    let key = (device.vendor_id?, device.product_id?);
+    hooks.try_read().ok()?.horizontal_scroll.get(&key).copied()
+}
+
 /// Remap one function-key edge without blocking the hook callback.
 fn handle_key(
     event: KeyEvent,
@@ -468,6 +490,12 @@ pub fn start(
                     from_trackpad,
                     device,
                 } => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(scale_percent) =
+                        horizontal_scroll_scale(delta.x(), from_trackpad, device.as_ref(), &hooks)
+                    {
+                        return EventDisposition::AdjustHorizontalScroll { scale_percent };
+                    }
                     #[cfg(target_os = "windows")]
                     if delta.y() == 0.0
                         && let Some((button, action)) = hooks

@@ -1,6 +1,7 @@
 //! App-wide and per-device *value* settings: [`AppSettings`], [`Appearance`],
-//! [`UiScale`], [`AppIcon`], [`Lighting`], [`ScrollResolution`], [`WheelMode`] /
-//! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
+//! [`UiScale`], [`AppIcon`], [`HorizontalScrollSensitivity`], [`Lighting`],
+//! [`ScrollResolution`], [`WheelMode`] / [`SmartShift`], and the legacy
+//! [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
 
@@ -344,6 +345,91 @@ impl Default for VerticalScrollSensitivity {
 
 impl From<VerticalScrollSensitivity> for f32 {
     fn from(sensitivity: VerticalScrollSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
+/// Native horizontal mouse-wheel responsiveness on OpenLogi's `1..=100`
+/// scale.
+///
+/// This is deliberately distinct from [`ThumbwheelSensitivity`], which applies
+/// only to a diverted HID++ `0x2150` thumb wheel. Native tilt wheels arrive as
+/// host scroll events and retain their original phases and metadata.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct HorizontalScrollSensitivity(u8);
+
+impl HorizontalScrollSensitivity {
+    /// Lowest selectable sensitivity.
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum horizontal scroll sensitivity"),
+    };
+    /// Highest selectable sensitivity.
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum horizontal scroll sensitivity"),
+    };
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1x.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default horizontal scroll sensitivity"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = rounded_sensitivity(value);
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped horizontal scroll sensitivity is always valid");
+        };
+        value
+    }
+
+    /// Horizontal scroll-distance multiplier relative to [`Self::DEFAULT`].
+    #[must_use]
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
+    }
+
+    /// Signed percentage applied to the native event's horizontal axis.
+    #[must_use]
+    pub fn scale_percent(self, inverted: bool) -> i16 {
+        let magnitude = i16::from(self.into_inner()) * 100 / i16::from(Self::DEFAULT.into_inner());
+        if inverted { -magnitude } else { magnitude }
+    }
+
+    /// `skip_serializing_if` helper for the native 1x default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl Default for HorizontalScrollSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<HorizontalScrollSensitivity> for f32 {
+    fn from(sensitivity: HorizontalScrollSensitivity) -> Self {
         Self::from(sensitivity.into_inner())
     }
 }
@@ -816,6 +902,28 @@ mod tests {
         assert_eq!(
             VerticalScrollSensitivity::from_rounded(f32::INFINITY),
             VerticalScrollSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_sensitivity_has_shared_scale_and_signed_percentage() {
+        assert_eq!(
+            HorizontalScrollSensitivity::DEFAULT.scale_percent(false),
+            100
+        );
+        assert_eq!(
+            HorizontalScrollSensitivity::try_new(42)
+                .expect("42 is a valid 3x setting")
+                .scale_percent(true),
+            -300
+        );
+        assert_eq!(
+            HorizontalScrollSensitivity::from_rounded(f32::NAN),
+            HorizontalScrollSensitivity::MIN
+        );
+        assert_eq!(
+            HorizontalScrollSensitivity::from_rounded(f32::INFINITY),
+            HorizontalScrollSensitivity::MAX
         );
     }
 }

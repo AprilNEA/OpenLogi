@@ -34,7 +34,7 @@ be copied manually to the generated physical keys.
 
 ## Shape
 
-`schema_version` is required and currently `5`. `selected_device` is an
+`schema_version` is required and currently `7`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -61,6 +61,16 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `horizontal_scroll_sensitivity`, from `1` through `100` (`14` is 1x), and
+  `invert_horizontal_scroll` for native horizontal-wheel events on macOS.
+  The Pointer tab shows these controls only when the model's asset metadata
+  identifies left/right tilt on the main scroll wheel; a dedicated thumb wheel
+  continues to use the separate thumb-wheel sensitivity setting.
+  Per-device attribution currently requires a directly connected mouse;
+  receiver events do not expose the paired slot to the macOS event tap. Two
+  direct mice with the same vendor/product ids are also indistinguishable: the
+  GUI disables these controls while both are connected, and TOML transforms
+  apply only when both devices already specify the same policy.
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
