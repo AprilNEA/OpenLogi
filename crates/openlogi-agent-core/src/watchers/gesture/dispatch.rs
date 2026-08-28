@@ -12,7 +12,7 @@ use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
-use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
+use crate::capture_plan::DeviceCapturePlan;
 use crate::runtime::{HidppSessionId, PressToken};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one capture
@@ -89,26 +89,20 @@ impl SessionWheels {
     fn cancel_session(&mut self, session: &HidppSessionId) {
         self.0.remove(session);
     }
-
-    fn retain_devices(&mut self, mut keep: impl FnMut(&str) -> bool) {
-        self.0.retain(|session, _| keep(session.device_key()));
-    }
 }
 
 /// Input routing plus the per-session state retained between
 /// captured events. Capture-session lifecycle remains owned by the parent.
 pub(super) struct InputDispatcher {
-    capture_plans: SharedCapturePlans,
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
 }
 
 impl InputDispatcher {
-    /// Build a dispatcher over the agent's live capture plans.
-    pub(super) fn new(capture_plans: SharedCapturePlans, outputs: GestureOutputs) -> Self {
+    /// Build a dispatcher for session-owned capture-plan snapshots.
+    pub(super) fn new(outputs: GestureOutputs) -> Self {
         Self {
-            capture_plans,
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
@@ -122,22 +116,15 @@ impl InputDispatcher {
         self.gesture_presses.cancel_session(session);
     }
 
-    /// Drop wheel state for devices that no longer have a capture session.
-    pub(super) fn retain_devices(&mut self, keep: impl FnMut(&str) -> bool) {
-        self.wheels.retain_devices(keep);
-    }
-
     /// Route one captured input from `session` to its bound action or
     /// re-synthesised scroll output.
-    pub(super) fn dispatch(&mut self, session: &HidppSessionId, input: CapturedInput) {
+    pub(super) fn dispatch(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DeviceCapturePlan,
+        input: CapturedInput,
+    ) {
         let key = session.device_key();
-        let Ok(plans) = self.capture_plans.read() else {
-            return;
-        };
-        let Some(plan) = plans.iter().find(|plan| plan.config_key == key) else {
-            debug!(key, "input from a device with no capture plan — ignored");
-            return;
-        };
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {

@@ -17,6 +17,7 @@
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hidpp::{
@@ -376,7 +377,6 @@ async fn run_capture_session_on(
     )
     .await;
 
-    drop(listener);
     // The slot is one last-writer-wins cell shared by every session, so a
     // sibling may have published its own channel after ours. Clear it only
     // while it still holds *this* session's channel — evicting the sibling's
@@ -389,19 +389,29 @@ async fn run_capture_session_on(
     {
         *slot = None;
     }
-    if channel_unusable {
-        // A dead channel would burn a timeout per write; a superseded channel
-        // must not restore controls underneath its replacement. Either way,
-        // the next session re-arms the requested diverts on the current path.
-        debug!(
-            index = device_index,
-            "skipping disarm on an unusable channel"
-        );
-    } else {
-        armed.disarm().await;
-    }
+    drop_listener_after(listener, async {
+        if channel_unusable {
+            // A dead channel would burn a timeout per write; a superseded
+            // channel must not restore controls underneath its replacement.
+            // Either way, the next session re-arms the requested diverts on
+            // the current path.
+            debug!(
+                index = device_index,
+                "skipping disarm on an unusable channel"
+            );
+        } else {
+            armed.disarm().await;
+        }
+    })
+    .await;
     debug!(index = device_index, "control capture stopped");
     Ok(())
+}
+
+/// Keep diverted reports deliverable until firmware teardown has finished.
+async fn drop_listener_after<T>(listener: T, teardown: impl Future<Output = ()>) {
+    teardown.await;
+    drop(listener);
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.

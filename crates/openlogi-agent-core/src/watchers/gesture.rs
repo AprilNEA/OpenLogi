@@ -157,6 +157,10 @@ impl SessionTarget {
 struct RunningSession {
     id: HidppSessionId,
     target: SessionTarget,
+    /// Immutable dispatch snapshot retained through teardown. A newly
+    /// published plan may remove a diversion before firmware restoration
+    /// completes, but events from this session still belong to this epoch.
+    plan: DeviceCapturePlan,
     /// Present while the session runs; taken to request a stop. `None` means
     /// the session is draining — deliberately stopped, but its task (and the
     /// control-restore writes in its teardown) may still be in flight.
@@ -172,10 +176,14 @@ struct SessionDone {
     session: HidppSessionId,
 }
 
+enum SessionEvent {
+    Input(CapturedEvent),
+    Done(SessionDone),
+}
+
 #[derive(Clone)]
 struct SessionChannels {
-    inputs: mpsc::UnboundedSender<CapturedEvent>,
-    done: mpsc::UnboundedSender<SessionDone>,
+    events: mpsc::UnboundedSender<SessionEvent>,
     capture: CaptureChannel,
     registry: openlogi_hid::ChannelRegistry,
 }
@@ -210,11 +218,19 @@ fn on_done(done_session: &HidppSessionId, live: Option<&RunningSession>) -> Done
     }
 }
 
-/// Whether an input belongs to the current, still-live session. A draining
-/// session has already emitted `Cancel`, so even its correctly-tagged queued
-/// events must not enter the replacement lifecycle.
-fn accepts_input(input_session: &HidppSessionId, live: Option<&RunningSession>) -> bool {
-    live.is_some_and(|session| session.id == *input_session && session.stop.is_some())
+/// Return the immutable plan that owns an input from the currently tracked
+/// session. Deliberately stopped sessions remain admissible until their task
+/// reports that native firmware reporting has been restored.
+fn dispatch_plan_for<'a>(
+    input_session: &HidppSessionId,
+    live: Option<&'a RunningSession>,
+    exclusive_requested: bool,
+) -> Option<&'a DeviceCapturePlan> {
+    if exclusive_requested {
+        return None;
+    }
+    live.filter(|session| session.id == *input_session)
+        .map(|session| &session.plan)
 }
 
 /// Whether the plan currently published for a device still describes the
@@ -230,7 +246,7 @@ fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> b
 fn wanted_sessions(
     receiver_access: &ReceiverAccess,
     capture_plans: &SharedCapturePlans,
-) -> HashMap<String, SessionTarget> {
+) -> HashMap<String, DeviceCapturePlan> {
     if receiver_access.exclusive_requested() {
         return HashMap::new();
     }
@@ -239,7 +255,7 @@ fn wanted_sessions(
         .map(|plans| {
             plans
                 .iter()
-                .map(|plan| (plan.config_key.clone(), SessionTarget::for_plan(plan)))
+                .map(|plan| (plan.config_key.clone(), plan.clone()))
                 .collect()
         })
         .unwrap_or_default()
@@ -263,10 +279,10 @@ async fn manage(
     channel_registry: openlogi_hid::ChannelRegistry,
     outputs: GestureOutputs,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<CapturedEvent>();
+    let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
-    let mut input_dispatcher = InputDispatcher::new(Arc::clone(&capture_plans), outputs);
+    let mut input_dispatcher = InputDispatcher::new(outputs);
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -274,10 +290,8 @@ async fn manage(
     // next tick, a deliberately stopped one merely frees its key for the
     // replacement once its teardown has drained, and stale completions are
     // ignored (see `on_done`).
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionDone>();
     let channels = SessionChannels {
-        inputs: tx,
-        done: done_tx,
+        events,
         capture: capture_channel,
         registry: channel_registry,
     };
@@ -288,22 +302,38 @@ async fn manage(
 
     loop {
         tokio::select! {
-            Some(event) = rx.recv() => {
-                let key = event.session.device_key();
-                let live = sessions.get(key);
-                let current = accepts_input(&event.session, live)
-                    && !receiver_access.exclusive_requested()
-                    && capture_plans.read().is_ok_and(|plans| {
-                        plans
-                            .iter()
-                            .find(|plan| plan.config_key == key)
-                            .is_some_and(|plan| live.is_some_and(|session| session_matches_plan(session, plan)))
-                    });
-                if current {
-                    input_dispatcher.dispatch(&event.session, event.input);
-                } else {
-                    input_dispatcher.cancel_session(&event.session);
-                    debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
+            Some(event) = event_rx.recv() => {
+                match event {
+                    SessionEvent::Input(event) => {
+                        let key = event.session.device_key();
+                        let live = sessions.get(key);
+                        let dispatch_plan = dispatch_plan_for(
+                            &event.session,
+                            live,
+                            receiver_access.exclusive_requested(),
+                        );
+                        if let Some(plan) = dispatch_plan {
+                            input_dispatcher.dispatch(&event.session, plan, event.input);
+                        } else {
+                            input_dispatcher.cancel_session(&event.session);
+                            debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
+                        }
+                    }
+                    SessionEvent::Done(done) => {
+                        let key = done.session.device_key();
+                        // Completion is queued behind every input the listener
+                        // accepted during restoration, so cancellation cannot
+                        // overtake the last diverted edge.
+                        if let DoneAction::Remove { unexpected } =
+                            on_done(&done.session, sessions.get(key))
+                        {
+                            input_dispatcher.cancel_session(&done.session);
+                            if unexpected {
+                                warn!(key, "capture session ended unexpectedly, re-arming");
+                            }
+                            sessions.remove(key);
+                        }
+                    }
                 }
             }
             () = wait_for_reconcile(&mut ticker, &capture_plan_changed) => {
@@ -323,17 +353,18 @@ async fn manage(
                 // live until completion so already-diverted edges can settle
                 // against the retiring plan during teardown.
                 for (key, session) in &mut sessions {
-                    let keep = want.get(key).is_some_and(|target| *target == session.target);
+                    let keep = want
+                        .get(key)
+                        .is_some_and(|plan| session_matches_plan(session, plan));
                     if !keep && let Some(stop) = session.stop.take() {
-                        input_dispatcher.cancel_session(&session.id);
                         let _ = stop.send(());
                     }
                 }
-                input_dispatcher.retain_devices(|key| want.contains_key(key));
-                for (key, target) in want {
+                for (key, plan) in want {
                     if sessions.contains_key(&key) {
                         continue;
                     }
+                    let target = SessionTarget::for_plan(&plan);
                     // All sessions share one exclusive lease; acquire it with the
                     // first session and ride the existing one afterwards.
                     let session_lease = if let Some(existing) = lease.upgrade() {
@@ -350,26 +381,11 @@ async fn manage(
                     let session = spawn_session(
                         id,
                         target,
+                        plan,
                         session_lease,
                         &channels,
                     );
                     sessions.insert(key, session);
-                }
-            }
-            Some(done) = done_rx.recv() => {
-                let key = done.session.device_key();
-                // A capture session's task has fully exited — its restore writes
-                // included — so dropping its entry lets the next tick start a
-                // fresh session for that device; the tick fires at most once per
-                // `TARGET_POLL`, which paces the respawn so a permanently failing
-                // device can't hot-loop. A stale epoch (an already-superseded
-                // session) is a no-op.
-                if let DoneAction::Remove { unexpected } = on_done(&done.session, sessions.get(key)) {
-                    input_dispatcher.cancel_session(&done.session);
-                    if unexpected {
-                        warn!(key, "capture session ended unexpectedly, re-arming");
-                    }
-                    sessions.remove(key);
                 }
             }
         }
@@ -381,6 +397,7 @@ async fn manage(
 fn spawn_session(
     id: HidppSessionId,
     target: SessionTarget,
+    plan: DeviceCapturePlan,
     lease: Arc<SessionReceiverLease>,
     channels: &SessionChannels,
 ) -> RunningSession {
@@ -388,17 +405,17 @@ fn spawn_session(
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let forward = channels.inputs.clone();
+    let events = channels.events.clone();
     let forward_id = id.clone();
-    tokio::spawn(async move {
+    let forward_task = tokio::spawn(async move {
         while let Some(input) = session_rx.recv().await {
-            let _ = forward.send(CapturedEvent {
+            let _ = events.send(SessionEvent::Input(CapturedEvent {
                 session: forward_id.clone(),
                 input,
-            });
+            }));
         }
     });
-    let done = channels.done.clone();
+    let events = channels.events.clone();
     let done_id = id.clone();
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
@@ -418,13 +435,17 @@ fn spawn_session(
         {
             debug!(error = %e, "capture session ended");
         }
-        // Report completion so the manager can re-arm if this exit was
-        // unexpected rather than a deliberate stop.
-        let _ = done.send(SessionDone { session: done_id });
+        if let Err(error) = forward_task.await {
+            debug!(%error, "capture input forwarder ended unexpectedly");
+        }
+        // Use the same channel as input so completion follows every diverted
+        // report accepted before the listener was dropped.
+        let _ = events.send(SessionEvent::Done(SessionDone { session: done_id }));
     });
     RunningSession {
         id,
         target,
+        plan,
         stop: Some(stop_tx),
     }
 }
