@@ -27,12 +27,12 @@ revision. Opening the GUI also tells the resident agent to reload the current
 file, so hand edits and runtime behavior converge immediately.
 
 Schema versions newer than the running build are rejected before their fields
-are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
-The v3 physical-device-key transition cannot safely assign older model-scoped
-device settings when two identical devices exist, so v2 model-key entries must
-be copied manually to the generated physical keys. Pre-v7 thumb-wheel scroll
-pairs on the old defaults are migrated in both device and per-application
-profiles so they keep their native direction.
+are parsed. v1 binding maps and v3-or-older gesture-owner layouts migrate on
+load. The v3 physical-device-key transition cannot safely assign older
+model-scoped device settings when two identical devices exist, so v2 model-key
+entries must be copied manually to the generated physical keys. Pre-v7
+thumb-wheel scroll pairs on the old defaults are migrated in both device and
+per-application profiles so they keep their native direction.
 
 ## Shape
 
