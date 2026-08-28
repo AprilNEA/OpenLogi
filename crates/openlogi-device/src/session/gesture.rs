@@ -948,6 +948,10 @@ pub(crate) async fn enumerate_controls(
 /// Update `acc` and emit on a decoded `0x1b04` event: preserve physical button
 /// edges, and commit a gesture swipe the instant it crosses the threshold
 /// (mid-swipe, like Options+) rather than on release.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the two raw event variants update one gesture state machine and splitting them would obscure their shared lifecycle"
+)]
 fn handle_reprog_with_gesture_buttons(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
