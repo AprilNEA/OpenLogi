@@ -180,22 +180,23 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
 /// `LeftClick`/`RightClick`/`MiddleClick` variants synthesise a mouse click
 /// at the current cursor location. The WindowServer actions (`MissionControl`,
 /// `AppExpose`, `ShowDesktop`, `LaunchpadShow`) are posted straight to the
-/// Dock via `CoreDockSendNotification`. Device-side actions (`CycleDpiPresets`,
-/// `SetDpiPreset`, `ToggleSmartShift`) have no CGEvent equivalent and are
-/// handled at the hook/HID layer, logging a trace here.
+/// Dock via `CoreDockSendNotification`; `SmartZoom` posts one native gesture at
+/// the pointer and leaves the receiving application to interpret it. Device-side
+/// actions (`CycleDpiPresets`, `SetDpiPreset`, `ToggleSmartShift`) have no CGEvent
+/// equivalent and are handled at the hook/HID layer, logging a trace here.
 ///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
 /// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
 /// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
-/// `LaunchpadShow`) have no universal Linux equivalent and are silently
-/// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
-/// Linux key codes; macOS Cmd maps to Ctrl.
+/// `LaunchpadShow`) and `SmartZoom` have no universal Linux equivalent and are
+/// silently skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes
+/// to Linux key codes; macOS Cmd maps to Ctrl.
 ///
 /// On Windows, key and mouse events are synthesised via `SendInput`. The
 /// macOS window-manager actions map to their Windows equivalents (e.g.
 /// `MissionControl` → Win+Tab, `ShowDesktop` → Win+D); `CustomShortcut`
 /// maps macOS `kVK_*` codes to Windows virtual-key codes, with Cmd mapped to
-/// Ctrl.
+/// Ctrl. `SmartZoom` is retained for config portability but does nothing.
 ///
 /// On other platforms a warning is logged and the function returns
 /// immediately — the binary compiles clean on all targets.

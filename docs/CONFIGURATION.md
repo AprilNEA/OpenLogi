@@ -88,7 +88,8 @@ Common device fields are:
 ## Actions
 
 Action names are the serialized Rust variant names, including `Copy`,
-`BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
+`BrowserBack`, `PlayPause`, `CycleDpiPresets`, `SmartZoom`, and
+`ShowActionsRing`.
 Payload actions use a one-key inline table:
 
 ```toml
@@ -97,6 +98,11 @@ Forward = { HoldShortcut = "Ctrl+Space" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
+
+`SmartZoom` is offered by the action picker only on macOS. It emits one native
+Smart Zoom gesture at the pointer, leaving Safari, Chrome, Preview, or another
+receiving application to decide what zoom behavior follows. The action remains
+valid in transferred configs on Linux and Windows, where it safely does nothing.
 
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
