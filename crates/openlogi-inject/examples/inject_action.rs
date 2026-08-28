@@ -33,6 +33,8 @@
 //! LockScreen Screenshot
 //! PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume
 //! CycleDpiPresets ToggleSmartShift
+//!
+//! macOS only: SmartZoom
 //! ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight
 
 use std::time::Duration;

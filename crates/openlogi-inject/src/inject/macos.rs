@@ -30,6 +30,19 @@ static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
 const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
 
+// Smart Zoom is represented as a generic gesture with the private
+// kTLInfoSubtypeSmartMagnify subtype. These values match the event emitted by
+// a two-finger trackpad double-tap and Logitech Options+.
+const GESTURE_EVENT_TYPE: u32 = 29;
+const GESTURE_SUBTYPE_FIELD: u32 = 110;
+const SMART_MAGNIFY_SUBTYPE: i64 = 22;
+// Private gesture payload markers present on both native trackpad and
+// Logitech Options+ Smart Zoom events.
+const GESTURE_PAYLOAD_KIND_FIELD: u32 = 59;
+const GESTURE_PAYLOAD_KIND: i64 = 0x2000_0100;
+const GESTURE_PAYLOAD_FLAGS_FIELD: u32 = 102;
+const GESTURE_PAYLOAD_FLAGS: i64 = 0x3f;
+
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
 const NX_KEYTYPE_SOUND_DOWN: i32 = 1;
@@ -144,6 +157,82 @@ fn dispatch_native(native: NativeAction) {
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::SmartZoom => smart_zoom(),
+    }
+}
+
+/// Post the native Smart Zoom gesture at the current pointer location.
+///
+/// AppKit identifies this as `NSEventTypeSmartMagnify`. CoreGraphics exposes
+/// neither the generic gesture event nor its subtype in the public Rust enum,
+/// so the event type is set through the underlying C API while the remaining
+/// event construction and posting stays on the safe `core-graphics` wrapper.
+fn smart_zoom() {
+    // Native Smart Zoom events originate from the combined session, not the
+    // HID state used for synthetic mouse and keyboard events.
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else {
+        tracing::warn!("CGEventSource::new failed for Smart Zoom");
+        return;
+    };
+    let Ok(event) = CGEvent::new(src) else {
+        tracing::warn!("CGEvent::new failed for Smart Zoom");
+        return;
+    };
+
+    gesture_event::set_smart_magnify(&event);
+    event.post(CGEventTapLocation::HID);
+}
+
+#[expect(
+    unsafe_code,
+    reason = "core-graphics omits generic gesture type 29 and CGEvent timestamp setters"
+)]
+mod gesture_event {
+    use core_graphics::event::CGEvent;
+    use foreign_types::ForeignType as _;
+
+    use super::{
+        GESTURE_EVENT_TYPE, GESTURE_PAYLOAD_FLAGS, GESTURE_PAYLOAD_FLAGS_FIELD,
+        GESTURE_PAYLOAD_KIND, GESTURE_PAYLOAD_KIND_FIELD, GESTURE_SUBTYPE_FIELD,
+        SMART_MAGNIFY_SUBTYPE,
+    };
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSetType(event: core_graphics::sys::CGEventRef, event_type: u32);
+        fn CGEventSetTimestamp(event: core_graphics::sys::CGEventRef, timestamp: u64);
+    }
+
+    pub(super) fn set_smart_magnify(event: &CGEvent) {
+        // SAFETY: `event.as_ptr()` is a live, owned CGEventRef and 29 is the
+        // generic gesture event type accepted by WindowServer.
+        unsafe { CGEventSetType(event.as_ptr(), GESTURE_EVENT_TYPE) };
+        // A non-zero CGEvent timestamp also populates the private IOHID queue
+        // timestamp carried by real Smart Zoom events. Without it Safari
+        // accepts zoom-in but never releases its discrete-gesture latch, so
+        // later presses cannot toggle back out.
+        // SAFETY: `event.as_ptr()` remains live and the timestamp uses the
+        // nanosecond scale required by CGEventTimestamp.
+        unsafe { CGEventSetTimestamp(event.as_ptr(), current_timestamp()) };
+        event.set_integer_value_field(GESTURE_SUBTYPE_FIELD, SMART_MAGNIFY_SUBTYPE);
+        event.set_integer_value_field(GESTURE_PAYLOAD_KIND_FIELD, GESTURE_PAYLOAD_KIND);
+        event.set_integer_value_field(GESTURE_PAYLOAD_FLAGS_FIELD, GESTURE_PAYLOAD_FLAGS);
+    }
+
+    fn current_timestamp() -> u64 {
+        let mut timebase = mach2::mach_time::mach_timebase_info_data_t { numer: 0, denom: 0 };
+        // SAFETY: `timebase` points to writable storage of the exact type the
+        // Mach API initializes.
+        let status = unsafe { mach2::mach_time::mach_timebase_info(&raw mut timebase) };
+        if status != 0 || timebase.denom == 0 {
+            return 0;
+        }
+
+        // SAFETY: `mach_absolute_time` takes no arguments and has no caller
+        // invariants; it reads the host's monotonic clock.
+        let ticks = unsafe { mach2::mach_time::mach_absolute_time() };
+        let nanos = u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom);
+        u64::try_from(nanos).unwrap_or_default()
     }
 }
 

@@ -92,6 +92,14 @@ fn power_user_actions_excluded_from_catalog() {
 }
 
 #[test]
+fn smart_zoom_is_pickable_only_on_macos() {
+    assert_eq!(
+        Action::catalog().contains(&Action::SmartZoom),
+        cfg!(target_os = "macos")
+    );
+}
+
+#[test]
 fn power_user_actions_roundtrip_toml() {
     for action in [
         Action::TypeText("hello".into()),
@@ -299,6 +307,9 @@ fn all_catalog_variants_roundtrip_toml() {
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
+    if !actions.contains(&Action::SmartZoom) {
+        actions.push(Action::SmartZoom);
+    }
     actions.extend([
         Action::SetDpiPreset(0),
         Action::CustomShortcut(
@@ -381,6 +392,7 @@ fn persisted_action_variant_names_are_stable() {
         "ShowActionsRing",
         "ShowDesktop",
         "Sleep",
+        "SmartZoom",
         "ToggleSmartShift",
         "TypeText",
         "Undo",
@@ -475,6 +487,7 @@ fn category_navigation_variants() {
     assert_eq!(Action::NextDesktop.category(), Category::Navigation);
     assert_eq!(Action::ShowDesktop.category(), Category::Navigation);
     assert_eq!(Action::LaunchpadShow.category(), Category::Navigation);
+    assert_eq!(Action::SmartZoom.category(), Category::Navigation);
 }
 
 #[test]
@@ -640,5 +653,13 @@ fn scroll_actions_lower_to_unit_direction() {
     assert_eq!(
         Action::HorizontalScrollRight.effect(),
         Effect::Scroll { dx: 1, dy: 0 }
+    );
+}
+
+#[test]
+fn smart_zoom_lowers_to_native_action() {
+    assert_eq!(
+        Action::SmartZoom.effect(),
+        Effect::Native(NativeAction::SmartZoom)
     );
 }
