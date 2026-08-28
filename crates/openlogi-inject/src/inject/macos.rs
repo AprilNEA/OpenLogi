@@ -133,9 +133,9 @@ fn parse_shortcut(text: &str) -> KeyCombo {
 
 /// Dispatch a window-manager or power [`NativeAction`].
 ///
-/// These are all posted straight to the Dock or WindowServer via private
-/// SPIs rather than a synthesised keyboard chord — see the module docs on
-/// [`mission_control`] and friends for why.
+/// Window-manager actions use the Dock or WindowServer private SPIs documented
+/// by [`mission_control`] and its peers. Smart Zoom instead posts the native
+/// generic-gesture event expected by the receiving application.
 fn dispatch_native(native: NativeAction) {
     let cmd = CGEventFlags::CGEventFlagCommand;
     let shift = CGEventFlags::CGEventFlagShift;
@@ -167,9 +167,7 @@ fn dispatch_native(native: NativeAction) {
 /// neither a named generic gesture event nor its subtype, so their raw values
 /// are passed through the typed `objc2-core-graphics` wrappers.
 fn smart_zoom() {
-    use objc2_core_graphics::{
-        CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
-    };
+    use objc2_core_graphics::{CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation};
 
     // Native Smart Zoom events originate from the combined session, not the
     // HID state used for synthetic mouse and keyboard events.
@@ -186,10 +184,7 @@ fn smart_zoom() {
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
 }
 
-#[expect(
-    unsafe_code,
-    reason = "Mach clock APIs have no safe Rust wrapper"
-)]
+#[expect(unsafe_code, reason = "Mach clock APIs have no safe Rust wrapper")]
 mod gesture_event {
     use objc2_core_graphics::{CGEvent, CGEventField, CGEventType};
 
@@ -237,6 +232,45 @@ mod gesture_event {
         let ticks = unsafe { mach2::mach_time::mach_absolute_time() };
         let nanos = u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom);
         u64::try_from(nanos).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use objc2_core_graphics::{CGEvent, CGEventField, CGEventSource, CGEventSourceStateID};
+
+        use super::*;
+
+        #[test]
+        fn smart_magnify_event_has_native_payload_at_pointer() {
+            let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+                .expect("combined-session event source should be available");
+            let event = CGEvent::new(Some(&source)).expect("CGEvent should be available");
+            let pointer = CGEvent::location(Some(&event));
+
+            set_smart_magnify(&event);
+
+            assert_eq!(CGEvent::r#type(Some(&event)).0, GESTURE_EVENT_TYPE);
+            assert_ne!(CGEvent::timestamp(Some(&event)), 0);
+            assert_eq!(CGEvent::location(Some(&event)), pointer);
+            assert_eq!(
+                CGEvent::integer_value_field(Some(&event), CGEventField(GESTURE_SUBTYPE_FIELD)),
+                SMART_MAGNIFY_SUBTYPE
+            );
+            assert_eq!(
+                CGEvent::integer_value_field(
+                    Some(&event),
+                    CGEventField(GESTURE_PAYLOAD_KIND_FIELD)
+                ),
+                GESTURE_PAYLOAD_KIND
+            );
+            assert_eq!(
+                CGEvent::integer_value_field(
+                    Some(&event),
+                    CGEventField(GESTURE_PAYLOAD_FLAGS_FIELD)
+                ),
+                GESTURE_PAYLOAD_FLAGS
+            );
+        }
     }
 }
 
