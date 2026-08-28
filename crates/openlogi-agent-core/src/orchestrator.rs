@@ -292,7 +292,29 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
-        HookMaps { bindings, gestures }
+        HookMaps {
+            bindings,
+            gestures,
+            selected_device: key.map(str::to_owned),
+            ..HookMaps::default()
+        }
+    }
+
+    /// Publish hook maps while preserving thumb-wheel polarities learned from
+    /// hardware capture sessions. Selection, polarity, and bindings share the
+    /// one lock the callback reads, so a device switch cannot combine facts
+    /// from two devices.
+    fn publish_hook_maps(&self, mut maps: HookMaps) {
+        match self.shared.hook_maps.write() {
+            Ok(mut current) => {
+                maps.thumbwheel_positive_is_forward =
+                    std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                *current = maps;
+            }
+            Err(error) => {
+                warn!(%error, lock = "hook_maps", "lock poisoned — keeping stale value");
+            }
+        }
     }
 
     /// The keyboard key-capture spec for the first known keyboard, or `None`
@@ -340,13 +362,7 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
-        // One write publishes both hook maps atomically, so a button press during
-        // an owner switch can't observe a half-updated state.
-        write_value(
-            &self.shared.hook_maps,
-            self.hook_maps_for(key, self.current_app.as_deref()),
-            "hook_maps",
-        );
+        self.publish_hook_maps(self.hook_maps_for(key, self.current_app.as_deref()));
         self.publish_device_runtime();
     }
 
@@ -810,11 +826,7 @@ impl Orchestrator {
             return false;
         }
         self.current_app = id;
-        write_value(
-            &self.shared.hook_maps,
-            self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
-            "hook_maps",
-        );
+        self.publish_hook_maps(self.hook_maps_for(self.current_key(), self.current_app.as_deref()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();

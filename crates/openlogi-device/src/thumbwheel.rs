@@ -153,6 +153,21 @@ pub struct ThumbwheelInfo {
     pub supports_single_tap: bool,
 }
 
+impl ThumbwheelInfo {
+    /// Whether an un-inverted positive rotation is toward the front of the
+    /// device — the physical direction represented by
+    /// [`ButtonId::ThumbwheelScrollUp`](openlogi_core::binding::ButtonId::ThumbwheelScrollUp).
+    ///
+    /// HID++ `0x2150` defines `default_dir = 0` as positive toward left/back
+    /// and `1` as positive toward right/front. The value varies by model, so
+    /// captured input must consult it instead of assigning meaning to the raw
+    /// sign globally.
+    #[must_use]
+    pub fn positive_is_forward(self) -> bool {
+        self.default_dir == 1
+    }
+}
+
 /// A decoded `thumbwheelEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbwheelEvent {
@@ -339,6 +354,17 @@ mod tests {
             RotationStatus::Inactive,
             "an unrecognised value must not make the tap permanently undeliverable"
         );
+    }
+
+    #[test]
+    fn positive_direction_follows_the_device_report() {
+        let info = |default_dir| ThumbwheelInfo {
+            resolution: WheelResolution::UNKNOWN,
+            default_dir,
+            supports_single_tap: false,
+        };
+        assert!(!info(0).positive_is_forward());
+        assert!(info(1).positive_is_forward());
     }
 
     /// The roll's own `Stop` reports no rotation — it is the release — so

@@ -921,6 +921,27 @@ fn app_switch_republishes_capture_plans() {
 }
 
 #[test]
+fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+
+    {
+        let mut maps = orch.shared.hook_maps.write().expect("hook maps");
+        assert_eq!(maps.selected_device.as_deref(), Some("a"));
+        maps.thumbwheel_positive_is_forward
+            .insert("a".to_owned(), true);
+    }
+
+    // Config/app rebuilds replace binding maps but hardware observations must
+    // remain in the same atomically published snapshot.
+    orch.reload_config(Config::default());
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(maps.selected_device.as_deref(), Some("a"));
+    assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
+}
+
+#[test]
 fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);

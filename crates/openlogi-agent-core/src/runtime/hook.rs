@@ -23,10 +23,10 @@ use super::scroll::ScrollInputHandle;
 use super::{ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
 
-/// The two button maps the OS-hook callback reads, kept behind ONE lock so a
-/// config rebuild publishes both atomically — a press during an owner switch can
-/// never see the new single-action bindings against the old gesture map (or vice
-/// versa), and the common case reads one lock instead of two.
+/// The button maps and selected-device thumb-wheel polarity the OS-hook callback
+/// reads, kept behind ONE lock so a config rebuild publishes one coherent
+/// snapshot. A callback during a device/app switch can never combine one
+/// device's bindings with another device's direction convention.
 #[derive(Default)]
 pub struct HookMaps {
     /// Per-button immediate or threshold binding — the non-gesture dispatch path.
@@ -36,6 +36,26 @@ pub struct HookMaps {
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
     /// instead — it never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Device whose binding maps this snapshot contains.
+    #[cfg_attr(
+        not(any(target_os = "windows", test)),
+        expect(dead_code, reason = "read only by the Windows native-wheel fallback")
+    )]
+    pub(crate) selected_device: Option<String>,
+    /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
+    /// `true` means a positive native horizontal delta is physical forward/up.
+    /// Entries survive map rebuilds because they are hardware observations,
+    /// not configuration.
+    pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+}
+
+impl HookMaps {
+    #[cfg(any(target_os = "windows", test))]
+    fn selected_thumbwheel_positive_is_forward(&self) -> Option<bool> {
+        self.thumbwheel_positive_is_forward
+            .get(self.selected_device.as_deref()?)
+            .copied()
+    }
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -504,16 +524,25 @@ pub fn start(
 /// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.
 /// The built-in horizontal-scroll defaults intentionally return `None` so the
 /// physical wheel stays native unless the user changed that direction. On
-/// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
-/// backward/down direction, so it maps to `ThumbwheelScrollDown`.
+/// devices exposing `0x2150`, the learned `default_dir` determines which
+/// physical direction the native delta represents. Unknown devices retain the
+/// MX Master 2S fallback: positive is physical backward/down.
 #[cfg(any(target_os = "windows", test))]
 fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId, Action)> {
-    let button = if delta_x > 0.0 {
-        ButtonId::ThumbwheelScrollDown
+    let positive_is_forward = maps
+        .selected_thumbwheel_positive_is_forward()
+        .unwrap_or(false);
+    let forward = if delta_x > 0.0 {
+        positive_is_forward
     } else if delta_x < 0.0 {
-        ButtonId::ThumbwheelScrollUp
+        !positive_is_forward
     } else {
         return None;
+    };
+    let button = if forward {
+        ButtonId::ThumbwheelScrollUp
+    } else {
+        ButtonId::ThumbwheelScrollDown
     };
     let action = maps.bindings.get(&button)?.click_action();
     (action != default_binding(button)).then_some((button, action))

@@ -53,7 +53,7 @@ pub use super::capture_restore::{
     PendingCaptureRestore,
 };
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
-use crate::thumbwheel::{self, Thumbwheel, WheelDirection, WheelResolution};
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,13 +68,23 @@ pub enum CapturedInput {
     /// Emitted while the wheel is diverted (click bound, rotation rebound, or
     /// sensitivity changed).
     Scroll {
-        /// Rotation in the wheel's diverted increments.
+        /// Rotation in the wheel's diverted increments. Positive is always
+        /// physical forward/up: arming normalises the model-specific polarity
+        /// reported by `0x2150 default_dir`.
         increments: i16,
         /// What one revolution measures in each mode, so the dispatcher can
         /// scale those increments back to the wheel's native scroll amount
         /// instead of scrolling by however finely this wheel happens to
         /// report.
         resolution: WheelResolution,
+    },
+    /// The un-inverted polarity learned while arming a thumb wheel. This is a
+    /// one-time session fact rather than user input; the agent records it for
+    /// native horizontal-wheel events that the Windows hook cannot attribute
+    /// to a device.
+    ThumbwheelDirection {
+        /// Whether a positive native delta is physical forward/up.
+        positive_is_forward: bool,
     },
     /// A diverted button's physical up edge.
     ButtonUp(ButtonId),
@@ -290,6 +300,10 @@ async fn run_capture_session_on(
     let device_index = shared.device_index();
     let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
 
+    if let Some(direction) = armed.thumbwheel_direction() {
+        let _ = sink.send(direction);
+    }
+
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
     if let Ok(mut slot) = channel_slot.write() {
@@ -303,11 +317,11 @@ async fn run_capture_session_on(
     let thumb_index = armed
         .thumb
         .as_ref()
-        .map(|(thumbwheel, _)| thumbwheel.feature_index());
+        .map(|thumb| thumb.wheel.feature_index());
     let thumb_resolution = armed
         .thumb
         .as_ref()
-        .map_or(WheelResolution::UNKNOWN, |(_, res)| *res);
+        .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
     let activity = Arc::new(ChannelActivity::default());
@@ -466,12 +480,44 @@ struct ArmedControls {
     button_cids: Vec<(u16, ButtonId)>,
     /// Original reporting state for every diverted `0x1b04` control.
     reporting: Vec<ArmedReporting>,
-    /// `0x2150` accessor and the wheel's reported resolution, present when the
-    /// thumb wheel is diverted.
-    thumb: Option<(Thumbwheel, WheelResolution)>,
+    /// `0x2150` accessor and the information read while diverting it, present
+    /// when the thumb wheel is diverted.
+    thumb: Option<ArmedThumbwheel>,
+}
+
+struct ArmedThumbwheel {
+    wheel: Thumbwheel,
+    info: Option<ThumbwheelInfo>,
+}
+
+impl ArmedThumbwheel {
+    fn resolution(&self) -> WheelResolution {
+        self.info
+            .map_or(WheelResolution::UNKNOWN, |info| info.resolution)
+    }
+
+    fn direction(&self) -> WheelDirection {
+        if self.info.is_some_and(|info| !info.positive_is_forward()) {
+            WheelDirection::Inverted
+        } else {
+            WheelDirection::Default
+        }
+    }
 }
 
 impl ArmedControls {
+    /// Build the one-time polarity fact learned while arming the thumb wheel.
+    fn thumbwheel_direction(&self) -> Option<CapturedInput> {
+        let positive_is_forward = self
+            .thumb
+            .as_ref()?
+            .info
+            .map(ThumbwheelInfo::positive_is_forward)?;
+        Some(CapturedInput::ThumbwheelDirection {
+            positive_is_forward,
+        })
+    }
+
     /// Convert all armed firmware state into the one capability that can
     /// release it. Consuming `self` prevents a session and a restore retry from
     /// both claiming ownership at once.
@@ -487,9 +533,7 @@ impl ArmedControls {
         PendingCaptureRestore::new(
             retired,
             reprog,
-            thumb
-                .as_ref()
-                .map(|(thumbwheel, _)| thumbwheel.feature_index()),
+            thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
         )
     }
 
@@ -518,8 +562,8 @@ impl ArmedControls {
                 }
             }
         }
-        if let Some((thumbwheel, _)) = self.thumb.as_ref()
-            && let Err(error) = thumbwheel.divert(WheelDirection::Default).await
+        if let Some(thumb) = self.thumb.as_ref()
+            && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
@@ -764,23 +808,28 @@ async fn arm_controls_into(
         // Consume the getInfo error here, before the next await: Hidpp20Error
         // isn't Send, so holding it across an await would make this future
         // (spawned on tokio) non-Send.
-        let (supports_single_tap, resolution) = match tw.get_info().await {
-            Ok(twinfo) => (twinfo.supports_single_tap, twinfo.resolution),
+        let wheel_info = match tw.get_info().await {
+            Ok(twinfo) => Some(twinfo),
             Err(e) => {
                 warn!(error = ?e, "thumb wheel getInfo failed");
-                (false, WheelResolution::UNKNOWN)
+                None
             }
         };
         // Divert whenever capture was requested: rotation rebinds and the
         // sensitivity multiplier need the diverted event stream even on wheels
         // that report no single-tap capability (e.g. MX Master 4) — lacking the
         // tap only means a bound click can never fire.
-        if !supports_single_tap {
+        if wheel_info.is_some_and(|info| !info.supports_single_tap) {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
-        armed.thumb = Some((tw, resolution));
-        if let Some((tw, _)) = armed.thumb.as_ref()
-            && let Err(error) = tw.divert(WheelDirection::Default).await
+        // Store ownership before the write: a transport error cannot prove
+        // whether firmware applied diversion, so rollback must cover it too.
+        armed.thumb = Some(ArmedThumbwheel {
+            wheel: tw,
+            info: wheel_info,
+        });
+        if let Some(thumb) = armed.thumb.as_ref()
+            && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             return Err(GestureError::Hidpp(format!("{error:?}")));
         }

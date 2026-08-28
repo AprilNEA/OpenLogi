@@ -273,6 +273,11 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 4 {
         config.migrate_transport_scoped_keys();
     }
+    // Every released schema may contain an explicit copy of the pre-v7
+    // thumb-wheel defaults, either globally or in a per-app profile.
+    if header.schema_version <= 6 {
+        config.migrate_thumbwheel_native_direction();
+    }
     config.repair_duplicate_routes();
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))

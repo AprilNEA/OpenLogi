@@ -201,7 +201,7 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
             (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
             (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
         ]),
-        gestures: BTreeMap::new(),
+        ..HookMaps::default()
     };
     assert_eq!(
         rebound_thumbwheel_action(&maps, 1.0),
@@ -212,6 +212,27 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
         Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
     );
     assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
+}
+
+#[test]
+fn rebound_horizontal_wheel_uses_the_selected_devices_polarity() {
+    let maps = HookMaps {
+        bindings: BTreeMap::from([
+            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
+        ]),
+        selected_device: Some("mx3".to_owned()),
+        thumbwheel_positive_is_forward: BTreeMap::from([("mx3".to_owned(), true)]),
+        ..HookMaps::default()
+    };
+    assert_eq!(
+        rebound_thumbwheel_action(&maps, 1.0),
+        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+    );
+    assert_eq!(
+        rebound_thumbwheel_action(&maps, -1.0),
+        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+    );
 }
 
 #[test]
@@ -227,7 +248,7 @@ fn native_thumbwheel_scroll_stays_os_native() {
                 default_binding(ButtonId::ThumbwheelScrollDown).into(),
             ),
         ]),
-        gestures: BTreeMap::new(),
+        ..HookMaps::default()
     };
     assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
     assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);

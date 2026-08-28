@@ -13,6 +13,7 @@ use tracing::debug;
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
+use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
@@ -94,6 +95,7 @@ impl SessionWheels {
 /// Input routing plus the per-session state retained between
 /// captured events. Capture-session lifecycle remains owned by the parent.
 pub(super) struct InputDispatcher {
+    hook_maps: SharedHookMaps,
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
@@ -101,12 +103,28 @@ pub(super) struct InputDispatcher {
 
 impl InputDispatcher {
     /// Build a dispatcher for session-owned capture-plan snapshots.
-    pub(super) fn new(outputs: GestureOutputs) -> Self {
+    pub(super) fn new(hook_maps: SharedHookMaps, outputs: GestureOutputs) -> Self {
         Self {
+            hook_maps,
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
         }
+    }
+
+    /// Publish a hardware polarity observation into the OS-hook snapshot.
+    fn record_thumbwheel_direction(&self, key: &str, input: CapturedInput) -> bool {
+        let CapturedInput::ThumbwheelDirection {
+            positive_is_forward,
+        } = input
+        else {
+            return false;
+        };
+        if let Ok(mut maps) = self.hook_maps.write() {
+            maps.thumbwheel_positive_is_forward
+                .insert(key.to_owned(), positive_is_forward);
+        }
+        true
     }
 
     /// Cancel every input lifecycle retained for one capture session.
@@ -125,6 +143,9 @@ impl InputDispatcher {
         input: CapturedInput,
     ) {
         let key = session.device_key();
+        if self.record_thumbwheel_direction(key, input) {
+            return;
+        }
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {
@@ -212,6 +233,9 @@ impl InputDispatcher {
                         self.outputs.actions.dispatch(action, Some(key));
                     }
                 }
+            }
+            CapturedInput::ThumbwheelDirection { .. } => {
+                unreachable!("thumb-wheel direction reports return before dispatch")
             }
         }
     }

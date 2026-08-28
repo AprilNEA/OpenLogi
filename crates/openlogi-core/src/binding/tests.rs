@@ -533,6 +533,21 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
     }
 }
 
+#[test]
+fn thumbwheel_defaults_match_normalised_native_direction() {
+    // HID++ capture normalises the per-model firmware polarity to physical
+    // forward/up. The defaults must then reproduce native horizontal scroll,
+    // including when sensitivity alone causes the wheel to be diverted.
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollUp),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollDown),
+        Action::HorizontalScrollRight
+    );
+}
+
 // ── Effect classification ─────────────────────────────────────────────────
 //
 // `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three
