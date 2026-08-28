@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::NodeId;
-use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel, scripted_node_info};
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
@@ -961,4 +961,140 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
         ),
         None
     );
+}
+
+/// How long a liveness test waits for the session to end on its own before
+/// concluding the watchdog kept a dead channel alive.
+const WATCHDOG_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+use std::sync::RwLock;
+
+use crate::backend::{BackendError, HotplugStream, NodeInfo, RawWriter};
+
+/// A minimal HID++ 2.0 mouse: answers the root ping (so the version probe
+/// during arming succeeds) and reports every feature as unsupported, so
+/// arming diverts nothing and the session reaches its watchdog.
+fn featureless_mouse(request: &[u8]) -> Option<Vec<u8>> {
+    match request[3] >> 4 {
+        // Root ping: echo the header, report protocol 4.
+        1 => Some(vec![
+            0x10, request[1], request[2], request[3], 0x04, 0x00, request[6],
+        ]),
+        // Root getFeature: payload[0] == 0 means "not supported".
+        0 => Some(vec![0x10, request[1], request[2], request[3], 0, 0, 0]),
+        _ => None,
+    }
+}
+
+/// A backend presenting exactly one node, served by a pre-opened channel.
+struct LiveBackend(Arc<HidppChannel>);
+
+#[hidpp::async_trait]
+impl HidBackend for LiveBackend {
+    async fn enumerate(&self) -> Result<Vec<NodeInfo>, BackendError> {
+        Ok(vec![scripted_node_info("bt-mouse")])
+    }
+
+    async fn enumerate_hidpp(&self) -> Result<Vec<NodeInfo>, BackendError> {
+        self.enumerate().await
+    }
+
+    async fn open_hidpp(
+        &self,
+        _node: &NodeInfo,
+    ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+        Ok(Some(Arc::clone(&self.0)))
+    }
+
+    async fn open_raw_writer(&self, _node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError> {
+        Err(BackendError::Backend(
+            "capture tests open no raw writer".into(),
+        ))
+    }
+
+    fn watch(&self) -> Result<HotplugStream, BackendError> {
+        Ok(Box::new(futures_lite::stream::empty()))
+    }
+}
+
+/// A channel whose writes fail at the transport — the shape of a Bluetooth
+/// node that went away while the OS still lists it — must end the capture
+/// session, not live on forever as a zombie. The failure is scoped to the
+/// liveness ping (its data byte marks it), so arming succeeds and the session
+/// reaches its watchdog with a channel that looks healthy until it dies.
+#[tokio::test]
+async fn a_channel_whose_writes_fail_ends_the_capture_session() {
+    let (raw, _handle) = ScriptedRawHidChannel::with_failing_writes(featureless_mouse, |request| {
+        request.last() == Some(&super::LIVENESS_PING_DATA)
+    });
+    let backend: Arc<dyn HidBackend> = Arc::new(LiveBackend(scripted_channel(raw).await));
+    let (sink, _rx) = mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = oneshot::channel();
+    let slot: CaptureChannel = Arc::new(RwLock::new(None));
+    let session_slot = Arc::clone(&slot);
+
+    let session = tokio::spawn(async move {
+        run_capture_session(
+            &*backend,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb35b,
+            },
+            CaptureSpec::default(),
+            sink,
+            stop_rx,
+            session_slot,
+        )
+        .await
+    });
+
+    let result = tokio::time::timeout(WATCHDOG_BUDGET, session)
+        .await
+        .expect("a channel whose writes fail kept the capture session alive")
+        .expect("the session should exit cleanly, not with an error");
+    assert!(
+        slot.read().unwrap().is_none(),
+        "an exited session must release the capture slot"
+    );
+    assert!(
+        matches!(result, Ok(CaptureSessionOutcome::Restored)),
+        "the session should exit restored, not pending restoration"
+    );
+}
+
+/// A pong proves delivery.
+#[test]
+fn a_pong_ping_classifies_alive() {
+    assert_eq!(super::classify_ping(&Ok(0x04)), super::Liveness::Alive,);
+}
+
+/// A HID++-level error reply is still a device-originated reply — delivery
+/// proven. A sleeping device answers like this, and must not churn the
+/// session.
+#[test]
+fn a_feature_error_reply_classifies_alive() {
+    let error = super::v20::Hidpp20Error::Feature(super::v20::ErrorType::InvalidArgument);
+    assert_eq!(super::classify_ping(&Err(error)), super::Liveness::Alive);
+}
+
+/// Silence strikes: one lost ping is congestion, two declare the channel
+/// dead — the pre-existing anti-churn contract, unchanged.
+#[test]
+fn a_timed_out_ping_classifies_silent() {
+    let error = super::v20::Hidpp20Error::Channel(hidpp::channel::ChannelError::Timeout);
+    assert_eq!(super::classify_ping(&Err(error)), super::Liveness::Silent);
+
+    let error = super::v20::Hidpp20Error::Channel(hidpp::channel::ChannelError::NoResponse);
+    assert_eq!(super::classify_ping(&Err(error)), super::Liveness::Silent);
+}
+
+/// A transport-level write failure is the Windows Bluetooth signature: the
+/// request never reached the device, so no reply can ever prove delivery
+/// through this channel again. Dead on first sight.
+#[test]
+fn a_transport_write_failure_classifies_dead() {
+    let error = super::v20::Hidpp20Error::Channel(hidpp::channel::ChannelError::Implementation(
+        crate::channel::scripted::mock_error(),
+    ));
+    assert_eq!(super::classify_ping(&Err(error)), super::Liveness::Dead);
 }

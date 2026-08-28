@@ -53,12 +53,58 @@ use crate::thumbwheel::{self, Thumbwheel, WheelDirection, WheelResolution};
 
 /// How often the capture session pings its device to prove the channel still
 /// delivers input reports. Cheap: one HID++ round-trip per interval.
+///
+/// Tests shrink this so the real-time response wait (a paused tokio clock
+/// cannot govern the channel's `futures_timer` deadline) still runs fast.
+#[cfg(not(test))]
 const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+#[cfg(test)]
+const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Consecutive all-silent pings after which the capture channel is declared
 /// dead. Two, so one ping lost to transient receiver congestion (which does
 /// happen under pointer load) doesn't churn the session.
 const LIVENESS_PING_STRIKES: u8 = 2;
+
+/// The data byte that marks the session's own liveness ping on the wire
+/// (`root.ping(0x5a)`), so a scripted transport can fail exactly this
+/// request and leave the version probe alone.
+const LIVENESS_PING_DATA: u8 = 0x5a;
+
+/// What one liveness ping says about the channel's delivery path.
+#[derive(Debug, PartialEq, Eq)]
+enum Liveness {
+    /// A transport-level failure: the request never went out. Nothing can
+    /// prove delivery through this channel again — the Windows BT path
+    /// surfaces its removed HID instance this way (write errors), which the
+    /// reply-only classification used to read as "healthy".
+    Dead,
+    /// No reply within the response budget. One lost ping is not proof —
+    /// receiver congestion swallows single round-trips — so this only
+    /// strikes.
+    Silent,
+    /// A pong or a HID++-level error reply arrived, proving the channel
+    /// delivered *something* the device originated.
+    Alive,
+}
+
+/// Classify one liveness-ping outcome. Match order matters: silence is the
+/// only two-strike path; any other `Channel` error is a transport failure,
+/// and a `Feature` error is still a device-originated reply.
+#[expect(
+    clippy::match_same_arms,
+    reason = "a pong and a HID++ error reply are distinct delivery proofs; merging them would hide the contract the doc comment promises"
+)]
+fn classify_ping(result: &Result<u8, v20::Hidpp20Error>) -> Liveness {
+    match result {
+        Ok(_) => Liveness::Alive,
+        Err(v20::Hidpp20Error::Channel(
+            hidpp::channel::ChannelError::Timeout | hidpp::channel::ChannelError::NoResponse,
+        )) => Liveness::Silent,
+        Err(v20::Hidpp20Error::Channel(_)) => Liveness::Dead,
+        Err(_) => Liveness::Alive,
+    }
+}
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,12 +374,14 @@ async fn run_capture_session_on(
     // Liveness watchdog: this session's channel is the sole delivery path for
     // every diverted control, and a channel whose input-report delivery dies
     // (observed on macOS with concurrent opens of one node: writes accepted,
-    // replies and events silently routed elsewhere) turns every captured
-    // button to dead air with nothing to notice. Ping the device through this
-    // channel; consecutive all-silent pings mean the channel — not the device
-    // — is gone (a sleeping/unreachable device still gets us an error *reply*,
-    // which proves delivery and resets the count). Exiting lets the manager
-    // re-arm on a fresh channel.
+    // replies and events silently routed elsewhere; on Windows a removed
+    // Bluetooth HID instance fails every write) turns every captured button
+    // to dead air with nothing to notice. Ping the device through this
+    // channel: a transport write failure is proof enough to restart at once,
+    // consecutive all-silent pings mean the channel no longer delivers
+    // (a sleeping/unreachable device still gets us an error *reply*, which
+    // proves delivery and resets the count). Exiting lets the manager re-arm
+    // on a fresh channel.
     let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
     let wireless = root
         .get_feature(WirelessDeviceStatusFeature::ID)
@@ -562,20 +610,19 @@ async fn monitor_capture(
                 context.armed.rearm().await;
             }
             () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
-                match context.root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => {
+                match classify_ping(&context.root.ping(LIVENESS_PING_DATA).await) {
+                    Liveness::Silent => {
                         silent_pings = silent_pings.saturating_add(1);
                         if silent_pings >= LIVENESS_PING_STRIKES {
                             warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
                             return stop_for_current_publication(context.registry, context.shared);
                         }
                     }
-                    // Any reply — pong, feature error, unreachable-device
-                    // error — proves the channel still delivers.
-                    _ => silent_pings = 0,
+                    Liveness::Dead => {
+                        warn!(index = context.device_index, "capture channel write failed — restarting session on a fresh channel");
+                        return stop_for_current_publication(context.registry, context.shared);
+                    }
+                    Liveness::Alive => silent_pings = 0,
                 }
             }
         }
