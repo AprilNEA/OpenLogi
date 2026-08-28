@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureResponseTime};
+use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
@@ -26,7 +26,6 @@ use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
-use openlogi_hook::EventDeviceId;
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -55,7 +54,6 @@ struct AgentDevice {
     slot: u8,
     serial: Option<String>,
     unit_id: [u8; 4],
-    event_source_id: Option<String>,
     capabilities: Option<Capabilities>,
     /// HID++-reported device kind — identity only (capability decisions come
     /// from the feature table). Used to find the keyboard the key-capture
@@ -272,10 +270,14 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
-    /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
-    /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
-    /// so they're built together here and published under one lock — keeping
-    /// `rebuild` and `set_current_app` from drifting into a half-populated write.
+    /// Build the OS-hook callback's maps for the selected device `key` and
+    /// foreground `app`. Bindings, gestures, and response times deliberately
+    /// share that selection: a native event identifies its HID sender, but a
+    /// receiver sender does not identify one pairing slot. HID++ capture plans
+    /// are the physical-device path and retain their own response times.
+    ///
+    /// All hook maps are published under one lock so `rebuild` and
+    /// `set_current_app` cannot expose a half-populated profile.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
@@ -300,18 +302,10 @@ impl Orchestrator {
                 .map(|&button| (button, self.config.gesture_response_time(key, button)))
                 .collect()
         });
-        let mut response_times_by_source = BTreeMap::new();
-        for device in &self.devices {
-            let times = hook_response_times_for(&self.config, &device.config_key);
-            for source_id in hook_source_ids(device) {
-                response_times_by_source.insert(source_id, times.clone());
-            }
-        }
         HookMaps {
             bindings,
             gestures,
             gesture_response_times,
-            gesture_response_times_by_source: response_times_by_source,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }
@@ -920,33 +914,6 @@ impl Orchestrator {
     }
 }
 
-fn hook_response_times_for(
-    config: &Config,
-    config_key: &str,
-) -> BTreeMap<ButtonId, GestureResponseTime> {
-    ButtonId::ALL
-        .iter()
-        .copied()
-        .filter(|button| button.is_os_hook_button())
-        .map(|button| (button, config.gesture_response_time(config_key, button)))
-        .collect()
-}
-
-fn hook_source_ids(device: &AgentDevice) -> Vec<EventDeviceId> {
-    let mut ids = Vec::new();
-    if let Some(serial) = device.serial.as_deref() {
-        ids.extend(EventDeviceId::new(serial));
-    }
-    if device.unit_id != [0; 4] {
-        let unit = format!("{:08x}", u32::from_be_bytes(device.unit_id));
-        ids.extend(EventDeviceId::new(unit));
-    }
-    if let Some(source_id) = device.event_source_id.as_deref() {
-        ids.extend(EventDeviceId::new(source_id));
-    }
-    ids
-}
-
 /// Resolve the two independently-gated HiResWheel settings for one device.
 /// `None` means preserve the device's current value.
 fn configured_wheel_mode(
@@ -985,24 +952,6 @@ fn build_devices(
 ) -> Vec<AgentDevice> {
     let mut devices = Vec::new();
     for inv in inventories {
-        // A receiver source id names the receiver, not one pairing slot. It is
-        // unambiguous only when one pointer device can emit hooked mouse events.
-        let event_source_slot = if inv
-            .paired
-            .iter()
-            .any(|paired| paired.slot == DIRECT_DEVICE_INDEX)
-        {
-            Some(DIRECT_DEVICE_INDEX)
-        } else {
-            let mut pointers = inv
-                .paired
-                .iter()
-                .filter(|paired| matches!(paired.kind, DeviceKind::Mouse | DeviceKind::Trackball));
-            match (pointers.next(), pointers.next()) {
-                (Some(pointer), None) => Some(pointer.slot),
-                _ => None,
-            }
-        };
         for paired in &inv.paired {
             let Some(model) = paired.model_info.as_ref() else {
                 continue;
@@ -1032,11 +981,6 @@ fn build_devices(
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
-                event_source_id: if event_source_slot == Some(paired.slot) {
-                    inv.receiver.event_source_id.clone()
-                } else {
-                    None
-                },
                 capabilities: paired.capabilities,
                 kind: paired.kind,
                 light_capabilities: None,
@@ -1071,7 +1015,6 @@ fn build_devices(
             slot: DIRECT_DEVICE_INDEX,
             serial: device.serial_number.clone(),
             unit_id: device.unit_id,
-            event_source_id: device.serial_number.clone(),
             capabilities: device.capabilities,
             kind: device.kind,
             light_capabilities: device.light_capabilities,

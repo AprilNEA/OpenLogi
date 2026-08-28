@@ -381,7 +381,6 @@ fn device_inventory() {
             vendor_id: 0x046d,
             product_id: 0xc548,
             unique_id: Some("F00DCAFE".into()),
-            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: 1,

@@ -62,7 +62,6 @@ fn source_is_remappable_policy() {
         vendor_id: Some(0),
         product_id: None,
         product_name: Some("Apple Internal Keyboard / Trackpad".into()),
-        ..EventDevice::default()
     };
     assert!(!source_is_remappable(Some(&trackpad)));
 
@@ -70,7 +69,6 @@ fn source_is_remappable_policy() {
         vendor_id: Some(0x05ac),
         product_id: Some(0x030d),
         product_name: Some("Magic Mouse".into()),
-        ..EventDevice::default()
     };
     assert!(!source_is_remappable(Some(&apple_mouse)));
 
@@ -78,7 +76,6 @@ fn source_is_remappable_policy() {
         vendor_id: Some(LOGITECH_VENDOR_ID),
         product_id: Some(0xb034),
         product_name: Some("MX Master 3S".into()),
-        ..EventDevice::default()
     };
     assert!(source_is_remappable(Some(&logi)));
 
@@ -86,7 +83,6 @@ fn source_is_remappable_policy() {
         vendor_id: None,
         product_id: None,
         product_name: Some("Logitech USB Receiver".into()),
-        ..EventDevice::default()
     };
     assert!(source_is_remappable(Some(&logi_by_name)));
 }

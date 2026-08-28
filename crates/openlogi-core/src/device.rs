@@ -243,9 +243,6 @@ pub struct ReceiverInfo {
     /// Platform-reported serial, when one is exposed. Deliberately excluded
     /// from diagnostics (see [`crate::diagnostics::ReceiverDiag`]).
     pub unique_id: Option<String>,
-    /// Process-local OS event-source identity for this HID node.
-    #[serde(skip)]
-    pub event_source_id: Option<String>,
 }
 
 /// HID++ `DeviceInformation` (feature 0x0003) snapshot used to identify a
@@ -447,7 +444,6 @@ mod tests {
                 vendor_id: 0x046d,
                 product_id: 0xc548,
                 unique_id: Some("receiver-1".to_string()),
-                event_source_id: None,
             },
             paired: vec![PairedDevice {
                 slot,

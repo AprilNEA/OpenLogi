@@ -166,7 +166,6 @@ async fn probe_bolt_receiver(
         vendor_id: info.vendor_id,
         product_id: info.product_id,
         unique_id,
-        event_source_id: info.serial_number,
     };
     assemble_bolt_probe(receiver, pairing_count, slot_results)
 }
@@ -316,7 +315,6 @@ async fn probe_unifying_receiver(
                 vendor_id: info.vendor_id,
                 product_id: info.product_id,
                 unique_id,
-                event_source_id: info.serial_number,
             },
             paired,
         }),
@@ -569,7 +567,6 @@ async fn probe_direct(
             vendor_id: info.vendor_id,
             product_id: info.product_id,
             unique_id: None,
-            event_source_id: info.serial_number.clone(),
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,

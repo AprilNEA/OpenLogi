@@ -16,8 +16,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hook::{
-    EventDevice, EventDeviceId, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent,
-    source_is_remappable,
+    EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
 use tracing::{info, warn};
 
@@ -49,36 +48,12 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
-    /// Click-versus-swipe timing for each OS-hook gesture control.
+    /// Click-versus-swipe timing for each OS-hook gesture control on the
+    /// selected device profile. Native button events do not reliably identify
+    /// one peripheral behind a shared receiver, so this intentionally follows
+    /// the same selected-profile boundary as [`Self::bindings`] and
+    /// [`Self::gestures`]. HID++ capture plans carry physical-device timing.
     pub gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
-    /// Click-versus-swipe timing keyed by a stable native event-source id.
-    pub gesture_response_times_by_source:
-        BTreeMap<EventDeviceId, BTreeMap<ButtonId, GestureResponseTime>>,
-}
-
-impl HookMaps {
-    fn gesture_response_time_for(
-        &self,
-        device: Option<&EventDevice>,
-        button: ButtonId,
-    ) -> Option<GestureResponseTime> {
-        if !self.gestures.contains_key(&button) {
-            return None;
-        }
-        let selected = self
-            .gesture_response_times
-            .get(&button)
-            .copied()
-            .unwrap_or_default();
-        Some(
-            device
-                .and_then(|device| device.stable_id.as_ref())
-                .and_then(|source| self.gesture_response_times_by_source.get(source))
-                .and_then(|times| times.get(&button))
-                .copied()
-                .unwrap_or(selected),
-        )
-    }
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -295,7 +270,7 @@ fn handle_button(
         let responsiveness = hooks
             .try_read()
             .ok()
-            .and_then(|maps| maps.gesture_response_time_for(device, id));
+            .and_then(|maps| maps.gesture_response_times.get(&id).copied());
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
