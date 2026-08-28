@@ -158,11 +158,18 @@ fn no_match_err(devices: &[Candidate], query: Option<&str>) -> anyhow::Error {
 
 fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRoute, String)> {
     let needle = query.to_lowercase();
-    devices
+    let mut matches = devices
         .iter()
-        .find(|candidate| candidate.name.to_lowercase().contains(&needle))
-        .map(|candidate| (candidate.route.clone(), candidate.name.clone()))
-        .ok_or_else(|| no_match_err(devices, Some(query)))
+        .filter(|candidate| candidate.name.to_lowercase().contains(&needle));
+    let candidate = matches
+        .next()
+        .ok_or_else(|| no_match_err(devices, Some(query)))?;
+    if matches.next().is_some() {
+        return Err(anyhow!(
+            "multiple online devices match `--device {query}`; use a more specific value"
+        ));
+    }
+    Ok((candidate.route.clone(), candidate.name.clone()))
 }
 
 /// Select an online device from an agent-provided inventory by name substring.
@@ -177,8 +184,8 @@ pub(crate) fn select_inventory_device(
 /// Pick the device a diag should run against.
 ///
 /// Selection order:
-/// 1. If `query` is set, the first online device whose name contains it
-///    (case-insensitive) — lets the user disambiguate explicitly.
+/// 1. If `query` is set, the single online device whose name contains it
+///    (case-insensitive); ambiguous matches are rejected.
 /// 2. Else, if `required_features` is non-empty, the first online device whose
 ///    HID++ feature table exposes *any* of them. This is what stops a
 ///    mouse-only diag (DPI, SmartShift) from picking a paired keyboard when
@@ -233,7 +240,7 @@ mod tests {
     };
     use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
-    use super::{Candidate, no_match_err, online_candidates};
+    use super::{Candidate, no_match_err, online_candidates, select_named_device};
 
     fn candidate(name: &str) -> Candidate {
         Candidate {
@@ -370,5 +377,17 @@ mod tests {
             capabilities: Some(Capabilities::default()),
             settings_revision: 0,
         }
+    }
+
+    #[test]
+    fn ambiguous_query_is_rejected() {
+        let devices = vec![candidate("MX Master 3S"), candidate("MX Mechanical")];
+
+        let err = select_named_device(&devices, "mx").unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "multiple online devices match `--device mx`; use a more specific value"
+        );
     }
 }
