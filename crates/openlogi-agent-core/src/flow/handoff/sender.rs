@@ -12,6 +12,7 @@ use crate::flow::runtime::GenerationState;
 
 const NETWORK_SLACK: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_PEER_ARM_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: EdgeCrossing) {
     if !state.is_active()
@@ -75,7 +76,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
         .handoffs
         .register_outgoing(peer.public_key, transfer_id)
         .await;
-    let Some(acceptance) = request_acceptance(&connection, &peer.name, transfer_id, envelope).await
+    let Some(deadline) = request_acceptance(&connection, &peer.name, transfer_id, envelope).await
     else {
         state.handoffs.remove_outgoing(transfer_id).await;
         return;
@@ -107,7 +108,6 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
         }
     }
 
-    let deadline = Duration::from_millis(u64::from(acceptance.arm_timeout_ms)) + NETWORK_SLACK;
     match tokio::time::timeout(deadline, result).await {
         Ok(Ok(OutgoingSignal::Result(result))) => {
             info!(
@@ -132,7 +132,7 @@ async fn request_acceptance(
     peer_name: &str,
     transfer_id: u64,
     request: Envelope,
-) -> Option<proto::HandoffAccept> {
+) -> Option<Duration> {
     let response = match tokio::time::timeout(REQUEST_TIMEOUT, connection.call(request)).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
@@ -160,14 +160,22 @@ async fn request_acceptance(
     let Ok(acceptance) = response.decode::<proto::HandoffAccept>(InboundRole::Request) else {
         return None;
     };
-    if acceptance.transfer_id != transfer_id || acceptance.arm_timeout_ms == 0 {
+    let Some(deadline) = handoff_deadline(&acceptance, transfer_id) else {
         warn!(
             peer = peer_name,
             "Flow peer returned an invalid handoff acceptance"
         );
         return None;
-    }
-    Some(acceptance)
+    };
+    Some(deadline)
+}
+
+fn handoff_deadline(acceptance: &proto::HandoffAccept, transfer_id: u64) -> Option<Duration> {
+    let arm_timeout = Duration::from_millis(u64::from(acceptance.arm_timeout_ms));
+    (acceptance.transfer_id == transfer_id
+        && !arm_timeout.is_zero()
+        && arm_timeout <= MAX_PEER_ARM_TIMEOUT)
+        .then(|| arm_timeout + NETWORK_SLACK)
 }
 
 fn entry_from_crossing(crossing: EdgeCrossing) -> proto::EntryPoint {
@@ -208,4 +216,44 @@ fn unix_millis() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acceptance(transfer_id: u64, arm_timeout_ms: u32) -> proto::HandoffAccept {
+        proto::HandoffAccept {
+            transfer_id,
+            arm_timeout_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn peer_arm_timeout_is_bounded_before_handoff() {
+        let transfer_id = 42;
+        let max_ms = u32::try_from(MAX_PEER_ARM_TIMEOUT.as_millis()).unwrap();
+
+        assert_eq!(
+            handoff_deadline(&acceptance(transfer_id, max_ms), transfer_id),
+            Some(MAX_PEER_ARM_TIMEOUT + NETWORK_SLACK)
+        );
+        assert_eq!(
+            handoff_deadline(&acceptance(transfer_id, 0), transfer_id),
+            None
+        );
+        assert_eq!(
+            handoff_deadline(&acceptance(transfer_id, max_ms + 1), transfer_id),
+            None
+        );
+        assert_eq!(
+            handoff_deadline(&acceptance(transfer_id, u32::MAX), transfer_id),
+            None
+        );
+        assert_eq!(
+            handoff_deadline(&acceptance(transfer_id + 1, max_ms), transfer_id),
+            None
+        );
+    }
 }
