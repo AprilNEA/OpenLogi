@@ -157,9 +157,10 @@ impl SessionTarget {
 struct RunningSession {
     id: HidppSessionId,
     target: SessionTarget,
-    /// Immutable dispatch snapshot retained through teardown. A newly
+    /// Latest dispatch plan while active, frozen when teardown starts. A newly
     /// published plan may remove a diversion before firmware restoration
-    /// completes, but events from this session still belong to this epoch.
+    /// completes, but events from a draining session still belong to its
+    /// retiring plan.
     plan: DeviceCapturePlan,
     /// Present while the session runs; taken to request a stop. `None` means
     /// the session is draining — deliberately stopped, but its task (and the
@@ -238,6 +239,22 @@ fn dispatch_plan_for<'a>(
 /// plan publication and the manager's next teardown tick.
 fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> bool {
     session.target == SessionTarget::for_plan(plan)
+}
+
+/// Reconcile a tracked session with its currently wanted plan.
+///
+/// Dispatch-only changes can be adopted without touching firmware while the
+/// session is active. Once stop has been requested, keep the retiring plan
+/// frozen so reports accepted during restoration resolve against the bindings
+/// that owned the diversion.
+fn refresh_dispatch_plan(session: &mut RunningSession, wanted: Option<&DeviceCapturePlan>) -> bool {
+    let Some(plan) = wanted.filter(|plan| session_matches_plan(session, plan)) else {
+        return false;
+    };
+    if session.stop.is_some() {
+        session.plan = plan.clone();
+    }
+    true
 }
 
 /// Snapshot the sessions that should be armed on this tick. Pairing owns the
@@ -353,9 +370,7 @@ async fn manage(
                 // live until completion so already-diverted edges can settle
                 // against the retiring plan during teardown.
                 for (key, session) in &mut sessions {
-                    let keep = want
-                        .get(key)
-                        .is_some_and(|plan| session_matches_plan(session, plan));
+                    let keep = refresh_dispatch_plan(session, want.get(key));
                     if !keep && let Some(stop) = session.stop.take() {
                         let _ = stop.send(());
                     }

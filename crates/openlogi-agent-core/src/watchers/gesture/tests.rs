@@ -158,6 +158,108 @@ fn capture_plan_changes_schedule_the_old_session_for_retirement() {
 }
 
 #[test]
+fn active_session_adopts_action_only_plan_changes_without_rearming() {
+    let mut config = openlogi_core::config::Config::default();
+    config.set_binding(
+        "mouse-a",
+        ButtonId::DpiToggle,
+        Binding::Single(Action::Copy),
+    );
+    let first = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
+    let mut session = live_session_with_epoch(7);
+    session.target = SessionTarget::for_plan(&first);
+    session.plan = first.clone();
+
+    config.set_binding(
+        "mouse-a",
+        ButtonId::DpiToggle,
+        Binding::Single(Action::Paste),
+    );
+    let rebound = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
+    assert!(session_matches_plan(&session, &rebound));
+    assert!(refresh_dispatch_plan(&mut session, Some(&rebound)));
+    assert_eq!(
+        session.plan.bindings.get(&ButtonId::DpiToggle),
+        Some(&Binding::Single(Action::Paste))
+    );
+}
+
+#[test]
+fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
+    let mut config = openlogi_core::config::Config::default();
+    config.set_gesture_mode("mouse-a", ButtonId::GestureButton, true);
+    let first = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
+    let mut session = live_session_with_epoch(7);
+    session.target = SessionTarget::for_plan(&first);
+    session.plan = first;
+
+    config.set_gesture_direction(
+        "mouse-a",
+        ButtonId::GestureButton,
+        GestureDirection::Right,
+        Action::MissionControl,
+    );
+    let gestured = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
+    assert!(refresh_dispatch_plan(&mut session, Some(&gestured)));
+    assert_eq!(
+        session
+            .plan
+            .gesture_bindings
+            .get(&ButtonId::GestureButton)
+            .and_then(|map| map.get(&GestureDirection::Right)),
+        Some(&Action::MissionControl)
+    );
+
+    config.set_binding(
+        "mouse-a",
+        ButtonId::DpiToggle,
+        Binding::Single(Action::Copy),
+    );
+    let base = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
+    session.target = SessionTarget::for_plan(&base);
+    session.plan = base;
+    config.set_per_app_binding(
+        "mouse-a",
+        "com.example.Editor",
+        ButtonId::DpiToggle,
+        Some(Action::Paste),
+    );
+    let per_app = crate::capture_plan::plan_for_device(
+        &config,
+        "mouse-a",
+        route(),
+        Some("com.example.Editor"),
+        0,
+        true,
+    );
+    assert!(refresh_dispatch_plan(&mut session, Some(&per_app)));
+    assert_eq!(
+        session.plan.bindings.get(&ButtonId::DpiToggle),
+        Some(&Binding::Single(Action::Paste))
+    );
+}
+
+#[test]
+fn draining_session_keeps_its_retiring_dispatch_plan_frozen() {
+    let mut session = stopped_session_with_epoch(7);
+    session
+        .plan
+        .bindings
+        .insert(ButtonId::DpiToggle, Binding::Single(Action::Copy));
+    let mut published = session.plan.clone();
+    published
+        .bindings
+        .insert(ButtonId::DpiToggle, Binding::Single(Action::Paste));
+
+    assert!(refresh_dispatch_plan(&mut session, Some(&published)));
+    assert_eq!(
+        session.plan.bindings.get(&ButtonId::DpiToggle),
+        Some(&Binding::Single(Action::Copy)),
+        "a draining session must keep resolving late input through its retiring bindings"
+    );
+}
+
+#[test]
 fn wheel_configuration_changes_invalidate_the_capture_epoch() {
     let mut config = openlogi_core::config::Config::default();
     config.set_binding(
