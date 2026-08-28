@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Mittenknapp"
 "DPI Preset %{index}": "DPI-förinställning %{index}"
 "Hold %{chord}": "Håll %{chord}"
+"Hold %{modifiers}, tap %{key}": "Håll %{modifiers}, tryck %{key}"
+"Tap %{key}": "Tryck %{key}"
 "Gesture %{name}": "Gest %{name}"
 "Left Click": "Vänsterklick"
 "Right Click": "Högerklick"

@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Central"
 "DPI Preset %{index}": "Preajuste de DPI %{index}"
 "Hold %{chord}": "Mantener %{chord}"
+"Hold %{modifiers}, tap %{key}": "Mantener %{modifiers}, pulsar %{key}"
+"Tap %{key}": "Pulsar %{key}"
 "Gesture %{name}": "Gesto %{name}"
 "Left Click": "Clic izquierdo"
 "Right Click": "Clic derecho"

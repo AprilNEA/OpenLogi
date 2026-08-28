@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Μεσαίο"
 "DPI Preset %{index}": "Προεπιλογή DPI %{index}"
 "Hold %{chord}": "Κράτημα %{chord}"
+"Hold %{modifiers}, tap %{key}": "Κράτημα %{modifiers}, πάτημα %{key}"
+"Tap %{key}": "Πάτημα %{key}"
 "Gesture %{name}": "Χειρονομία %{name}"
 "Left Click": "Αριστερό κλικ"
 "Right Click": "Δεξί κλικ"

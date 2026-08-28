@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Mitteltaste"
 "DPI Preset %{index}": "DPI-Voreinstellung %{index}"
 "Hold %{chord}": "%{chord} halten"
+"Hold %{modifiers}, tap %{key}": "%{modifiers} halten, %{key} tippen"
+"Tap %{key}": "%{key} tippen"
 "Gesture %{name}": "Geste %{name}"
 "Left Click": "Linksklick"
 "Right Click": "Rechtsklick"

@@ -13,6 +13,14 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::HoldShortcut(combo) => {
             tr!("Hold %{chord}", chord => combo.rendered_label())
         }
+        Action::TapKeyHoldingModifiers(combo) => match combo.rendered_modifiers() {
+            Some(modifiers) => tr!(
+                "Hold %{modifiers}, tap %{key}",
+                modifiers => modifiers,
+                key => combo.rendered_key()
+            ),
+            None => tr!("Tap %{key}", key => combo.rendered_key()),
+        },
         _ => tr!(action.label()),
     }
 }

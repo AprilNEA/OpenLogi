@@ -175,6 +175,8 @@ _version: 1
 "Middle": "中鍵"
 "DPI Preset %{index}": "靈敏度預設 %{index}"
 "Hold %{chord}": "按住 %{chord}"
+"Hold %{modifiers}, tap %{key}": "按住 %{modifiers}，輕按 %{key}"
+"Tap %{key}": "輕按 %{key}"
 "Gesture %{name}": "手勢 %{name}"
 "Left Click": "左鍵單擊"
 "Right Click": "右鍵單擊"

@@ -41,6 +41,19 @@ mod tests {
 
     use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 
+    /// The chord actions label the two halves of a combo differently, so each
+    /// shape carries its own key. Grouped here rather than inlined so the one
+    /// locale test below stays inside the line budget, and not a `#[test]` of
+    /// its own because the locale it reads is a process-global.
+    fn assert_chord_labels() {
+        assert_eq!(rust_i18n::t!("Hold %{chord}", chord => "X"), "按住 X");
+        assert_eq!(
+            rust_i18n::t!("Hold %{modifiers}, tap %{key}", modifiers => "Cmd", key => "Tab"),
+            "按住 Cmd，点按 Tab"
+        );
+        assert_eq!(rust_i18n::t!("Tap %{key}", key => "F5"), "点按 F5");
+    }
+
     /// End-to-end check that `locales/*.yml` loaded and the gettext-style
     /// English keys match — a typo'd key silently falls back to English, which
     /// this catches. All locale-dependent assertions live in this one test on
@@ -68,7 +81,7 @@ mod tests {
             rust_i18n::t!("DPI Preset %{index}", index => "2"),
             "灵敏度预设 2"
         ); // parameterized action label
-        assert_eq!(rust_i18n::t!("Hold %{chord}", chord => "X"), "按住 X"); // held action label
+        assert_chord_labels();
         assert_eq!(rust_i18n::t!("Quit OpenLogi"), "退出 OpenLogi"); // menu-bar status item
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
         assert_eq!(rust_i18n::t!("Lighting"), "灯光"); // keyboard lighting tab
@@ -97,8 +110,8 @@ mod tests {
 
         // Exhaustive: every non-parameterized device/action label has a `zh-CN`
         // entry. Parameterized `Action`s (`SetDpiPreset`, `CustomShortcut`,
-        // `HoldShortcut`) are skipped here and checked explicitly above where
-        // needed.
+        // `HoldShortcut`, `TapKeyHoldingModifiers`) are skipped here and
+        // checked explicitly above where needed.
         let covered = |label: &str| rust_i18n::t!(label) != label;
         for b in ButtonId::ALL {
             assert!(covered(b.label()), "no zh-CN for ButtonId::{b:?}");

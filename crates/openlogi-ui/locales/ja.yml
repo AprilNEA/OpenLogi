@@ -175,6 +175,8 @@ _version: 1
 "Middle": "中ボタン"
 "DPI Preset %{index}": "DPI プリセット %{index}"
 "Hold %{chord}": "%{chord} を長押し"
+"Hold %{modifiers}, tap %{key}": "%{modifiers} を長押しして %{key} を1回押す"
+"Tap %{key}": "%{key} を1回押す"
 "Gesture %{name}": "ジェスチャー %{name}"
 "Left Click": "左クリック"
 "Right Click": "右クリック"

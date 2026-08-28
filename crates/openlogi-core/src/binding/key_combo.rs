@@ -194,21 +194,37 @@ impl KeyCombo {
     /// Canonical user-facing chord label.
     #[must_use]
     pub fn rendered_label(&self) -> String {
+        match self.rendered_modifiers() {
+            Some(modifiers) => format!("{modifiers}+{}", self.rendered_key()),
+            None => self.rendered_key(),
+        }
+    }
+
+    /// Canonical label for the chord's modifiers alone, or `None` when it
+    /// carries none. An action that holds the modifiers while tapping the
+    /// ordinary key separately labels the two halves separately too.
+    #[must_use]
+    pub fn rendered_modifiers(&self) -> Option<String> {
         let mut parts = Vec::new();
         if self.has_command() {
-            parts.push("Cmd".to_string());
+            parts.push("Cmd");
         }
         if self.has_control() {
-            parts.push("Ctrl".to_string());
+            parts.push("Ctrl");
         }
         if self.has_option() {
-            parts.push("Alt".to_string());
+            parts.push("Alt");
         }
         if self.has_shift() {
-            parts.push("Shift".to_string());
+            parts.push("Shift");
         }
-        parts.push(self.key.label());
-        parts.join("+")
+        (!parts.is_empty()).then(|| parts.join("+"))
+    }
+
+    /// Canonical label for the chord's ordinary key alone.
+    #[must_use]
+    pub fn rendered_key(&self) -> String {
+        self.key.label()
     }
 }
 

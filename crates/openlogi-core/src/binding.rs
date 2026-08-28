@@ -24,7 +24,7 @@ mod value;
 #[cfg(test)]
 mod tests;
 
-pub use action::{Action, WorkflowStep};
+pub use action::{Action, HeldKeys, WorkflowStep};
 pub use action_ring::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
     RingAction, RingActionError,

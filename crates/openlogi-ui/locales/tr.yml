@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Orta"
 "DPI Preset %{index}": "DPI Ön Ayarı %{index}"
 "Hold %{chord}": "%{chord} basılı tut"
+"Hold %{modifiers}, tap %{key}": "%{modifiers} basılı tut, %{key} tuşuna bas"
+"Tap %{key}": "%{key} tuşuna bas"
 "Gesture %{name}": "%{name} hareketi"
 "Left Click": "Sol Tık"
 "Right Click": "Sağ Tık"
