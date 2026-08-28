@@ -259,15 +259,38 @@ cargo run -p xtask -- linux package
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
 
+`packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
+packages, not a second package lifecycle. Its online mode maps the host and
+package manager to the release naming contract
+`openlogi-v<version>-linux-<amd64|arm64>.<format>`, verifies only that file's
+`SHA256SUMS` entry, and then delegates installation to apt, dnf, yum, zypper,
+rpm, or pacman. The nFPM post-install script remains the owner of udev and
+desktop/icon cache reloads. The explicit `--from-source` mode preserves the
+checkout installer for the four local `target/release` binaries and shared
+resources.
+
+Run the mocked online/source smoke suite directly with dash; it exercises
+latest and pinned versions, both architectures, every package-manager mapping,
+checksum rejection before sudo, dry-run, and the source resource set without
+network or system writes:
+
+```sh
+dash -n packaging/linux/install.sh
+dash packaging/linux/tests/install-smoke.sh
+```
+
 The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
 commands.
 
 ## Release updater publishing
 
-Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual
-downloads and the Homebrew cask. The release workflow also publishes the same
-DMGs to Cloudflare R2 and writes a static updater manifest at:
+Tagged releases attach installers and `SHA256SUMS` to GitHub Releases for
+manual downloads. Before checksums and signatures are generated, the release
+workflow copies `packaging/linux/install.sh` to `dist/install.sh`; that exact
+file is listed in `SHA256SUMS`, signed as `install.sh.minisig`, and attached as
+a release asset. The workflow also publishes the artifacts to Cloudflare R2
+and writes a static updater manifest at:
 
 ```text
 ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
@@ -290,9 +313,9 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
   the app and used to verify updater artifacts.
 - `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — the passwordless minisign secret key
   file, **base64-encoded** (`base64 < minisign.key`), used only in the release
-  publish job to sign DMGs before `latest.json` is generated. It is stored
-  base64 (not raw) so its two lines survive 1Password's paste handling; the
-  workflow decodes it, mirroring the GitHub App key.
+  publish job to sign release artifacts before `latest.json` is generated. It
+  is stored base64 (not raw) so its two lines survive 1Password's paste
+  handling; the workflow decodes it, mirroring the GitHub App key.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.

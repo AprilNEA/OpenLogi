@@ -102,28 +102,30 @@ brew install --cask aprilnea/tap/openlogi@latest
 
 ### Linux
 
-从[最新 release](https://github.com/AprilNEA/OpenLogi/releases/latest) 下载适用于你的发行版的安装包：
+通过 HTTPS 将安装脚本下载到文件，检查后再运行；不要直接通过管道交给 shell：
 
 ```sh
-# Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
-
-# Fedora / RHEL
-sudo rpm -i openlogi-*.rpm
-
-# Arch Linux
-sudo pacman -U openlogi-*.pkg.tar.zst
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --fail --location --silent --show-error \
+  --retry 3 --retry-connrefused \
+  --output openlogi-install.sh \
+  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
+less openlogi-install.sh
+sh openlogi-install.sh
+rm openlogi-install.sh
 ```
 
-安装包同时提供 `x86_64`/`amd64` 与 `arm64`/`aarch64` 两种架构。
+脚本会检测 apt、dnf、yum、zypper、rpm 或 pacman，精确选择当前机器所需的 `.deb`、`.rpm` 或 `.pkg.tar.zst`，并在使用 `sudo` 调用包管理器前，根据 release 的 `SHA256SUMS` 验证该文件。请以普通用户运行脚本，不要用 `sudo` 启动整个脚本。默认安装最新版本；需要时可使用 `--version`、`--package-manager`、`--no-start` 或 `--dry-run`。
 
-安装包会写入 udev 规则，让你的用户无需 `sudo` 即可访问 `/dev/hidraw*` 和 `/dev/uinput`。装完后为当前用户启用后台 agent：
+安装包同时提供 `x86_64`/`amd64` 与 `arm64`/`aarch64` 两种架构，要求 GLIBC 2.35 或更高版本（以 Ubuntu 22.04 为基线）。
+
+安装包会写入 udev 规则，让你的用户无需 `sudo` 即可访问 `/dev/hidraw*`、`/dev/uinput` 以及 Logitech 鼠标的 `/dev/input/event*` 节点。安装脚本会尽力为当前用户启用并启动后台 agent；手动安装包后可运行：
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-手动 / 源码安装以及无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
+固定版本、源码安装、完整 NixOS 选项以及无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
 
 ### Windows
 
