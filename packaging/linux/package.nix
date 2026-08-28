@@ -31,6 +31,7 @@
   git,
   pkg-config,
   patchelf,
+  protobuf,
   versionCheckHook,
   fontconfig,
   freetype,
@@ -120,6 +121,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     patchelf
+    protobuf # openlogi-flow generates its wire types during the build
     rustPlatform.bindgenHook # `media` (a gpui dep) runs bindgen — needs libclang
   ];
 
