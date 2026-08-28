@@ -177,7 +177,7 @@ fn print_usage() {
                   BrowserBack BrowserForward NewTab CloseTab ReopenTab\n\
                   NextTab PrevTab ReloadPage\n\
                   MissionControl AppExpose PreviousDesktop NextDesktop\n\
-                  ShowDesktop LaunchpadShow\n\
+                  ShowDesktop LaunchpadShow SmartZoom\n\
                   LockScreen Screenshot\n\
                   PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume\n\
                   CycleDpiPresets ToggleSmartShift\n\
