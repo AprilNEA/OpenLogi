@@ -311,8 +311,15 @@ impl ActionDispatcher {
     }
 
     /// Queue one function-key down edge without blocking the hook callback.
-    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> bool {
-        self.buttons.try_hook_key_down(keycode, action).is_some()
+    pub(crate) fn try_hook_key_down(
+        &self,
+        keycode: u16,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> bool {
+        self.buttons
+            .try_hook_key_down(keycode, action, target)
+            .is_some()
     }
 
     /// Queue one function-key up edge without blocking the hook callback.
