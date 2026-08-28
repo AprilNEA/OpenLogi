@@ -30,6 +30,7 @@ zbus = "5"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { workspace = true, features = ["highsierra"] }
 core-foundation = { workspace = true }
+foreign-types = "0.5"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = [
   "NSEvent",
@@ -42,6 +43,7 @@ objc2-core-graphics = { workspace = true, features = ["CGEvent"] }
 objc2-foundation = { workspace = true }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement", "AXError", "libc"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString"] }
+mach2 = "0.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
