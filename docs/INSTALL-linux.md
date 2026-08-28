@@ -14,6 +14,49 @@
 - `systemd` + `udev` (standard on Ubuntu, Fedora, Arch, Debian, openSUSE, …).
 - GLIBC 2.35 or newer for the pre-built packages (Ubuntu 22.04 baseline).
 
+## Install a release package
+
+Download the installer to a file over HTTPS, inspect it, and then run it. Do
+not use `curl | sh`:
+
+```sh
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --fail --location --silent --show-error \
+  --retry 3 --retry-connrefused \
+  --output openlogi-install.sh \
+  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
+less openlogi-install.sh
+sh openlogi-install.sh
+rm openlogi-install.sh
+```
+
+By default the script resolves the latest GitHub release, detects
+`x86_64`/`aarch64` and apt, dnf, yum, zypper, rpm, or pacman, then downloads
+the exact matching `.deb`, `.rpm`, or `.pkg.tar.zst`. It downloads that
+release's `SHA256SUMS`, extracts exactly one entry for the selected file, and
+verifies it before invoking only the package-manager command with `sudo`.
+nFPM's package scripts remain responsible for reloading udev and desktop/icon
+caches. Run the installer as your normal user; it refuses an invocation of the
+whole script through `sudo`.
+
+Useful options:
+
+```sh
+# Pin a release (an optional leading v is accepted):
+sh openlogi-install.sh --version "$VERSION"
+
+# Override detection, verify without installing, or leave the agent stopped:
+sh openlogi-install.sh --package-manager zypper
+sh openlogi-install.sh --dry-run
+sh openlogi-install.sh --no-start
+```
+
+The installer enables and starts `openlogi-agent.service` for the current user
+when systemd is available; failure to reach the user service manager does not
+roll back an otherwise successful package installation. Tagged releases that
+include the installer also attach `install.sh`, `install.sh.minisig`, and a
+`SHA256SUMS` entry for manual verification.
+
 ## NixOS
 
 The repository Flake provides a package and a NixOS module for x86_64 and
@@ -67,7 +110,8 @@ from source instead, use the stable Rust toolchain:
 ```sh
 git clone https://github.com/AprilNEA/OpenLogi
 cd OpenLogi
-cargo build --release -p openlogi -p openlogi-desktop -p openlogi-agent
+cargo build --release \
+  -p openlogi -p openlogi-desktop -p openlogi-overlay -p openlogi-agent
 ```
 
 Four production executables land in `target/release/`:
@@ -136,19 +180,23 @@ sudo usermod -aG input "$USER"
 # Re-login for the group change to take effect.
 ```
 
-## Install with the script
+## Install from source with the script
 
-The `packaging/linux/install.sh` script copies the binaries, udev rules,
-systemd unit, desktop entry, and icon to system paths, then reloads `udevadm`.
+From a repository checkout, `--from-source` copies the four local
+`target/release` binaries, udev rules, systemd unit, desktop entry, and icon to
+system paths, then reloads udev and desktop/icon caches. The script requests
+`sudo` only for system files and lifecycle commands; do not run the whole
+installer with `sudo`. `--prefix` applies only to this mode.
 
 ```sh
 # From the repo root, after building:
-sudo packaging/linux/install.sh
+packaging/linux/install.sh --from-source
 # Or to a custom prefix (e.g. /usr):
-packaging/linux/install.sh --prefix=/usr
+packaging/linux/install.sh --from-source --prefix=/usr
 ```
 
-To remove:
+To remove a source installation (release packages should be removed through
+their package manager):
 
 ```sh
 packaging/linux/uninstall.sh

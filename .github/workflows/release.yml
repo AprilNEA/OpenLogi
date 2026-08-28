@@ -176,6 +176,10 @@ jobs:
 
       - name: Generate checksums
         run: |
+          # Ship the repository installer beside the packages. Keeping this
+          # copy step in publish means the bytes hashed, signed, and attached
+          # are exactly the reviewed script from the release tag.
+          install -m755 packaging/linux/install.sh dist/install.sh
           cd dist
           # The DMGs are the release gate — fail loudly if none arrived (with
           # nullglob alone, sha256sum with zero args would silently hash stdin).
@@ -185,14 +189,14 @@ jobs:
           # hashed alone. The Windows portable artifact is a zip of the GUI +
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+          sha256sum -- install.sh *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
-      # and the Linux deb/rpm are all best-effort — only the DMGs, SHA256SUMS
-      # and the .minisig set are guaranteed by the publish gate — so record
-      # what actually arrived. This is what lets a failing Windows or Linux
-      # leg degrade to a smaller release instead of blocking the macOS one.
+      # and the Linux deb/rpm are all best-effort — only install.sh, the DMGs,
+      # SHA256SUMS and the .minisig set are guaranteed by the publish gate — so
+      # record what actually arrived. This is what lets a failing Windows or
+      # Linux leg degrade to a smaller release instead of blocking the macOS one.
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
@@ -262,15 +266,14 @@ jobs:
           # newline mangled to a space — see the GitHub App key note above).
           # `tr -d` drops any wrapping whitespace before decoding.
           printf '%s' "$OPENLOGI_UPDATE_MINISIGN_SECRET_KEY" | tr -d '[:space:]' | base64 -d > "$key_file"
-          # The Windows binaries and Linux packages get the same minisign
-          # treatment as the DMGs: manual verification today, and the future
-          # auto-updaters need the detached signatures to exist for every
-          # shipped version.
+          # The installer, Windows binaries, and Linux packages get the same
+          # minisign treatment as the DMGs: manual verification today, and the
+          # future auto-updaters need detached signatures for every artifact.
           # nullglob: the zip/msi/deb/rpm sets are best-effort per arch leg, so
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+          for artifact in dist/install.sh dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -331,6 +334,7 @@ jobs:
         with:
           body_path: .release/RELEASE_NOTES.md
           files: |
+            dist/install.sh
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
