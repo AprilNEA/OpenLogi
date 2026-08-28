@@ -262,17 +262,19 @@ icon) are declared in `packaging/linux/nfpm.yaml`.
 `packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
 packages, not a second package lifecycle. Its online mode maps the host and
 package manager to the release naming contract
-`openlogi-v<version>-linux-<amd64|arm64>.<format>`, verifies only that file's
-`SHA256SUMS` entry, and then delegates installation to apt, dnf, yum, zypper,
-rpm, or pacman. The nFPM post-install script remains the owner of udev and
-desktop/icon cache reloads. The explicit `--from-source` mode preserves the
-checkout installer for the four local `target/release` binaries and shared
-resources.
+`openlogi-v<version>-linux-<amd64|arm64>.<format>`, authenticates that file's
+detached signature against its embedded minisign public key, verifies only that
+file's `SHA256SUMS` entry, and then delegates installation to apt, dnf, yum,
+zypper, rpm, or pacman. The embedded public key must stay in sync with
+`OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`. The nFPM post-install script remains the
+owner of udev and desktop/icon cache reloads. The explicit `--from-source` mode
+preserves the checkout installer for the four local `target/release` binaries
+and shared resources.
 
 Run the mocked online/source smoke suite directly with dash; it exercises
 latest and pinned versions, both architectures, every package-manager mapping,
-checksum rejection before sudo, dry-run, and the source resource set without
-network or system writes:
+signature and checksum rejection before sudo, dry-run, and the source resource
+set without network or system writes:
 
 ```sh
 dash -n packaging/linux/install.sh
@@ -285,12 +287,13 @@ commands.
 
 ## Release updater publishing
 
-Tagged releases attach installers and `SHA256SUMS` to GitHub Releases for
-manual downloads. Before checksums and signatures are generated, the release
-workflow copies `packaging/linux/install.sh` to `dist/install.sh`; that exact
-file is listed in `SHA256SUMS`, signed as `install.sh.minisig`, and attached as
-a release asset. The workflow also publishes the artifacts to Cloudflare R2
-and writes a static updater manifest at:
+Tagged releases attach artifacts and `SHA256SUMS` to GitHub Releases for manual
+downloads. When both Linux build legs succeed, the release workflow copies
+`packaging/linux/install.sh` to `dist/install.sh`; that exact file is listed in
+`SHA256SUMS`, signed as `install.sh.minisig`, and attached as a release asset.
+Partial releases without a complete Linux package set omit the installer. The
+workflow also publishes the artifacts to Cloudflare R2 and writes a static
+updater manifest at:
 
 ```text
 ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json

@@ -115,7 +115,7 @@ sh openlogi-install.sh
 rm openlogi-install.sh
 ```
 
-脚本会检测 apt、dnf、yum、zypper、rpm 或 pacman，精确选择当前机器所需的 `.deb`、`.rpm` 或 `.pkg.tar.zst`，并在使用 `sudo` 调用包管理器前，根据 release 的 `SHA256SUMS` 验证该文件。请以普通用户运行脚本，不要用 `sudo` 启动整个脚本。默认安装最新版本；需要时可使用 `--version`、`--package-manager`、`--no-start` 或 `--dry-run`。
+脚本会检测 apt、dnf、yum、zypper、rpm 或 pacman，精确选择当前机器所需的 `.deb`、`.rpm` 或 `.pkg.tar.zst`，使用内嵌的 OpenLogi minisign 公钥验证其分离签名，并在使用 `sudo` 调用包管理器前根据 release 的 `SHA256SUMS` 验证该文件。请先通过发行版安装 `minisign`，并以普通用户运行脚本，不要用 `sudo` 启动整个脚本。默认安装最新版本；需要时可使用 `--version`、`--package-manager`、`--no-start` 或 `--dry-run`。
 
 安装包同时提供 `x86_64`/`amd64` 与 `arm64`/`aarch64` 两种架构，要求 GLIBC 2.35 或更高版本（以 Ubuntu 22.04 为基线）。
 

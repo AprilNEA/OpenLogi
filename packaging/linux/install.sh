@@ -7,6 +7,9 @@ set -eu
 REPOSITORY=AprilNEA/OpenLogi
 GITHUB_URL=https://github.com
 RELEASES_URL="${GITHUB_URL}/${REPOSITORY}/releases"
+# Public trust anchor for release package signatures. Keep this in sync with
+# OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the release publishing configuration.
+MINISIGN_PUBLIC_KEY=RWRRkFtw+rqkvTlCTGKUszSE5dX9CK1teaQD45jO4P9rYlWLO4/nHVUF
 
 MODE=release
 VERSION=latest
@@ -40,8 +43,9 @@ Usage:
   $0 --from-source [--prefix PREFIX] [OPTIONS]
 
 Install the latest OpenLogi release package for this Linux distribution.
-Release packages are downloaded from GitHub and verified against the exact
-entry in SHA256SUMS before the package manager is invoked with sudo.
+Release packages are downloaded from GitHub, authenticated with the embedded
+minisign public key, and verified against the exact entry in SHA256SUMS before
+the package manager is invoked with sudo. The minisign command is required.
 Run this script as your normal user, not with sudo.
 
 Options:
@@ -311,6 +315,7 @@ install_release() {
   need_command curl
   need_command grep
   need_command awk
+  need_command minisign
   need_command sha256sum
   need_command id
 
@@ -321,6 +326,7 @@ install_release() {
 
   PACKAGE_NAME="openlogi-${RELEASE_TAG}-linux-${PACKAGE_ARCH}.${PACKAGE_EXTENSION}"
   PACKAGE_PATH="${TEMP_DIR}/${PACKAGE_NAME}"
+  SIGNATURE_PATH="${PACKAGE_PATH}.minisig"
   CHECKSUMS_PATH="${TEMP_DIR}/SHA256SUMS"
   CHECK_PATH="${TEMP_DIR}/SHA256SUMS.selected"
   RELEASE_DOWNLOAD_URL="${RELEASES_URL}/download/${RELEASE_TAG}"
@@ -328,7 +334,11 @@ install_release() {
   printf 'Downloading OpenLogi %s for %s (%s)...\n' \
     "$VERSION" "$PACKAGE_ARCH" "$PACKAGE_MANAGER"
   curl_download "$PACKAGE_PATH" "${RELEASE_DOWNLOAD_URL}/${PACKAGE_NAME}"
+  curl_download "$SIGNATURE_PATH" "${RELEASE_DOWNLOAD_URL}/${PACKAGE_NAME}.minisig"
   curl_download "$CHECKSUMS_PATH" "${RELEASE_DOWNLOAD_URL}/SHA256SUMS"
+
+  minisign -V -P "$MINISIGN_PUBLIC_KEY" -m "$PACKAGE_PATH" -x "$SIGNATURE_PATH" ||
+    die "signature verification failed for $PACKAGE_NAME"
 
   awk -v file="$PACKAGE_NAME" '
     $2 == file && $1 ~ /^[0-9A-Fa-f]+$/ && length($1) == 64 {
@@ -341,7 +351,7 @@ install_release() {
 
   (cd "$TEMP_DIR" && sha256sum -c "${CHECK_PATH##*/}") ||
     die "checksum verification failed for $PACKAGE_NAME"
-  printf 'Verified %s before privilege escalation.\n' "$PACKAGE_NAME"
+  printf 'Authenticated and verified %s before privilege escalation.\n' "$PACKAGE_NAME"
 
   install_release_package
   start_agent

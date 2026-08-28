@@ -125,11 +125,12 @@ rm openlogi-install.sh
 ```
 
 The script detects apt, dnf, yum, zypper, rpm, or pacman; selects the exact
-`.deb`, `.rpm`, or `.pkg.tar.zst` for the machine; and verifies that package's
-entry in the release `SHA256SUMS` before invoking the package manager with
-`sudo`. Run the script as your normal user, not with `sudo`. It installs the
-latest release by default. Use `--version`,
-`--package-manager`, `--no-start`, or `--dry-run` when needed.
+`.deb`, `.rpm`, or `.pkg.tar.zst` for the machine; authenticates its detached
+signature with OpenLogi's embedded minisign public key; and verifies its entry
+in the release `SHA256SUMS` before invoking the package manager with `sudo`.
+Install `minisign` through your distribution first. Run the script as your
+normal user, not with `sudo`. It installs the latest release by default. Use
+`--version`, `--package-manager`, `--no-start`, or `--dry-run` when needed.
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
