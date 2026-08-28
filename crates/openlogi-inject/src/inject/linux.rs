@@ -281,6 +281,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    KeyCode::KEY_BRIGHTNESSUP, KeyCode::KEY_BRIGHTNESSDOWN,
     // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
