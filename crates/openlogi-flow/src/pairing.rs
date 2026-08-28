@@ -220,17 +220,19 @@ impl PairingSession {
     /// key and atomically moves the session to [`PairingState::Paired`].
     pub fn confirm_local(
         &mut self,
+        now: Instant,
         store: &mut impl PeerKeyStore,
     ) -> Result<proto::PairResult, PairingError> {
-        self.confirm(ConfirmationSide::Local, store)
+        self.confirm(ConfirmationSide::Local, now, store)
     }
 
     /// Handles a peer `PairConfirm` and returns its idempotent RPC outcome.
     pub fn receive_confirm(
         &mut self,
+        now: Instant,
         store: &mut impl PeerKeyStore,
     ) -> Result<proto::PairOutcome, PairingError> {
-        let result = self.confirm(ConfirmationSide::Peer, store)?;
+        let result = self.confirm(ConfirmationSide::Peer, now, store)?;
         Ok(proto::PairOutcome {
             result: result.into(),
             ..Default::default()
@@ -328,6 +330,7 @@ impl PairingSession {
     fn confirm(
         &mut self,
         side: ConfirmationSide,
+        now: Instant,
         store: &mut impl PeerKeyStore,
     ) -> Result<proto::PairResult, PairingError> {
         if matches!(self.phase, Phase::Paired) {
@@ -343,6 +346,10 @@ impl PairingSession {
         let Phase::Prompted(mut prompted) = self.phase else {
             return Err(PairingError::InvalidTransition(self.state()));
         };
+        if now >= prompted.deadline {
+            self.terminal(Phase::TimedOut);
+            return Ok(proto::PairResult::Timeout);
+        }
         match side {
             ConfirmationSide::Local => prompted.local_confirmed = true,
             ConfirmationSide::Peer => prompted.peer_confirmed = true,
@@ -417,17 +424,18 @@ mod tests {
 
     #[test]
     fn both_confirms_persist_once_and_pair() {
+        let now = Instant::now();
         let mut session = session();
         let mut store = MemoryStore::default();
-        session.receive_start(Instant::now(), None).unwrap();
+        session.receive_start(now, None).unwrap();
 
         assert_eq!(
-            session.confirm_local(&mut store).unwrap(),
+            session.confirm_local(now, &mut store).unwrap(),
             proto::PairResult::PendingLocal
         );
         assert_eq!(
             session
-                .receive_confirm(&mut store)
+                .receive_confirm(now, &mut store)
                 .unwrap()
                 .result
                 .as_known(),
@@ -439,13 +447,39 @@ mod tests {
 
         assert_eq!(
             session
-                .receive_confirm(&mut store)
+                .receive_confirm(now, &mut store)
                 .unwrap()
                 .result
                 .as_known(),
             Some(proto::PairResult::Paired)
         );
         assert_eq!(store.0.len(), 1);
+    }
+
+    #[test]
+    fn confirmation_at_deadline_times_out_without_persisting() {
+        let now = Instant::now();
+        let mut session = session();
+        let mut store = MemoryStore::default();
+        session
+            .receive_start(now, Some(Duration::from_secs(1)))
+            .unwrap();
+
+        assert_eq!(
+            session.confirm_local(now, &mut store).unwrap(),
+            proto::PairResult::PendingLocal
+        );
+        assert_eq!(
+            session
+                .receive_confirm(now + Duration::from_secs(1), &mut store)
+                .unwrap()
+                .result
+                .as_known(),
+            Some(proto::PairResult::Timeout)
+        );
+        assert_eq!(session.state(), PairingState::TimedOut);
+        assert!(store.0.is_empty());
+        assert!(session.sas_code().is_none());
     }
 
     #[test]
@@ -532,13 +566,14 @@ mod tests {
 
     #[test]
     fn repeated_peer_confirm_replays_terminal_outcome() {
+        let now = Instant::now();
         let mut session = session();
         let mut store = MemoryStore::default();
-        session.receive_start(Instant::now(), None).unwrap();
+        session.receive_start(now, None).unwrap();
         session.reject().unwrap();
         assert_eq!(
             session
-                .receive_confirm(&mut store)
+                .receive_confirm(now, &mut store)
                 .unwrap()
                 .result
                 .as_known(),

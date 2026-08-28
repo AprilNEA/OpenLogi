@@ -239,7 +239,7 @@ async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult 
     let mut first_store = MemoryKeyStore::default();
     let mut second_store = MemoryKeyStore::default();
     assert_eq!(
-        first_session.confirm_local(&mut first_store)?,
+        first_session.confirm_local(Instant::now(), &mut first_store)?,
         proto::PairResult::PendingLocal
     );
     let first_confirm = message_envelope(FrameKind::PairConfirm, &proto::PairConfirm::default())?;
@@ -247,7 +247,7 @@ async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult 
         let RpcEvent::Request(request) = pair.second.accept_rpc().await? else {
             return Err("first PairConfirm was rejected".into());
         };
-        let outcome = second_session.receive_confirm(&mut second_store)?;
+        let outcome = second_session.receive_confirm(Instant::now(), &mut second_store)?;
         request
             .respond(message_envelope(FrameKind::PairOutcome, &outcome)?)
             .await?;
@@ -258,7 +258,7 @@ async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult 
     first_session.receive_outcome(&decode::<proto::PairOutcome>(&outcome?)?)?;
 
     assert_eq!(
-        second_session.confirm_local(&mut second_store)?,
+        second_session.confirm_local(Instant::now(), &mut second_store)?,
         proto::PairResult::Paired
     );
     let second_confirm = message_envelope(FrameKind::PairConfirm, &proto::PairConfirm::default())?;
@@ -266,7 +266,7 @@ async fn full_pairing_ceremony_agrees_on_sas_and_promotes_trust() -> TestResult 
         let RpcEvent::Request(request) = pair.first.accept_rpc().await? else {
             return Err("second PairConfirm was rejected".into());
         };
-        let outcome = first_session.receive_confirm(&mut first_store)?;
+        let outcome = first_session.receive_confirm(Instant::now(), &mut first_store)?;
         request
             .respond(message_envelope(FrameKind::PairOutcome, &outcome)?)
             .await?;

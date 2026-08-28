@@ -12,6 +12,7 @@ use std::{
     net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
     sync::{Arc, RwLock},
+    time::Instant,
 };
 
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
@@ -31,6 +32,7 @@ pub const DEFAULT_PORT: u16 = 42_424;
 const TXT_PUBLIC_KEY: &str = "pk";
 const TXT_PROTO_MIN: &str = "proto_min";
 const TXT_PROTO_MAX: &str = "proto_max";
+const MAX_MDNS_SERVICES: usize = 256;
 
 /// Future returned by a dynamically dispatched [`CandidateSource`].
 pub type CandidateFuture<'a> =
@@ -304,6 +306,7 @@ impl Drop for MdnsAdvertiser {
 struct DiscoveredService {
     record: MdnsRecord,
     addresses: BTreeSet<SocketAddr>,
+    last_resolved: Instant,
 }
 
 /// A continuously browsing mDNS candidate source.
@@ -508,10 +511,32 @@ fn update_resolved_service(
             _ => None,
         })
         .collect();
-    services.insert(
+    insert_discovered_service(
+        &mut services,
         service.get_fullname().to_owned(),
-        DiscoveredService { record, addresses },
+        DiscoveredService {
+            record,
+            addresses,
+            last_resolved: Instant::now(),
+        },
     );
+}
+
+fn insert_discovered_service(
+    services: &mut BTreeMap<String, DiscoveredService>,
+    fullname: String,
+    service: DiscoveredService,
+) {
+    if services.len() >= MAX_MDNS_SERVICES
+        && !services.contains_key(&fullname)
+        && let Some(oldest) = services
+            .iter()
+            .min_by_key(|(name, service)| (service.last_resolved, *name))
+            .map(|(name, _)| name.clone())
+    {
+        services.remove(&oldest);
+    }
+    services.insert(fullname, service);
 }
 
 fn public_key_hex(public_key: PublicKey) -> String {
@@ -591,6 +616,38 @@ mod tests {
         let record = MdnsRecord::new(PublicKey::new([1; 32]), 2, 4).unwrap();
         assert!(record.overlaps(1, 2));
         assert!(!record.overlaps(5, 6));
+    }
+
+    #[test]
+    fn mdns_cache_evicts_oldest_service_at_capacity() {
+        let now = Instant::now();
+        let record = MdnsRecord::new(PublicKey::new([1; 32]), 1, 1).unwrap();
+        let mut services = BTreeMap::new();
+        for index in 0..MAX_MDNS_SERVICES {
+            insert_discovered_service(
+                &mut services,
+                format!("service-{index}"),
+                DiscoveredService {
+                    record,
+                    addresses: BTreeSet::new(),
+                    last_resolved: now + Duration::from_millis(index as u64),
+                },
+            );
+        }
+
+        insert_discovered_service(
+            &mut services,
+            "new-service".to_owned(),
+            DiscoveredService {
+                record,
+                addresses: BTreeSet::new(),
+                last_resolved: now + Duration::from_secs(1),
+            },
+        );
+
+        assert_eq!(services.len(), MAX_MDNS_SERVICES);
+        assert!(!services.contains_key("service-0"));
+        assert!(services.contains_key("new-service"));
     }
 
     #[tokio::test]
