@@ -17,6 +17,14 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::HoldShortcut(combo) => {
             tr!("actions.hold_shortcut", chord => combo.rendered_label())
         }
+        Action::TapKeyHoldingModifiers(combo) => match combo.rendered_modifiers() {
+            Some(modifiers) => tr!(
+                "actions.hold_modifiers_tap_key",
+                modifiers => modifiers,
+                key => combo.rendered_key()
+            ),
+            None => tr!("actions.tap_key", key => combo.rendered_key()),
+        },
         Action::TypeText(text) => tr!("actions.type_text_action", text => text.clone()),
         Action::RunAppleScript(_) => tr!("actions.run_applescript_heading"),
         Action::RunShellCommand(_) => tr!("actions.run_shell_command_heading"),

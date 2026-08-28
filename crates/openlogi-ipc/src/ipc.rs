@@ -68,7 +68,9 @@ pub use succession::Identity;
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
 /// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
-pub const PROTOCOL_VERSION: u32 = 35;
+/// v36: `Action::TapKeyHoldingModifiers` appended for switcher-style output
+///      that holds the modifiers and taps the ordinary key once.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
