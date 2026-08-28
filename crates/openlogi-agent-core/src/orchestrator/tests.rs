@@ -84,6 +84,46 @@ fn hook_response_times_join_direct_transport_identity() {
     );
 }
 
+#[test]
+fn hook_response_times_join_single_pointer_receiver_identity() {
+    let config_key = "receiver:82839805:slot:1";
+    let mut config = Config::default();
+    config.set_gesture_mode(config_key, ButtonId::Back, true);
+    config.set_gesture_response_time(config_key, ButtonId::Back, GestureResponseTime::DELIBERATE);
+    let mut inventory = bolt_inventory([0x6b, 0xe9, 0xd3, 0x00]);
+    inventory.receiver.event_source_id = Some("receiver-native-id".to_string());
+    let devices = build_devices(&config, &[inventory], &[]);
+    let mut orch = orchestrator(config);
+    orch.devices = devices;
+
+    let maps = orch.hook_maps_for(Some(config_key), None);
+
+    assert_eq!(
+        maps.gesture_response_times_by_source
+            .get(&EventDeviceId::new("receiver-native-id").unwrap())
+            .and_then(|times| times.get(&ButtonId::Back)),
+        Some(&GestureResponseTime::DELIBERATE)
+    );
+}
+
+#[test]
+fn shared_receiver_identity_is_not_assigned_to_multiple_pointer_devices() {
+    let mut inventory = bolt_inventory([0x6b, 0xe9, 0xd3, 0x00]);
+    inventory.receiver.event_source_id = Some("receiver-native-id".to_string());
+    let mut second = inventory.paired[0].clone();
+    second.slot = 2;
+    second.model_info.as_mut().unwrap().unit_id = [0x6b, 0xe9, 0xd3, 0x01];
+    inventory.paired.push(second);
+
+    let devices = build_devices(&Config::default(), &[inventory], &[]);
+
+    assert!(
+        devices
+            .iter()
+            .all(|device| device.event_source_id.is_none())
+    );
+}
+
 fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
     AgentDevice {
         config_key: key.to_string(),

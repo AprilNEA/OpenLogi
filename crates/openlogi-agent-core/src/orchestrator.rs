@@ -985,6 +985,24 @@ fn build_devices(
 ) -> Vec<AgentDevice> {
     let mut devices = Vec::new();
     for inv in inventories {
+        // A receiver source id names the receiver, not one pairing slot. It is
+        // unambiguous only when one pointer device can emit hooked mouse events.
+        let event_source_slot = if inv
+            .paired
+            .iter()
+            .any(|paired| paired.slot == DIRECT_DEVICE_INDEX)
+        {
+            Some(DIRECT_DEVICE_INDEX)
+        } else {
+            let mut pointers = inv
+                .paired
+                .iter()
+                .filter(|paired| matches!(paired.kind, DeviceKind::Mouse | DeviceKind::Trackball));
+            match (pointers.next(), pointers.next()) {
+                (Some(pointer), None) => Some(pointer.slot),
+                _ => None,
+            }
+        };
         for paired in &inv.paired {
             let Some(model) = paired.model_info.as_ref() else {
                 continue;
@@ -1014,7 +1032,7 @@ fn build_devices(
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
-                event_source_id: if paired.slot == DIRECT_DEVICE_INDEX {
+                event_source_id: if event_source_slot == Some(paired.slot) {
                     inv.receiver.event_source_id.clone()
                 } else {
                     None
