@@ -243,7 +243,7 @@ pub struct ReceiverInfo {
     /// Platform-reported serial, when one is exposed. Deliberately excluded
     /// from diagnostics (see [`crate::diagnostics::ReceiverDiag`]).
     pub unique_id: Option<String>,
-    /// Process-local OS event-source identity for a direct device.
+    /// Process-local OS event-source identity for this HID node.
     #[serde(skip)]
     pub event_source_id: Option<String>,
 }
