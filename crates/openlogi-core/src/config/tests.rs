@@ -70,8 +70,7 @@ peer_channels = { self = 0, "work-laptop" = 1 }
     };
     assert_eq!(config.flow, flow);
 
-    let written = toml::to_string_pretty(&config).expect("serialize Flow config");
-    let reparsed: Config = toml::from_str(&written).expect("reparse Flow config");
+    let reparsed = write_and_read(&config);
     assert_eq!(reparsed.flow, flow);
 }
 
