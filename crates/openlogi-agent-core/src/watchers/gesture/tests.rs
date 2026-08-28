@@ -77,6 +77,45 @@ fn settles_a_draining_session_quietly() {
     );
 }
 
+#[tokio::test]
+async fn input_accepted_during_restoration_precedes_session_done() {
+    let id = session_id(7);
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let (session_tx, session_rx) = mpsc::unbounded_channel();
+    let listener_sink = session_tx.clone();
+    drop(session_tx);
+    let forward_task = spawn_input_forwarder(id.clone(), session_rx, events.clone());
+    let completion = tokio::spawn(report_done_after_inputs(forward_task, events, id.clone()));
+    let (restored_tx, restored_rx) = oneshot::channel();
+    let listener = tokio::spawn(async move {
+        listener_sink
+            .send(CapturedInput::ButtonPulse(ButtonId::DpiToggle))
+            .expect("the capture forwarder should remain open");
+        let _ = restored_rx.await;
+        drop(listener_sink);
+    });
+
+    match event_rx.recv().await {
+        Some(SessionEvent::Input(input)) => {
+            assert_eq!(input.session, id);
+            assert_eq!(input.input, CapturedInput::ButtonPulse(ButtonId::DpiToggle));
+        }
+        _ => panic!("captured input must be forwarded first"),
+    }
+    assert!(
+        event_rx.try_recv().is_err(),
+        "Done must wait while restoration still holds the listener"
+    );
+
+    restored_tx.send(()).expect("restore signal should be open");
+    listener.await.expect("listener task should finish");
+    completion.await.expect("completion task should finish");
+    match event_rx.recv().await {
+        Some(SessionEvent::Done(done)) => assert_eq!(done.session, id),
+        _ => panic!("Done must follow the last accepted input"),
+    }
+}
+
 #[test]
 fn accepts_inputs_from_the_current_session_until_teardown_finishes() {
     assert!(dispatch_plan_for(&session_id(7), Some(&live_session_with_epoch(7))).is_some());

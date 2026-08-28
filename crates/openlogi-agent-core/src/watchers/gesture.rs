@@ -189,6 +189,36 @@ struct SessionChannels {
     registry: openlogi_hid::ChannelRegistry,
 }
 
+/// Forward one capture session's inputs onto the manager's ordered event
+/// channel. The sender closes only after the device listener has been dropped.
+fn spawn_input_forwarder(
+    session: HidppSessionId,
+    mut inputs: mpsc::UnboundedReceiver<CapturedInput>,
+    events: mpsc::UnboundedSender<SessionEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(input) = inputs.recv().await {
+            let _ = events.send(SessionEvent::Input(CapturedEvent {
+                session: session.clone(),
+                input,
+            }));
+        }
+    })
+}
+
+/// Report completion only after every input accepted by the device listener
+/// has reached the manager's event channel.
+async fn report_done_after_inputs(
+    forward_task: tokio::task::JoinHandle<()>,
+    events: mpsc::UnboundedSender<SessionEvent>,
+    session: HidppSessionId,
+) {
+    if let Err(error) = forward_task.await {
+        debug!(%error, "capture input forwarder ended unexpectedly");
+    }
+    let _ = events.send(SessionEvent::Done(SessionDone { session }));
+}
+
 /// What a capture-session manager should do with one session-completion
 /// report. Shared with the keyboard manager, which tracks its single session
 /// under the same rules.
@@ -219,8 +249,8 @@ fn on_done(done_session: &HidppSessionId, live: Option<&RunningSession>) -> Done
     }
 }
 
-/// Return the immutable plan that owns an input from the currently tracked
-/// session. Deliberately stopped sessions remain admissible until their task
+/// Return the plan that owns an input from the currently tracked session.
+/// Deliberately stopped sessions remain admissible until their task
 /// reports that native firmware reporting has been restored. An exclusive
 /// request initiates that stop through reconciliation; it does not revoke the
 /// session's ownership while controls are still diverted.
@@ -413,17 +443,8 @@ fn spawn_session(
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
-    let (session_tx, mut session_rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let events = channels.events.clone();
-    let forward_id = id.clone();
-    let forward_task = tokio::spawn(async move {
-        while let Some(input) = session_rx.recv().await {
-            let _ = events.send(SessionEvent::Input(CapturedEvent {
-                session: forward_id.clone(),
-                input,
-            }));
-        }
-    });
+    let (session_tx, session_rx) = mpsc::unbounded_channel::<CapturedInput>();
+    let forward_task = spawn_input_forwarder(id.clone(), session_rx, channels.events.clone());
     let events = channels.events.clone();
     let done_id = id.clone();
     let session_route = target.route.clone();
@@ -444,12 +465,9 @@ fn spawn_session(
         {
             debug!(error = %e, "capture session ended");
         }
-        if let Err(error) = forward_task.await {
-            debug!(%error, "capture input forwarder ended unexpectedly");
-        }
         // Use the same channel as input so completion follows every diverted
         // report accepted before the listener was dropped.
-        let _ = events.send(SessionEvent::Done(SessionDone { session: done_id }));
+        report_done_after_inputs(forward_task, events, done_id).await;
     });
     RunningSession {
         id,

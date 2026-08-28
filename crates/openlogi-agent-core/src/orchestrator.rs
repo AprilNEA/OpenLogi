@@ -170,9 +170,10 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
-    /// Whether the OS mouse hook is currently installed. Device-owned
-    /// Back/Forward gestures need its pointer deltas, so their HID++ diversion
-    /// is published only while this is true.
+    /// Whether the OS mouse hook is currently installed. Back/Forward gesture
+    /// motion comes from HID++, but diversion is published only while the
+    /// broader mouse-remapping path is available so losing the hook leaves the
+    /// side buttons native.
     os_mouse_hook_available: bool,
     shared: SharedRuntime,
     /// The state the GUI observes. Every mutator below that changes one of its
@@ -434,9 +435,9 @@ impl Orchestrator {
 
     /// Publish whether the OS movement hook is currently usable.
     ///
-    /// HID++ Back/Forward diversion is coupled to this state because its
-    /// gesture accumulator receives movement from the hook. Other HID++-only
-    /// controls do not depend on Accessibility and remain captured.
+    /// HID++ Back/Forward diversion follows this state as a fail-open policy:
+    /// if the mouse-remapping hook is unavailable, side buttons remain native.
+    /// Other HID++-only controls remain captured independently.
     pub fn set_os_mouse_hook_available(&mut self, available: bool) {
         if self.os_mouse_hook_available == available {
             return;

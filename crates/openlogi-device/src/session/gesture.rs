@@ -17,7 +17,6 @@
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
-use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hidpp::{
@@ -389,29 +388,23 @@ async fn run_capture_session_on(
     {
         *slot = None;
     }
-    drop_listener_after(listener, async {
-        if channel_unusable {
-            // A dead channel would burn a timeout per write; a superseded
-            // channel must not restore controls underneath its replacement.
-            // Either way, the next session re-arms the requested diverts on
-            // the current path.
-            debug!(
-                index = device_index,
-                "skipping disarm on an unusable channel"
-            );
-        } else {
-            armed.disarm().await;
-        }
-    })
-    .await;
+    if channel_unusable {
+        // A dead channel would burn a timeout per write; a superseded channel
+        // must not restore controls underneath its replacement. Either way,
+        // the next session re-arms the requested diverts on the current path.
+        debug!(
+            index = device_index,
+            "skipping disarm on an unusable channel"
+        );
+    } else {
+        armed.disarm().await;
+    }
+    // Keep accepting reports until native firmware delivery is restored. The
+    // listener owns the final sink sender, so dropping it also lets the agent
+    // forwarder drain before publishing session completion.
+    drop(listener);
     debug!(index = device_index, "control capture stopped");
     Ok(())
-}
-
-/// Keep diverted reports deliverable until firmware teardown has finished.
-async fn drop_listener_after<T>(listener: T, teardown: impl Future<Output = ()>) {
-    teardown.await;
-    drop(listener);
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.

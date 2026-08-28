@@ -23,39 +23,6 @@ fn reporting(
     }
 }
 
-#[tokio::test]
-async fn capture_listener_outlives_native_reporting_restore() {
-    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
-
-    impl Drop for DropProbe {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (restored_tx, restored_rx) = oneshot::channel();
-    let task = tokio::spawn(drop_listener_after(
-        DropProbe(Arc::clone(&dropped)),
-        async move {
-            let _ = restored_rx.await;
-        },
-    ));
-
-    tokio::task::yield_now().await;
-    assert!(
-        !dropped.load(std::sync::atomic::Ordering::Relaxed),
-        "the listener must remain installed while native reporting is still diverted"
-    );
-
-    restored_tx.send(()).expect("restore signal should be open");
-    task.await.expect("listener-retirement task should finish");
-    assert!(
-        dropped.load(std::sync::atomic::Ordering::Relaxed),
-        "the listener may be removed after native reporting is restored"
-    );
-}
-
 /// A control that was *already* diverted when the session armed it — an agent
 /// killed mid-session, or another Logitech app — must not be handed that state
 /// back. Replaying it leaves the button diverted with no listener: no OS event
