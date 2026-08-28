@@ -80,6 +80,13 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
 /// hotspot.y       = marker.y / 100 * mouse_h     // height ratio is 1:1
 /// ```
 ///
+/// The translation trusts `origin` only while it plausibly describes this
+/// PNG: the M720 Triathlon depot ships `origin` 396×396 against 1258×1920
+/// renders whose markers are normalized to the full height, so a wildly
+/// mismatched origin is dropped wholesale rather than mixed into a
+/// half-width/full-height coordinate system that compresses every hotspot
+/// into the centre strip.
+///
 /// Primary left/right clicks deliberately have no entry — Logi never
 /// exposes them as remappable (and Options+ doesn't either), so we don't
 /// invent markers for them.
@@ -92,6 +99,7 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
     let origin_w = asset
         .metadata
         .origin()
+        .filter(|o| origin_plausibly_matches_png(*o, asset.png_width, asset.png_height))
         .map_or(png_w, |o| o.width as f32)
         .min(png_w);
     let bbox_w_rendered = if png_w > 0. {
@@ -123,6 +131,35 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
         .collect();
 
     hotspots
+}
+/// Whether a depot's `origin` dimensions plausibly describe the PNG the
+/// hotspot math will translate into. Logi documents `origin` as the
+/// silhouette bbox inside a padded PNG, so it can legitimately be narrower
+/// on either axis — but a depot whose `origin` disagrees with the PNG by
+/// an order of magnitude (the M720 Triathlon ships 396×396 over
+/// 1228×1920 renders) was authored against a different canvas, and trusting
+/// it would compress every hotspot into a centre strip.
+///
+/// The check is deliberately loose: an `origin` within 2× of the PNG on
+/// each axis is accepted (padding is typically tens of percent, never a
+/// multiple), and an `origin` wider than the PNG is still accepted — the
+/// existing `.min(png_w)` clamp handles that case and its markers may be
+/// normalized to a wider bbox cropped off the render.
+fn origin_plausibly_matches_png(
+    origin: openlogi_assets::metadata::Origin,
+    png_width: u32,
+    png_height: u32,
+) -> bool {
+    if png_width == 0 || png_height == 0 || origin.width == 0 || origin.height == 0 {
+        return false;
+    }
+    // Ratio in either direction must stay within 2× on both axes.
+
+    let height_ok = origin.height * 2 >= png_height && png_height * 2 >= origin.height;
+    // Width wider than the PNG is clamped downstream, so only reject an
+    // origin implausibly narrower than the PNG.
+    let width_ok = origin.width * 2 >= png_width;
+    height_ok && width_ok
 }
 
 /// Lay labels out evenly down one or both sides of the mouse. A two-sided
@@ -247,6 +284,114 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
 mod tests {
     use super::*;
     use crate::features::mouse::hotspots::default_hotspots;
+    use openlogi_assets::metadata::{ImageEntry, Metadata, Origin};
+
+    fn asset_with(origin: (u32, u32), png: (u32, u32), marker: (f32, f32)) -> ResolvedAsset {
+        ResolvedAsset {
+            depot: "m720_triathlon".to_string(),
+            display_name: "M720 TRIATHLON".to_string(),
+            kind: None,
+            image_path: std::path::PathBuf::new(),
+            hero_image_path: None,
+            glow: None,
+            metadata: Metadata {
+                images: vec![
+                    ImageEntry {
+                        key: "device_image".to_string(),
+                        origin: Origin {
+                            width: origin.0,
+                            height: origin.1,
+                        },
+                        assignments: vec![],
+                    },
+                    ImageEntry {
+                        key: "device_buttons_image".to_string(),
+                        origin: Origin {
+                            width: origin.0,
+                            height: origin.1,
+                        },
+                        assignments: vec![openlogi_assets::metadata::Assignment {
+                            slot_name: "SLOT_NAME_MIDDLE_BUTTON".to_string(),
+                            marker: openlogi_assets::metadata::Point {
+                                x: marker.0,
+                                y: marker.1,
+                            },
+                            label: openlogi_assets::metadata::Direction { x: 0, y: 0 },
+                        }],
+                    },
+                ],
+            },
+            png_width: png.0,
+            png_height: png.1,
+        }
+    }
+
+    #[test]
+    fn plausible_origin_still_narrows_the_marker_bbox() {
+        // A normal depot: origin is the silhouette bbox, modestly narrower
+        // than the padded PNG, same height.
+        let asset = asset_with((1000, 1920), (1258, 1920), (50., 50.));
+        let hotspots = asset_hotspots_for_png(&asset, 200., 320.);
+        assert_eq!(hotspots.len(), 1);
+        let center = hotspots[0].center();
+        // bbox_w = 200 * 1000/1258 ≈ 159; x = (200-159)/2 + 0.5*159 ≈ 100.
+        assert!((center.0 - 100.).abs() < 2., "center.x = {}", center.0);
+        assert!((center.1 - 160.).abs() < 1., "center.y = {}", center.1);
+    }
+
+    #[test]
+    fn mismatched_origin_is_dropped_so_markers_keep_full_png_width() {
+        // The M720 Triathlon depot: origin 396×396 over a 1228×1920 PNG.
+        // Its markers are normalized to the full canvas (the tilt markers
+        // sit at x≈57/73.5, the wheel at y≈14-19), so the origin must not
+        // compress the X axis to 32% of the rendered width.
+        let asset = asset_with((396, 396), (1228, 1920), (73.5, 19.));
+        let hotspots = asset_hotspots_for_png(&asset, 200., 320.);
+        assert_eq!(hotspots.len(), 1);
+        let center = hotspots[0].center();
+        // With the origin dropped: x = 0.735 * 200 = 147, y = 0.19 * 320 ≈ 60.8.
+        assert!((center.0 - 147.).abs() < 1., "center.x = {}", center.0);
+        assert!((center.1 - 60.8).abs() < 1., "center.y = {}", center.1);
+    }
+
+    #[test]
+    fn origin_slightly_narrower_than_png_stays_trusted() {
+        assert!(origin_plausibly_matches_png(
+            Origin {
+                width: 1000,
+                height: 1920
+            },
+            1258,
+            1920
+        ));
+        // M720's bogus 396×396 against 1228×1920 is rejected.
+        assert!(!origin_plausibly_matches_png(
+            Origin {
+                width: 396,
+                height: 396
+            },
+            1228,
+            1920
+        ));
+        // An origin wider than the PNG (cropped bbox) is clamped downstream.
+        assert!(origin_plausibly_matches_png(
+            Origin {
+                width: 2000,
+                height: 1920
+            },
+            1258,
+            1920
+        ));
+        // No PNG dimensions → no basis to trust the origin.
+        assert!(!origin_plausibly_matches_png(
+            Origin {
+                width: 1000,
+                height: 1920
+            },
+            0,
+            0
+        ));
+    }
 
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
