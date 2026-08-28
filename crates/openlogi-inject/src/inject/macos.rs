@@ -97,8 +97,8 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::SelectAll => "Cmd+A",
         Shortcut::Find => "Cmd+F",
         Shortcut::Save => "Cmd+S",
-        // Cmd+[ / Cmd+] for Chrome and other apps. The action runtime first
-        // tries Safari's Accessibility toolbar path; this is its fallback.
+        // Cmd+[ / Cmd+] for Chrome and other apps. Safari navigation bypasses
+        // this table and targets its captured Accessibility toolbar button.
         Shortcut::BrowserBack => "Cmd+[",
         Shortcut::BrowserForward => "Cmd+]",
         Shortcut::NewTab => "Cmd+T",
@@ -751,8 +751,8 @@ mod ax_nav {
     pub(super) const AX_ERROR_SUCCESS: i32 = 0;
 }
 
-/// The AX attribute names [`find_button`] needs, bundled so its argument list
-/// does not grow with the tree depth it searches.
+/// The AX attribute names needed by [`find_button`], bundled so its argument
+/// list does not grow with the tree depth it searches.
 struct AxAttrs {
     role: core_foundation::string::CFStringRef,
     identifier: core_foundation::string::CFStringRef,
