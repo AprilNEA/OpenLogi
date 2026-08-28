@@ -1,6 +1,7 @@
 //! Firmware catalog apply, zone enumeration, and host-frame writers.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use hidpp::{
@@ -34,6 +35,30 @@ const COLOR_LED_EFFECTS_FEATURE: u16 = 0x8070;
 const MAX_COLOR_LED_EFFECT_ZONES: u8 = 4;
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
+static ZONE_EFFECT_SLOTS: LazyLock<Mutex<HashMap<String, HashMap<u8, HashMap<u16, u8>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn remember_zone_slot(route: &DeviceRoute, zone: u8, effect_id: u16, slot: u8) {
+    let Ok(mut cache) = ZONE_EFFECT_SLOTS.lock() else {
+        return;
+    };
+    cache
+        .entry(route.to_string())
+        .or_default()
+        .entry(zone)
+        .or_default()
+        .insert(effect_id, slot);
+}
+
+fn cached_zone_slot(route: &DeviceRoute, zone: u8, effect_id: EffectId) -> Option<u8> {
+    let cache = ZONE_EFFECT_SLOTS.lock().ok()?;
+    cache
+        .get(&route.to_string())?
+        .get(&zone)?
+        .get(&u16::from(effect_id))
+        .copied()
+}
+
 /// Outcome of a firmware lighting apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightingApply {
@@ -52,10 +77,12 @@ pub async fn read_lighting_info(
     audio_visualizer: bool,
 ) -> Result<LightingInfo, WriteError> {
     let device_index = route.device_index();
+    let fetch_route = route.clone();
     with_route(backend, route, move |channel| async move {
         read_lighting_info_on_channel(
             &channel,
             device_index,
+            &fetch_route,
             mouse,
             screen_sampler,
             audio_visualizer,
@@ -68,6 +95,7 @@ pub async fn read_lighting_info(
 /// [`read_lighting_info`] on an already-open channel.
 pub async fn read_lighting_info_on(
     shared: &SharedChannel,
+    route: &DeviceRoute,
     mouse: bool,
     screen_sampler: bool,
     audio_visualizer: bool,
@@ -75,6 +103,7 @@ pub async fn read_lighting_info_on(
     read_lighting_info_on_channel(
         shared.channel(),
         shared.device_index(),
+        route,
         mouse,
         screen_sampler,
         audio_visualizer,
@@ -85,11 +114,12 @@ pub async fn read_lighting_info_on(
 async fn read_lighting_info_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
+    route: &DeviceRoute,
     mouse: bool,
     screen_sampler: bool,
     audio_visualizer: bool,
 ) -> Result<LightingInfo, WriteError> {
-    let zones = match enumerate_color_led_zones(channel, index).await {
+    let zones = match enumerate_color_led_zones(channel, index, route).await {
         Ok(zones) => zones,
         Err(WriteError::FeatureUnsupported { .. }) => Vec::new(),
         Err(error) => return Err(error),
@@ -116,6 +146,7 @@ async fn read_lighting_info_on_channel(
 async fn enumerate_color_led_zones(
     channel: &Arc<HidppChannel>,
     index: u8,
+    route: &DeviceRoute,
 ) -> Result<Vec<LightingZone>, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
@@ -139,6 +170,7 @@ async fn enumerate_color_led_zones(
                 .await
                 .map_err(classify_lighting_error)?;
             let id = u16::from(effect.effect_id);
+            remember_zone_slot(route, zone_index, id, effect_index);
             if id != 0 && !firmware_effects.contains(&id) {
                 firmware_effects.push(id);
             }
@@ -161,8 +193,9 @@ pub async fn apply_lighting(
 ) -> Result<LightingApply, WriteError> {
     let device_index = route.device_index();
     let lighting = lighting.clone();
+    let fetch_route = route.clone();
     with_route(backend, route, move |channel| async move {
-        apply_lighting_on_channel(&channel, device_index, &lighting).await
+        apply_lighting_on_channel(&channel, device_index, &fetch_route, &lighting).await
     })
     .await
 }
@@ -170,20 +203,22 @@ pub async fn apply_lighting(
 /// [`apply_lighting`] on an already-open channel.
 pub async fn apply_lighting_on(
     shared: &SharedChannel,
+    route: &DeviceRoute,
     lighting: &Lighting,
 ) -> Result<LightingApply, WriteError> {
-    apply_lighting_on_channel(shared.channel(), shared.device_index(), lighting).await
+    apply_lighting_on_channel(shared.channel(), shared.device_index(), route, lighting).await
 }
 
 async fn apply_lighting_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
+    route: &DeviceRoute,
     lighting: &Lighting,
 ) -> Result<LightingApply, WriteError> {
     if lighting.enabled && lighting.effect == LightingEffect::EchoPress {
         let mut firmware = lighting.clone();
         firmware.effect = LightingEffect::LightOnPress;
-        match apply_firmware_effect(channel, index, &firmware).await {
+        match apply_firmware_effect(channel, index, route, &firmware).await {
             Ok(0) | Err(WriteError::FeatureUnsupported { .. }) => {
                 return Ok(LightingApply::Host);
             }
@@ -194,12 +229,12 @@ async fn apply_lighting_on_channel(
     if lighting.enabled && lighting.effect.is_host() {
         return Ok(LightingApply::Host);
     }
-    match apply_firmware_effect(channel, index, lighting).await {
+    match apply_firmware_effect(channel, index, route, lighting).await {
         Err(WriteError::FeatureUnsupported { feature_hex })
             if feature_hex == COLOR_LED_EFFECTS_FEATURE
                 && (!lighting.enabled || lighting.effect == LightingEffect::Solid) =>
         {
-            let (r, g, b) = solid_rgb(lighting);
+            let (r, g, b) = scaled_solid_rgb(lighting);
             set_keyboard_color_with_on_channel(channel, index, LightingMethod::Auto, r, g, b)
                 .await?;
             Ok(LightingApply::Firmware)
@@ -212,6 +247,7 @@ async fn apply_lighting_on_channel(
 async fn apply_firmware_effect(
     channel: &Arc<HidppChannel>,
     index: u8,
+    route: &DeviceRoute,
     lighting: &Lighting,
 ) -> Result<usize, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
@@ -231,7 +267,8 @@ async fn apply_firmware_effect(
     let (effect_id, params) = firmware_effect_and_params(lighting);
     let mut written = 0usize;
     for zone in zones_to_write {
-        let Some(effect_index) = lookup_zone_effect_index(&feature, zone, effect_id).await? else {
+        let Some(effect_index) = lookup_zone_effect_index(&feature, route, zone, effect_id).await?
+        else {
             debug!(index, zone, ?effect_id, "zone does not advertise effect");
             continue;
         };
@@ -261,12 +298,16 @@ fn firmware_effect_and_params(lighting: &Lighting) -> (EffectId, [u8; ZONE_EFFEC
     if !lighting.enabled {
         return (EffectId::Disabled, [0; ZONE_EFFECT_PARAM_COUNT]);
     }
-    let (r, g, b) = solid_rgb(lighting);
     let id = lighting
         .effect
         .firmware_id()
         .and_then(|id| EffectId::try_from(id).ok())
         .unwrap_or(EffectId::FixedColor);
+    let (r, g, b) = solid_rgb(lighting);
+    let (r, g, b) = match id {
+        EffectId::Starlight | EffectId::Ripple => dim_rgb((r, g, b), lighting.brightness),
+        _ => (r, g, b),
+    };
     (
         id,
         pack_effect_params(id, r, g, b, lighting.speed, lighting.brightness),
@@ -277,14 +318,17 @@ fn solid_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
-    let (r, g, b) = lighting.color.components();
-    if lighting.effect == LightingEffect::Solid {
-        let scale =
-            |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
-        (scale(r), scale(g), scale(b))
-    } else {
-        (r, g, b)
-    }
+    lighting.color.components()
+}
+
+fn scaled_solid_rgb(lighting: &Lighting) -> (u8, u8, u8) {
+    dim_rgb(solid_rgb(lighting), lighting.brightness)
+}
+
+fn dim_rgb(color: (u8, u8, u8), brightness: u8) -> (u8, u8, u8) {
+    let scale =
+        |c: u8| u8::try_from(u16::from(c) * u16::from(brightness.min(100)) / 100).unwrap_or(c);
+    (scale(color.0), scale(color.1), scale(color.2))
 }
 
 /// Pack the ten `setZoneEffect` parameter bytes for a firmware effect.
@@ -339,6 +383,7 @@ pub fn pack_effect_params(
             params[0] = r;
             params[1] = g;
             params[2] = b;
+            params[6] = intensity;
         }
     }
     params
@@ -346,26 +391,21 @@ pub fn pack_effect_params(
 
 async fn lookup_zone_effect_index(
     feature: &ColorLedEffectsFeature,
+    route: &DeviceRoute,
     zone: u8,
     effect_id: EffectId,
 ) -> Result<Option<u8>, WriteError> {
-    let info = feature
-        .get_zone_info(zone)
-        .await
-        .map_err(classify_lighting_error)?;
-    for effect_index in 0..info.effects_number {
-        let effect = feature
-            .get_zone_effect_info(zone, effect_index)
-            .await
-            .map_err(classify_lighting_error)?;
-        if effect.effect_id == effect_id {
-            return Ok(Some(effect_index));
-        }
+    if let Some(slot) = cached_zone_slot(route, zone, effect_id) {
+        return Ok(Some(slot));
     }
-    if effect_id == EffectId::Disabled {
+    let slot = lookup_named_effect_index(feature, zone, effect_id).await?;
+    if let Some(slot) = slot {
+        remember_zone_slot(route, zone, u16::from(effect_id), slot);
+    }
+    if slot.is_none() && effect_id == EffectId::Disabled {
         return lookup_named_effect_index(feature, zone, EffectId::FixedColor).await;
     }
-    Ok(None)
+    Ok(slot)
 }
 
 async fn lookup_named_effect_index(
@@ -420,9 +460,10 @@ pub async fn set_zonal_colors_on(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = open_feature::<ColorLedEffectsFeature>(&mut device).await?;
+    let route = shared.route();
     for &(zone, r, g, b) in colors {
         let Some(effect_index) =
-            lookup_zone_effect_index(&feature, zone, EffectId::FixedColor).await?
+            lookup_zone_effect_index(&feature, route, zone, EffectId::FixedColor).await?
         else {
             continue;
         };
@@ -492,9 +533,12 @@ mod tests {
     use super::{EffectId, pack_effect_params};
 
     #[test]
-    fn packs_fixed_color_in_the_first_three_bytes() {
+    fn packs_fixed_color_rgb_and_intensity() {
         let params = pack_effect_params(EffectId::FixedColor, 0x11, 0x22, 0x33, 50, 100);
-        assert_eq!(&params[0..4], &[0x11, 0x22, 0x33, 0]);
+        assert_eq!(&params[0..3], &[0x11, 0x22, 0x33]);
+        assert_eq!(params[6], 0);
+        let dim = pack_effect_params(EffectId::FixedColor, 0xff, 0xff, 0xff, 50, 40);
+        assert_eq!(dim[6], 40);
     }
 
     #[test]

@@ -165,6 +165,10 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
+        self.orchestrator
+            .lock()
+            .await
+            .store_lighting(&route, lighting.clone());
         let host = self.shared.lighting.clone();
         openlogi_agent_core::hardware::set_lighting_in_background(
             &host,
@@ -328,8 +332,14 @@ impl Agent for AgentServer {
         self.shared
             .device(&route)
             .run(HidppOperation::Lighting, |c| async move {
-                openlogi_hid::read_lighting_info_on(&c, mouse, screen_sampler, audio_visualizer)
-                    .await
+                openlogi_hid::read_lighting_info_on(
+                    &c,
+                    &route,
+                    mouse,
+                    screen_sampler,
+                    audio_visualizer,
+                )
+                .await
             })
             .await
     }

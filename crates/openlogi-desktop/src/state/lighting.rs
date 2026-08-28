@@ -95,10 +95,10 @@ impl AppState {
         if let Some(key) = key {
             self.config
                 .edit(|config| config.set_lighting(&key, lighting.clone()));
-            // Keep the agent's config copy fresh: it re-applies the saved colour
-            // when the keyboard reconnects, and without the reload it would
-            // replay whatever was saved the last time something *else* reloaded.
-            if !self.persist_and_reload("lighting") {
+            // Lighting is pushed over `SetLighting`; a full agent reload would
+            // rebuild hook maps and re-apply every volatile setting on each
+            // slider tick.
+            if !self.persist_config("lighting") {
                 return;
             }
         } else {

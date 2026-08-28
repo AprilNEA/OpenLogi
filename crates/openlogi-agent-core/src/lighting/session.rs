@@ -107,7 +107,7 @@ async fn run_apply(
             debug!(%route, "lighting apply skipped — no channel");
             return;
         };
-        match apply_lighting_on(&shared, &lighting).await {
+        match apply_lighting_on(&shared, &route, &lighting).await {
             Ok(apply) => apply,
             Err(error) => {
                 warn!(error = ?error, %route, "lighting apply failed");
