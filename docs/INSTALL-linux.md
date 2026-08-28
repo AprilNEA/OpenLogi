@@ -13,6 +13,8 @@
   distros).
 - `systemd` + `udev` (standard on Ubuntu, Fedora, Arch, Debian, openSUSE, …).
 - GLIBC 2.35 or newer for the pre-built packages (Ubuntu 22.04 baseline).
+- `minisign`, installed through your distribution's package manager, for
+  authenticating release packages.
 
 ## Install a release package
 
@@ -33,8 +35,10 @@ rm openlogi-install.sh
 By default the script resolves the latest GitHub release, detects
 `x86_64`/`aarch64` and apt, dnf, yum, zypper, rpm, or pacman, then downloads
 the exact matching `.deb`, `.rpm`, or `.pkg.tar.zst`. It downloads that
-release's `SHA256SUMS`, extracts exactly one entry for the selected file, and
-verifies it before invoking only the package-manager command with `sudo`.
+package's detached signature and authenticates it against the minisign public
+key embedded in the reviewed script. It also downloads the release's
+`SHA256SUMS`, extracts exactly one entry for the selected file, and verifies it
+before invoking only the package-manager command with `sudo`.
 nFPM's package scripts remain responsible for reloading udev and desktop/icon
 caches. Run the installer as your normal user; it refuses an invocation of the
 whole script through `sudo`.
@@ -53,8 +57,8 @@ sh openlogi-install.sh --no-start
 
 The installer enables and starts `openlogi-agent.service` for the current user
 when systemd is available; failure to reach the user service manager does not
-roll back an otherwise successful package installation. Tagged releases that
-include the installer also attach `install.sh`, `install.sh.minisig`, and a
+roll back an otherwise successful package installation. Tagged releases with
+a complete Linux build also attach `install.sh`, `install.sh.minisig`, and a
 `SHA256SUMS` entry for manual verification.
 
 ## NixOS

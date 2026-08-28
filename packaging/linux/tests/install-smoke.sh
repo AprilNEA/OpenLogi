@@ -14,6 +14,7 @@ WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/openlogi-install-smoke.XXXXXXXXXX")
 MOCK_BIN=${WORK_DIR}/bin
 MOCK_LOG=${WORK_DIR}/commands.log
 MOCK_CURL_LOG=${WORK_DIR}/curl.log
+MOCK_MINISIGN_LOG=${WORK_DIR}/minisign.log
 MOCK_PACKAGE_PATH=${WORK_DIR}/package-path
 MOCK_SERVICE_CAPTURE=${WORK_DIR}/openlogi-agent.service
 OUTPUT=${WORK_DIR}/output
@@ -27,8 +28,9 @@ trap 'exit 1' HUP INT TERM
 mkdir -p "$MOCK_BIN"
 : >"$MOCK_LOG"
 : >"$MOCK_CURL_LOG"
+: >"$MOCK_MINISIGN_LOG"
 
-export MOCK_LOG MOCK_CURL_LOG MOCK_PACKAGE_PATH MOCK_SERVICE_CAPTURE
+export MOCK_LOG MOCK_CURL_LOG MOCK_MINISIGN_LOG MOCK_PACKAGE_PATH MOCK_SERVICE_CAPTURE
 export REAL_SHA256SUM
 export MOCK_ARCH=x86_64
 export MOCK_LATEST_TAG=v9.8.7
@@ -112,6 +114,9 @@ case "$url" in
     fi
     printf '%s  %s\n' "$hash" "$package_name" >"$output"
     ;;
+  */openlogi-v*-linux-*.minisig)
+    printf '%s\n' fixture-signature >"$output"
+    ;;
   */openlogi-v*-linux-*.deb | */openlogi-v*-linux-*.rpm | */openlogi-v*-linux-*.pkg.tar.zst)
     printf '%s\n' fixture-package >"$output"
     printf '%s\n' "$output" >"$MOCK_PACKAGE_PATH"
@@ -121,6 +126,26 @@ case "$url" in
     exit 1
     ;;
 esac
+EOF
+
+cat >"${MOCK_BIN}/minisign" <<'EOF'
+#!/bin/sh
+printf 'minisign %s\n' "$*" >>"$MOCK_MINISIGN_LOG"
+public_key=
+package=
+signature=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -P) public_key=$2; shift 2 ;;
+    -m) package=$2; shift 2 ;;
+    -x) signature=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ "$public_key" = RWRRkFtw+rqkvTlCTGKUszSE5dX9CK1teaQD45jO4P9rYlWLO4/nHVUF ]
+[ -f "$package" ]
+[ "$(cat "$signature")" = fixture-signature ]
+[ "${MOCK_BAD_SIGNATURE:-0}" -eq 0 ]
 EOF
 
 cat >"${MOCK_BIN}/package-manager" <<'EOF'
@@ -160,6 +185,7 @@ chmod +x "${MOCK_BIN}"/*
 reset_logs() {
   : >"$MOCK_LOG"
   : >"$MOCK_CURL_LOG"
+  : >"$MOCK_MINISIGN_LOG"
   rm -f "$MOCK_PACKAGE_PATH" "$MOCK_SERVICE_CAPTURE" "$OUTPUT"
 }
 
@@ -231,8 +257,8 @@ assert_not_contains "$MOCK_CURL_LOG" '/download/'
 MOCK_LATEST_TAG=v9.8.7
 export MOCK_LATEST_TAG
 
-# Latest-version resolution, architecture detection, apt detection, checksum
-# verification, privilege boundary and best-effort user service startup.
+# Latest-version resolution, architecture detection, apt detection, signature
+# and checksum verification, privilege boundary and user service startup.
 reset_logs
 MOCK_ARCH=x86_64
 export MOCK_ARCH
@@ -240,11 +266,13 @@ dash "$INSTALLER" >"$OUTPUT"
 assert_contains "$MOCK_CURL_LOG" '--proto =https --proto-redir =https --tlsv1.2 --fail --location'
 assert_contains "$MOCK_CURL_LOG" '/releases/latest'
 assert_contains "$MOCK_CURL_LOG" '/download/v9.8.7/openlogi-v9.8.7-linux-amd64.deb'
+assert_contains "$MOCK_CURL_LOG" '/download/v9.8.7/openlogi-v9.8.7-linux-amd64.deb.minisig'
 assert_contains "$MOCK_CURL_LOG" '/download/v9.8.7/SHA256SUMS'
+assert_contains "$MOCK_MINISIGN_LOG" 'minisign -V -P RWRRkFtw+rqkvTlCTGKUszSE5dX9CK1teaQD45jO4P9rYlWLO4/nHVUF -m '
 assert_contains "$MOCK_LOG" 'sudo apt-get install -y '
 assert_contains "$MOCK_LOG" 'systemctl --user daemon-reload'
 assert_contains "$MOCK_LOG" 'systemctl --user enable --now openlogi-agent.service'
-assert_contains "$OUTPUT" 'Verified openlogi-v9.8.7-linux-amd64.deb before privilege escalation.'
+assert_contains "$OUTPUT" 'Authenticated and verified openlogi-v9.8.7-linux-amd64.deb before privilege escalation.'
 [ "$(grep -c '^sudo ' "$MOCK_LOG")" -eq 1 ]
 installed_temp=$(cat "$MOCK_PACKAGE_PATH")
 [ ! -d "${installed_temp%/*}" ]
@@ -271,12 +299,22 @@ for specification in \
   [ "$(grep -c '^sudo ' "$MOCK_LOG")" -eq 1 ]
 done
 
-# Dry-run still proves the download and checksum but crosses no privilege or
+# Dry-run still proves the signature and checksum but crosses no privilege or
 # service boundary.
 reset_logs
 dash "$INSTALLER" --version 1.2.3 --package-manager rpm --dry-run >"$OUTPUT"
 assert_contains "$OUTPUT" 'Would run: sudo rpm -Uvh '
 assert_contains "$OUTPUT" 'Would run: systemctl --user enable --now openlogi-agent.service'
+[ ! -s "$MOCK_LOG" ]
+
+# A bad package signature must fail before checksum acceptance, sudo, or the
+# package manager is reached.
+reset_logs
+MOCK_BAD_SIGNATURE=1
+export MOCK_BAD_SIGNATURE
+expect_failure dash "$INSTALLER" --version 1.2.3 --package-manager apt
+unset MOCK_BAD_SIGNATURE
+assert_contains "$OUTPUT" 'signature verification failed'
 [ ! -s "$MOCK_LOG" ]
 
 # A checksum mismatch must fail before sudo or the package manager is reached.

@@ -174,12 +174,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Stage Linux installer
+        if: ${{ needs.build.outputs.linux_result == 'success' }}
+        run: |
+          # Publish the installer only when both Linux matrix legs completed.
+          # Otherwise latest could select a package that the partial release
+          # does not contain.
+          install -m755 packaging/linux/install.sh dist/install.sh
+
       - name: Generate checksums
         run: |
-          # Ship the repository installer beside the packages. Keeping this
-          # copy step in publish means the bytes hashed, signed, and attached
-          # are exactly the reviewed script from the release tag.
-          install -m755 packaging/linux/install.sh dist/install.sh
           cd dist
           # The DMGs are the release gate — fail loudly if none arrived (with
           # nullglob alone, sha256sum with zero args would silently hash stdin).
@@ -189,17 +193,27 @@ jobs:
           # hashed alone. The Windows portable artifact is a zip of the GUI +
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum -- install.sh *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+          artifacts=(*.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst)
+          if [ -f install.sh ]; then
+            artifacts=(install.sh "${artifacts[@]}")
+          fi
+          sha256sum -- "${artifacts[@]}" > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
-      # and the Linux deb/rpm are all best-effort — only install.sh, the DMGs,
-      # SHA256SUMS and the .minisig set are guaranteed by the publish gate — so
-      # record what actually arrived. This is what lets a failing Windows or
-      # Linux leg degrade to a smaller release instead of blocking the macOS one.
+      # and the Linux artifacts are all best-effort — only the DMGs,
+      # SHA256SUMS and the DMG .minisig set are guaranteed by the publish gate.
+      # The installer is present only with a complete Linux build. Record what
+      # actually arrived so a failed Windows or Linux leg can still degrade to
+      # a smaller release instead of blocking the macOS one.
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
+          if [ -f dist/install.sh ]; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installer=false" >> "$GITHUB_OUTPUT"
+          fi
           for ext in zip msi deb rpm; do
             if compgen -G "dist/*.$ext" > /dev/null; then
               echo "$ext=true" >> "$GITHUB_OUTPUT"
@@ -246,6 +260,11 @@ jobs:
           : "${R2_BUCKET:?Configure CLOUDFLARE_R2_BUCKET in the R2 1Password item}"
           : "${R2_ACCESS_KEY_ID:?Configure CLOUDFLARE_R2_ACCESS_KEY_ID in the R2 1Password item}"
           : "${R2_SECRET_ACCESS_KEY:?Configure CLOUDFLARE_R2_SECRET_ACCESS_KEY in the R2 1Password item}"
+          installer_key=$(sed -n 's/^MINISIGN_PUBLIC_KEY=//p' packaging/linux/install.sh)
+          if [ "$installer_key" != "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" ]; then
+            echo "The Linux installer minisign public key does not match the release key." >&2
+            exit 1
+          fi
 
       - name: Install minisign
         run: |
@@ -273,7 +292,11 @@ jobs:
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/install.sh dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+          artifacts=(dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst)
+          if [ -f dist/install.sh ]; then
+            artifacts=(dist/install.sh "${artifacts[@]}")
+          fi
+          for artifact in "${artifacts[@]}"; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -334,7 +357,7 @@ jobs:
         with:
           body_path: .release/RELEASE_NOTES.md
           files: |
-            dist/install.sh
+            ${{ steps.artifacts.outputs.installer == 'true' && 'dist/install.sh' || '' }}
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
