@@ -278,7 +278,6 @@ mod tests {
                 vendor_id: 0x046d,
                 product_id: 0xb023,
                 unique_id: None,
-                event_source_id: None,
             },
             paired: vec![PairedDevice {
                 slot: DIRECT_DEVICE_INDEX,

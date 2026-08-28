@@ -219,7 +219,6 @@ fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
             vendor_id: 0x046d,
             product_id: 0xc52b,
             unique_id: Some("receiver-1".to_string()),
-            event_source_id: None,
         },
         paired: slots
             .iter()
@@ -272,7 +271,6 @@ fn settled_direct_inventory_publishes_one_direct_route() {
             vendor_id: 0x046d,
             product_id: 0xb35b,
             unique_id: None,
-            event_source_id: None,
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
@@ -486,7 +484,6 @@ fn bolt_receiver_info() -> ReceiverInfo {
         vendor_id: 0x046d,
         product_id: 0xc548,
         unique_id: Some("bolt-1".to_string()),
-        event_source_id: None,
     }
 }
 

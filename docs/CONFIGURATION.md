@@ -69,7 +69,11 @@ Common device fields are:
   advanced users may enter another value in this range. A held gesture whose
   travel qualifies before release dispatches its swipe direction once the gate
   has elapsed, even if its last motion sample arrived earlier; otherwise release
-  dispatches that control's independent `Click` binding
+  dispatches that control's independent `Click` binding. Dedicated HID++
+  gesture controls use the physical device's timing. Middle/Back/Forward
+  gestures captured by the OS hook use the currently selected device profile,
+  matching their binding map; a shared receiver does not expose the originating
+  pairing slot to the native event hook.
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
