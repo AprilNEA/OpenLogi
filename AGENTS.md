@@ -14,59 +14,52 @@ touching an area.
 
 ## Architecture
 
-The long-lived app has three tiers: the **GUI** is a pure IPC client, the **agent** is
-the background server owning the input hook and runtime device I/O, and shared
-orchestration sits beneath both. The CLI is the explicit diagnostic exception:
-`openlogi list` reads the running agent first and falls back to direct enumeration
-only when no compatible agent answers, while hardware diagnostic commands may access
-devices directly.
+For runtime HID and input state, the long-running **GUI** and **overlay** are pure IPC
+clients; the **agent** owns the input hook and HID I/O. The CLI is a diagnostic
+exception: `openlogi list` prefers a compatible agent snapshot and falls back to
+direct enumeration when none is available, while hardware-diagnostic subcommands
+access devices directly.
 
 | Crate | Role |
 |---|---|
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog, locale negotiation. No I/O, no async (feature-gated host reads: `fs`, `locale`) |
 | `crates/openlogi-device-registry` | Pure hardware identity registry: receiver protocols and standalone-device driver metadata |
-| `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
-| `crates/openlogi-hidpp-derive` | Derive macros used by the HID++ hard fork; changes share the hidpp lint and rustdoc contract |
+| `crates/openlogi-hidpp` | Hard fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
+| `crates/openlogi-hidpp-derive` | Private derive macro for `openlogi-hidpp` feature boilerplate |
 | `crates/openlogi-device` | The HID++ device layer: enumeration, probing, writes, sessions, pairing. Knows no host — expressed against `HidBackend` |
 | `crates/openlogi-hid` | That layer wired to this host: `async-hid` transport, macOS Input Monitoring, the on-disk probe cache |
+| `crates/openlogi-camera` | Cross-platform Logitech UVC enumeration, capture, controls, and Camera-permission APIs |
 | `crates/openlogi-assets` | Device-render registry + cached fetch from OpenLogi asset mirrors |
-| `crates/openlogi-camera` | Camera enumeration, capture, and UVC controls through platform-native backends |
-| `crates/openlogi-cli` | The `clap` command tree: inventory, diagnostics, device control, cameras, and assets |
+| `crates/openlogi-cli` | CLI dispatch: agent-backed inventory when available, plus direct hardware diagnostics |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
 | `crates/openlogi-inject` | OS input synthesis: CGEvent / uinput+MPRIS / SendInput |
 | `crates/openlogi-agent-core` | Shared agent orchestration: hook runtime, HID++ writes, DPI cycle, Actions Ring session state |
-| `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by agent and GUI |
-| `crates/openlogi-agent` | The `openlogi-agent` binary — hook + device I/O server |
+| `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by the agent and its clients |
+| `crates/openlogi-agent` | The `openlogi-agent` binary — runtime HID/input server |
 | `crates/openlogi-permissions` | Privacy-permission status + System-Settings deep links: macOS TCC reads, Linux device-file probes. Reads only — never prompts |
 | `crates/openlogi-ui` | Presentation shared by the two GPUI processes: ring geometry/icons, the GPUI asset source, the shared locale catalogs. Depends on `gpui` but **not** `gpui-component` |
-| `crates/openlogi-desktop` | GPUI + gpui-component desktop app — polls the agent, no device I/O |
+| `crates/openlogi-desktop` | GPUI + gpui-component desktop app — polls the agent, no HID/input I/O |
 | `crates/openlogi-overlay` | The `openlogi-overlay` binary — cursor-centred Actions Ring, a pure IPC client |
 | `xtask` | `cargo xtask` maintenance: bundling, packaging, release manifest |
 
-- GUI ↔ agent speak tarpc/bincode over an `interprocess` local socket. The wire format
-  is versioned and **append-only** — read `crates/openlogi-ipc/AGENTS.md` before touching
-  it.
+- IPC clients ↔ agent speak tarpc/bincode over an `interprocess` local socket. The wire
+  format is versioned and **append-only** — read `crates/openlogi-ipc/AGENTS.md` before
+  touching it.
 - Three processes ship in the bundle — GUI, agent, overlay — and the overlay is a
   *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never
   `openlogi-desktop`. Anything both need goes in `openlogi-ui`, and every dependency
   added there lands in the overlay too (`.claude/rules/gui.md` has the rule).
 - Platform code is cfg-gated per crate (`[target.'cfg(target_os = …)'.dependencies]`).
   `.claude/rules/objc-ffi.md` is the contract for the workspace's macOS native FFI and
-  the canonical inventory of every file that carries any — read it before editing one
-  and keep that table in sync instead of duplicating a crate count here.
+  maintains the canonical file-by-file inventory — read it before editing that surface.
 
-## Decision and external-state discipline
+## Evidence and root-cause discipline
 
-- Treat issue reports and review findings as claims. Verify them against the current
-  head and the most direct available evidence before changing code or replying; do not
-  implement a stale or inapplicable diagnosis.
-- Fix the verified root cause. Do not add compatibility shims, fallback state, or
-  abstractions that merely hide a broken owner or lifecycle.
-- External writes require explicit authorization for that specific step: pushes and
-  force-pushes, workflow approvals or re-runs, merges, releases, issue or PR comments,
-  and infrastructure or data writes. Read-only inspection and authorization for an
-  earlier step do not authorize the next one.
+- Treat every issue, user report, and review finding as a claim. Verify it against the
+  current head and the most direct available evidence before accepting its diagnosis.
+- Fix the verified root cause at its owning module and lifecycle boundary. Do not hide
+  a broken owner or lifecycle behind a shim, fallback, or one-use abstraction.
 
 ## Build, run, verify
 
@@ -215,10 +208,9 @@ backstop, not a substitute for running the gate yourself after a rebase.
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `crates/openlogi-ipc/AGENTS.md`.
 6. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
-   as `en.yml` (new keys at the same position) and
-   `cargo test -p openlogi-ui locale` is green. If catalog wiring or desktop key
-   resolution changed, also run `cargo test -p openlogi-desktop i18n` — see
-   `.claude/rules/i18n.md`.
+   as `en.yml` (new keys at the same position); run `cargo test -p openlogi-ui locale`
+   for catalog parity and `cargo test -p openlogi-desktop i18n` for catalog wiring and
+   desktop resolution — see `.claude/rules/i18n.md`.
 7. Only then `git push` / force-push to the PR branch.
 
 ### Running the app

@@ -23,9 +23,12 @@ about licensing or attribution:
   crate's protocol knowledge came from even as the code itself moves away from
   upstream's structure.
 - `[lib] name = "hidpp"` in `Cargo.toml`. Every consumer imports it as
-  `use hidpp::...` across `openlogi-device`, `openlogi-hid`, and doctests. Renaming
-  the lib target is not a documentation-only change: derive the current call-site
-  set with `rg` and update all of it in the same commit. Don't do it as a drive-by.
+  `hidpp`, not by the package name. Before changing the lib target or its public
+  surface, derive the current consumer set with
+  `rg -l '\bhidpp::|use hidpp::' crates --glob '*.rs'` and
+  `rg -n 'hidpp\s*=' --glob 'Cargo.toml' .`. Renaming the target is not a
+  documentation-only change: update every current consumer in the same commit.
+  Do not do it as a drive-by.
 
 ## Rules that hold regardless of fork/vendor status
 
@@ -58,13 +61,11 @@ So `clippy::pedantic`, `unwrap_used`, and `expect_used` apply here exactly as
 they do elsewhere. There is no "it's vendored" excuse for a bare `unwrap`, and a
 suppression needs the same `reason = "…"` any other crate would need.
 
-## Known loose end
+## Optional serde surface
 
-The optional `serde` dependency and the ~40 files' worth of
-`#[cfg_attr(feature = "serde", derive(serde::Serialize))]` it gates are inherited
-library surface that **nothing in this workspace enables** — no crate depends on
-`hidpp` with `features = ["serde"]`, and types crossing the IPC boundary are
-converted to `openlogi-core`'s own structs first. Dropping it would be a large
-mechanical diff; keeping it costs a feature-combination nobody builds. Decide it
-deliberately (does this crate stay a general-purpose library, or is it strictly
-OpenLogi-internal?) rather than by drive-by.
+The optional `serde` dependency gates widespread
+`#[cfg_attr(feature = "serde", derive(serde::Serialize))]` library surface. Before
+changing it, derive the current feature consumers from the manifests and source.
+Types crossing OpenLogi's IPC boundary are converted to `openlogi-core` structs first.
+Decide deliberately whether this crate remains general-purpose or strictly internal;
+do not remove the feature as a drive-by.

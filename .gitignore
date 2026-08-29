@@ -47,10 +47,6 @@ node_modules/
 # macOS finder metadata
 .DS_Store
 
-# Bundle-time asset payload — fetched fresh from OpenLogi's asset mirrors by
-# the macOS bundle task before `cargo bundle`, not checked in.
-/crates/openlogi-gui/assets/
-
 # Compiled icons — `cargo xtask macos icon` rebuilds them from the Icon
 # Composer documents in `design/icon` on every bundle build. `AppIcon.icns` is
 # the exception: `cargo bundle` reads it straight from the manifest, so it stays
