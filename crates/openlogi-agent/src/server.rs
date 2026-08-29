@@ -165,13 +165,17 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        let (r, g, b) = hardware::lighting_rgb(&lighting);
-        self.shared
-            .device(&route)
-            .run(HidppOperation::Lighting, |c| async move {
-                openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
-            })
+        self.orchestrator
+            .lock()
             .await
+            .store_lighting(&route, lighting.clone());
+        let host = self.shared.lighting.clone();
+        openlogi_agent_core::hardware::set_lighting_in_background(
+            &host,
+            &self.shared.device(&route),
+            lighting,
+        );
+        Ok(())
     }
 
     async fn set_smartshift(
@@ -313,6 +317,29 @@ impl Agent for AgentServer {
             .device(&route)
             .run(HidppOperation::OnboardProfiles, |c| async move {
                 openlogi_hid::read_onboard_profile_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_lighting_info(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::LightingInfo, WriteError> {
+        let mouse = self.orchestrator.lock().await.route_is_mouse(&route);
+        let screen_sampler = openlogi_agent_core::lighting::screen_available();
+        let audio_visualizer = openlogi_agent_core::lighting::audio_available();
+        self.shared
+            .device(&route)
+            .run(HidppOperation::Lighting, |c| async move {
+                openlogi_hid::read_lighting_info_on(
+                    &c,
+                    &route,
+                    mouse,
+                    screen_sampler,
+                    audio_visualizer,
+                )
+                .await
             })
             .await
     }

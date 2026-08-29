@@ -59,6 +59,24 @@ pub fn camera() -> PermissionStatus {
     }
 }
 
+/// Current Screen Recording status. Never prompts — the agent owns capture
+/// and is the only process that may call `CGRequestScreenCaptureAccess`.
+#[must_use]
+pub fn screen_recording() -> PermissionStatus {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    // SAFETY: `CGPreflightScreenCaptureAccess` is the documented non-prompting
+    // Screen Capture TCC probe; it returns whether this process is already
+    // allowed, not whether the user has been asked.
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        PermissionStatus::Granted
+    } else {
+        PermissionStatus::Denied
+    }
+}
+
 /// Open the System Settings privacy pane for `permission`.
 ///
 /// For Accessibility the pane is all this offers — the agent owns the
@@ -71,6 +89,7 @@ pub fn open_pane(permission: Permission) {
         Permission::InputMonitoring => "Privacy_ListenEvent",
         Permission::Bluetooth => "Privacy_Bluetooth",
         Permission::Camera => "Privacy_Camera",
+        Permission::ScreenRecording => "Privacy_ScreenCapture",
     };
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
     if let Err(e) = opener::open(&url) {

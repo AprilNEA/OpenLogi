@@ -12,7 +12,8 @@
 //! ## macOS
 //!
 //! Two permissions matter: **Accessibility** (the hook's event tap) and **Input
-//! Monitoring** (opening HID devices via `IOHIDManager`). **Bluetooth** is
+//! Monitoring** (opening HID devices via `IOHIDManager`). **Screen Recording**
+//! is needed for the host screen-sampler lighting effect. **Bluetooth** is
 //! surfaced for completeness — OpenLogi reaches BLE mice through `IOHIDManager`,
 //! so it usually reads [`PermissionStatus::Unknown`].
 //!
@@ -61,10 +62,13 @@ pub enum Permission {
     /// macOS: Camera (AVFoundation) authorization for the webcam preview.
     #[cfg(target_os = "macos")]
     Camera,
+    /// macOS: Screen Recording (Screen Capture Kit / CGDisplay stream).
+    #[cfg(target_os = "macos")]
+    ScreenRecording,
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::{bluetooth, camera, input_monitoring, open_pane};
+pub use macos::{bluetooth, camera, input_monitoring, open_pane, screen_recording};
 
 #[cfg(target_os = "linux")]
 pub use linux::input_device_access;

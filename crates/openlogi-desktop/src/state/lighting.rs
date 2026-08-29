@@ -2,10 +2,11 @@
 
 use openlogi_core::config::Lighting;
 use openlogi_core::device_order::PhysicalDeviceKey;
-use openlogi_core::hid::OnboardLed;
+use openlogi_core::hid::{LightingEffect, OnboardLed, OnboardLedMode};
 use tracing::debug;
 
 use super::AppState;
+use super::load::{LightingLoad, Load};
 
 impl AppState {
     /// The lighting config for the active device, or the onboard LED when none
@@ -21,13 +22,41 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Cached lighting catalog for the selected device.
+    #[must_use]
+    pub fn lighting_info(&self) -> LightingLoad {
+        self.current_record().map_or(Load::Unknown, |record| {
+            self.pointer.reads.lighting_status(&record.device_key())
+        })
+    }
+
+    pub(super) fn load_current_lighting_info(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some((key, route)) = self.current_record().and_then(|record| {
+            record
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.lighting)
+                .then(|| {
+                    record
+                        .route
+                        .clone()
+                        .map(|route| (record.device_key(), route))
+                })
+                .flatten()
+        }) else {
+            return;
+        };
+        self.pointer
+            .reads
+            .ensure_lighting(key, route, self.ipc_sender(), cx);
+    }
+
     /// Onboard LED records last read from firmware for the selected device.
     #[must_use]
     pub fn onboard_leds(&self) -> &[OnboardLed] {
         self.current_record()
             .and_then(|record| self.onboard_leds.get(&record.device_key()))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The first onboard LED for the selected device, if firmware was read.
@@ -66,10 +95,10 @@ impl AppState {
         if let Some(key) = key {
             self.config
                 .edit(|config| config.set_lighting(&key, lighting.clone()));
-            // Keep the agent's config copy fresh: it re-applies the saved colour
-            // when the keyboard reconnects, and without the reload it would
-            // replay whatever was saved the last time something *else* reloaded.
-            if !self.persist_and_reload("lighting") {
+            // Lighting is pushed over `SetLighting`; a full agent reload would
+            // rebuild hook maps and re-apply every volatile setting on each
+            // slider tick.
+            if !self.persist_config("lighting") {
                 return;
             }
         } else {
@@ -82,7 +111,6 @@ impl AppState {
 }
 
 fn lighting_from_onboard(led: OnboardLed) -> Lighting {
-    use openlogi_core::hid::OnboardLedMode;
     Lighting {
         enabled: led.mode != OnboardLedMode::Off,
         color: led.color,
@@ -91,5 +119,7 @@ fn lighting_from_onboard(led: OnboardLed) -> Lighting {
         } else {
             led.brightness
         },
+        effect: LightingEffect::from_onboard(led.mode).unwrap_or_default(),
+        ..Lighting::default()
     }
 }

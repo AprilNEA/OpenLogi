@@ -46,7 +46,7 @@ use openlogi_core::device::{
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
-use openlogi_core::hid::LOGITECH_VENDOR_ID;
+use openlogi_core::hid::{LOGITECH_VENDOR_ID, LightingInfo, LightingZone, LightingZoneLocation};
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
@@ -302,7 +302,7 @@ impl State {
                     ),
                     tunable_torque: Some(MOCK_TORQUE),
                 }),
-                lighting: false,
+                lighting: true,
             },
         );
         settings.insert(OFFLINE_SLOT, DeviceSettings::unsupported());
@@ -590,7 +590,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                 capabilities: Some(Capabilities {
                     buttons: true,
                     pointer: true,
-                    lighting: false,
+                    lighting: true,
                     scroll_inversion: true,
                     hires_wheel: true,
                     thumbwheel: true,
@@ -1132,5 +1132,53 @@ mod tests {
             select_first.next_pairing_update(),
             Some(PairingUpdate::Failed(PairingFailure::Cancelled))
         ));
+    }
+
+    async fn read_lighting_info(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<LightingInfo, WriteError> {
+        let state = self.state.lock().await;
+        if !state.settings_for(&route)?.lighting {
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x8070,
+            });
+        }
+        Ok(canned_lighting_info(settings_key(&route)))
+    }
+}
+
+fn canned_lighting_info(slot: Option<u8>) -> LightingInfo {
+    match slot {
+        Some(MOUSE_SLOT) => LightingInfo {
+            mouse: true,
+            per_key: false,
+            zones: vec![
+                LightingZone {
+                    index: 0,
+                    location: LightingZoneLocation::Primary,
+                    firmware_effects: vec![1, 3, 5, 10],
+                },
+                LightingZone {
+                    index: 1,
+                    location: LightingZoneLocation::Logo,
+                    firmware_effects: vec![1, 3, 5, 10],
+                },
+            ],
+            screen_sampler: true,
+            audio_visualizer: true,
+        },
+        _ => LightingInfo {
+            mouse: false,
+            per_key: true,
+            zones: vec![LightingZone {
+                index: 0,
+                location: LightingZoneLocation::Primary,
+                firmware_effects: vec![1, 3, 4, 5, 6, 10, 11],
+            }],
+            screen_sampler: true,
+            audio_visualizer: true,
+        },
     }
 }

@@ -11,6 +11,7 @@
 pub mod dpi;
 pub mod error;
 pub mod light;
+pub mod lighting;
 pub mod onboard;
 pub mod pairing;
 pub mod route;
@@ -19,6 +20,10 @@ pub mod smartshift;
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use light::{LightCommand, commands_for_light_settings};
+pub use lighting::{
+    LIGHTING_PREFABS, LightingEffect, LightingInfo, LightingPrefab, LightingZone,
+    LightingZoneLocation, default_lighting_speed, firmware_intensity, speed_to_period_ms,
+};
 pub use onboard::{OnboardLed, OnboardLedMode, OnboardProfileSnapshot};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use route::{

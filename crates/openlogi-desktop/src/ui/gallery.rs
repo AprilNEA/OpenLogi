@@ -182,6 +182,7 @@ impl ComponentGallery {
             .flex_wrap()
             .gap_4()
             .child(self.choice_panel(pal, cx))
+            .child(Self::effect_tile_panel(pal))
             .child(self.toggle_panel(pal, cx))
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
@@ -223,6 +224,41 @@ impl ComponentGallery {
                     choice_card("gallery-choice-disabled", "Disabled choice", false, pal)
                         .disabled(true),
                 ),
+            pal,
+        )
+    }
+
+    fn effect_tile_panel(pal: Palette) -> gpui::Div {
+        gallery_panel(
+            "Effect tile",
+            IconName::Palette,
+            h_flex()
+                .gap_2()
+                .flex_wrap()
+                .child(effect_tile(
+                    "gallery-effect-selected",
+                    "Solid",
+                    true,
+                    false,
+                    pal,
+                    0x0000_a2ff,
+                ))
+                .child(effect_tile(
+                    "gallery-effect-idle",
+                    "Breathing",
+                    false,
+                    false,
+                    pal,
+                    0x0034_c759,
+                ))
+                .child(effect_tile(
+                    "gallery-effect-disabled",
+                    "Screen sampler",
+                    false,
+                    true,
+                    pal,
+                    0x0073_7373,
+                )),
             pal,
         )
     }
@@ -496,6 +532,44 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         .hover(move |style| style.bg(pal.control_hover))
         .focus_visible(move |style| style.border_color(theme::accent()))
         .child(div().text_body().child(label))
+}
+
+fn effect_tile(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    disabled: bool,
+    pal: Palette,
+    preview: u32,
+) -> ChoiceCard {
+    ChoiceCard::new(id, label)
+        .selected(selected)
+        .disabled(disabled)
+        .w(px(118.))
+        .p_2()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(if selected {
+            theme::accent()
+        } else {
+            pal.border
+        })
+        .bg(pal.control)
+        .hover(move |style| style.bg(pal.control_hover))
+        .focus_visible(move |style| style.border_color(theme::accent()))
+        .child(
+            v_flex()
+                .gap_1()
+                .w_full()
+                .child(
+                    div()
+                        .h(px(28.))
+                        .w_full()
+                        .rounded(pal.control_radius)
+                        .bg(gpui::rgb(preview)),
+                )
+                .child(div().text_caption().child(label)),
+        )
 }
 
 #[cfg(test)]

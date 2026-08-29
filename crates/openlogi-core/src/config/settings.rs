@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::ButtonId;
 use crate::color::Rgb;
-use crate::hid::{SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
+use crate::hid::{
+    LightingEffect, SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque,
+    default_lighting_speed,
+};
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
 /// historical behaviour); `Light` / `Dark` force a mode regardless of the OS.
@@ -483,12 +486,13 @@ fn default_true() -> bool {
     true
 }
 
-/// Per-device RGB lighting: a single static color, brightness, and on/off.
-/// Deliberately basic — per-key effects are a later addition.
+/// Per-device RGB lighting: catalog effect, color, speed, brightness, zones,
+/// and on/off.
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-ipc/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`). New fields append; serde defaults keep
+/// older TOML loading.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lighting {
@@ -509,6 +513,18 @@ pub struct Lighting {
         deserialize_with = "deserialize_brightness"
     )]
     pub brightness: u8,
+    /// Catalog effect. Absent files load [`LightingEffect::Solid`].
+    #[serde(default)]
+    pub effect: LightingEffect,
+    /// Speed percent (`0`–`100`). Firmware maps this onto effect period.
+    #[serde(
+        default = "default_lighting_speed",
+        deserialize_with = "deserialize_brightness"
+    )]
+    pub speed: u8,
+    /// `0x8070` zone indexes to write. Empty means every zone.
+    #[serde(default)]
+    pub zones: Vec<u8>,
 }
 
 /// Persisted settings for a standalone light such as Logitech Litra.
@@ -585,6 +601,9 @@ impl Default for Lighting {
             enabled: default_lighting_enabled(),
             color: default_lighting_color(),
             brightness: default_lighting_brightness(),
+            effect: LightingEffect::Solid,
+            speed: default_lighting_speed(),
+            zones: Vec::new(),
         }
     }
 }

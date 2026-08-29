@@ -19,6 +19,9 @@ openlogi-ipc = { path = "../openlogi-ipc" }
 futures-lite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+xcap = "0.9.8"
+cpal = "0.18.2"
+image = "0.25.10"
 
 [lints]
 workspace = true

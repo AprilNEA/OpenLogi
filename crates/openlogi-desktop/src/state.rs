@@ -24,7 +24,7 @@ pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiStatus, LightingLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,8 +166,6 @@ pub struct AppState {
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
-    /// Per-device Actions Ring profile open in this window's editor.
-    action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
@@ -221,6 +219,7 @@ impl AppState {
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_onboard_bindings(cx);
+            state.load_current_lighting_info(cx);
         });
     }
 
@@ -273,7 +272,6 @@ impl AppState {
             agent: AgentSession::default(),
             devices: DeviceStore::new(device_list, current_device),
             bindings,
-            action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lighting: LightingState::default(),
             ipc_commands,

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, LightingInfo, SmartShiftStatus, WriteError};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
@@ -13,11 +13,14 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::Command;
-use crate::state::{AppState, DeviceKey, DpiStatus, Load, SmartShiftLoad, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DpiStatus, LightingLoad, Load, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
+const LIGHTING: &str = "lighting";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -49,6 +52,7 @@ pub(crate) struct DeviceReads {
     next_generation: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
+    lighting: BTreeMap<DeviceKey, DeviceRead<LightingInfo>>,
 }
 
 impl DeviceReads {
@@ -100,6 +104,69 @@ impl DeviceReads {
             }
         });
         self.dpi.insert(
+            key,
+            DeviceRead {
+                route,
+                generation,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Start a lighting-capability query unless this route is already watched.
+    pub(crate) fn ensure_lighting(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .lighting
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_lighting(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let generation = self.take_generation();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| Command::ReadLightingInfo(route, reply),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !lighting_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(LIGHTING, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), lighting_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), lighting_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_lighting(&observed_key, generation, load)
+            {
+                cx.emit(StateEvent::LightingChanged(observed_key.clone()));
+            }
+        });
+        self.lighting.insert(
             key,
             DeviceRead {
                 route,
@@ -274,6 +341,7 @@ impl DeviceReads {
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
+        self.remove_lighting(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -290,12 +358,27 @@ impl DeviceReads {
         }
     }
 
+    pub(crate) fn remove_lighting(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.lighting.remove(key) {
+            drop(read);
+            self.clear::<LightingInfo>(LIGHTING, key);
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn lighting_status(&self, key: &DeviceKey) -> LightingLoad {
+        self.lighting
+            .get(key)
+            .map_or(Load::Unknown, |read| read.load.clone())
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
             .dpi
             .keys()
             .chain(self.smartshift.keys())
+            .chain(self.lighting.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -364,6 +447,21 @@ impl DeviceReads {
         read.load = load;
         true
     }
+
+    fn update_lighting(&mut self, key: &DeviceKey, generation: u64, load: LightingLoad) -> bool {
+        let Some(read) = self
+            .lighting
+            .get_mut(key)
+            .filter(|read| read.generation == generation)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
 }
 
 fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
@@ -415,6 +513,10 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn lighting_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

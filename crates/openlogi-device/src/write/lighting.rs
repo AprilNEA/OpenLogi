@@ -228,7 +228,7 @@ async fn set_color_effects(
 }
 
 /// Classify a HID++ error from the `ColorLedEffects` functions.
-fn classify_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
+pub(crate) fn classify_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, ColorLedEffectsFeature::ID)
 }
 
@@ -302,7 +302,7 @@ async fn set_color_per_key_v2(
 ///
 /// Ids `0` and `0xff` are end-of-list sentinels the feature rejects, so they
 /// are skipped even if a device sets their bits.
-async fn present_zones(feature: &PerKeyLightingFeature) -> Result<Vec<u8>, WriteError> {
+pub(crate) async fn present_zones(feature: &PerKeyLightingFeature) -> Result<Vec<u8>, WriteError> {
     let mut zones = Vec::new();
     for (page, base) in [
         (ZonePresencePage::Zones0To111, 0u16),
@@ -348,7 +348,7 @@ pub(super) fn collect_present_zones(
 }
 
 /// Classify a HID++ error from the `PerKeyLighting2` functions.
-fn classify_per_key_v2_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
+pub(crate) fn classify_per_key_v2_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, PerKeyLightingFeature::ID)
 }
 

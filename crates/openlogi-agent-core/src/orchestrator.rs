@@ -17,11 +17,11 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
+use openlogi_core::config::{Config, LightSettings, Lighting, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
-use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
+use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
     KEYBOARD_KEY_CIDS,
@@ -31,9 +31,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
-use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
-};
+use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -106,6 +104,8 @@ pub struct SharedRuntime {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Host lighting renderer sessions (screen sampler, visualizer, shows).
+    pub lighting: crate::lighting::LightingHost,
 }
 
 impl SharedRuntime {
@@ -227,6 +227,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            lighting: crate::lighting::LightingHost::default(),
         };
         let orch = Self {
             config,
@@ -258,6 +259,15 @@ impl Orchestrator {
         self.shared.clone()
     }
 
+    /// Whether `route` addresses a mouse-like device (zonal lighting catalog).
+    #[must_use]
+    pub fn route_is_mouse(&self, route: &DeviceRoute) -> bool {
+        self.devices.iter().any(|dev| {
+            dev.route.as_ref() == Some(route)
+                && matches!(dev.kind, DeviceKind::Mouse | DeviceKind::Trackball)
+        })
+    }
+
     fn current_key(&self) -> Option<&str> {
         self.devices
             .get(self.current)
@@ -276,18 +286,10 @@ impl Orchestrator {
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
-        let mut bindings = button_bindings_for(&self.config, key, app);
-        let mut gestures = oshook_gestures_for(&self.config, key, app);
-        if let Some(key) = key {
-            for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // HID++ owns both edges for these controls. Keeping their
-                // projected click or gesture map in the global hook would
-                // reintroduce a second, unattributed dispatch path.
-                bindings.remove(button);
-                gestures.remove(button);
-            }
+        HookMaps {
+            bindings: button_bindings_for(&self.config, key, app),
+            gestures: oshook_gestures_for(&self.config, key, app),
         }
-        HookMaps { bindings, gestures }
     }
 
     /// The keyboard key-capture spec for the first known keyboard, or `None`
@@ -418,33 +420,15 @@ impl Orchestrator {
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
-                let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
-                let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
-                    .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
                 Some(plan_for_device(
                     &self.config,
-                    physical_key,
                     &dev.config_key,
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
-                    self.os_mouse_hook_available,
                 ))
             })
             .collect()
-    }
-
-    /// Publish whether the OS movement hook is currently usable.
-    ///
-    /// HID++ Back/Forward diversion follows this state as a fail-open policy:
-    /// if the mouse-remapping hook is unavailable, side buttons remain native.
-    /// Other HID++-only controls remain captured independently.
-    pub fn set_os_mouse_hook_available(&mut self, available: bool) {
-        if self.os_mouse_hook_available == available {
-            return;
-        }
-        self.os_mouse_hook_available = available;
-        self.publish_capture_plans();
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -549,20 +533,32 @@ impl Orchestrator {
         let smartshift = device
             .and_then(|d| d.effective_smartshift(&route_key))
             .map(openlogi_hid::SmartShiftStatus::from);
-        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+        let report_rate = device.and_then(|d| d.effective_report_rate(&route_key));
+        if resolution.is_some()
+            || inverted.is_some()
+            || dpi.is_some()
+            || smartshift.is_some()
+            || report_rate.is_some()
+        {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 resolution,
                 inverted,
                 dpi,
                 smartshift,
+                report_rate,
             );
         }
         if let Some(lighting) = device
             .and_then(|d| d.effective_lighting(&route_key))
             .filter(|l| l.enabled)
         {
-            crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
+            let host = self.shared.lighting.clone();
+            crate::hardware::set_lighting_in_background(
+                &host,
+                &self.shared.device(&route),
+                lighting.clone(),
+            );
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             crate::hardware::write_fn_lock_in_background(
@@ -797,6 +793,19 @@ impl Orchestrator {
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
         true
+    }
+
+    /// Remember a lighting change pushed over IPC so reconnect re-apply matches
+    /// the GUI without a full config reload.
+    pub fn store_lighting(&mut self, route: &DeviceRoute, lighting: Lighting) {
+        let Some(dev) = self
+            .devices
+            .iter()
+            .find(|dev| dev.route.as_ref() == Some(route))
+        else {
+            return;
+        };
+        self.config.set_lighting(dev.config_key.as_str(), lighting);
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

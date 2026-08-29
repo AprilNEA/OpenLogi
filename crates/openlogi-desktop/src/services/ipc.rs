@@ -118,6 +118,10 @@ pub enum Command {
         DeviceRoute,
         oneshot::Sender<Result<OnboardProfileSnapshot, WriteError>>,
     ),
+    ReadLightingInfo(
+        DeviceRoute,
+        oneshot::Sender<Result<openlogi_core::hid::LightingInfo, WriteError>>,
+    ),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
@@ -562,6 +566,9 @@ async fn handle(
         Command::ReadOnboardProfile(route, reply) => {
             let _ = reply.send(rpc_result(client.read_onboard_profile(ctx, route).await)?);
         }
+        Command::ReadLightingInfo(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_lighting_info(ctx, route).await)?);
+        }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
             // is still a reload that did not happen — and the file on disk has
@@ -681,6 +688,9 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadOnboardProfile(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadLightingInfo(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

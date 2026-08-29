@@ -40,8 +40,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    LightCommand, LightingInfo, LightingZone, LightingZoneLocation, PasskeyMethod,
+    ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -101,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 32);
+    assert_eq!(PROTOCOL_VERSION, 33);
 }
 
 #[test]
@@ -227,6 +228,15 @@ fn request_variant_order() {
             },
         },
         "1b0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadLightingInfo {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1c0008463030444341464501",
     );
 }
 
@@ -545,8 +555,24 @@ fn device_settings_payloads() {
             enabled: true,
             color: "8000ff".parse().expect("valid hex"),
             brightness: 80,
+            ..Lighting::default()
         },
-        "010638303030666650",
+        "010638303030666650003200",
+    );
+
+    assert_wire(
+        &LightingInfo {
+            mouse: true,
+            per_key: false,
+            zones: vec![LightingZone {
+                index: 0,
+                location: LightingZoneLocation::Primary,
+                firmware_effects: vec![1, 3],
+            }],
+            screen_sampler: true,
+            audio_visualizer: false,
+        },
+        "01000100010201030100",
     );
 
     assert_wire(
