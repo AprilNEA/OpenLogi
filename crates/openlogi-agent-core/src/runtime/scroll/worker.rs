@@ -517,6 +517,12 @@ fn run_worker(
                 match input.output {
                     ScrollOutputMode::Smooth { at } if snapshot.smooth_scroll => {
                         let tuning = snapshot.motion_tuning(&input.source);
+                        tracing::trace!(
+                            x = input.impulse.x,
+                            y = input.impulse.y,
+                            queued_us = at.elapsed().as_micros(),
+                            "smooth wheel impulse"
+                        );
                         engine.impulse(input.source, input.impulse, at, tuning, emit_smooth);
                     }
                     ScrollOutputMode::Direct => {
