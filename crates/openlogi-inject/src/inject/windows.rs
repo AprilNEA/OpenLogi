@@ -10,6 +10,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
@@ -23,6 +24,17 @@ const WHEEL_DELTA_F64: f64 = 120.0;
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Win32 cursor coordinates are i32; values are clamped before conversion"
+)]
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    let x = x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    let y = y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    // SAFETY: SetCursorPos takes two integer coordinates by value.
+    unsafe { SetCursorPos(x, y) != 0 }
+}
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;

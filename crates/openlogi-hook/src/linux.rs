@@ -38,12 +38,14 @@ use evdev::{
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
-use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
+use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, KeyButMask, Window};
 use x11rb::rust_connection::RustConnection;
 
+use crate::edge::DisplayRect;
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    LOGITECH_VENDOR_ID, MouseEvent,
+    KeyModifiers, LOGITECH_VENDOR_ID, MouseEvent,
 };
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
@@ -143,6 +145,45 @@ impl HookBackend for Backend {
             x: f64::from(reply.root_x),
             y: f64::from(reply.root_y),
         })
+    }
+
+    fn display_rects() -> Vec<DisplayRect> {
+        let Ok((connection, screen_index)) = RustConnection::connect(None) else {
+            return Vec::new();
+        };
+        let screen = &connection.setup().roots[screen_index];
+        let displays: Vec<_> = connection
+            .randr_get_monitors(screen.root, true)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| {
+                reply
+                    .monitors
+                    .into_iter()
+                    .filter_map(|monitor| {
+                        DisplayRect::new(
+                            f64::from(monitor.x),
+                            f64::from(monitor.y),
+                            f64::from(monitor.width),
+                            f64::from(monitor.height),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !displays.is_empty() {
+            return displays;
+        }
+        // RandR 1.5 is optional. Older X servers still provide one useful
+        // virtual-desktop rectangle through the core screen description.
+        DisplayRect::new(
+            0.0,
+            0.0,
+            f64::from(screen.width_in_pixels),
+            f64::from(screen.height_in_pixels),
+        )
+        .into_iter()
+        .collect()
     }
 }
 
@@ -362,7 +403,11 @@ fn scroll(delta_x: f64, delta_y: f64) -> MouseEvent {
     }
 }
 
-fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
+fn translate_with_modifiers(
+    event: &evdev::InputEvent,
+    hires_scroll: bool,
+    modifiers: KeyModifiers,
+) -> Option<MouseEvent> {
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
             let id = key_to_button(key)?;
@@ -382,10 +427,12 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
             RelativeAxisCode::REL_X => Some(MouseEvent::Moved {
                 delta_x: value,
                 delta_y: 0,
+                modifiers,
             }),
             RelativeAxisCode::REL_Y => Some(MouseEvent::Moved {
                 delta_x: 0,
                 delta_y: value,
+                modifiers,
             }),
             _ => {
                 let v = f64::from(value);
@@ -410,6 +457,20 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
             }
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
+    translate_with_modifiers(event, hires_scroll, KeyModifiers::default())
+}
+
+fn modifiers_from_mask(mask: KeyButMask) -> KeyModifiers {
+    KeyModifiers {
+        shift: mask & KeyButMask::SHIFT != KeyButMask::default(),
+        control: mask & KeyButMask::CONTROL != KeyButMask::default(),
+        option: mask & KeyButMask::MOD1 != KeyButMask::default(),
+        command: mask & KeyButMask::MOD4 != KeyButMask::default(),
     }
 }
 
@@ -457,8 +518,10 @@ fn device_thread(
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
+    let modifier_source = X11ModifierSource::connect();
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
+    let mut report_modifiers = None;
 
     debug!("hook started on {}", path.display());
 
@@ -480,6 +543,7 @@ fn device_thread(
 
         for event in events {
             if let EventSummary::Synchronization(..) = event.destructure() {
+                report_modifiers = None;
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
@@ -499,7 +563,23 @@ fn device_thread(
                     pending.clear();
                 }
             } else {
-                let disposition = match translate(&event, hires_scroll) {
+                let modifiers = if matches!(
+                    event.destructure(),
+                    EventSummary::RelativeAxis(
+                        _,
+                        RelativeAxisCode::REL_X | RelativeAxisCode::REL_Y,
+                        _
+                    )
+                ) {
+                    *report_modifiers.get_or_insert_with(|| {
+                        modifier_source
+                            .as_ref()
+                            .map_or_else(KeyModifiers::default, X11ModifierSource::current)
+                    })
+                } else {
+                    KeyModifiers::default()
+                };
+                let disposition = match translate_with_modifiers(&event, hires_scroll, modifiers) {
                     Some(me) => cb(HookEvent::Mouse(me)),
                     // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
                     // is active — passing them through would double the scroll distance.
@@ -530,6 +610,34 @@ fn device_thread(
 }
 
 // ── frontmost_app_id ─────────────────────────────────────────────────────────
+
+/// Persistent X11 connection used to snapshot keyboard modifiers for pointer
+/// reports. Flow already requires X11 global coordinates on Linux; native
+/// Wayland sessions without XWayland fall back to empty modifiers.
+struct X11ModifierSource {
+    conn: RustConnection,
+    root: Window,
+}
+
+impl X11ModifierSource {
+    fn connect() -> Option<Self> {
+        let (conn, screen_num) = RustConnection::connect(None)
+            .map_err(|error| debug!("X11 modifier state unavailable: {error}"))
+            .ok()?;
+        let root = conn.setup().roots[screen_num].root;
+        Some(Self { conn, root })
+    }
+
+    fn current(&self) -> KeyModifiers {
+        self.conn
+            .query_pointer(self.root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map_or_else(KeyModifiers::default, |reply| {
+                modifiers_from_mask(reply.mask)
+            })
+    }
+}
 
 // The frontmost-app reader is backend-driven so that Wayland support can be
 // added without touching callers. Exactly one backend is selected at startup
@@ -847,7 +955,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 7,
-                delta_y: 0
+                delta_y: 0,
+                ..
             })
         );
     }
@@ -859,8 +968,41 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 0,
-                delta_y: -4
+                delta_y: -4,
+                ..
             })
+        );
+    }
+
+    #[test]
+    fn movement_preserves_current_modifiers() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 1);
+        let modifiers = KeyModifiers {
+            control: true,
+            ..KeyModifiers::default()
+        };
+
+        assert_matches!(
+            translate_with_modifiers(&event, false, modifiers),
+            Some(MouseEvent::Moved {
+                modifiers: observed,
+                ..
+            }) if observed == modifiers
+        );
+    }
+
+    #[test]
+    fn x11_modifier_mask_maps_to_hook_vocabulary() {
+        assert_eq!(
+            modifiers_from_mask(
+                KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4
+            ),
+            KeyModifiers {
+                shift: true,
+                control: true,
+                option: true,
+                command: true,
+            }
         );
     }
 

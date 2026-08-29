@@ -189,6 +189,7 @@ mod tests {
         m.record(&MouseEvent::Moved {
             delta_x: 5,
             delta_y: 5,
+            modifiers: openlogi_hook::KeyModifiers::default(),
         });
         m.record(&MouseEvent::Button {
             id: ButtonId::Forward,

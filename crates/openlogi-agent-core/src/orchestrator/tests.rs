@@ -8,7 +8,8 @@ use super::{
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
-    Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
+    Config, DeviceConfig, FlowPeer, LightSettings, LinkConfig, ScrollResolution,
+    VerticalScrollSensitivity,
 };
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -677,6 +678,34 @@ fn every_inventory_mutator_republishes_what_the_ipc_server_answers() {
     config.app_settings.launch_at_login = true;
     orch.reload_config(config);
     assert!(observable.snapshot().status.launch_at_login);
+}
+
+#[test]
+fn flow_config_is_published_on_startup_and_reload() {
+    let peer = FlowPeer {
+        name: "desk".to_string(),
+        public_key: format!("ed25519:{}", "01".repeat(32)),
+        addresses: vec!["desk.local:42424".to_string()],
+    };
+    let mut config = Config::default();
+    config.flow.enabled = true;
+    config.flow.peers.push(peer.clone());
+    let observable = Arc::new(ObservableState::new("test".to_string()));
+    let mut orch = Orchestrator::new(config, Arc::clone(&observable));
+
+    let published = observable.snapshot().flow;
+    assert!(published.enabled);
+    assert_eq!(published.peers.len(), 1);
+    assert_eq!(published.peers[0].name, peer.name);
+    assert_eq!(published.peers[0].public_key, peer.public_key);
+
+    let mut updated = Config::default();
+    updated.flow.peers.push(peer);
+    orch.reload_config(updated);
+
+    let published = observable.snapshot().flow;
+    assert!(!published.enabled);
+    assert_eq!(published.peers.len(), 1);
 }
 
 #[test]

@@ -50,7 +50,7 @@ pub use pairing::{
 };
 pub use session::gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
 pub use session::host_switch::{
-    HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_host_on,
+    HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_host_on, switch_hosts,
     switch_linked_hosts,
 };
 pub use session::keyboard::{

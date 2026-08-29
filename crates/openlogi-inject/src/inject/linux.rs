@@ -10,6 +10,9 @@ use std::sync::{LazyLock, Mutex};
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::rust_connection::RustConnection;
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
@@ -29,6 +32,23 @@ struct ScrollOutput {
 
 static SCROLL_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
     LazyLock::new(|| Mutex::new(ScrollOutput::default()));
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "X11's core pointer coordinates are i16; values are clamped before conversion"
+)]
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    let Ok((connection, screen_index)) = RustConnection::connect(None) else {
+        return false;
+    };
+    let root = connection.setup().roots[screen_index].root;
+    let x = x.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+    let y = y.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+    let Ok(cookie) = connection.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, x, y) else {
+        return false;
+    };
+    cookie.check().is_ok() && connection.flush().is_ok()
+}
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.

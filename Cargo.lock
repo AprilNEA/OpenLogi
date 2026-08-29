@@ -5565,10 +5565,14 @@ version = "0.8.1"
 dependencies = [
  "futures-lite",
  "openlogi-core",
+ "openlogi-flow",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "rand 0.9.4",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -5844,6 +5848,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "x11rb",
  "zbus",
 ]
 

@@ -14,6 +14,7 @@ pub mod action_ring;
 pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
+pub mod flow;
 pub mod hardware;
 pub mod observable;
 pub mod orchestrator;

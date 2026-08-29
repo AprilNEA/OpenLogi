@@ -390,6 +390,8 @@ mod tests {
     use std::sync::RwLock;
 
     use openlogi_agent_core::DpiCycles;
+    use openlogi_agent_core::flow::FlowController;
+    use openlogi_agent_core::observable::ObservableState;
     use openlogi_agent_core::receiver_access::ReceiverAccess;
     use openlogi_agent_core::runtime::hook::HookMaps;
     use openlogi_agent_core::runtime::scroll::ScrollPreferences;
@@ -397,6 +399,14 @@ mod tests {
     use openlogi_hid::PairingError;
 
     fn shared_runtime() -> SharedRuntime {
+        let channel_pool = openlogi_hid::host::channel_pool();
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            openlogi_core::config::FlowConfig::default(),
+            Arc::new(ObservableState::new("test".to_owned())),
+            channel_pool.clone(),
+            receiver_access.clone(),
+        );
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
@@ -408,12 +418,13 @@ mod tests {
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
-            channel_pool: openlogi_hid::host::channel_pool(),
+            channel_pool,
             keyboard_spec: Arc::new(RwLock::new(None)),
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(0.into()),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            flow,
         }
     }
 

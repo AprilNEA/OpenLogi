@@ -36,6 +36,7 @@ fn mouse_event_clone_and_debug() {
         MouseEvent::Moved {
             delta_x: 3,
             delta_y: -2,
+            modifiers: KeyModifiers::default(),
         },
     ];
     for e in &events {

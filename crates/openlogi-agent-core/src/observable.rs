@@ -19,8 +19,8 @@ use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    AgentSnapshot, AgentStatus, FlowStatus, ForegroundApps, FoundDevice, Generation,
+    InventoryHealth, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
 };
 use tokio::sync::watch;
 
@@ -60,6 +60,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                flow: FlowStatus::default(),
             },
         });
         Self { tx }
@@ -206,6 +207,17 @@ impl ObservableState {
                 return false;
             }
             snapshot.pairing = phase;
+            true
+        });
+    }
+
+    /// Publish configured Flow peers and their coarse connection states.
+    pub fn set_flow(&self, flow: FlowStatus) {
+        self.update(|snapshot| {
+            if snapshot.flow == flow {
+                return false;
+            }
+            snapshot.flow = flow;
             true
         });
     }
