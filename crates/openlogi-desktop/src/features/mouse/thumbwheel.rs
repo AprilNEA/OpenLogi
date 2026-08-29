@@ -28,10 +28,11 @@ pub(crate) enum ThumbwheelPreset {
     VerticalScroll,
     VerticalScrollReversed,
     HorizontalScroll,
+    HorizontalScrollReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -44,6 +45,7 @@ impl ThumbwheelPreset {
         Self::VerticalScroll,
         Self::VerticalScrollReversed,
         Self::HorizontalScroll,
+        Self::HorizontalScrollReversed,
     ];
 
     #[must_use]
@@ -61,6 +63,9 @@ impl ThumbwheelPreset {
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
             Self::VerticalScrollReversed => (Action::ScrollUp, Action::ScrollDown),
             Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            Self::HorizontalScrollReversed => {
+                (Action::HorizontalScrollRight, Action::HorizontalScrollLeft)
+            }
         };
         ThumbwheelPair { backward, forward }
     }
@@ -90,6 +95,7 @@ impl ThumbwheelPreset {
             Self::VerticalScroll => "Vertical Scroll",
             Self::VerticalScrollReversed => "Vertical Scroll (Reversed)",
             Self::HorizontalScroll => "Horizontal Scroll",
+            Self::HorizontalScrollReversed => "Horizontal Scroll (Reversed)",
         }
     }
 
@@ -105,7 +111,9 @@ impl ThumbwheelPreset {
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::CycleDpi => "action-icons/gauge.svg",
             Self::VerticalScroll | Self::VerticalScrollReversed => "action-icons/chevrons-up.svg",
-            Self::HorizontalScroll => "action-icons/chevrons-right.svg",
+            Self::HorizontalScroll | Self::HorizontalScrollReversed => {
+                "action-icons/chevrons-right.svg"
+            }
         }
     }
 }
@@ -129,6 +137,7 @@ mod tests {
             (Action::ScrollDown, Action::ScrollUp),
             (Action::ScrollUp, Action::ScrollDown),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
         ];
 
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {

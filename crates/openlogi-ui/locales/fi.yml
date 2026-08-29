@@ -198,6 +198,7 @@ _version: 1
 "Vertical Scroll": "Pystyvieritys"
 "Vertical Scroll (Reversed)": "Pystyvieritys (käänteinen)"
 "Horizontal Scroll": "Vaakavieritys"
+"Horizontal Scroll (Reversed)": "Vaakavieritys (käänteinen)"
 "Custom": "Mukautettu"
 "Gesture Button": "Eletoiminto"
 "Gestures": "Eleet"

@@ -198,6 +198,7 @@ _version: 1
 "Vertical Scroll": "縦スクロール"
 "Vertical Scroll (Reversed)": "縦スクロール（反転）"
 "Horizontal Scroll": "横スクロール"
+"Horizontal Scroll (Reversed)": "横スクロール（反転）"
 "Custom": "カスタム"
 "Gesture Button": "ジェスチャーボタン"
 "Gestures": "ジェスチャー"
