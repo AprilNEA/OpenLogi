@@ -46,6 +46,7 @@ pub(crate) fn run() {
             window_min_size: Some(Size::new(px(760.), px(600.))),
             app_id: Some(APP_ID.into()),
             titlebar: Some(crate::windows::titlebar_options(TITLE)),
+            window_decorations: crate::windows::linux_window_decorations(),
             ..WindowOptions::default()
         };
         let opened = cx.open_window(options, |window, cx| {

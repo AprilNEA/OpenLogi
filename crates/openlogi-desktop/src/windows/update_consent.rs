@@ -81,8 +81,7 @@ impl Render for UpdateConsentView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Client-side titlebar only when the compositor did not already
-            // draw one. KDE/KWin SSD plus this row is the double-chrome bug.
+            // In-app titlebar when Linux CSD was granted.
             .when(windows::paints_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(tr!("OpenLogi"), cx))
             })

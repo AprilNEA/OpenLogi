@@ -533,7 +533,7 @@ impl Render for SettingsView {
             // Client-side titlebar as an absolute overlay (with matching top
             // padding) rather than a flex-column row — the `Settings` sidebar
             // uses `h_resizable` percentage sizing, which a flex column would
-            // break. Only when the compositor did not already draw chrome.
+            // In-app titlebar when Linux CSD was granted.
             .when(windows::paints_client_titlebar(window), |this| {
                 this.pt(TITLE_BAR_HEIGHT).child(
                     div()

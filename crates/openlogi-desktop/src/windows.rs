@@ -18,7 +18,7 @@ use crate::ui::theme::Typography as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Decorations, Global, IntoElement, ParentElement as _,
     Pixels, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowHandle, WindowOptions, div,
+    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
@@ -39,13 +39,21 @@ pub struct WindowRegistry {
 
 impl Global for WindowRegistry {}
 
+/// Linux window-decoration request passed to GPUI at open time.
+///
+/// OpenLogi asks for client-side decorations so the compositor drops its own
+/// chrome and the in-app [`TitleBar`] can own minimize / maximize / close.
+/// Compositors may still ignore the request; [`paints_client_titlebar`] gates
+/// the in-app bar so a refused request does not stack two titlebars.
+pub fn linux_window_decorations() -> Option<WindowDecorations> {
+    cfg!(target_os = "linux").then_some(WindowDecorations::Client)
+}
+
 /// Titlebar options for an app window.
 ///
 /// On Linux this returns transparent options so the view can draw a client-side
-/// [`TitleBar`] when the compositor actually granted CSD (see
-/// [`paints_client_titlebar`]). The native title is still stamped so KDE/KWin
-/// (and any other compositor that keeps SSD) has a string to show. On macOS /
-/// Windows it keeps the native titlebar carrying `title`, unchanged.
+/// [`TitleBar`] when the compositor granted CSD (see [`paints_client_titlebar`]).
+/// On macOS / Windows it keeps the native titlebar carrying `title`, unchanged.
 pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
     let title = title.into();
     if cfg!(target_os = "linux") {
@@ -64,20 +72,18 @@ pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
 
 /// Whether this window should draw gpui-component's in-app [`TitleBar`].
 ///
-/// GPUI defaults to requesting server-side decorations. GNOME/Mutter typically
-/// has no `xdg-decoration` manager and falls back to unpainted CSD, so Linux
-/// windows paint a [`TitleBar`]. KDE/KWin honors the SSD request and draws its
-/// own chrome — painting a [`TitleBar`] there stacks a second set of window
-/// controls. macOS / Windows always use the native titlebar.
+/// Linux windows request CSD via [`linux_window_decorations`]; this is true
+/// only when the compositor actually granted it. If a compositor keeps SSD
+/// despite the request, the in-app bar stays hidden so controls are not
+/// doubled. macOS / Windows always use the native titlebar.
 pub fn paints_client_titlebar(window: &Window) -> bool {
     cfg!(target_os = "linux") && matches!(window.window_decorations(), Decorations::Client { .. })
 }
 
 /// Client-side window titlebar for auxiliary windows: window controls
 /// (minimize / maximize / close), the drag region, and the window `title`
-/// centred. Callers must gate this on [`paints_client_titlebar`] so KDE (SSD)
-/// keeps only the native chrome. On macOS the widget reserves the traffic-light
-/// space.
+/// centred. Callers must gate this on [`paints_client_titlebar`]. On macOS the
+/// widget reserves the traffic-light space.
 pub fn aux_title_bar(title: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     let title = title.into();
     TitleBar::new().child(
@@ -157,6 +163,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
         // own `gnome_shell` frontmost backend.
         app_id: Some(APP_ID.into()),
         titlebar: Some(titlebar_options(title.clone())),
+        window_decorations: linux_window_decorations(),
         ..WindowOptions::default()
     };
 
