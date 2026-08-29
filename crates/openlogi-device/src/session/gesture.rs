@@ -17,7 +17,7 @@
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::{
     channel::HidppChannel,
@@ -30,14 +30,24 @@ use hidpp::{
     protocol::v20,
 };
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
-use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::backend::{BackendError, HidBackend};
+use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
 use crate::{ChannelRegistry, SharedChannel};
 
+#[cfg(test)]
+use super::capture_restore::undivert_change;
+use super::capture_restore::{
+    ArmedReporting, CaptureStop, ReprogRestore, divert_change, drop_listener_after,
+    restore_after_stop, rollback_capture_start, stop_for_current_publication,
+    wait_for_channel_change,
+};
+pub use super::capture_restore::{
+    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, GestureError,
+    PendingCaptureRestore,
+};
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, WheelDirection, WheelResolution};
 
@@ -49,15 +59,6 @@ const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// dead. Two, so one ping lost to transient receiver congestion (which does
 /// happen under pointer load) doesn't churn the session.
 const LIVENESS_PING_STRIKES: u8 = 2;
-
-/// How quickly a registry-backed session notices that inventory replaced its
-/// underlying connection without changing the device's stable route.
-const REGISTRY_CURRENT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Shared slot holding the active capture session's open channel, so DPI /
-/// SmartShift writes can reuse it instead of opening a fresh one. `None`
-/// whenever no session is connected.
-pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,23 +86,6 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
-}
-
-/// Why a capture session could not start (or had to stop).
-#[derive(Debug, Error)]
-pub enum GestureError {
-    /// HID transport-level failure while enumerating or opening the device.
-    #[error("HID transport error")]
-    Hid(#[from] BackendError),
-    /// No connected device matched the capture route.
-    #[error("no connected device matched the capture route")]
-    DeviceNotFound,
-    /// The device at the target index did not answer HID++.
-    #[error("device at index {0:#04x} did not respond to HID++")]
-    DeviceUnreachable(u8),
-    /// A HID++ feature call returned an error; inner string carries context.
-    #[error("HID++ protocol error: {0}")]
-    Hidpp(String),
 }
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
@@ -237,8 +221,10 @@ pub struct CaptureSpec {
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
-/// dropped), after restoring every diverted control. Setup errors are returned;
-/// failures to restore on the way out are logged, not propagated.
+/// dropped). A normal stop restores every diverted control before returning;
+/// transport replacement or loss may return
+/// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
+/// current inventory channel.
 pub async fn run_capture_session(
     backend: &dyn HidBackend,
     route: DeviceRoute,
@@ -246,12 +232,13 @@ pub async fn run_capture_session(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
-) -> Result<(), GestureError> {
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let chan = open_route_channel(backend, &route)
-        .await?
+        .await
+        .map_err(GestureError::from)?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());
-    run_capture_session_on(route, shared, spec, sink, shutdown, channel_slot, None).await
+    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, None).await
 }
 
 /// Capture through the inventory-owned channel currently published for
@@ -265,34 +252,24 @@ pub async fn run_capture_session_with_registry_spec(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: &ChannelRegistry,
-) -> Result<(), GestureError> {
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
         .ok_or(GestureError::DeviceNotFound)?;
-    run_capture_session_on(
-        route,
-        shared,
-        spec,
-        sink,
-        shutdown,
-        channel_slot,
-        Some(registry),
-    )
-    .await
+    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, Some(registry)).await
 }
 
 async fn run_capture_session_on(
-    route: DeviceRoute,
     shared: SharedChannel,
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: Option<&ChannelRegistry>,
-) -> Result<(), GestureError> {
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let chan = Arc::clone(shared.channel());
-    let device_index = route.device_index();
-    let armed = arm_controls(&chan, device_index, &spec).await?;
+    let device_index = shared.device_index();
+    let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -301,14 +278,17 @@ async fn run_capture_session_on(
     }
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
-    let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
+    let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
     let gesture_cids = armed.gesture_cids.clone();
     let gesture_button_set = armed.gesture_button_cids.clone();
-    let thumb_index = armed.thumb.as_ref().map(|(_, idx, _)| *idx);
+    let thumb_index = armed
+        .thumb
+        .as_ref()
+        .map(|(thumbwheel, _)| thumbwheel.feature_index());
     let thumb_resolution = armed
         .thumb
         .as_ref()
-        .map_or(WheelResolution::UNKNOWN, |(_, _, res)| *res);
+        .map_or(WheelResolution::UNKNOWN, |(_, res)| *res);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
     let listener = chan.add_msg_listener_guarded({
@@ -362,7 +342,7 @@ async fn run_capture_session_on(
         .flatten()
         .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
     log_capture_active(device_index, &armed, wireless.is_some());
-    let channel_unusable = monitor_capture(
+    let stop = monitor_capture(
         CaptureMonitor {
             root: &root,
             armed: &armed,
@@ -388,23 +368,26 @@ async fn run_capture_session_on(
     {
         *slot = None;
     }
-    if channel_unusable {
-        // A dead channel would burn a timeout per write; a superseded channel
-        // must not restore controls underneath its replacement. Either way,
-        // the next session re-arms the requested diverts on the current path.
-        debug!(
-            index = device_index,
-            "skipping disarm on an unusable channel"
-        );
-    } else {
-        armed.disarm().await;
-    }
-    // Keep accepting reports until native firmware delivery is restored. The
-    // listener owns the final sink sender, so dropping it also lets the agent
-    // forwarder drain before publishing session completion.
-    drop(listener);
+    let outcome = finish_capture(listener, stop, armed, shared, registry).await;
     debug!(index = device_index, "control capture stopped");
-    Ok(())
+    Ok(outcome)
+}
+
+/// Restore or hand off one stopped session while its listener still owns every
+/// diverted input report.
+async fn finish_capture<T>(
+    listener: T,
+    stop: CaptureStop,
+    armed: ArmedControls,
+    retired: SharedChannel,
+    registry: Option<&ChannelRegistry>,
+) -> CaptureSessionOutcome {
+    let pending = armed.into_pending(&retired);
+    drop_listener_after(
+        listener,
+        restore_after_stop(stop, pending, &retired, registry),
+    )
+    .await
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.
@@ -442,8 +425,8 @@ fn thumbwheel_input(
 /// to the firmware on teardown.
 #[derive(Default)]
 struct ArmedControls {
-    /// `0x1b04` accessor + feature index, present when the device exposes it.
-    reprog: Option<(ReprogControlsV4, u8)>,
+    /// `0x1b04` accessor, present when the device exposes it.
+    reprog: Option<ReprogControlsV4>,
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     gesture_cids: Vec<u16>,
@@ -455,29 +438,32 @@ struct ArmedControls {
     /// the [`ButtonId`] each dispatches as.
     button_cids: Vec<(u16, ButtonId)>,
     /// Original reporting state for every diverted `0x1b04` control.
-    reporting: Vec<ArmedCid>,
-    /// `0x2150` accessor, feature index, and the wheel's reported resolution,
-    /// present when the thumb wheel is diverted.
-    thumb: Option<(Thumbwheel, u8, WheelResolution)>,
-}
-
-#[derive(Clone, Copy)]
-struct ArmedCid {
-    cid: u16,
-    original: reprog_controls::CidReporting,
+    reporting: Vec<ArmedReporting>,
+    /// `0x2150` accessor and the wheel's reported resolution, present when the
+    /// thumb wheel is diverted.
+    thumb: Option<(Thumbwheel, WheelResolution)>,
 }
 
 impl ArmedControls {
-    /// Restore every diverted control. Failures are logged, not propagated.
-    async fn disarm(&self) {
-        if let Some((rc, _)) = self.reprog.as_ref() {
-            for &reporting in &self.reporting {
-                restore_reporting(rc, reporting, "captured control").await;
-            }
-        }
-        if let Some((tw, _, _)) = self.thumb.as_ref() {
-            restore(tw.undivert().await, "thumb wheel");
-        }
+    /// Convert all armed firmware state into the one capability that can
+    /// release it. Consuming `self` prevents a session and a restore retry from
+    /// both claiming ownership at once.
+    fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
+        let Self {
+            reprog,
+            reporting,
+            thumb,
+            ..
+        } = self;
+        let reprog =
+            reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
+        PendingCaptureRestore::new(
+            retired,
+            reprog,
+            thumb
+                .as_ref()
+                .map(|(thumbwheel, _)| thumbwheel.feature_index()),
+        )
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast. The
@@ -485,14 +471,14 @@ impl ArmedControls {
     /// short settling window like the keyboard capture path does.
     async fn rearm(&self) {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        if let Some((rc, _)) = self.reprog.as_ref() {
+        if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
                 let raw_xy = self.gesture_cids.contains(&reporting.cid)
                     || self
                         .gesture_button_cids
                         .iter()
                         .any(|&(cid, _)| cid == reporting.cid);
-                let change = rearm_change(reporting.original, raw_xy);
+                let change = divert_change(reporting.original, raw_xy);
                 if let Err(error) = rc.set_cid_reporting_full(reporting.cid, change).await {
                     warn!(
                         cid = format_args!("{:#06x}", reporting.cid),
@@ -502,23 +488,11 @@ impl ArmedControls {
                 }
             }
         }
-        if let Some((thumbwheel, _, _)) = self.thumb.as_ref()
+        if let Some((thumbwheel, _)) = self.thumb.as_ref()
             && let Err(error) = thumbwheel.divert(WheelDirection::Default).await
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
-    }
-}
-
-fn rearm_change(
-    reporting: reprog_controls::CidReporting,
-    raw_xy: bool,
-) -> reprog_controls::CidReportingChange {
-    reprog_controls::CidReportingChange {
-        diverted: Some(true),
-        raw_xy: Some(raw_xy),
-        remap: reporting.remap,
-        ..Default::default()
     }
 }
 
@@ -535,19 +509,6 @@ fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool)
     );
 }
 
-async fn wait_until_channel_superseded(registry: Option<&ChannelRegistry>, shared: &SharedChannel) {
-    let Some(registry) = registry else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    loop {
-        tokio::time::sleep(REGISTRY_CURRENT_POLL).await;
-        if !registry.is_current(shared) {
-            return;
-        }
-    }
-}
-
 /// Borrowed state used while monitoring one armed capture session.
 struct CaptureMonitor<'a> {
     root: &'a RootFeature,
@@ -559,23 +520,31 @@ struct CaptureMonitor<'a> {
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
-/// the device announces a reconnect. Returns `true` when the underlying
-/// channel stopped delivering or inventory superseded it, so teardown must
-/// skip restore writes.
+/// the device announces a reconnect. Returns only the typed reason capture
+/// stopped; restoration performs a fresh registry lookup after monitoring.
 async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
     shutdown: oneshot::Receiver<()>,
-) -> bool {
+) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut shutdown = std::pin::pin!(shutdown);
     let mut silent_pings = 0u8;
     loop {
         tokio::select! {
-            _ = &mut shutdown => return false,
-            () = wait_until_channel_superseded(context.registry, context.shared) => {
-                info!(index = context.device_index, "inventory replaced capture channel — restarting session");
-                return true;
+            _ = &mut shutdown => {
+                // Shutdown and inventory replacement can become ready on the
+                // same turn. Prefer the typed channel transition so teardown
+                // never blindly writes through a transport already known to
+                // be obsolete.
+                return stop_for_current_publication(context.registry, context.shared);
+            }
+            transition = wait_for_channel_change(
+                context.registry,
+                context.shared,
+            ) => {
+                info!(index = context.device_index, "inventory replaced or removed capture channel — restarting session");
+                return transition;
             }
             event = async {
                 match wake_events.as_ref() {
@@ -601,7 +570,7 @@ async fn monitor_capture(
                         silent_pings = silent_pings.saturating_add(1);
                         if silent_pings >= LIVENESS_PING_STRIKES {
                             warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
-                            return true;
+                            return stop_for_current_publication(context.registry, context.shared);
                         }
                     }
                     // Any reply — pong, feature error, unreachable-device
@@ -619,22 +588,23 @@ async fn monitor_capture(
 /// root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 ///
-/// A failure mid-way hands every already-diverted control back to the firmware
-/// before returning: with several controls armed one after another, aborting
-/// without disarming would leave the earlier ones diverted with no session
-/// listening — captured-and-dropped until a later respawn succeeds.
+/// A failure mid-way tries to hand every possibly-diverted control back to the
+/// firmware. If compensation is incomplete, the returned failure carries an
+/// opaque restore capability for the manager to retain and retry.
 async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
     spec: &CaptureSpec,
-) -> Result<ArmedControls, GestureError> {
+    shared: &SharedChannel,
+    registry: Option<&ChannelRegistry>,
+) -> Result<ArmedControls, CaptureSessionFailure> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
         .map_err(|_| GestureError::DeviceUnreachable(slot))?;
     let mut armed = ArmedControls::default();
     if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
-        armed.disarm().await;
-        return Err(error);
+        let pending = armed.into_pending(shared);
+        return Err(rollback_capture_start(error, pending, shared, registry).await);
     }
     if armed.gesture_cids.is_empty()
         && armed.gesture_button_cids.is_empty()
@@ -647,9 +617,9 @@ async fn arm_controls(
     Ok(armed)
 }
 
-/// The fallible arming steps of [`arm_controls`], recording each successful
-/// divert into `armed` as it lands — so the caller can disarm exactly what was
-/// armed when a later step fails.
+/// The fallible arming steps of [`arm_controls`], recording ownership before
+/// each write. A transport failure cannot prove whether firmware applied that
+/// write, so rollback deliberately includes the uncertain current control.
 async fn arm_controls_into(
     device: &Device,
     chan: &Arc<HidppChannel>,
@@ -666,15 +636,14 @@ async fn arm_controls_into(
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
         // Register an accessor before the first divert, so a failure on any
-        // divert (including the first) can be handed back via `disarm`.
-        armed.reprog = Some((rc.clone(), info.index));
+        // divert (including the first) can become a restore capability.
+        armed.reprog = Some(rc.clone());
 
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
         for &cid in &spec.divert_gesture_sources {
             if controls.iter().any(|c| c.cid == cid && c.supports_raw_xy()) {
-                let reporting = arm_reprog_control(&rc, cid, true).await?;
-                armed.reporting.push(reporting);
+                arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
                 armed.gesture_cids.push(cid);
             }
         }
@@ -683,15 +652,13 @@ async fn arm_controls_into(
                 && control.is_divertable()
                 && control.supports_raw_xy()
             {
-                let reporting = arm_reprog_control(&rc, cid, true).await?;
-                armed.reporting.push(reporting);
+                arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
                 armed.gesture_button_cids.push((cid, button));
             }
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                let reporting = arm_reprog_control(&rc, cid, false).await?;
-                armed.reporting.push(reporting);
+                arm_reprog_control(&rc, cid, false, &mut armed.reporting).await?;
                 armed.dpi_cids.push(cid);
             }
         }
@@ -708,8 +675,7 @@ async fn arm_controls_into(
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                let reporting = arm_reprog_control(&rc, cid, false).await?;
-                armed.reporting.push(reporting);
+                arm_reprog_control(&rc, cid, false, &mut armed.reporting).await?;
                 armed.button_cids.push((cid, button));
             }
         }
@@ -740,12 +706,12 @@ async fn arm_controls_into(
         if !supports_single_tap {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
-        if let Err(error) = tw.divert(WheelDirection::Default).await {
-            let error = GestureError::Hidpp(format!("{error:?}"));
-            restore(tw.undivert().await, "failed thumb wheel diversion");
-            return Err(error);
+        armed.thumb = Some((tw, resolution));
+        if let Some((tw, _)) = armed.thumb.as_ref()
+            && let Err(error) = tw.divert(WheelDirection::Default).await
+        {
+            return Err(GestureError::Hidpp(format!("{error:?}")));
         }
-        armed.thumb = Some((tw, info.index, resolution));
     }
     Ok(())
 }
@@ -754,7 +720,8 @@ async fn arm_reprog_control(
     rc: &ReprogControlsV4,
     cid: u16,
     raw_xy: bool,
-) -> Result<ArmedCid, GestureError> {
+    reporting: &mut Vec<ArmedReporting>,
+) -> Result<(), GestureError> {
     let original = rc
         .get_cid_reporting(cid)
         .await
@@ -765,48 +732,14 @@ async fn arm_reprog_control(
         // replayed on restore, leaving the button dead.
         debug!(cid, "control was already diverted before arming");
     }
-    let change = reprog_controls::CidReportingChange {
-        diverted: Some(true),
-        raw_xy: Some(raw_xy),
-        remap: original.remap,
-        ..Default::default()
-    };
-    if let Err(error) = rc.set_cid_reporting_full(cid, change).await {
-        let error = GestureError::Hidpp(format!("{error:?}"));
-        restore_reporting(rc, ArmedCid { cid, original }, "failed diversion").await;
-        return Err(error);
-    }
-    Ok(ArmedCid { cid, original })
-}
-
-/// The mirror image of arming: clear the diversion this session turned on and
-/// hand the control's remap target back untouched.
-///
-/// Deliberately *not* a verbatim replay of the snapshot. A control can already
-/// be diverted when the session arms it — the agent was killed mid-session, or
-/// Logi Options+ left its own diversion behind — and replaying that snapshot
-/// hands the button back diverted with nothing listening for its HID++ events
-/// and no OS event either: dead until the device sleeps or reconnects, since
-/// diversion is volatile. Arming only ever sets `diverted` / `raw_xy` (plus
-/// re-asserting `remap`), so undoing exactly those fields is the whole job;
-/// every other bit stays `None`, i.e. unchanged.
-fn undivert_change(
-    reporting: reprog_controls::CidReporting,
-) -> reprog_controls::CidReportingChange {
-    reprog_controls::CidReportingChange {
-        diverted: Some(false),
-        raw_xy: Some(false),
-        remap: reporting.remap,
-        ..Default::default()
-    }
-}
-
-async fn restore_reporting(rc: &ReprogControlsV4, armed: ArmedCid, what: &str) {
-    let result = rc
-        .set_cid_reporting_full(armed.cid, undivert_change(armed.original))
+    let change = divert_change(original, raw_xy);
+    // Record ownership before the write: a transport error does not prove the
+    // firmware rejected the command, so rollback must cover this CID too.
+    reporting.push(ArmedReporting { cid, original });
+    rc.set_cid_reporting_full(cid, change)
         .await
-        .map(|_| ());
-    restore(result, what);
+        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    Ok(())
 }
 
 /// The [`ButtonId`] a gesture-source CID dispatches as, per
@@ -827,13 +760,6 @@ fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) ->
             .find(|&&(candidate, _)| candidate == cid)
             .map(|&(_, button)| button)
     })
-}
-
-/// Log (don't propagate) a failure to hand a control back to the firmware.
-pub(crate) fn restore<E: std::fmt::Display>(result: Result<(), E>, what: &str) {
-    if let Err(e) = result {
-        warn!(error = %e, control = what, "failed to restore control mapping on shutdown");
-    }
 }
 
 /// Read the device's full reprogrammable-control table in one pass, so we can

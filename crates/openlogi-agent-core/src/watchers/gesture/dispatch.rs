@@ -12,12 +12,12 @@ use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
-use crate::capture_plan::DeviceCapturePlan;
+use crate::capture_plan::DispatchPlan;
 use crate::runtime::{HidppSessionId, PressToken};
 
-/// Effective thumb-wheel configuration whose continuity is tied to one capture
-/// session. A binding or sensitivity change starts a new session epoch even
-/// when the HID++ divert set itself stays the same.
+/// Effective thumb-wheel configuration whose continuity is tied to one
+/// dispatch plan. A binding or sensitivity update clears accumulated state
+/// without cycling an unchanged HID++ diversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct WheelConfiguration {
     up: Action,
@@ -27,7 +27,7 @@ pub(super) struct WheelConfiguration {
 
 impl WheelConfiguration {
     /// Resolve both directional bindings and their shared sensitivity.
-    pub(super) fn for_plan(plan: &DeviceCapturePlan) -> Self {
+    pub(super) fn for_plan(plan: &DispatchPlan) -> Self {
         let action = |button| {
             plan.bindings
                 .get(&button)
@@ -121,7 +121,7 @@ impl InputDispatcher {
     pub(super) fn dispatch(
         &mut self,
         session: &HidppSessionId,
-        plan: &DeviceCapturePlan,
+        plan: &DispatchPlan,
         input: CapturedInput,
     ) {
         let key = session.device_key();

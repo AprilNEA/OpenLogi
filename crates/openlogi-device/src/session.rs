@@ -6,6 +6,7 @@
 //! control presses for the agent to dispatch, [`host_switch`] follows a
 //! keyboard's host keys to switch its linked pointing devices.
 
+mod capture_restore;
 pub mod gesture;
 pub mod host_switch;
 pub mod keyboard;

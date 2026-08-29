@@ -31,6 +31,7 @@ impl ScriptedRawHidHandle {
 
 /// Answers a HID++ request as a particular scripted device would.
 pub(crate) type Responder = fn(&[u8]) -> Option<Vec<u8>>;
+type DynamicResponder = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
 /// Decides whether a raw write fails at the transport rather than reaching the
 /// device — the shape a node that has gone away takes.
@@ -40,13 +41,20 @@ pub(crate) struct ScriptedRawHidChannel {
     incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
-    responder: Responder,
+    responder: DynamicResponder,
     fails: Option<WriteFailure>,
 }
 
 impl ScriptedRawHidChannel {
     /// A channel answering as `responder`'s device.
     pub(crate) fn with_responder(responder: Responder) -> (Self, ScriptedRawHidHandle) {
+        Self::build(responder, None)
+    }
+
+    /// A channel whose responder needs per-test captured state.
+    pub(crate) fn with_dynamic_responder(
+        responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> (Self, ScriptedRawHidHandle) {
         Self::build(responder, None)
     }
 
@@ -61,7 +69,10 @@ impl ScriptedRawHidChannel {
         Self::build(responder, Some(fails))
     }
 
-    fn build(responder: Responder, fails: Option<WriteFailure>) -> (Self, ScriptedRawHidHandle) {
+    fn build(
+        responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+        fails: Option<WriteFailure>,
+    ) -> (Self, ScriptedRawHidHandle) {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         (
@@ -69,7 +80,7 @@ impl ScriptedRawHidChannel {
                 incoming_tx,
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written: Arc::clone(&written),
-                responder,
+                responder: Arc::new(responder),
                 fails,
             },
             ScriptedRawHidHandle { written },

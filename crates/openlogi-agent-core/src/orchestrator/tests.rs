@@ -872,7 +872,8 @@ fn config_reload_clears_override_when_camera_mode_changes() {
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
     orch.shared.capture_plans.read().ok().and_then(|plans| {
         plans.first().and_then(|plan| {
-            plan.bindings
+            plan.dispatch
+                .bindings
                 .get(&ButtonId::Back)
                 .map(Binding::click_action)
         })
@@ -881,7 +882,7 @@ fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
 
 #[test]
 fn app_switch_republishes_capture_plans() {
-    // HID++ dispatch reads `plan.bindings` at event time, so a
+    // HID++ dispatch reads `plan.dispatch.bindings` at event time, so a
     // foreground-app change must republish the capture plans — their
     // binding maps and divert sets are per-app effective — or every
     // diverted button keeps firing the previous app's actions.
@@ -921,6 +922,8 @@ async fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .capture_plans
             .read()
             .expect("capture plans should not be poisoned")[0]
+            .target
+            .spec
             .divert_gesture_buttons
             .iter()
             .any(|&(_, button)| button == ButtonId::Forward)

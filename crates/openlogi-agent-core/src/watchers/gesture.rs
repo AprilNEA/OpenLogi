@@ -27,17 +27,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use openlogi_core::config::ThumbwheelSensitivity;
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
-use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
 use openlogi_hid::{
-    CaptureChannel, CapturedInput, DeviceRoute, run_capture_session_with_registry_spec,
+    CaptureChannel, CaptureSessionOutcome, CapturedInput, PendingCaptureRestore,
+    run_capture_session_with_registry_spec,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, warn};
 
-use self::dispatch::{InputDispatcher, WheelConfiguration};
-use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
+use self::dispatch::InputDispatcher;
+use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
+use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
@@ -107,74 +108,18 @@ pub fn spawn(
     });
 }
 
-/// Whether one device's thumb wheel must be diverted over HID++ (which
-/// suppresses native scroll) so we can re-synthesise its scroll or capture its
-/// tap: its sensitivity leaves the default (so we scale scroll ourselves) or a
-/// thumbwheel binding does.
-fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
-    plan.thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
-        || plan.thumbwheel_bindings_nondefault
-}
-
-/// The [`CaptureSpec`] one device's session should run with right now.
-fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
-    CaptureSpec {
-        capture_thumbwheel: thumbwheel_armed(plan),
-        // Derived from the dispatch maps, so the armed diverts and the maps
-        // resolving their events can never drift apart.
-        divert_gesture_sources: GESTURE_SOURCE_BUTTONS
-            .into_iter()
-            .filter(|(_, button)| plan.gesture_bindings.contains_key(button))
-            .map(|(cid, _)| cid)
-            .collect(),
-        divert_gesture_buttons: plan.divert_gesture_buttons.clone(),
-        divert_buttons: plan.divert_buttons.clone(),
-    }
-}
-
-/// Capture and wheel-state configuration that determines whether a session can
-/// stay armed without leaking state across a binding epoch.
-#[derive(Clone, PartialEq)]
-struct SessionTarget {
-    route: DeviceRoute,
-    spec: CaptureSpec,
-    wheel: WheelConfiguration,
-    rearm_generation: u64,
-}
-
-impl SessionTarget {
-    fn for_plan(plan: &DeviceCapturePlan) -> Self {
-        Self {
-            route: plan.route.clone(),
-            spec: spec_for(plan),
-            wheel: WheelConfiguration::for_plan(plan),
-            rearm_generation: plan.rearm_generation,
-        }
-    }
-}
-
-/// One capture session tracked by the manager.
-struct RunningSession {
-    id: HidppSessionId,
-    target: SessionTarget,
-    /// Latest dispatch plan while active, frozen when teardown starts. A newly
-    /// published plan may remove a diversion before firmware restoration
-    /// completes, but events from a draining session still belong to its
-    /// retiring plan.
-    plan: DeviceCapturePlan,
-    /// Present while the session runs; taken to request a stop. `None` means
-    /// the session is draining — deliberately stopped, but its task (and the
-    /// control-restore writes in its teardown) may still be in flight.
-    stop: Option<oneshot::Sender<()>>,
-}
+type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
 
 struct CapturedEvent {
+    physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
     input: CapturedInput,
 }
 
 struct SessionDone {
+    physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
+    pending_restore: Option<PendingCaptureRestore>,
 }
 
 enum SessionEvent {
@@ -192,6 +137,7 @@ struct SessionChannels {
 /// Forward one capture session's inputs onto the manager's ordered event
 /// channel. The sender closes only after the device listener has been dropped.
 fn spawn_input_forwarder(
+    physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
     mut inputs: mpsc::UnboundedReceiver<CapturedInput>,
     events: mpsc::UnboundedSender<SessionEvent>,
@@ -199,6 +145,7 @@ fn spawn_input_forwarder(
     tokio::spawn(async move {
         while let Some(input) = inputs.recv().await {
             let _ = events.send(SessionEvent::Input(CapturedEvent {
+                physical_key: physical_key.clone(),
                 session: session.clone(),
                 input,
             }));
@@ -211,78 +158,24 @@ fn spawn_input_forwarder(
 async fn report_done_after_inputs(
     forward_task: tokio::task::JoinHandle<()>,
     events: mpsc::UnboundedSender<SessionEvent>,
-    session: HidppSessionId,
+    done: SessionDone,
 ) {
     if let Err(error) = forward_task.await {
         debug!(%error, "capture input forwarder ended unexpectedly");
     }
-    let _ = events.send(SessionEvent::Done(SessionDone { session }));
+    let _ = events.send(SessionEvent::Done(done));
 }
 
-/// What a capture-session manager should do with one session-completion
-/// report. Shared with the keyboard manager, which tracks its single session
-/// under the same rules.
-#[derive(Debug, PartialEq)]
-pub(super) enum DoneAction {
-    /// A stale report from a session the manager no longer tracks — ignore it.
-    Ignore,
-    /// The tracked session's task has fully exited: drop its entry so the next
-    /// tick may arm a successor. `unexpected` is true when the exit wasn't a
-    /// deliberate stop and the drop deserves a warning.
-    Remove { unexpected: bool },
-}
-
-/// Decide the [`DoneAction`] for a completion report carrying `done_session`,
-/// given the session the manager currently tracks for that device (if any).
-///
-/// Only the *current* session's report settles anything; a stale epoch belongs
-/// to a session already superseded. A tracked session whose stop sender is
-/// gone was stopped deliberately and is merely draining — its report frees the
-/// key quietly. One still holding its stop sender exited on its own and
-/// warrants a warning alongside the re-arm.
-fn on_done(done_session: &HidppSessionId, live: Option<&RunningSession>) -> DoneAction {
-    match live {
-        Some(session) if session.id == *done_session => DoneAction::Remove {
-            unexpected: session.stop.is_some(),
-        },
-        _ => DoneAction::Ignore,
-    }
-}
-
-/// Return the plan that owns an input from the currently tracked session.
-/// Deliberately stopped sessions remain admissible until their task
-/// reports that native firmware reporting has been restored. An exclusive
-/// request initiates that stop through reconciliation; it does not revoke the
-/// session's ownership while controls are still diverted.
-fn dispatch_plan_for<'a>(
+/// Return the plan that owns an input from the currently tracked session. An
+/// active session follows compatible plan updates; a deliberately stopped
+/// session keeps its frozen plan and remains admissible until its task reports
+/// that native firmware reporting has been restored.
+fn dispatch_context_for<'a>(
     input_session: &HidppSessionId,
     live: Option<&'a RunningSession>,
-) -> Option<&'a DeviceCapturePlan> {
-    live.filter(|session| session.id == *input_session)
-        .map(|session| &session.plan)
-}
-
-/// Whether the plan currently published for a device still describes the
-/// capture session that produced an input. This closes the interval between a
-/// plan publication and the manager's next teardown tick.
-fn session_matches_plan(session: &RunningSession, plan: &DeviceCapturePlan) -> bool {
-    session.target == SessionTarget::for_plan(plan)
-}
-
-/// Reconcile a tracked session with its currently wanted plan.
-///
-/// Dispatch-only changes can be adopted without touching firmware while the
-/// session is active. Once stop has been requested, keep the retiring plan
-/// frozen so reports accepted during restoration resolve against the bindings
-/// that owned the diversion.
-fn refresh_dispatch_plan(session: &mut RunningSession, wanted: Option<&DeviceCapturePlan>) -> bool {
-    let Some(plan) = wanted.filter(|plan| session_matches_plan(session, plan)) else {
-        return false;
-    };
-    if session.stop.is_some() {
-        session.plan = plan.clone();
-    }
-    true
+) -> Option<(&'a HidppSessionId, &'a DispatchPlan)> {
+    live.filter(|session| session.owns(input_session))
+        .map(|session| (session.id(), session.dispatch()))
 }
 
 /// Snapshot the sessions that should be armed on this tick. Pairing owns the
@@ -291,7 +184,7 @@ fn refresh_dispatch_plan(session: &mut RunningSession, wanted: Option<&DeviceCap
 fn wanted_sessions(
     receiver_access: &ReceiverAccess,
     capture_plans: &SharedCapturePlans,
-) -> HashMap<String, DeviceCapturePlan> {
+) -> HashMap<PhysicalDeviceKey, DeviceCapturePlan> {
     if receiver_access.exclusive_requested() {
         return HashMap::new();
     }
@@ -300,16 +193,81 @@ fn wanted_sessions(
         .map(|plans| {
             plans
                 .iter()
-                .map(|plan| (plan.config_key.clone(), plan.clone()))
+                .map(|plan| (plan.target.physical_key.clone(), plan.clone()))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn reconcile_session(
+    session: &mut RunningSession,
+    wanted: Option<(&CaptureTarget, &DispatchPlan)>,
+    dispatcher: &mut InputDispatcher,
+) {
+    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
+        dispatcher.cancel_session(session.id());
+        let config_key = session.dispatch().config_key.clone();
+        session.rekey(&config_key);
+    }
+}
+
+/// Reconcile one tracked slot directly against the latest publication. Input
+/// calls this before dispatch so an event cannot slip through the interval
+/// between publishing a hot action update and processing its notification.
+fn reconcile_published_session(
+    key: &PhysicalDeviceKey,
+    session: &mut RunningSession,
+    receiver_access: &ReceiverAccess,
+    capture_plans: &SharedCapturePlans,
+    dispatcher: &mut InputDispatcher,
+) {
+    if receiver_access.exclusive_requested() {
+        reconcile_session(session, None, dispatcher);
+    } else {
+        match capture_plans.read() {
+            Ok(plans) => {
+                let wanted = plans
+                    .iter()
+                    .find(|plan| plan.target.physical_key == *key)
+                    .map(|plan| (&plan.target, &plan.dispatch));
+                reconcile_session(session, wanted, dispatcher);
+            }
+            Err(_) => reconcile_session(session, None, dispatcher),
+        }
+    }
 }
 
 async fn wait_for_reconcile(ticker: &mut tokio::time::Interval, changed: &Notify) {
     tokio::select! {
         _ = ticker.tick() => {}
         () = changed.notified() => {}
+    }
+}
+
+fn acquire_session_lease(
+    receiver_access: &ReceiverAccess,
+    lease: &mut std::sync::Weak<SessionReceiverLease>,
+) -> Option<Arc<SessionReceiverLease>> {
+    if let Some(existing) = lease.upgrade() {
+        return Some(existing);
+    }
+    let fresh = Arc::new(receiver_access.try_acquire_for_session()?);
+    *lease = Arc::downgrade(&fresh);
+    Some(fresh)
+}
+
+async fn retry_pending_restores(
+    pending_restores: &mut HashMap<PhysicalDeviceKey, PendingCaptureRestore>,
+    registry: &openlogi_hid::ChannelRegistry,
+) {
+    let keys: Vec<_> = pending_restores.keys().cloned().collect();
+    for key in keys {
+        let Some(pending) = pending_restores.remove(&key) else {
+            continue;
+        };
+        if let CaptureSessionOutcome::RestorePending(pending) = pending.retry(registry).await {
+            pending_restores.insert(key, pending);
+        }
     }
 }
 
@@ -325,7 +283,8 @@ async fn manage(
     outputs: GestureOutputs,
 ) {
     let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mut sessions: HashMap<String, RunningSession> = HashMap::new();
+    let mut sessions: HashMap<PhysicalDeviceKey, RunningSession> = HashMap::new();
+    let mut pending_restores: HashMap<PhysicalDeviceKey, PendingCaptureRestore> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut input_dispatcher = InputDispatcher::new(outputs);
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -334,7 +293,7 @@ async fn manage(
     // key and the epoch it started under: a dead *current* session re-arms on the
     // next tick, a deliberately stopped one merely frees its key for the
     // replacement once its teardown has drained, and stale completions are
-    // ignored (see `on_done`).
+    // ignored by the shared capture-session lifecycle.
     let channels = SessionChannels {
         events,
         capture: capture_channel,
@@ -350,27 +309,41 @@ async fn manage(
             Some(event) = event_rx.recv() => {
                 match event {
                     SessionEvent::Input(event) => {
-                        let key = event.session.device_key();
+                        let key = &event.physical_key;
+                        if let Some(session) = sessions.get_mut(key) {
+                            reconcile_published_session(
+                                key,
+                                session,
+                                &receiver_access,
+                                &capture_plans,
+                                &mut input_dispatcher,
+                            );
+                        }
                         let live = sessions.get(key);
-                        let dispatch_plan = dispatch_plan_for(&event.session, live);
-                        if let Some(plan) = dispatch_plan {
-                            input_dispatcher.dispatch(&event.session, plan, event.input);
+                        let dispatch_context = dispatch_context_for(&event.session, live);
+                        if let Some((session, plan)) = dispatch_context {
+                            input_dispatcher.dispatch(session, plan, event.input);
                         } else {
                             input_dispatcher.cancel_session(&event.session);
-                            debug!(key, epoch = event.session.epoch(), "input from a stale capture session — ignored");
+                            debug!(key = key.as_str(), epoch = event.session.epoch(), "input from a stale capture session — ignored");
                         }
                     }
                     SessionEvent::Done(done) => {
-                        let key = done.session.device_key();
+                        let key = &done.physical_key;
                         // Completion is queued behind every input the listener
                         // accepted during restoration, so cancellation cannot
                         // overtake the last diverted edge.
-                        if let DoneAction::Remove { unexpected } =
-                            on_done(&done.session, sessions.get(key))
+                        if let Some((CompletionAction::Remove { unexpected }, dispatch_session)) =
+                            sessions.get(key).map(|session| {
+                                (session.completion(&done.session), session.id().clone())
+                            })
                         {
-                            input_dispatcher.cancel_session(&done.session);
+                            if let Some(pending) = done.pending_restore {
+                                pending_restores.insert(key.clone(), pending);
+                            }
+                            input_dispatcher.cancel_session(&dispatch_session);
                             if unexpected {
-                                warn!(key, "capture session ended unexpectedly, re-arming");
+                                warn!(key = key.as_str(), "capture session ended unexpectedly, re-arming");
                             }
                             sessions.remove(key);
                         }
@@ -384,7 +357,7 @@ async fn manage(
                 let want = wanted_sessions(&receiver_access, &capture_plans);
                 // Stop sessions whose device disappeared or whose plan changed.
                 // Sending on the oneshot lets the session restore its controls.
-                // A stopped session stays tracked — stop sender taken — until
+                // A stopped session stays tracked in the draining phase until
                 // its task reports completion below, and a tracked key is never
                 // re-armed: arming the replacement while the old task may still
                 // be mid-restore could interleave its divert writes with the
@@ -394,36 +367,44 @@ async fn manage(
                 // live until completion so already-diverted edges can settle
                 // against the retiring plan during teardown.
                 for (key, session) in &mut sessions {
-                    let keep = refresh_dispatch_plan(session, want.get(key));
-                    if !keep && let Some(stop) = session.stop.take() {
-                        let _ = stop.send(());
-                    }
+                    let wanted = want.get(key).map(|plan| (&plan.target, &plan.dispatch));
+                    reconcile_session(session, wanted, &mut input_dispatcher);
+                }
+                // Firmware ownership outlives the desired plan. Retry every
+                // pending restore even when the device was disabled or its
+                // plan disappeared, and consume/reinsert the typed token so a
+                // successful attempt cannot accidentally be retried.
+                // Keep the strong lease through successor spawning below: the
+                // restore→rearm transition is one uninterrupted shared-access
+                // interval from pairing's perspective.
+                let restore_lease = if pending_restores.is_empty() {
+                    None
+                } else {
+                    let Some(restore_lease) = acquire_session_lease(
+                        &receiver_access,
+                        &mut lease,
+                    ) else {
+                        continue;
+                    };
+                    Some(restore_lease)
+                };
+                if restore_lease.is_some() {
+                    retry_pending_restores(&mut pending_restores, &channels.registry).await;
                 }
                 for (key, plan) in want {
-                    if sessions.contains_key(&key) {
+                    if sessions.contains_key(&key) || pending_restores.contains_key(&key) {
                         continue;
                     }
-                    let target = SessionTarget::for_plan(&plan);
-                    // All sessions share one exclusive lease; acquire it with the
-                    // first session and ride the existing one afterwards.
-                    let session_lease = if let Some(existing) = lease.upgrade() {
-                        existing
-                    } else {
-                        let Some(fresh) = receiver_access.try_acquire_for_session() else {
-                            continue;
-                        };
-                        let fresh = Arc::new(fresh);
-                        lease = Arc::downgrade(&fresh);
-                        fresh
+                    // Restoration and capture both touch the receiver channel,
+                    // so acquire the shared session lease before either. This
+                    // closes the window where pairing could acquire exclusive
+                    // access between a pending restore and successor arming.
+                    let Some(session_lease) = acquire_session_lease(&receiver_access, &mut lease)
+                    else {
+                        continue;
                     };
-                    let id = HidppSessionId::new(&key);
-                    let session = spawn_session(
-                        id,
-                        target,
-                        plan,
-                        session_lease,
-                        &channels,
-                    );
+                    let id = HidppSessionId::new(&plan.dispatch.config_key);
+                    let session = spawn_session(id, plan, session_lease, &channels);
                     sessions.insert(key, session);
                 }
             }
@@ -435,25 +416,34 @@ async fn manage(
 /// return the manager's tracking entry for it.
 fn spawn_session(
     id: HidppSessionId,
-    target: SessionTarget,
     plan: DeviceCapturePlan,
     lease: Arc<SessionReceiverLease>,
     channels: &SessionChannels,
 ) -> RunningSession {
+    let DeviceCapturePlan {
+        target, dispatch, ..
+    } = plan;
+    let physical_key = target.physical_key.clone();
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
     let (session_tx, session_rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let forward_task = spawn_input_forwarder(id.clone(), session_rx, channels.events.clone());
+    let forward_task = spawn_input_forwarder(
+        physical_key.clone(),
+        id.clone(),
+        session_rx,
+        channels.events.clone(),
+    );
     let events = channels.events.clone();
     let done_id = id.clone();
+    let done_key = physical_key;
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
     let slot = Arc::clone(&channels.capture);
     let registry = channels.registry.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        if let Err(e) = run_capture_session_with_registry_spec(
+        let pending_restore = match run_capture_session_with_registry_spec(
             session_route,
             session_spec,
             session_tx,
@@ -463,18 +453,28 @@ fn spawn_session(
         )
         .await
         {
-            debug!(error = %e, "capture session ended");
-        }
+            Ok(CaptureSessionOutcome::Restored) => None,
+            Ok(CaptureSessionOutcome::RestorePending(pending)) => Some(pending),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                debug!(%error, "capture session ended");
+                pending
+            }
+        };
         // Use the same channel as input so completion follows every diverted
         // report accepted before the listener was dropped.
-        report_done_after_inputs(forward_task, events, done_id).await;
+        report_done_after_inputs(
+            forward_task,
+            events,
+            SessionDone {
+                physical_key: done_key,
+                session: done_id,
+                pending_restore,
+            },
+        )
+        .await;
     });
-    RunningSession {
-        id,
-        target,
-        plan,
-        stop: Some(stop_tx),
-    }
+    CaptureSession::active(id, target, dispatch, stop_tx)
 }
 
 #[cfg(test)]

@@ -1,4 +1,6 @@
 use super::*;
+use crate::backend::NodeId;
+use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
@@ -21,6 +23,187 @@ fn reporting(
         analytics_key_events: true,
         raw_wheel: true,
     }
+}
+
+#[tokio::test]
+async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    let retired = SharedChannel::new(retired_channel.clone(), route.clone());
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    registry.replace_node(node.clone(), [route.clone()], retired_channel);
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("the retired transport must never restore underneath a replacement")
+        }
+    };
+    assert!(retired_handle.written_reports().is_empty());
+
+    let (replacement_raw, replacement_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let replacement = scripted_channel(replacement_raw).await;
+    registry.replace_node(node, [route.clone()], replacement);
+
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    let reports = replacement_handle.written_reports();
+    assert_eq!(reports.len(), 1);
+    let restore = &reports[0];
+    assert_eq!(restore[2], 0x22, "restore must address ReprogControlsV4");
+    assert_eq!(restore[3] >> 4, 3, "restore must call setCidReporting");
+    assert_eq!(
+        &restore[4..7],
+        &[0x00, 0xc3, 0x22],
+        "restore must clear diversion and raw-XY using their valid bits"
+    );
+}
+
+#[tokio::test]
+async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    let (retired_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    let retired = SharedChannel::new(retired_channel, route.clone());
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+
+    let (winner_raw, winner_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let winner = scripted_channel(winner_raw).await;
+    let replacement_registry = registry.clone();
+    let replacement_node = node.clone();
+    let replacement_route = route.clone();
+    let replacement_winner = winner.clone();
+    let (superseded_raw, superseded_handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            replacement_registry.replace_node(
+                replacement_node.clone(),
+                [replacement_route.clone()],
+                replacement_winner.clone(),
+            );
+            Some(request.to_vec())
+        });
+    let superseded = scripted_channel(superseded_raw).await;
+    registry.replace_node(node, [route], superseded);
+
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("a write to a publication replaced during await is not final")
+        }
+    };
+    assert_eq!(superseded_handle.written_reports().len(), 1);
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(winner_handle.written_reports().len(), 1);
+}
+
+#[tokio::test]
+async fn failed_setup_rollback_returns_its_restore_capability() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let (raw, _) =
+        ScriptedRawHidChannel::with_failing_writes(|request| Some(request.to_vec()), |_| true);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(channel, route.clone());
+    let pending = PendingCaptureRestore::new(
+        &shared,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    );
+
+    let failure = rollback_capture_start(
+        GestureError::Hidpp("diversion failed".into()),
+        pending,
+        &shared,
+        None,
+    )
+    .await;
+    let (_, pending) = failure.into_parts();
+
+    assert!(
+        pending.is_some(),
+        "a failed compensating write must not discard firmware ownership"
+    );
+}
+
+#[tokio::test]
+async fn capture_listener_outlives_native_reporting_restore() {
+    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (restored_tx, restored_rx) = oneshot::channel();
+    let task = tokio::spawn(drop_listener_after(
+        DropProbe(Arc::clone(&dropped)),
+        async move {
+            let _ = restored_rx.await;
+        },
+    ));
+
+    tokio::task::yield_now().await;
+    assert!(
+        !dropped.load(std::sync::atomic::Ordering::Relaxed),
+        "the listener must remain installed while native reporting is still diverted"
+    );
+
+    restored_tx.send(()).expect("restore signal should be open");
+    task.await.expect("listener-retirement task should finish");
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::Relaxed),
+        "the listener may be removed after native reporting is restored"
+    );
 }
 
 /// A control that was *already* diverted when the session armed it — an agent
@@ -55,7 +238,7 @@ fn restore_returns_the_remap_target_and_touches_nothing_else() {
 fn wake_rearm_restores_diversion_mode_and_remap_target() {
     let remap = reprog_controls::ControlId(0x0053);
 
-    let change = rearm_change(reporting(false, Some(remap)), true);
+    let change = divert_change(reporting(false, Some(remap)), true);
 
     assert_eq!(change.diverted, Some(true));
     assert_eq!(change.raw_xy, Some(true));

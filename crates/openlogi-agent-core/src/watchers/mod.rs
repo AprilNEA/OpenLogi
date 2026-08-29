@@ -4,6 +4,7 @@
 
 pub mod accessibility;
 pub mod camera;
+mod capture_session;
 pub mod foreground_app;
 pub mod gesture;
 pub mod host_switch;

@@ -14,17 +14,41 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
-use openlogi_hid::session::gesture::{DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS};
+use openlogi_hid::session::gesture::{
+    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
+};
 
-/// Everything the capture watcher needs to run one device's session and
-/// dispatch its events.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeviceCapturePlan {
-    /// Stable per-device config key (binding / preset lookup).
-    pub config_key: String,
+/// Hardware identity of one HID++ capture session.
+///
+/// Equality is the rearm contract: changing any field requires restoring the
+/// old firmware diversion before a replacement session may start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureTarget {
+    /// Physical identity used to serialize firmware ownership even when the
+    /// config entry carrying this device's settings is adopted or renamed.
+    pub physical_key: PhysicalDeviceKey,
     /// HID++ route the session opens.
     pub route: DeviceRoute,
+    /// Exact controls and reporting modes the session owns in firmware.
+    pub spec: CaptureSpec,
+    /// Orchestrator generation bumped after reconnect or system wake, forcing
+    /// a rearm even when route and diversion still compare equal.
+    pub rearm_generation: u64,
+}
+
+/// Action resolution and stateful dispatch configuration for captured input.
+///
+/// This may be hot-replaced while [`CaptureTarget`] stays armed. The manager
+/// cancels input lifecycles admitted under the previous value before using the
+/// replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchPlan {
+    /// Current config namespace for actions from this physical device. Unlike
+    /// [`CaptureTarget::physical_key`], this may change when settings are
+    /// adopted and therefore hot-refreshes without touching firmware.
+    pub config_key: String,
     /// Per-button immediate or threshold bindings for this device (per-app effective).
     pub bindings: BTreeMap<ButtonId, Binding>,
     /// Per-direction map for each HID++ gesture source (the dedicated gesture
@@ -35,21 +59,18 @@ pub struct DeviceCapturePlan {
     /// macOS Back/Forward gesture maps resolved from device-owned HID++ raw XY.
     /// These remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// Standard buttons whose binding leaves the default — divert over
-    /// `0x1b04`. A button at its default keeps its native HID behavior, so no
-    /// re-synthesis is ever needed.
-    pub divert_buttons: Vec<(u16, ButtonId)>,
-    /// Standard Back/Forward controls requested as HID++ raw-XY gesture sources.
-    pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
-    /// Whether any thumbwheel binding leaves its default. Combined with the
-    /// sensitivity to decide thumb-wheel diversion.
-    pub thumbwheel_bindings_nondefault: bool,
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
-    /// Capture re-arm generation from the orchestrator. Bumps on reconnect /
-    /// system wake so sessions restart even when route and divert set match.
-    pub rearm_generation: u64,
+}
+
+/// One device's independently versioned hardware target and dispatch plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCapturePlan {
+    /// Hardware state whose changes require a capture-session restart.
+    pub target: CaptureTarget,
+    /// Hot-replaceable action resolution for input from that target.
+    pub dispatch: DispatchPlan,
 }
 
 /// Shared plan list, rewritten by the orchestrator and read by the watcher.
@@ -76,6 +97,7 @@ pub(crate) fn hidpp_side_gesture_maps_for(
 #[must_use]
 pub fn plan_for_device(
     config: &Config,
+    physical_key: PhysicalDeviceKey,
     config_key: &str,
     route: DeviceRoute,
     app: Option<&str>,
@@ -90,8 +112,8 @@ pub fn plan_for_device(
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
     // One direction map per HID++ source in gesture mode — several may
-    // gesture at once, each armed with its own raw-XY divert (the watcher
-    // derives the CIDs to divert from this map's keys).
+    // gesture at once, each armed with its own raw-XY divert (the capture
+    // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
     let divert_gesture_buttons = if os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
@@ -146,17 +168,31 @@ pub fn plan_for_device(
             .get(button)
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
+    let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
     DeviceCapturePlan {
-        config_key: config_key.to_owned(),
-        route,
-        bindings,
-        gesture_bindings,
-        side_gesture_bindings,
-        divert_buttons,
-        divert_gesture_buttons,
-        thumbwheel_bindings_nondefault,
-        thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
-        rearm_generation,
+        target: CaptureTarget {
+            physical_key,
+            route,
+            spec: CaptureSpec {
+                capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
+                    || thumbwheel_bindings_nondefault,
+                divert_gesture_sources: GESTURE_SOURCE_BUTTONS
+                    .into_iter()
+                    .filter(|(_, button)| gesture_bindings.contains_key(button))
+                    .map(|(cid, _)| cid)
+                    .collect(),
+                divert_gesture_buttons,
+                divert_buttons,
+            },
+            rearm_generation,
+        },
+        dispatch: DispatchPlan {
+            config_key: config_key.to_owned(),
+            bindings,
+            gesture_bindings,
+            side_gesture_bindings,
+            thumbwheel_sensitivity,
+        },
     }
 }
 
@@ -174,6 +210,26 @@ mod tests {
         }
     }
 
+    fn plan_for_device(
+        config: &Config,
+        config_key: &str,
+        route: DeviceRoute,
+        app: Option<&str>,
+        rearm_generation: u64,
+        os_mouse_hook_available: bool,
+    ) -> DeviceCapturePlan {
+        super::plan_for_device(
+            config,
+            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                .expect("fixture should be a physical key"),
+            config_key,
+            route,
+            app,
+            rearm_generation,
+            os_mouse_hook_available,
+        )
+    }
+
     #[test]
     fn both_hidpp_sources_gesture_when_both_are_in_gesture_mode() {
         // On MX Master 4 the dedicated button and the haptic panel can gesture
@@ -185,13 +241,20 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
-            plan.gesture_bindings.contains_key(&ButtonId::GestureButton)
-                && plan.gesture_bindings.contains_key(&ButtonId::HapticPanel),
+            plan.dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::GestureButton)
+                && plan
+                    .dispatch
+                    .gesture_bindings
+                    .contains_key(&ButtonId::HapticPanel),
             "both sources need their own dispatch map, got: {:?}",
-            plan.gesture_bindings.keys().collect::<Vec<_>>()
+            plan.dispatch.gesture_bindings.keys().collect::<Vec<_>>()
         );
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID || cid == HAPTIC_PANEL_CID),
@@ -214,13 +277,17 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
         assert!(
-            plan.divert_buttons
+            plan.target
+                .spec
+                .divert_buttons
                 .contains(&(0x005b, ButtonId::WheelTiltLeft)),
             "a bound tilt must be diverted, or the binding can never fire: {:?}",
-            plan.divert_buttons
+            plan.target.spec.divert_buttons
         );
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(_, button)| button == ButtonId::WheelTiltRight),
@@ -242,7 +309,9 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
         assert!(
-            plan.divert_buttons
+            plan.target
+                .spec
+                .divert_buttons
                 .iter()
                 .any(|&(_, button)| button == ButtonId::Back),
             "the runtime needs both edges even when the short action is native"
@@ -259,11 +328,15 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
-            plan.gesture_bindings.contains_key(&ButtonId::HapticPanel),
+            plan.dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::HapticPanel),
             "a gesture-mode panel must arm the HID++ gesture divert"
         );
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == HAPTIC_PANEL_CID),
@@ -285,7 +358,9 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
-            plan.divert_buttons
+            plan.target
+                .spec
+                .divert_buttons
                 .contains(&(HAPTIC_PANEL_CID, ButtonId::HapticPanel)),
             "a single-bound panel must be plain-diverted, or the binding can never fire"
         );
@@ -298,7 +373,9 @@ mod tests {
         let plan = plan_for_device(&Config::default(), "2b042", route(), None, 0, true);
 
         assert!(
-            plan.divert_buttons
+            plan.target
+                .spec
+                .divert_buttons
                 .contains(&(HAPTIC_PANEL_CID, ButtonId::HapticPanel)),
             "the panel's default Actions Ring binding must be HID++-diverted"
         );
@@ -317,6 +394,8 @@ mod tests {
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == HAPTIC_PANEL_CID),
@@ -338,11 +417,13 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
-            plan.gesture_bindings.is_empty(),
+            plan.dispatch.gesture_bindings.is_empty(),
             "gestures are off — no raw-XY gesture divert"
         );
         assert!(
-            plan.divert_buttons
+            plan.target
+                .spec
+                .divert_buttons
                 .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
             "a single-bound gesture button must be plain-diverted, or the binding can never fire"
         );
@@ -359,11 +440,13 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
-            !plan.gesture_bindings.is_empty(),
+            !plan.dispatch.gesture_bindings.is_empty(),
             "the gesture button owns the gesture role"
         );
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
@@ -381,6 +464,8 @@ mod tests {
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
@@ -395,22 +480,30 @@ mod tests {
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         if cfg!(target_os = "macos") {
-            assert!(plan.side_gesture_bindings.contains_key(&ButtonId::Forward));
             assert!(
-                plan.divert_gesture_buttons
+                plan.dispatch
+                    .side_gesture_bindings
+                    .contains_key(&ButtonId::Forward)
+            );
+            assert!(
+                plan.target
+                    .spec
+                    .divert_gesture_buttons
                     .contains(&(0x0056, ButtonId::Forward)),
                 "Forward must be requested as a HID++ raw-XY gesture source"
             );
             assert!(
                 !plan
+                    .target
+                    .spec
                     .divert_buttons
                     .iter()
                     .any(|&(_, button)| button == ButtonId::Forward),
                 "a gesture hold must not also be a plain divert"
             );
         } else {
-            assert!(plan.side_gesture_bindings.is_empty());
-            assert!(plan.divert_gesture_buttons.is_empty());
+            assert!(plan.dispatch.side_gesture_bindings.is_empty());
+            assert!(plan.target.spec.divert_gesture_buttons.is_empty());
         }
     }
 
@@ -421,10 +514,12 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
-        assert!(plan.side_gesture_bindings.is_empty());
-        assert!(plan.divert_gesture_buttons.is_empty());
+        assert!(plan.dispatch.side_gesture_bindings.is_empty());
+        assert!(plan.target.spec.divert_gesture_buttons.is_empty());
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(_, button)| button == ButtonId::Forward),
@@ -452,13 +547,17 @@ mod tests {
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             !plan
+                .target
+                .spec
                 .divert_buttons
                 .iter()
                 .any(|&(_, button)| button.is_os_hook_button()),
             "capture opt-out must leave all OS-hook buttons native"
         );
         assert!(
-            plan.divert_buttons
+            plan.target
+                .spec
+                .divert_buttons
                 .iter()
                 .any(|&(_, button)| button == ButtonId::GestureButton),
             "HID++-only controls must remain remappable without the OS hook"
@@ -471,14 +570,16 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, false);
-        assert!(plan.divert_gesture_buttons.is_empty());
+        assert!(plan.target.spec.divert_gesture_buttons.is_empty());
         if cfg!(target_os = "macos") {
             assert!(
-                plan.side_gesture_bindings.contains_key(&ButtonId::Forward),
+                plan.dispatch
+                    .side_gesture_bindings
+                    .contains_key(&ButtonId::Forward),
                 "a draining session must retain its dispatch map until disarm completes"
             );
         } else {
-            assert!(plan.side_gesture_bindings.is_empty());
+            assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
     }
 }

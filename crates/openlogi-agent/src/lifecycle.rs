@@ -283,7 +283,7 @@ impl Armed {
     /// so the interval before this check remains pass-through rather than
     /// suppressing input without a consumer.
     #[cfg(target_os = "windows")]
-    fn apply_hook_health(&mut self) {
+    async fn apply_hook_health(&mut self) {
         let Some(hook) = self.hook.as_ref() else {
             return;
         };
@@ -292,6 +292,10 @@ impl Armed {
         }
         warn!("Windows hook worker exited — marking input capture unavailable");
         self.stop_hook();
+        self.orchestrator
+            .lock()
+            .await
+            .set_os_mouse_hook_available(false);
         self.observable
             .set_accessibility_and_hook(Hook::has_accessibility(), false);
     }
@@ -303,7 +307,7 @@ impl Armed {
         // Inventory and foreground-app samples make this a periodic health
         // reconciliation without another timer in the control-plane loop.
         #[cfg(target_os = "windows")]
-        self.apply_hook_health();
+        self.apply_hook_health().await;
 
         match event {
             WatcherEvent::Inventory(event) => self.apply_inventory(event).await,
