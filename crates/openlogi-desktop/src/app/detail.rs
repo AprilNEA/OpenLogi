@@ -2,7 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Axis, Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
@@ -180,6 +180,7 @@ fn detail_navigation(
         .w(px(DETAIL_RAIL_W))
         .h_full()
         .flex_shrink_0()
+        .overflow_x_hidden()
         .gap_1()
         .border_r_1()
         .border_color(pal.border)
@@ -227,7 +228,13 @@ fn detail_navigation(
                         .size_4()
                         .flex_none(),
                 )
-                .child(tab.label())
+                .child(
+                    // A flex item's default min-content width is the full
+                    // label, which is how longer locales painted across the
+                    // divider. Bound it to the leftover rail and wrap at two
+                    // lines before ellipsizing.
+                    div().flex_1().min_w_0().line_clamp(2).child(tab.label()),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.active_tab = tab;
                     cx.notify();
@@ -409,10 +416,12 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     };
     let inversion_row = h_flex()
         .justify_between()
-        .items_center()
+        .items_start()
         .gap_4()
         .child(
             v_flex()
+                .min_w_0()
+                .flex_1()
                 .child(
                     div()
                         .text_body()
@@ -427,19 +436,21 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                 ),
         )
         .child(
-            Toggle::new("invert-scroll-toggle")
-                .selected(inverted)
-                .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("Unavailable")))
-                .on_change(|inverted, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_invert_scroll(*inverted);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DeviceConfigChanged(key));
-                        }
-                    });
-                }),
+            div().flex_shrink_0().child(
+                Toggle::new("invert-scroll-toggle")
+                    .selected(inverted)
+                    .disabled(!inversion_supported)
+                    .label((!inversion_supported).then(|| tr!("Unavailable")))
+                    .on_change(|inverted, _window, cx| {
+                        AppState::update(cx, |state, cx| {
+                            let key = state.current_record().map(DeviceRecord::device_key);
+                            state.commit_invert_scroll(*inverted);
+                            if let Some(key) = key {
+                                cx.emit(StateEvent::DeviceConfigChanged(key));
+                            }
+                        });
+                    }),
+            ),
         );
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
@@ -489,24 +500,25 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
         Some(ScrollResolution::High),
     ];
     ButtonGroup::new("wheel-resolution")
+        .layout(Axis::Vertical)
         .w_full()
         .outline()
         .disabled(!enabled)
         .child(
             Button::new("wheel-resolution-default")
-                .flex_1()
+                .w_full()
                 .label(tr!("Device default"))
                 .selected(selected.is_none()),
         )
         .child(
             Button::new("wheel-resolution-low")
-                .flex_1()
+                .w_full()
                 .label(tr!("Standard"))
                 .selected(selected == Some(ScrollResolution::Low)),
         )
         .child(
             Button::new("wheel-resolution-high")
-                .flex_1()
+                .w_full()
                 .label(tr!("High resolution"))
                 .selected(selected == Some(ScrollResolution::High)),
         )

@@ -200,10 +200,9 @@ impl Render for AddDeviceView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar at the top of the window; the
-            // padded content sits in the flex-column below it. macOS / Windows
-            // keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Client-side titlebar only when the compositor did not already
+            // draw one. KDE/KWin SSD plus this row is the double-chrome bug.
+            .when(windows::paints_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(tr!("Add Device"), cx))
             })
             .child(

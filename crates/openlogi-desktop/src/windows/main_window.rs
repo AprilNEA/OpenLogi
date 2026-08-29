@@ -32,8 +32,9 @@ fn window_options(cx: &mut App) -> WindowOptions {
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
         // Linux: transparent chrome so `AppView::render` can draw a client-side
-        // `TitleBar` (the compositor declines server-side decorations and gpui's
-        // fallback is unpainted). macOS/Windows keep their native titlebar.
+        // `TitleBar` when the compositor granted CSD. Compositors that keep SSD
+        // (KWin) still get a native titlebar from the stamped title.
+        // macOS/Windows keep their native titlebar.
         titlebar: Some(titlebar_options("OpenLogi")),
         ..WindowOptions::default()
     }
