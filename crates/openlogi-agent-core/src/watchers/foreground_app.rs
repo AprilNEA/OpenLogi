@@ -13,13 +13,24 @@ use super::poll::Poll;
 use std::sync::mpsc::RecvTimeoutError;
 #[cfg(target_os = "macos")]
 use std::thread;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::time::Instant;
 #[cfg(target_os = "macos")]
 use tracing::{debug, warn};
 
-#[cfg(target_os = "macos")]
-const MACOS_RECONCILE_PERIOD: Duration = Duration::from_secs(30);
+/// Long-stop recovery after the native activation path has been quiet.
+///
+/// This is deliberately not a foreground polling cadence: every delivered
+/// native activation defers it. It remains armed because AppKit can lose a
+/// notification or retain an observer that has silently stopped calling back;
+/// neither condition disconnects the callback channel.
+#[cfg(any(target_os = "macos", test))]
+const MACOS_IDLE_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
+#[cfg(any(target_os = "macos", test))]
+fn next_idle_recovery_deadline(now: Instant) -> Instant {
+    now + MACOS_IDLE_RECOVERY_INTERVAL
+}
 
 /// Channel item: `Some(app)` when an app is frontmost; `None` for "no
 /// foreground app" (rare on macOS — Finder is usually frontmost even when
@@ -85,8 +96,10 @@ impl ForegroundChanges {
 }
 
 /// Observe native app activations from each notification's application payload.
-/// A slow authoritative reconciliation read recovers from any notification the
-/// OS failed to deliver and notices a dropped consumer without a separate poll.
+/// After 30 seconds without a native activation, one authoritative read recovers
+/// from a notification the OS failed to deliver or from an observer that remains
+/// registered but has silently stopped delivering callbacks. Successful native
+/// delivery keeps deferring that deadline, so this is not periodic polling.
 #[cfg(target_os = "macos")]
 fn spawn_macos() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -105,10 +118,10 @@ fn spawn_macos() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
             if !publish_current(&tx, &mut changes) {
                 return;
             }
-            let mut next_reconcile = Instant::now() + MACOS_RECONCILE_PERIOD;
+            let mut idle_recovery_deadline = next_idle_recovery_deadline(Instant::now());
 
             loop {
-                let timeout = next_reconcile.saturating_duration_since(Instant::now());
+                let timeout = idle_recovery_deadline.saturating_duration_since(Instant::now());
                 match activation_rx.recv_timeout(timeout) {
                     Ok(mut activation) => {
                         // Coalesce a burst to its latest authoritative AppKit
@@ -120,21 +133,26 @@ fn spawn_macos() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                         if !publish(&tx, &mut changes, activation) {
                             return;
                         }
-                        next_reconcile = Instant::now() + MACOS_RECONCILE_PERIOD;
+                        idle_recovery_deadline = next_idle_recovery_deadline(Instant::now());
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         if tx.is_closed() {
                             debug!("foreground-app watcher receiver dropped — exiting");
                             return;
                         }
-                        if Instant::now() >= next_reconcile {
+                        if Instant::now() >= idle_recovery_deadline {
                             if !publish_current(&tx, &mut changes) {
                                 return;
                             }
-                            next_reconcile = Instant::now() + MACOS_RECONCILE_PERIOD;
+                            idle_recovery_deadline = next_idle_recovery_deadline(Instant::now());
                         }
                     }
                     Err(RecvTimeoutError::Disconnected) => {
+                        // `_observer` retains the callback and therefore its
+                        // sender for this loop's lifetime. Silence does not
+                        // disconnect it (the idle recovery above handles that),
+                        // so disconnection means the observer ownership
+                        // contract itself broke and there is no producer left.
                         warn!(
                             "foreground-app activation observer stopped — per-app profiles are disabled"
                         );
@@ -193,5 +211,23 @@ mod tests {
         assert!(!changes.observe(&Some(app("com.example.One"))));
         assert!(changes.observe(&Some(app("com.example.Two"))));
         assert!(changes.observe(&None));
+    }
+
+    #[test]
+    fn native_activity_defers_the_idle_recovery_read() {
+        let started = Instant::now();
+        let original = next_idle_recovery_deadline(started);
+        let activation = started + Duration::from_secs(12);
+        let deferred = next_idle_recovery_deadline(activation);
+
+        assert_eq!(
+            original.saturating_duration_since(started),
+            MACOS_IDLE_RECOVERY_INTERVAL
+        );
+        assert_eq!(
+            deferred.saturating_duration_since(activation),
+            MACOS_IDLE_RECOVERY_INTERVAL
+        );
+        assert!(deferred > original);
     }
 }

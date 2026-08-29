@@ -17,6 +17,8 @@
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
+mod liveness;
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::{
@@ -37,6 +39,8 @@ use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
 use crate::{ChannelRegistry, SharedChannel};
 
+use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
+
 #[cfg(test)]
 use super::capture_restore::undivert_change;
 use super::capture_restore::{
@@ -50,15 +54,6 @@ pub use super::capture_restore::{
 };
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, WheelDirection, WheelResolution};
-
-/// How often the capture session pings its device to prove the channel still
-/// delivers input reports. Cheap: one HID++ round-trip per interval.
-const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// Consecutive all-silent pings after which the capture channel is declared
-/// dead. Two, so one ping lost to transient receiver congestion (which does
-/// happen under pointer load) doesn't churn the session.
-const LIVENESS_PING_STRIKES: u8 = 2;
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,10 +286,15 @@ async fn run_capture_session_on(
         .map_or(WheelResolution::UNKNOWN, |(_, res)| *res);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
+    let activity = Arc::new(ChannelActivity::default());
     let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
+        let activity = Arc::clone(&activity);
         let sink = sink.clone();
         move |raw, matched| {
+            // Every parsed inbound HID++ report proves this channel's read
+            // path is alive, including responses matched to another request.
+            activity.record();
             if matched {
                 return;
             }
@@ -350,6 +350,7 @@ async fn run_capture_session_on(
             device_index,
             registry,
             shared: &shared,
+            activity: &activity,
         },
         wireless,
         shutdown,
@@ -517,6 +518,7 @@ struct CaptureMonitor<'a> {
     device_index: u8,
     registry: Option<&'a ChannelRegistry>,
     shared: &'a SharedChannel,
+    activity: &'a ChannelActivity,
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
@@ -529,22 +531,27 @@ async fn monitor_capture(
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut shutdown = std::pin::pin!(shutdown);
-    let mut silent_pings = 0u8;
+    let mut liveness =
+        CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
     loop {
+        let activity_generation = liveness.activity_generation();
+        let idle_deadline = liveness.idle_deadline();
         tokio::select! {
-            _ = &mut shutdown => {
-                // Shutdown and inventory replacement can become ready on the
-                // same turn. Prefer the typed channel transition so teardown
-                // never blindly writes through a transport already known to
-                // be obsolete.
-                return stop_for_current_publication(context.registry, context.shared);
-            }
+            biased;
+
             transition = wait_for_channel_change(
                 context.registry,
                 context.shared,
             ) => {
                 info!(index = context.device_index, "inventory replaced or removed capture channel — restarting session");
                 return transition;
+            }
+            _ = &mut shutdown => {
+                // Shutdown and inventory replacement can become ready on the
+                // same turn. Prefer the typed channel transition so teardown
+                // never blindly writes through a transport already known to
+                // be obsolete.
+                return stop_for_current_publication(context.registry, context.shared);
             }
             event = async {
                 match wake_events.as_ref() {
@@ -561,21 +568,32 @@ async fn monitor_capture(
                     CaptureAccum::default();
                 context.armed.rearm().await;
             }
-            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
-                match context.root.ping(0x5a).await {
+            generation = context.activity.changed_after(activity_generation) => {
+                liveness.record_activity(tokio::time::Instant::now(), generation);
+            }
+            () = tokio::time::sleep_until(idle_deadline) => {
+                if !liveness.ping_due(
+                    tokio::time::Instant::now(),
+                    context.activity.generation(),
+                ) {
+                    continue;
+                }
+                let outcome = match context.root.ping(0x5a).await {
                     Err(v20::Hidpp20Error::Channel(
                         hidpp::channel::ChannelError::Timeout
                         | hidpp::channel::ChannelError::NoResponse,
-                    )) => {
-                        silent_pings = silent_pings.saturating_add(1);
-                        if silent_pings >= LIVENESS_PING_STRIKES {
-                            warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
-                            return stop_for_current_publication(context.registry, context.shared);
-                        }
-                    }
+                    )) => PingOutcome::AllSilent,
                     // Any reply — pong, feature error, unreachable-device
                     // error — proves the channel still delivers.
-                    _ => silent_pings = 0,
+                    _ => PingOutcome::Delivered,
+                };
+                if liveness.finish_ping(
+                    tokio::time::Instant::now(),
+                    context.activity.generation(),
+                    outcome,
+                ) == LivenessDecision::Restart {
+                    warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
+                    return stop_for_current_publication(context.registry, context.shared);
                 }
             }
         }

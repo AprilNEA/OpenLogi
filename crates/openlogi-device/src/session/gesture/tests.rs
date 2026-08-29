@@ -206,6 +206,38 @@ async fn capture_listener_outlives_native_reporting_restore() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    let (retired_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    registry.replace_node(node.clone(), [route.clone()], retired_channel);
+    let retired = registry
+        .lookup(&route)
+        .expect("the capture publication should be current");
+
+    let (replacement_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let replacement = scripted_channel(replacement_raw).await;
+    registry.replace_node(node, [route], replacement);
+
+    // These are the two monitor branches that can become ready together. The
+    // explicit shutdown branch re-checks the publication, so both preserve the
+    // typed replacement teardown rather than restoring through `retired`.
+    assert!(matches!(
+        stop_for_current_publication(Some(&registry), &retired),
+        CaptureStop::ChannelChanged
+    ));
+    assert!(matches!(
+        wait_for_channel_change(Some(&registry), &retired).await,
+        CaptureStop::ChannelChanged
+    ));
+}
+
 /// A control that was *already* diverted when the session armed it — an agent
 /// killed mid-session, or another Logitech app — must not be handed that state
 /// back. Replaying it leaves the button diverted with no listener: no OS event
