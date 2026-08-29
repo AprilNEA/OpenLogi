@@ -30,7 +30,7 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, PendingCaptureRestore,
+    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
     run_capture_session_with_registry_spec,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -82,6 +82,7 @@ pub fn spawn(
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     channel_registry: openlogi_hid::ChannelRegistry,
+    device_io: DeviceIoGate,
     outputs: GestureOutputs,
 ) {
     let plans = capture_plans.clone();
@@ -103,6 +104,7 @@ pub fn spawn(
             receiver_access,
             receiver_requests,
             channel_registry,
+            device_io,
             outputs,
         ));
     });
@@ -145,6 +147,7 @@ struct SessionChannels {
     events: mpsc::UnboundedSender<SessionEvent>,
     capture: CaptureChannel,
     registry: openlogi_hid::ChannelRegistry,
+    device_io: DeviceIoGate,
 }
 
 /// Forward one capture session's inputs onto the manager's ordered event
@@ -297,10 +300,11 @@ async fn retry_pending_restores(
 
 fn next_deadline(
     requests: ReceiverRequestState,
+    device_io_allowed: bool,
     pending_restores: &HashMap<PhysicalDeviceKey, PendingRestore>,
     restart_after: &HashMap<PhysicalDeviceKey, Instant>,
 ) -> Option<Instant> {
-    if requests.any() {
+    if requests.any() || !device_io_allowed {
         return None;
     }
     pending_restores
@@ -325,8 +329,13 @@ impl GestureManagerState {
         }
     }
 
-    fn deadline(&self, requests: ReceiverRequestState) -> Option<Instant> {
-        next_deadline(requests, &self.pending_restores, &self.restart_after)
+    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
+        next_deadline(
+            requests,
+            device_io_allowed,
+            &self.pending_restores,
+            &self.restart_after,
+        )
     }
 
     fn expedite_pending_restores(&mut self) {
@@ -339,10 +348,18 @@ impl GestureManagerState {
     async fn reconcile(
         &mut self,
         requests: ReceiverRequestState,
+        device_io_allowed: bool,
         published: &Arc<Vec<DeviceCapturePlan>>,
         receiver_access: &ReceiverAccess,
         channels: &SessionChannels,
     ) {
+        // Keep existing passive listeners and their firmware ownership intact
+        // while the display/session is asleep. Retiring them here would issue
+        // restoration writes during DarkWake; retries and successors wait for
+        // the user-visible resume instead.
+        if !device_io_allowed {
+            return;
+        }
         let now = Instant::now();
         let wanted = if requests.any() {
             &[][..]
@@ -400,6 +417,76 @@ impl GestureManagerState {
             self.sessions.insert(key.clone(), session);
         }
     }
+
+    fn handle_session_event(
+        &mut self,
+        event: SessionEvent,
+        device_io_allowed: bool,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    ) -> bool {
+        match event {
+            SessionEvent::Input(event) => {
+                let key = &event.physical_key;
+                if device_io_allowed && let Some(session) = self.sessions.get_mut(key) {
+                    reconcile_published_session(
+                        key,
+                        session,
+                        receiver_requests,
+                        capture_plans,
+                        &mut self.input_dispatcher,
+                    );
+                }
+                let live = self.sessions.get(key);
+                let dispatch_context = dispatch_context_for(&event.session, live);
+                if let Some((session, plan)) = dispatch_context {
+                    self.input_dispatcher.dispatch(session, plan, event.input);
+                } else {
+                    self.input_dispatcher.cancel_session(&event.session);
+                    debug!(
+                        key = key.as_str(),
+                        epoch = event.session.epoch(),
+                        "input from a stale capture session — ignored"
+                    );
+                }
+                false
+            }
+            SessionEvent::Done(done) => {
+                let key = &done.physical_key;
+                // Completion is queued behind every input the listener
+                // accepted during restoration, so cancellation cannot
+                // overtake the last diverted edge.
+                let Some((CompletionAction::Remove { unexpected }, dispatch_session)) = self
+                    .sessions
+                    .get(key)
+                    .map(|session| (session.completion(&done.session), session.id().clone()))
+                else {
+                    return false;
+                };
+                if let Some(pending) = done.pending_restore {
+                    self.pending_restores.insert(
+                        key.clone(),
+                        PendingRestore {
+                            token: pending,
+                            retry_at: Instant::now() + RETRY_DELAY,
+                        },
+                    );
+                }
+                self.input_dispatcher.cancel_session(&dispatch_session);
+                if device_io_allowed
+                    && let Some(deadline) = restart_deadline(unexpected, Instant::now())
+                {
+                    self.restart_after.insert(key.clone(), deadline);
+                    warn!(
+                        key = key.as_str(),
+                        "capture session ended unexpectedly, delaying re-arm"
+                    );
+                }
+                self.sessions.remove(key);
+                true
+            }
+        }
+    }
 }
 
 /// Keep one capture session alive per online device, restarting a session when
@@ -411,6 +498,7 @@ async fn manage(
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
     channel_registry: openlogi_hid::ChannelRegistry,
+    mut device_io: DeviceIoGate,
     outputs: GestureOutputs,
 ) {
     let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
@@ -426,6 +514,7 @@ async fn manage(
         events,
         capture: capture_channel,
         registry: channel_registry,
+        device_io: device_io.clone(),
     };
     let mut state = GestureManagerState::new(outputs);
     let mut reconcile = true;
@@ -433,15 +522,24 @@ async fn manage(
     loop {
         if reconcile {
             reconcile = false;
-            let requests = *receiver_requests.borrow_and_update();
-            let published = Arc::clone(&capture_plans.borrow_and_update());
-            state
-                .reconcile(requests, &published, &receiver_access, &channels)
-                .await;
+            let device_io_allowed = device_io.allows_io();
+            if device_io_allowed {
+                let requests = *receiver_requests.borrow_and_update();
+                let published = Arc::clone(&capture_plans.borrow_and_update());
+                state
+                    .reconcile(
+                        requests,
+                        device_io_allowed,
+                        &published,
+                        &receiver_access,
+                        &channels,
+                    )
+                    .await;
+            }
         }
 
         let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests);
+        let deadline = state.deadline(requests, device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             reconcile = true;
             continue;
@@ -449,56 +547,12 @@ async fn manage(
 
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                match event {
-                    SessionEvent::Input(event) => {
-                        let key = &event.physical_key;
-                        if let Some(session) = state.sessions.get_mut(key) {
-                            reconcile_published_session(
-                                key,
-                                session,
-                                &receiver_requests,
-                                &capture_plans,
-                                &mut state.input_dispatcher,
-                            );
-                        }
-                        let live = state.sessions.get(key);
-                        let dispatch_context = dispatch_context_for(&event.session, live);
-                        if let Some((session, plan)) = dispatch_context {
-                            state.input_dispatcher.dispatch(session, plan, event.input);
-                        } else {
-                            state.input_dispatcher.cancel_session(&event.session);
-                            debug!(key = key.as_str(), epoch = event.session.epoch(), "input from a stale capture session — ignored");
-                        }
-                    }
-                    SessionEvent::Done(done) => {
-                        let key = &done.physical_key;
-                        // Completion is queued behind every input the listener
-                        // accepted during restoration, so cancellation cannot
-                        // overtake the last diverted edge.
-                        if let Some((CompletionAction::Remove { unexpected }, dispatch_session)) =
-                            state.sessions.get(key).map(|session| {
-                                (session.completion(&done.session), session.id().clone())
-                            })
-                        {
-                            if let Some(pending) = done.pending_restore {
-                                state.pending_restores.insert(
-                                    key.clone(),
-                                    PendingRestore {
-                                        token: pending,
-                                        retry_at: Instant::now() + RETRY_DELAY,
-                                    },
-                                );
-                            }
-                            state.input_dispatcher.cancel_session(&dispatch_session);
-                            if let Some(deadline) = restart_deadline(unexpected, Instant::now()) {
-                                state.restart_after.insert(key.clone(), deadline);
-                                warn!(key = key.as_str(), "capture session ended unexpectedly, delaying re-arm");
-                            }
-                            state.sessions.remove(key);
-                            reconcile = true;
-                        }
-                    }
-                }
+                reconcile |= state.handle_session_event(
+                    event,
+                    device_io.allows_io(),
+                    &receiver_requests,
+                    &capture_plans,
+                );
             }
             result = capture_plans.changed() => match result {
                 Ok(()) => reconcile = true,
@@ -508,6 +562,11 @@ async fn manage(
                 Ok(()) => reconcile = true,
                 Err(_) => return,
             },
+            allowed = device_io.changed() => match allowed {
+                Some(true) => reconcile = true,
+                Some(false) => {}
+                None => return,
+            },
             open = wait_for_registry_change(
                 &mut registry_changes,
                 !state.pending_restores.is_empty(),
@@ -515,8 +574,10 @@ async fn manage(
                 if !open {
                     return;
                 }
-                state.expedite_pending_restores();
-                reconcile = true;
+                if device_io.allows_io() {
+                    state.expedite_pending_restores();
+                    reconcile = true;
+                }
             }
             () = wait_for_deadline(deadline) => {
                 reconcile = true;
@@ -554,6 +615,7 @@ fn spawn_session(
     let session_spec = target.spec.clone();
     let slot = Arc::clone(&channels.capture);
     let registry = channels.registry.clone();
+    let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _lease = lease;
         let pending_restore = match run_capture_session_with_registry_spec(
@@ -563,6 +625,7 @@ fn spawn_session(
             stop_rx,
             slot,
             &registry,
+            device_io,
         )
         .await
         {

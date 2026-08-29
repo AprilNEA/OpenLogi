@@ -14,7 +14,7 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::ChannelRegistry;
+use openlogi_hid::{ChannelRegistry, DeviceIoGate};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -61,41 +61,6 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
-}
-
-/// Non-blocking producer for native OS resume callbacks.
-#[derive(Clone)]
-pub struct ResumeSignal {
-    sender: mpsc::Sender<()>,
-}
-
-/// Single-consumer stream of coalesced native OS resume transitions.
-pub struct ResumeEvents {
-    receiver: mpsc::Receiver<()>,
-}
-
-/// Create the directional native-resume channel.
-///
-/// Capacity one intentionally coalesces the equivalent wake, screen-wake, and
-/// session-active bursts some operating systems emit for one resume.
-#[must_use]
-pub fn resume_channel() -> (ResumeSignal, ResumeEvents) {
-    let (sender, receiver) = mpsc::channel(1);
-    (ResumeSignal { sender }, ResumeEvents { receiver })
-}
-
-impl ResumeSignal {
-    /// Publish one native resume transition without blocking the OS callback.
-    pub fn notify(&self) {
-        let _ = self.sender.try_send(());
-    }
-}
-
-impl ResumeEvents {
-    /// Wait for one resume transition. `None` means every producer was dropped.
-    pub async fn recv(&mut self) -> Option<()> {
-        self.receiver.recv().await
-    }
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -277,23 +242,17 @@ enum RefreshRequest {
 /// Spawn a watcher without publishing channels into a registry.
 #[must_use]
 pub fn spawn() -> InventoryWatcher {
-    spawn_inner(None, None)
+    spawn_inner(None, openlogi_hid::host::device_io_gate())
 }
 
 /// Spawn the persistent watcher, publish its already-open HID++ channels into
-/// `registry`, and consume a coalesced native-resume signal.
+/// `registry`, and stop active reconciliation while host device I/O is gated.
 #[must_use]
-pub fn spawn_with_registry(
-    registry: ChannelRegistry,
-    resume_events: ResumeEvents,
-) -> InventoryWatcher {
-    spawn_inner(Some(registry), Some(resume_events))
+pub fn spawn_with_registry(registry: ChannelRegistry, device_io: DeviceIoGate) -> InventoryWatcher {
+    spawn_inner(Some(registry), device_io)
 }
 
-fn spawn_inner(
-    registry: Option<ChannelRegistry>,
-    resume_events: Option<ResumeEvents>,
-) -> InventoryWatcher {
+fn spawn_inner(registry: Option<ChannelRegistry>, device_io: DeviceIoGate) -> InventoryWatcher {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
@@ -310,7 +269,7 @@ fn spawn_inner(
                     return;
                 }
             };
-            rt.block_on(run_watcher(worker_tx, refresh_rx, registry, resume_events));
+            rt.block_on(run_watcher(worker_tx, refresh_rx, registry, device_io));
         });
     if let Err(e) = spawn_result {
         // OS thread / fork limits are non-fatal for the agent as a whole, but
@@ -330,7 +289,7 @@ async fn run_watcher(
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
     registry: Option<ChannelRegistry>,
-    resume_events: Option<ResumeEvents>,
+    device_io: DeviceIoGate,
 ) {
     // The listener is attached to each inventory-owned channel before its
     // first probe, and its bounded queue is subscribed before every snapshot.
@@ -360,7 +319,7 @@ async fn run_watcher(
         hid_events,
         schedule: Schedule::new(now),
         wake_detector: WakeDetector::new(SystemTime::now(), now),
-        resume_events,
+        device_io,
         refresh_open: true,
     }
     .run()
@@ -376,7 +335,7 @@ struct InventoryWorker {
     hid_events: openlogi_hid::inventory::events::EventReceiver,
     schedule: Schedule,
     wake_detector: WakeDetector,
-    resume_events: Option<ResumeEvents>,
+    device_io: DeviceIoGate,
     refresh_open: bool,
 }
 
@@ -384,8 +343,17 @@ impl InventoryWorker {
     async fn run(&mut self) {
         let mut trigger = ReconcileTrigger::Initial;
         loop {
+            if !self.device_io.allows_io() {
+                if !self.device_io.wait_until_allowed().await {
+                    return;
+                }
+                trigger = ReconcileTrigger::SystemResume;
+            }
             if !self.settle_trigger(trigger).await || !self.reconcile(trigger).await {
                 return;
+            }
+            if !self.device_io.allows_io() {
+                continue;
             }
             trigger = self.next_trigger().await;
         }
@@ -441,6 +409,13 @@ impl InventoryWorker {
             }
             Err(error) => (self.state.classify(Err(error)), true),
         };
+        if !self.device_io.allows_io() {
+            debug!(
+                ?trigger,
+                "device I/O suspended during inventory reconciliation — result discarded"
+            );
+            return true;
+        }
         if let Some(event) = event
             && self.events.send(event).is_err()
         {
@@ -473,16 +448,13 @@ impl InventoryWorker {
                 Some(source) = self.hid_events.recv() => {
                     break ReconcileTrigger::HidEvent(source);
                 }
-                resumed = async {
-                    match self.resume_events.as_mut() {
-                        Some(events) => events.recv().await,
-                        None => pending().await,
-                    }
-                } => {
-                    if resumed.is_some() {
+                allowed = self.device_io.changed() => {
+                    if allowed == Some(false) && self.device_io.wait_until_allowed().await {
                         break ReconcileTrigger::SystemResume;
                     }
-                    self.resume_events = None;
+                    if allowed == Some(true) {
+                        break ReconcileTrigger::SystemResume;
+                    }
                 }
                 request = async {
                     if self.refresh_open {
@@ -517,7 +489,8 @@ impl InventoryWorker {
         // unavailable without restoring a dedicated wake-check timer. A
         // SystemResume reconciliation is already authoritative, so replacing
         // another trigger loses no inventory work.
-        if trigger != ReconcileTrigger::SystemResume
+        if !cfg!(target_os = "macos")
+            && trigger != ReconcileTrigger::SystemResume
             && self
                 .wake_detector
                 .observe(SystemTime::now(), Instant::now())
@@ -532,26 +505,11 @@ impl InventoryWorker {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::time::Duration;
 
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
     use openlogi_hid::{BackendError, InventoryError};
 
-    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState, resume_channel};
-
-    #[tokio::test]
-    async fn resume_signal_retains_and_coalesces_native_callbacks() {
-        let (signal, mut events) = resume_channel();
-        signal.notify();
-        signal.notify();
-        tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("a callback before the waiter is retained")
-            .expect("the signal producer remains alive");
-        tokio::time::timeout(Duration::from_millis(10), events.recv())
-            .await
-            .expect_err("equivalent callbacks coalesce into one resume");
-    }
+    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
 
     /// A transport-level enumerate failure — what the watcher's `Err` arm now
     /// sees (a partial per-node read is replayed by the hid ledger as `Ok`).

@@ -35,9 +35,9 @@ use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::backend::HidBackend;
+use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
-use crate::{ChannelRegistry, SharedChannel};
+use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
 
@@ -227,13 +227,20 @@ pub async fn run_capture_session(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
+    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if !device_io.allows_io() {
+        return Err(GestureError::Hid(BackendError::Backend(
+            "host device I/O is suspended".into(),
+        ))
+        .into());
+    }
     let chan = open_route_channel(backend, &route)
         .await
         .map_err(GestureError::from)?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());
-    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, None).await
+    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, None, device_io).await
 }
 
 /// Capture through the inventory-owned channel currently published for
@@ -247,11 +254,21 @@ pub async fn run_capture_session_with_registry_spec(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
         .ok_or(GestureError::DeviceNotFound)?;
-    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, Some(registry)).await
+    run_capture_session_on(
+        shared,
+        spec,
+        sink,
+        shutdown,
+        channel_slot,
+        Some(registry),
+        device_io,
+    )
+    .await
 }
 
 async fn run_capture_session_on(
@@ -261,7 +278,14 @@ async fn run_capture_session_on(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: Option<&ChannelRegistry>,
+    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if !device_io.allows_io() {
+        return Err(GestureError::Hid(BackendError::Backend(
+            "host device I/O is suspended".into(),
+        ))
+        .into());
+    }
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
     let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
@@ -355,6 +379,7 @@ async fn run_capture_session_on(
         },
         wireless,
         shutdown,
+        device_io,
     )
     .await;
 
@@ -471,8 +496,11 @@ impl ArmedControls {
     /// Reapply volatile diversion after a wireless reconnect broadcast. The
     /// broadcast can precede the device accepting feature writes, so allow a
     /// short settling window like the keyboard capture path does.
-    async fn rearm(&self) {
+    async fn rearm(&self, device_io: &DeviceIoGate) {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if !device_io.allows_io() {
+            return;
+        }
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
                 let raw_xy = self.gesture_cids.contains(&reporting.cid)
@@ -529,17 +557,37 @@ async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
     shutdown: oneshot::Receiver<()>,
+    mut device_io: DeviceIoGate,
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut shutdown = std::pin::pin!(shutdown);
     let mut liveness =
         CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
     loop {
+        if !device_io.allows_io() {
+            if !device_io.wait_until_allowed().await {
+                return stop_for_current_publication(context.registry, context.shared);
+            }
+            // Time asleep is not channel idleness. Give the transport a full
+            // quiet interval after visible resume and clear any pre-sleep
+            // strike before considering a liveness ping.
+            liveness.record_activity(tokio::time::Instant::now(), context.activity.generation());
+        }
         let activity_generation = liveness.activity_generation();
         let idle_deadline = liveness.idle_deadline();
         tokio::select! {
             biased;
 
+            allowed = device_io.changed() => {
+                match allowed {
+                    Some(true) => liveness.record_activity(
+                        tokio::time::Instant::now(),
+                        context.activity.generation(),
+                    ),
+                    Some(false) => {}
+                    None => return stop_for_current_publication(context.registry, context.shared),
+                }
+            }
             transition = wait_for_channel_change(
                 context.registry,
                 context.shared,
@@ -567,7 +615,7 @@ async fn monitor_capture(
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
                     CaptureAccum::default();
-                context.armed.rearm().await;
+                context.armed.rearm(&device_io).await;
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);

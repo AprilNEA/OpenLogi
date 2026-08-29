@@ -163,6 +163,9 @@ impl PairingManager {
 
     /// Begin a session: forget the previous discovery, pause capture, then start.
     pub async fn start(&self, selector: ReceiverSelector) -> Result<(), PairingCommandError> {
+        if !self.shared.device_io.allows_io() {
+            return Err(PairingCommandError::ReceiverBusy);
+        }
         let admission = match SessionAdmission::new(Arc::clone(&self.session)) {
             Ok(admission) => admission,
             Err(error) => {
@@ -411,6 +414,7 @@ mod tests {
             capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
+            device_io: openlogi_hid::device_io_channel().1,
             channel_pool: openlogi_hid::host::channel_pool(),
             keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),

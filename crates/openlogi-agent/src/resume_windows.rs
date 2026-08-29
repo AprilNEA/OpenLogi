@@ -20,7 +20,7 @@
 
 use std::ffi::c_void;
 
-use openlogi_agent_core::watchers::inventory::ResumeSignal;
+use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 use windows_sys::Win32::System::Power::{
     DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, RegisterSuspendResumeNotification,
@@ -30,10 +30,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Register for suspend/resume notifications for the process lifetime; the
-/// system invokes [`on_power_event`] and each resume notifies `signal`. Failure
-/// is logged, never fatal — the clock-gap heuristic still covers long
-/// sleeps.
-pub fn register(signal: ResumeSignal) {
+/// system invokes [`on_power_event`] and updates the process-wide device-I/O
+/// gate. Failure is logged, never fatal — the clock-gap heuristic still covers
+/// long sleeps.
+pub fn register(signal: DeviceIoSignal) {
     // Retained for the process lifetime on successful registration: the
     // callback may notify the signal until process exit.
     let context = Box::into_raw(Box::new(signal));
@@ -44,7 +44,7 @@ pub fn register(signal: ResumeSignal) {
         Callback: Some(on_power_event),
         Context: context.cast::<c_void>(),
     }));
-    // SAFETY: `params` and the `ResumeSignal` behind its context remain valid
+    // SAFETY: `params` and the `DeviceIoSignal` behind its context remain valid
     // for the call, and the callback matches
     // `PDEVICE_NOTIFY_CALLBACK_ROUTINE`. A successful subscription keeps both
     // allocations for the process lifetime below.
@@ -67,23 +67,28 @@ pub fn register(signal: ResumeSignal) {
 /// Whether a `PBT_*` power event means the system just resumed.
 /// `PBT_APMRESUMEAUTOMATIC` fires on every wake, `PBT_APMRESUMESUSPEND`
 /// additionally once user input confirms it — both can arrive for one wake,
-/// and the bounded resume channel coalesces them.
+/// and the latest-state device-I/O channel coalesces them.
 fn is_resume_event(event: u32) -> bool {
     matches!(event, PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND)
 }
 
-/// Invoked by the system on an arbitrary thread; only attempts a non-blocking
-/// send to the bounded resume channel.
+/// Invoked by the system on an arbitrary thread; only updates the non-blocking
+/// latest-state device-I/O channel.
 unsafe extern "system" fn on_power_event(
     context: *const c_void,
     event: u32,
     _setting: *const c_void,
 ) -> u32 {
     if is_resume_event(event) {
-        // SAFETY: `context` is the `ResumeSignal` this module leaked at
+        // SAFETY: `context` is the `DeviceIoSignal` this module leaked at
         // registration, alive for the process lifetime.
-        let signal = unsafe { &*context.cast::<ResumeSignal>() };
-        signal.notify();
+        let signal = unsafe { &*context.cast::<DeviceIoSignal>() };
+        let _ = signal.resume();
+    } else if event == windows_sys::Win32::UI::WindowsAndMessaging::PBT_APMSUSPEND {
+        // SAFETY: `context` is the `DeviceIoSignal` this module leaked at
+        // registration, alive for the process lifetime.
+        let signal = unsafe { &*context.cast::<DeviceIoSignal>() };
+        let _ = signal.suspend();
     }
     0
 }
@@ -91,27 +96,22 @@ unsafe extern "system" fn on_power_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlogi_agent_core::watchers::inventory::resume_channel;
+    use openlogi_hid::device_io_channel;
     use windows_sys::Win32::UI::WindowsAndMessaging::PBT_APMSUSPEND;
 
-    #[tokio::test]
-    async fn resume_events_notify_and_a_suspend_does_not() {
-        let (signal, mut events) = resume_channel();
+    #[test]
+    fn suspend_and_resume_events_update_the_device_io_gate() {
+        let (signal, gate) = device_io_channel();
         let context = (&raw const signal).cast::<c_void>();
         // SAFETY: `context` points at the signal above, live for this test;
         // the callback executes synchronously.
         unsafe { on_power_event(context, PBT_APMSUSPEND, std::ptr::null()) };
-        tokio::time::timeout(std::time::Duration::from_millis(10), events.recv())
-            .await
-            .expect_err("a suspend edge does not notify inventory");
+        assert!(!gate.allows_io());
 
         // SAFETY: `context` points at the signal above, live for this test;
         // the callback executes synchronously.
         unsafe { on_power_event(context, PBT_APMRESUMEAUTOMATIC, std::ptr::null()) };
-        tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-            .await
-            .expect("resume callback notifies the inventory signal")
-            .expect("the signal producer remains alive");
+        assert!(gate.allows_io());
         assert!(is_resume_event(PBT_APMRESUMESUSPEND));
     }
 }

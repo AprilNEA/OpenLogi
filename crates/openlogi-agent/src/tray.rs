@@ -27,15 +27,18 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::NSStatusItem;
+#[cfg(test)]
+use objc2_app_kit::NSWorkspaceDidWakeNotification;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
-    NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification,
-    NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification,
+    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
+    NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationName, NSString};
-use openlogi_agent_core::watchers::inventory::ResumeSignal;
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
+use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
 use crate::status_item;
@@ -105,29 +108,38 @@ pub fn relocalize() {
     });
 }
 
-struct ResumeTargetIvars {
-    signal: ResumeSignal,
+struct ActivityTargetIvars {
+    signal: DeviceIoSignal,
 }
 
 define_class!(
-    // SAFETY: NSObject has no subclassing requirements, and `ResumeTarget`
+    // SAFETY: NSObject has no subclassing requirements, and `ActivityTarget`
     // does not implement `Drop`.
     #[unsafe(super(NSObject))]
-    #[ivars = ResumeTargetIvars]
-    #[name = "OpenLogiAgentWorkspaceResumeTarget"]
-    struct ResumeTarget;
+    #[ivars = ActivityTargetIvars]
+    #[name = "OpenLogiAgentWorkspaceActivityTarget"]
+    struct ActivityTarget;
 
-    impl ResumeTarget {
+    impl ActivityTarget {
+        #[unsafe(method(workspaceDidSuspend:))]
+        fn workspace_did_suspend(&self, _notification: &NSNotification) {
+            if self.ivars().signal.suspend() {
+                info!("display/session suspended — pausing device I/O");
+            }
+        }
+
         #[unsafe(method(workspaceDidResume:))]
         fn workspace_did_resume(&self, _notification: &NSNotification) {
-            self.ivars().signal.notify();
+            if self.ivars().signal.resume() {
+                info!("display/session resumed — enabling device I/O");
+            }
         }
     }
 );
 
-impl ResumeTarget {
-    fn new(signal: ResumeSignal) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(ResumeTargetIvars { signal });
+impl ActivityTarget {
+    fn new(signal: DeviceIoSignal) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(ActivityTargetIvars { signal });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
     }
@@ -239,8 +251,13 @@ fn gui_is_running() -> bool {
 /// tokio core still does all the work). The toggle takes effect on the agent's
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
-/// `resume_signal` forwards coalesced workspace resume notifications to that core.
-pub fn run_app_loop(show_in_menu_bar: bool, app_icon: AppIcon, resume_signal: ResumeSignal) -> ! {
+/// `device_io_signal` closes the hardware gate while the display/session is
+/// asleep and reopens it only for a user-visible resume.
+pub fn run_app_loop(
+    show_in_menu_bar: bool,
+    app_icon: AppIcon,
+    device_io_signal: DeviceIoSignal,
+) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         #[expect(
@@ -255,7 +272,7 @@ pub fn run_app_loop(show_in_menu_bar: bool, app_icon: AppIcon, resume_signal: Re
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
-    let _resume_target = install_resume_observer(resume_signal);
+    let _activity_target = install_activity_observer(device_io_signal);
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
@@ -266,14 +283,29 @@ pub fn run_app_loop(show_in_menu_bar: bool, app_icon: AppIcon, resume_signal: Re
     std::process::exit(0);
 }
 
-/// Observe native resume transitions that the inventory clock-gap heuristic
-/// cannot see. The returned target must live for the AppKit loop's lifetime.
-fn install_resume_observer(signal: ResumeSignal) -> Retained<ResumeTarget> {
-    let target = ResumeTarget::new(signal);
+/// Observe display/session sleep and user-visible resume transitions. Generic
+/// `NSWorkspaceDidWakeNotification` is deliberately not registered: macOS
+/// emits it for maintenance DarkWake, where opening BLE HID is exactly what can
+/// promote an otherwise invisible wake into a full display wake (#656).
+fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
+    let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
+    for name in suspend_notification_names() {
+        // SAFETY: `ActivityTarget` implements `workspaceDidSuspend:` with the
+        // exact one-NSNotification argument signature, and the caller retains
+        // the target for the AppKit loop's lifetime.
+        unsafe {
+            center.addObserver_selector_name_object(
+                &target,
+                sel!(workspaceDidSuspend:),
+                Some(name),
+                Some(&workspace),
+            );
+        }
+    }
     for name in resume_notification_names() {
-        // SAFETY: `ResumeTarget` implements `workspaceDidResume:` with the
+        // SAFETY: `ActivityTarget` implements `workspaceDidResume:` with the
         // exact one-NSNotification argument signature, and the caller retains
         // the target for the AppKit loop's lifetime.
         unsafe {
@@ -288,14 +320,22 @@ fn install_resume_observer(signal: ResumeSignal) -> Retained<ResumeTarget> {
     target
 }
 
-fn resume_notification_names() -> [&'static NSNotificationName; 3] {
+fn suspend_notification_names() -> [&'static NSNotificationName; 3] {
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-    let system_wake = unsafe { NSWorkspaceDidWakeNotification };
+    let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
+    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+    let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
+    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+    let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
+    [system_sleep, screen_sleep, session_inactive]
+}
+
+fn resume_notification_names() -> [&'static NSNotificationName; 2] {
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
-    [system_wake, screen_wake, session_active]
+    [screen_wake, session_active]
 }
 
 /// Build and install the menu-bar status item, returning the objects that must
@@ -387,24 +427,34 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlogi_agent_core::watchers::inventory::resume_channel;
+    use openlogi_hid::device_io_channel;
 
-    #[tokio::test]
-    async fn resume_notifications_are_forwarded() {
-        let (signal, mut events) = resume_channel();
-        let target = install_resume_observer(signal.clone());
+    #[test]
+    fn darkwake_does_not_reopen_device_io() {
+        let (signal, gate) = device_io_channel();
+        let target = install_activity_observer(signal);
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
 
-        for name in resume_notification_names() {
-            // SAFETY: `workspace` is live, matches the registration filter,
-            // and notification delivery completes synchronously.
-            unsafe { center.postNotificationName_object(name, Some(&workspace)) };
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-            .await
-            .expect("workspace notification reaches the inventory signal")
-            .expect("the signal producer remains alive");
+        let screen_sleep = suspend_notification_names()[1];
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(screen_sleep, Some(&workspace)) };
+        assert!(!gate.allows_io());
+
+        // `DidWake` is a maintenance/system wake and intentionally has no
+        // observer, so posting it must leave the gate closed.
+        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
+        let darkwake = unsafe { NSWorkspaceDidWakeNotification };
+        // SAFETY: `workspace` is live and notification delivery is synchronous.
+        unsafe { center.postNotificationName_object(darkwake, Some(&workspace)) };
+        assert!(!gate.allows_io());
+
+        let screen_wake = resume_notification_names()[0];
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(screen_wake, Some(&workspace)) };
+        assert!(gate.allows_io());
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };

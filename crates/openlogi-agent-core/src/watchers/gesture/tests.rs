@@ -98,6 +98,32 @@ async fn retry_deadline_is_not_postponed_by_ready_input() {
     );
 }
 
+#[test]
+fn suspended_device_io_disables_retry_deadlines() {
+    let retry_at = Instant::now() + RETRY_DELAY;
+    let restart_after = HashMap::from([(physical_key(), retry_at)]);
+
+    assert_eq!(
+        next_deadline(
+            ReceiverRequestState::default(),
+            true,
+            &HashMap::new(),
+            &restart_after,
+        ),
+        Some(retry_at),
+    );
+    assert_eq!(
+        next_deadline(
+            ReceiverRequestState::default(),
+            false,
+            &HashMap::new(),
+            &restart_after,
+        ),
+        None,
+        "capture retries must stay dormant until visible resume",
+    );
+}
+
 #[tokio::test]
 async fn input_accepted_during_restoration_precedes_session_done() {
     let id = session_id(7);

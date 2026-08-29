@@ -17,6 +17,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod channel;
+mod device_io;
 
 pub mod backend;
 pub mod backlight;
@@ -37,6 +38,7 @@ pub use channel::route::{
     speaks_unifying_protocol,
 };
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel};
+pub use device_io::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};

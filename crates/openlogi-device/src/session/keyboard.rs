@@ -37,10 +37,9 @@ use super::gesture::{
     CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
     PendingCaptureRestore, enumerate_controls,
 };
-use crate::ChannelRegistry;
-use crate::SharedChannel;
-use crate::backend::HidBackend;
+use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
@@ -75,13 +74,26 @@ pub async fn run_keyboard_capture_session(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
+    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if !device_io.allows_io() {
+        return Err(device_io_suspended().into());
+    }
     let chan = open_route_channel(backend, &route)
         .await
         .map_err(GestureError::from)?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());
-    run_keyboard_capture_session_on(shared, wanted, sink, shutdown, channel_slot, None).await
+    run_keyboard_capture_session_on(
+        shared,
+        wanted,
+        sink,
+        shutdown,
+        channel_slot,
+        None,
+        device_io,
+    )
+    .await
 }
 
 /// Run keyboard capture on the exact channel currently published by `registry`.
@@ -96,12 +108,21 @@ pub async fn run_keyboard_capture_session_with_registry(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
         .ok_or(GestureError::DeviceNotFound)?;
-    run_keyboard_capture_session_on(shared, wanted, sink, shutdown, channel_slot, Some(registry))
-        .await
+    run_keyboard_capture_session_on(
+        shared,
+        wanted,
+        sink,
+        shutdown,
+        channel_slot,
+        Some(registry),
+        device_io,
+    )
+    .await
 }
 
 async fn run_keyboard_capture_session_on(
@@ -111,7 +132,11 @@ async fn run_keyboard_capture_session_on(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: Option<&ChannelRegistry>,
+    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if !device_io.allows_io() {
+        return Err(device_io_suspended().into());
+    }
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
     let device = Device::new(Arc::clone(&chan), device_index)
@@ -196,6 +221,7 @@ async fn run_keyboard_capture_session_on(
         },
         wireless,
         shutdown,
+        device_io,
     )
     .await;
 
@@ -236,11 +262,22 @@ async fn monitor_keyboard_capture(
     context: KeyboardMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
     shutdown: oneshot::Receiver<()>,
+    mut device_io: DeviceIoGate,
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
+        if !device_io.allows_io() && !device_io.wait_until_allowed().await {
+            return stop_for_current_publication(context.registry, context.shared);
+        }
         tokio::select! {
+            biased;
+
+            allowed = device_io.changed() => {
+                if allowed.is_none() {
+                    return stop_for_current_publication(context.registry, context.shared);
+                }
+            }
             _ = &mut shutdown => {
                 return stop_for_current_publication(context.registry, context.shared);
             }
@@ -259,7 +296,7 @@ async fn monitor_keyboard_capture(
                     continue;
                 };
                 info!(?broadcast, "keyboard reconnected — re-arming key diversion");
-                rearm_keys(context.armed).await;
+                rearm_keys(context.armed, &device_io).await;
             }
         }
     }
@@ -343,10 +380,13 @@ async fn arm_keys(
 /// Re-issue diversion for every armed control after a device power-cycle.
 /// Failures are logged, not propagated — the next reconnection broadcast
 /// retries.
-async fn rearm_keys(armed: &ArmedKeys) {
+async fn rearm_keys(armed: &ArmedKeys, device_io: &DeviceIoGate) {
     // A settling pause: the broadcast arrives the instant the link is back,
     // occasionally before the device accepts feature writes again.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if !device_io.allows_io() {
+        return;
+    }
     for &reporting in &armed.reporting {
         if let Err(e) = armed
             .controls
@@ -360,6 +400,10 @@ async fn rearm_keys(armed: &ArmedKeys) {
             );
         }
     }
+}
+
+fn device_io_suspended() -> GestureError {
+    GestureError::Hid(BackendError::Backend("host device I/O is suspended".into()))
 }
 
 #[cfg(test)]

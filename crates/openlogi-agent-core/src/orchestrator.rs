@@ -23,7 +23,7 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
+    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
@@ -89,6 +89,8 @@ pub struct SharedRuntime {
     pub capture_channel: CaptureChannel,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
+    /// Host-lifecycle gate shared by every producer of proactive device I/O.
+    pub device_io: DeviceIoGate,
     /// Shared transport pool used by long-running host-switch sessions.
     pub channel_pool: ChannelPool,
     /// The keyboard key-capture watcher's target + bindings, `None` while no
@@ -118,6 +120,7 @@ impl SharedRuntime {
             &self.capture_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -131,6 +134,7 @@ impl SharedRuntime {
             &self.keyboard_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -221,6 +225,7 @@ impl Orchestrator {
             capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
+            device_io: openlogi_hid::host::device_io_gate(),
             channel_pool: openlogi_hid::host::channel_pool(),
             keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
@@ -580,7 +585,12 @@ impl Orchestrator {
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
-            crate::hardware::set_light_in_background(Some(route), &light, capabilities);
+            crate::hardware::set_light_in_background(
+                &self.shared.device_io,
+                Some(route),
+                &light,
+                capabilities,
+            );
         }
     }
 
@@ -610,7 +620,12 @@ impl Orchestrator {
                 continue;
             };
             light.enabled = active;
-            crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
+            crate::hardware::set_light_in_background(
+                &self.shared.device_io,
+                dev.route.clone(),
+                &light,
+                capabilities,
+            );
             applied += 1;
         }
         info!(previous = ?previous, active, lights = applied, "applied camera-linked light state");
@@ -865,7 +880,12 @@ impl Orchestrator {
                 self.effective_light_settings(&dev.config_key),
                 dev.light_capabilities,
             ) {
-                crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
+                crate::hardware::set_light_in_background(
+                    &self.shared.device_io,
+                    dev.route.clone(),
+                    &light,
+                    capabilities,
+                );
             }
         }
     }

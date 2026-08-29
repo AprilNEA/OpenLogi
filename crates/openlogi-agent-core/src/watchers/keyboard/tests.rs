@@ -128,3 +128,18 @@ fn target_changes_freeze_dispatch_until_teardown_finishes() {
     assert!(!session.is_active());
     assert_eq!(session.dispatch(), &old_dispatch);
 }
+
+#[test]
+fn suspended_device_io_disables_retry_deadlines() {
+    let retry_at = tokio::time::Instant::now() + RETRY_DELAY;
+
+    assert_eq!(
+        next_deadline(ReceiverRequestState::default(), true, None, Some(retry_at)),
+        Some(retry_at),
+    );
+    assert_eq!(
+        next_deadline(ReceiverRequestState::default(), false, None, Some(retry_at)),
+        None,
+        "keyboard retries must stay dormant until visible resume",
+    );
+}

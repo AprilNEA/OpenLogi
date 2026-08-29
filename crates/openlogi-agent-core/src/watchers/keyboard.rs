@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceRoute,
-    PendingCaptureRestore, run_keyboard_capture_session_with_registry,
+    CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
+    DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session_with_registry,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -102,6 +102,7 @@ struct KeyboardManagerState {
 struct KeyboardSessionChannels {
     capture: CaptureChannel,
     registry: ChannelRegistry,
+    device_io: DeviceIoGate,
     events: mpsc::UnboundedSender<KeyboardSessionEvent>,
 }
 
@@ -115,6 +116,7 @@ pub fn spawn(
     keyboard_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
+    device_io: DeviceIoGate,
     dispatcher: ActionDispatcher,
 ) {
     let spec = spec.clone();
@@ -136,6 +138,7 @@ pub fn spawn(
             receiver_access,
             receiver_requests,
             registry,
+            device_io,
             dispatcher,
         ));
     });
@@ -222,16 +225,19 @@ impl KeyboardManagerState {
         }
     }
 
-    fn deadline(&self, requests: ReceiverRequestState) -> Option<tokio::time::Instant> {
-        if requests.any() {
-            return None;
-        }
-        self.pending_restore
-            .as_ref()
-            .map(|pending| pending.retry_at)
-            .into_iter()
-            .chain(self.restart_at)
-            .min()
+    fn deadline(
+        &self,
+        requests: ReceiverRequestState,
+        device_io_allowed: bool,
+    ) -> Option<tokio::time::Instant> {
+        next_deadline(
+            requests,
+            device_io_allowed,
+            self.pending_restore
+                .as_ref()
+                .map(|pending| pending.retry_at),
+            self.restart_at,
+        )
     }
 
     fn expedite_pending_restore(&mut self) {
@@ -243,11 +249,18 @@ impl KeyboardManagerState {
     async fn reconcile(
         &mut self,
         requests: ReceiverRequestState,
+        device_io_allowed: bool,
         published: bool,
         wanted: Option<(KeyboardTarget, KeyboardDispatchPlan)>,
         receiver_access: &ReceiverAccess,
         channels: &KeyboardSessionChannels,
     ) {
+        // Preserve the passive listener and diverted-key ownership across
+        // display sleep. Stopping or retrying it while suspended would issue
+        // the same proactive HID writes that can promote macOS DarkWake.
+        if !device_io_allowed {
+            return;
+        }
         let now = tokio::time::Instant::now();
         if !published {
             self.restart_at = None;
@@ -295,6 +308,81 @@ impl KeyboardManagerState {
             self.restart_at = Some(now + RETRY_DELAY);
         }
     }
+
+    fn handle_session_event(
+        &mut self,
+        event: KeyboardSessionEvent,
+        device_io_allowed: bool,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        spec: &watch::Receiver<Option<Arc<KeyboardSpec>>>,
+    ) -> bool {
+        match event {
+            KeyboardSessionEvent::Input(input) => {
+                if device_io_allowed {
+                    let wanted = wanted_session(*receiver_requests.borrow(), spec);
+                    if let Some(running) = self.current.as_mut() {
+                        reconcile_session(running, wanted.as_ref(), &self.dispatcher);
+                    }
+                }
+
+                let Some(running) = self
+                    .current
+                    .as_ref()
+                    .filter(|running| running.owns(&input.session))
+                else {
+                    self.dispatcher.cancel_hidpp_session(&input.session);
+                    debug!(
+                        epoch = input.session.epoch(),
+                        "input from a stale keyboard session — ignored"
+                    );
+                    return false;
+                };
+                dispatch_input(
+                    running.id(),
+                    input.input,
+                    running.dispatch(),
+                    &self.dispatcher,
+                );
+                false
+            }
+            KeyboardSessionEvent::Done(done) => {
+                // Input and Done share this queue, and the forwarding task is
+                // drained before Done is sent. A tracked draining session
+                // therefore remains the sole input owner until firmware
+                // restoration is complete.
+                let Some((CompletionAction::Remove { unexpected }, dispatch_session)) = self
+                    .current
+                    .as_ref()
+                    .map(|running| (running.completion(&done.session), running.id().clone()))
+                else {
+                    return false;
+                };
+                self.dispatcher.cancel_hidpp_session(&dispatch_session);
+                self.pending_restore = done.pending_restore.map(|token| PendingRestore {
+                    token,
+                    retry_at: tokio::time::Instant::now() + RETRY_DELAY,
+                });
+                if unexpected && device_io_allowed {
+                    self.restart_at = Some(tokio::time::Instant::now() + RETRY_DELAY);
+                    warn!("keyboard capture session ended unexpectedly, delaying re-arm");
+                }
+                self.current = None;
+                true
+            }
+        }
+    }
+}
+
+fn next_deadline(
+    requests: ReceiverRequestState,
+    device_io_allowed: bool,
+    pending_restore: Option<tokio::time::Instant>,
+    restart_at: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    if requests.any() || !device_io_allowed {
+        return None;
+    }
+    pending_restore.into_iter().chain(restart_at).min()
 }
 
 /// Keep one keyboard capture session alive for the published spec, restarting
@@ -306,6 +394,7 @@ async fn manage(
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
     registry: ChannelRegistry,
+    mut device_io: DeviceIoGate,
     dispatcher: ActionDispatcher,
 ) {
     let (events, mut event_rx) = mpsc::unbounded_channel::<KeyboardSessionEvent>();
@@ -313,6 +402,7 @@ async fn manage(
     let channels = KeyboardSessionChannels {
         capture: keyboard_channel,
         registry,
+        device_io: device_io.clone(),
         events,
     };
     let mut state = KeyboardManagerState::new(dispatcher);
@@ -321,22 +411,26 @@ async fn manage(
     loop {
         if reconcile {
             reconcile = false;
-            let requests = *receiver_requests.borrow_and_update();
-            let published = spec.borrow_and_update().clone();
-            let want = wanted_session_for(requests, published.as_deref());
-            state
-                .reconcile(
-                    requests,
-                    published.is_some(),
-                    want,
-                    &receiver_access,
-                    &channels,
-                )
-                .await;
+            let device_io_allowed = device_io.allows_io();
+            if device_io_allowed {
+                let requests = *receiver_requests.borrow_and_update();
+                let published = spec.borrow_and_update().clone();
+                let want = wanted_session_for(requests, published.as_deref());
+                state
+                    .reconcile(
+                        requests,
+                        device_io_allowed,
+                        published.is_some(),
+                        want,
+                        &receiver_access,
+                        &channels,
+                    )
+                    .await;
+            }
         }
 
         let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests);
+        let deadline = state.deadline(requests, device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
             reconcile = true;
             continue;
@@ -344,52 +438,12 @@ async fn manage(
 
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                match event {
-                    KeyboardSessionEvent::Input(input) => {
-                        let want = wanted_session(*receiver_requests.borrow(), &spec);
-                        if let Some(running) = state.current.as_mut() {
-                            reconcile_session(running, want.as_ref(), &state.dispatcher);
-                        }
-
-                        let Some(running) = state.current
-                            .as_ref()
-                            .filter(|running| running.owns(&input.session))
-                        else {
-                            state.dispatcher.cancel_hidpp_session(&input.session);
-                            debug!(epoch = input.session.epoch(), "input from a stale keyboard session — ignored");
-                            continue;
-                        };
-                        dispatch_input(
-                            running.id(),
-                            input.input,
-                            running.dispatch(),
-                            &state.dispatcher,
-                        );
-                    }
-                    KeyboardSessionEvent::Done(done) => {
-                        // Input and Done share this queue, and the forwarding
-                        // task is drained before Done is sent. A tracked
-                        // draining session therefore remains the sole input
-                        // owner until firmware restoration is complete.
-                        if let Some((CompletionAction::Remove { unexpected }, dispatch_session)) =
-                            state.current.as_ref().map(|running| {
-                                (running.completion(&done.session), running.id().clone())
-                            })
-                        {
-                            state.dispatcher.cancel_hidpp_session(&dispatch_session);
-                            state.pending_restore = done.pending_restore.map(|token| PendingRestore {
-                                token,
-                                retry_at: tokio::time::Instant::now() + RETRY_DELAY,
-                            });
-                            if unexpected {
-                                state.restart_at = Some(tokio::time::Instant::now() + RETRY_DELAY);
-                                warn!("keyboard capture session ended unexpectedly, delaying re-arm");
-                            }
-                            state.current = None;
-                            reconcile = true;
-                        }
-                    }
-                }
+                reconcile |= state.handle_session_event(
+                    event,
+                    device_io.allows_io(),
+                    &receiver_requests,
+                    &spec,
+                );
             }
             result = spec.changed() => match result {
                 Ok(()) => reconcile = true,
@@ -399,6 +453,11 @@ async fn manage(
                 Ok(()) => reconcile = true,
                 Err(_) => return,
             },
+            allowed = device_io.changed() => match allowed {
+                Some(true) => reconcile = true,
+                Some(false) => {}
+                None => return,
+            },
             open = wait_for_registry_change(
                 &mut registry_changes,
                 state.pending_restore.is_some(),
@@ -406,8 +465,10 @@ async fn manage(
                 if !open {
                     return;
                 }
-                state.expedite_pending_restore();
-                reconcile = true;
+                if device_io.allows_io() {
+                    state.expedite_pending_restore();
+                    reconcile = true;
+                }
             }
             () = wait_for_deadline(deadline) => {
                 reconcile = true;
@@ -459,6 +520,7 @@ fn spawn_session(
     let done_id = id.clone();
     let route = target.route.clone();
     let wanted = target.wanted.clone();
+    let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
         let pending_restore = match run_keyboard_capture_session_with_registry(
@@ -468,6 +530,7 @@ fn spawn_session(
             stop_rx,
             slot,
             &session_registry,
+            device_io,
         )
         .await
         {

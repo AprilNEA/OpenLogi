@@ -1,13 +1,14 @@
 //! Native Linux suspend/resume notifications from systemd-logind.
 //!
-//! `PrepareForSleep(false)` is emitted once the system has resumed. The
-//! process-lifetime listener reconnects only after D-Bus failure; steady state
-//! blocks on the native signal and performs no timed inventory work.
+//! `PrepareForSleep(true)` closes the device-I/O gate before suspend and
+//! `PrepareForSleep(false)` reopens it after resume. The process-lifetime
+//! listener reconnects only after D-Bus failure; steady state blocks on the
+//! native signal and performs no timed inventory work.
 
 use std::thread;
 use std::time::Duration;
 
-use openlogi_agent_core::watchers::inventory::ResumeSignal;
+use openlogi_hid::DeviceIoSignal;
 use tracing::{debug, info, warn};
 use zbus::blocking::Connection;
 use zbus::proxy;
@@ -28,7 +29,7 @@ trait LoginManager {
 
 /// Start a process-lifetime logind listener. Failure is non-fatal: the
 /// inventory recovery scan still detects long suspend gaps from the clocks.
-pub fn register(signal: ResumeSignal) {
+pub fn register(signal: DeviceIoSignal) {
     let spawned = thread::Builder::new()
         .name("openlogi-linux-resume".into())
         .spawn(move || {
@@ -60,22 +61,20 @@ pub fn register(signal: ResumeSignal) {
     }
 }
 
-fn listen(signal: &ResumeSignal) -> zbus::Result<()> {
+fn listen(signal: &DeviceIoSignal) -> zbus::Result<()> {
     let connection = Connection::system()?;
     let proxy = LoginManagerProxyBlocking::new(&connection)?;
     let changes = proxy.receive_prepare_for_sleep()?;
     info!("logind suspend/resume notifications registered");
     for change in changes {
         let args = change.args()?;
-        if is_resume_edge(*args.sleeping()) {
-            signal.notify();
+        if *args.sleeping() {
+            let _ = signal.suspend();
+        } else {
+            let _ = signal.resume();
         }
     }
     Ok(())
-}
-
-fn is_resume_edge(sleeping: bool) -> bool {
-    !sleeping
 }
 
 fn next_reconnect_delay(current: Duration) -> Duration {
@@ -84,13 +83,7 @@ fn next_reconnect_delay(current: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RECONNECT_DELAY, RECONNECT_DELAY, is_resume_edge, next_reconnect_delay};
-
-    #[test]
-    fn only_the_post_sleep_edge_is_resume() {
-        assert!(!is_resume_edge(true));
-        assert!(is_resume_edge(false));
-    }
+    use super::{MAX_RECONNECT_DELAY, RECONNECT_DELAY, next_reconnect_delay};
 
     #[test]
     fn reconnect_backoff_is_bounded() {

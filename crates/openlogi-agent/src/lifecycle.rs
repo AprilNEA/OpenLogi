@@ -28,7 +28,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
-use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh, ResumeEvents};
+use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -54,7 +54,6 @@ const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
     config: Config,
-    resume_events: ResumeEvents,
     uninstalled: UnboundedReceiver<()>,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
 ) {
@@ -64,7 +63,6 @@ pub(crate) async fn run(
 
     let Some(booted) = Booted::bootstrap(
         config,
-        resume_events,
         uninstalled,
         #[cfg(target_os = "macos")]
         armed_tx,
@@ -97,13 +95,11 @@ struct Booted {
     /// Releases the main thread's tray loop once the agent arms.
     #[cfg(target_os = "macos")]
     armed_tx: std::sync::mpsc::Sender<()>,
-    resume_events: ResumeEvents,
 }
 
 impl Booted {
     async fn bootstrap(
         config: Config,
-        resume_events: ResumeEvents,
         uninstalled: UnboundedReceiver<()>,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
@@ -121,7 +117,6 @@ impl Booted {
             launch_at_login,
             #[cfg(target_os = "macos")]
             armed_tx,
-            resume_events,
         })
     }
 
@@ -191,7 +186,6 @@ impl Wanted {
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
-            resume_events,
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
@@ -212,7 +206,6 @@ impl Wanted {
         // the server's `declare_client` handler.
         drop(demand);
         Armed {
-            resume_events,
             running: Running {
                 orchestrator,
                 shared,
@@ -229,17 +222,14 @@ impl Wanted {
     }
 }
 
-/// An armed agent whose one-shot resume stream has not yet been handed to the
-/// inventory watcher.
+/// An armed agent ready to start its watcher fleets.
 struct Armed {
-    resume_events: ResumeEvents,
     running: Running,
 }
 
 /// The live agent state into which the select loop folds events.
-///
-/// Separate from [`Armed`] so starting the watcher structurally consumes the
-/// single-owner resume stream; no optional or already-consumed state exists.
+/// Separate from [`Armed`] so watcher startup and the steady-state event loop
+/// remain distinct lifecycle phases.
 struct Running {
     orchestrator: Arc<Mutex<Orchestrator>>,
     shared: SharedRuntime,
@@ -259,17 +249,13 @@ impl Armed {
     /// Start the watcher fleets, then drain every control-plane source until
     /// told to leave (low-frequency by contract — [`startup::WatcherEvent`]).
     async fn run(self) {
-        let Self {
-            resume_events,
-            mut running,
-        } = self;
+        let Self { mut running } = self;
         #[cfg(target_os = "macos")]
         request_input_monitoring().await;
 
         // HID++ watchers need no Accessibility — start them up front.
         startup::spawn_hidpp_watchers(&running.shared, &running.inputs);
-        let (mut watchers, inventory_refresh) =
-            startup::spawn_state_watchers(&running.shared, resume_events);
+        let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
 
         info!("openlogi-agent started");
         loop {

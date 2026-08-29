@@ -4,7 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use openlogi_hid::{
-    ChannelPool, DeviceRoute, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
+    ChannelPool, DeviceIoGate, DeviceRoute, HostSwitchStopReason, run_host_switch_session,
+    switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -29,7 +30,12 @@ pub struct HostSwitchLink {
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
 /// Spawn the host switch session manager.
-pub fn spawn(links: &HostSwitchLinks, channel_pool: ChannelPool, receiver_access: ReceiverAccess) {
+pub fn spawn(
+    links: &HostSwitchLinks,
+    channel_pool: ChannelPool,
+    receiver_access: ReceiverAccess,
+    device_io: DeviceIoGate,
+) {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     thread::spawn(move || {
@@ -48,6 +54,7 @@ pub fn spawn(links: &HostSwitchLinks, channel_pool: ChannelPool, receiver_access
             channel_pool,
             receiver_access,
             receiver_requests,
+            device_io,
         ));
     });
 }
@@ -67,8 +74,8 @@ impl HostSwitchManagerState {
         }
     }
 
-    fn deadline(&self, requests: ReceiverRequestState) -> Option<Instant> {
-        if requests.any() {
+    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
+        if requests.any() || !device_io_allowed {
             return None;
         }
         self.restart_after
@@ -84,7 +91,14 @@ impl HostSwitchManagerState {
         receiver_access: &ReceiverAccess,
         channel_pool: &ChannelPool,
         done: &mpsc::UnboundedSender<SessionCompletion>,
+        device_io: &DeviceIoGate,
     ) {
+        // Keep armed listeners passive while sleeping. A reconcile to an
+        // empty/changed link set would restore firmware controls and a retry
+        // would reopen the HID transport during DarkWake.
+        if !device_io.allows_io() {
+            return;
+        }
         let now = Instant::now();
         let wanted = if requests.any() {
             &[][..]
@@ -115,6 +129,7 @@ impl HostSwitchManagerState {
                 receiver_lease,
                 channel_pool.clone(),
                 done.clone(),
+                device_io.clone(),
             ));
         }
     }
@@ -125,6 +140,7 @@ async fn manage(
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
+    mut device_io: DeviceIoGate,
 ) {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionCompletion>();
     let mut state = HostSwitchManagerState::new();
@@ -133,21 +149,25 @@ async fn manage(
     loop {
         if reconcile {
             reconcile = false;
-            let requests = *receiver_requests.borrow_and_update();
-            let published = std::sync::Arc::clone(&links.borrow_and_update());
-            state
-                .reconcile(
-                    requests,
-                    &published,
-                    &receiver_access,
-                    &channel_pool,
-                    &done_tx,
-                )
-                .await;
+            let device_io_allowed = device_io.allows_io();
+            if device_io_allowed {
+                let requests = *receiver_requests.borrow_and_update();
+                let published = std::sync::Arc::clone(&links.borrow_and_update());
+                state
+                    .reconcile(
+                        requests,
+                        &published,
+                        &receiver_access,
+                        &channel_pool,
+                        &done_tx,
+                        &device_io,
+                    )
+                    .await;
+            }
         }
 
         let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests);
+        let deadline = state.deadline(requests, device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             reconcile = true;
             continue;
@@ -162,9 +182,19 @@ async fn manage(
                     let completed = state.sessions.remove(index);
                     let _ = completed.task.await;
                     if let Some((link, host)) = completion.request {
+                        if !device_io.wait_until_allowed().await {
+                            return;
+                        }
                         stop_all(&mut state.sessions, HostSwitchStopReason::Graceful).await;
-                        run_transition(&mut links, &channel_pool, &receiver_access, link, host).await;
-                    } else {
+                        run_transition(
+                            &mut links,
+                            &channel_pool,
+                            &receiver_access,
+                            link,
+                            host,
+                        )
+                        .await;
+                    } else if device_io.allows_io() {
                         state.restart_after.push((completed.link, Instant::now() + RETRY_DELAY));
                     }
                     reconcile = true;
@@ -182,6 +212,11 @@ async fn manage(
                 }
                 reconcile = true;
             }
+            allowed = device_io.changed() => match allowed {
+                Some(true) => reconcile = true,
+                Some(false) => {}
+                None => return,
+            },
             () = wait_for_deadline(deadline) => {
                 reconcile = true;
             }
@@ -203,6 +238,7 @@ fn spawn_session(
     receiver_lease: crate::receiver_access::SessionReceiverLease,
     pool: ChannelPool,
     done: mpsc::UnboundedSender<SessionCompletion>,
+    device_io: DeviceIoGate,
 ) -> RunningSession {
     let (stop, stop_rx) = oneshot::channel();
     let session_link = link.clone();
@@ -210,7 +246,9 @@ fn spawn_session(
         let _receiver_lease = receiver_lease;
         let keyboard = session_link.keyboard.clone();
         let request =
-            match run_host_switch_session(session_link.keyboard.clone(), stop_rx, pool).await {
+            match run_host_switch_session(session_link.keyboard.clone(), stop_rx, pool, device_io)
+                .await
+            {
                 Ok(host) => host.map(|host| (session_link, host)),
                 Err(error) => {
                     debug!(%error, route = %keyboard, "host switch session ended");
@@ -323,6 +361,29 @@ mod tests {
             receiver_uid: "cafe".to_owned(),
             slot,
         }
+    }
+
+    #[test]
+    fn suspended_device_io_disables_retry_deadlines() {
+        let retry_at = Instant::now() + RETRY_DELAY;
+        let mut state = HostSwitchManagerState::new();
+        state.restart_after.push((
+            HostSwitchLink {
+                keyboard: route(1),
+                targets: vec![route(2)],
+            },
+            retry_at,
+        ));
+
+        assert_eq!(
+            state.deadline(ReceiverRequestState::default(), true),
+            Some(retry_at),
+        );
+        assert_eq!(
+            state.deadline(ReceiverRequestState::default(), false),
+            None,
+            "host-switch retries must stay dormant until visible resume",
+        );
     }
 
     #[tokio::test(start_paused = true)]

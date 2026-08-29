@@ -252,7 +252,7 @@ impl Agent for AgentServer {
         command: LightCommand,
     ) -> Result<(), WriteError> {
         hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&route, command).await
+        hardware::apply_light(&self.shared.device_io, &route, command).await
     }
 
     async fn set_light_manual_power(
@@ -262,7 +262,7 @@ impl Agent for AgentServer {
         enabled: bool,
     ) -> Result<(), WriteError> {
         hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&route, LightCommand::Power(enabled)).await?;
+        hardware::apply_light(&self.shared.device_io, &route, LightCommand::Power(enabled)).await?;
         if !self
             .orchestrator
             .lock()

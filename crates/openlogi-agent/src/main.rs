@@ -41,7 +41,6 @@ mod tray;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 
-use openlogi_agent_core::watchers::inventory::resume_channel;
 use openlogi_core::config::Config;
 use tracing::{info, warn};
 
@@ -105,7 +104,7 @@ fn main() {
     // the process main thread — so the async core (orchestrator, IPC, watchers,
     // hook) runs on the tokio runtime on a dedicated thread, and the main thread
     // runs AppKit. Elsewhere there is no tray, so just block on the core.
-    let (resume_signal, resume_events) = resume_channel();
+    let device_io_signal = openlogi_hid::host::device_io_signal();
     #[cfg(target_os = "macos")]
     {
         // Read the menu-bar preference before `config` moves into the core
@@ -121,14 +120,14 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, resume_events, uninstalled, armed_tx));
+                runtime.block_on(lifecycle::run(config, uninstalled, armed_tx));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
         if armed_rx.recv().is_ok() {
-            tray::run_app_loop(show_in_menu_bar, app_icon, resume_signal);
+            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal);
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -141,13 +140,13 @@ fn main() {
             // Native resume notifications feed the same event seam as macOS
             // and Linux: inventory wakes immediately and replays volatile
             // settings on its settled authoritative snapshot.
-            resume_windows::register(resume_signal.clone());
+            resume_windows::register(device_io_signal.clone());
         }
         #[cfg(target_os = "linux")]
-        resume_linux::register(resume_signal.clone());
+        resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        drop(resume_signal);
-        runtime.block_on(lifecycle::run(config, resume_events, uninstalled));
+        drop(device_io_signal);
+        runtime.block_on(lifecycle::run(config, uninstalled));
     }
 }
 

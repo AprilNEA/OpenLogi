@@ -16,7 +16,6 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
-use openlogi_agent_core::watchers::inventory::ResumeEvents;
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
@@ -135,6 +134,7 @@ impl InputServices {
             shared.capture_channel.clone(),
             shared.channel_registry.clone(),
             shared.receiver_access.clone(),
+            shared.device_io.clone(),
             sender,
         ) {
             Ok(runtime) => runtime,
@@ -175,18 +175,21 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
+        shared.device_io.clone(),
         GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
     );
     watchers::host_switch::spawn(
         &shared.host_switch_links,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
+        shared.device_io.clone(),
     );
     watchers::keyboard::spawn(
         &shared.keyboard_spec,
         shared.keyboard_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
+        shared.device_io.clone(),
         inputs.dispatcher.clone(),
     );
 }
@@ -226,7 +229,6 @@ pub(crate) enum Watcher {
 /// stream.
 pub(crate) fn spawn_state_watchers(
     shared: &SharedRuntime,
-    resume_events: ResumeEvents,
 ) -> (
     impl Stream<Item = WatcherEvent> + Unpin + use<>,
     watchers::inventory::InventoryRefresh,
@@ -243,8 +245,10 @@ pub(crate) fn spawn_state_watchers(
         .chain(stream::iter([WatcherEvent::Lost(source)]))
         .boxed()
     }
-    let inventory =
-        watchers::inventory::spawn_with_registry(shared.channel_registry.clone(), resume_events);
+    let inventory = watchers::inventory::spawn_with_registry(
+        shared.channel_registry.clone(),
+        shared.device_io.clone(),
+    );
     let streams = stream::select_all([
         tagged(
             inventory.events,

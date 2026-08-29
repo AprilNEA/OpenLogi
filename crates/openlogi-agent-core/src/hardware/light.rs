@@ -8,8 +8,8 @@ use std::thread;
 use openlogi_core::config::LightSettings;
 use openlogi_core::device::LightCapabilities;
 use openlogi_hid::{
-    DeviceRoute, HidppOperation, LightCommand, WriteError, commands_for_light_settings,
-    litra_model_for_route,
+    DeviceIoGate, DeviceRoute, HidppOperation, LightCommand, WriteError,
+    commands_for_light_settings, litra_model_for_route,
 };
 use tracing::{debug, info, warn};
 
@@ -17,6 +17,7 @@ struct LightApplyRequest {
     settings: LightSettings,
     capabilities: LightCapabilities,
     generation: u64,
+    device_io: DeviceIoGate,
 }
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ static LIGHT_WRITE_LOCKS: LazyLock<Mutex<HashMap<String, LightWriteLock>>> =
 /// Failures are logged because this path is best-effort; an explicit IPC
 /// command returns the typed error to the caller instead.
 pub fn set_light_in_background(
+    device_io: &DeviceIoGate,
     target: Option<DeviceRoute>,
     light: &LightSettings,
     capabilities: LightCapabilities,
@@ -63,6 +65,7 @@ pub fn set_light_in_background(
             settings: *light,
             capabilities,
             generation,
+            device_io: device_io.clone(),
         })
         .is_err()
     {
@@ -152,12 +155,17 @@ fn light_worker_loop(
             debug!(route = %target, "skipping superseded light re-apply");
             continue;
         }
+        if !request.device_io.allows_io() {
+            debug!(route = %target, "host device I/O suspended — light re-apply skipped");
+            continue;
+        }
         let result = rt.block_on(apply_light_settings(
             &target,
             &request.settings,
             request.capabilities,
             &generation,
             request.generation,
+            &request.device_io,
         ));
         match result {
             Ok(true) => info!(
@@ -179,6 +187,7 @@ async fn apply_light_settings(
     capabilities: LightCapabilities,
     generation: &AtomicU64,
     expected_generation: u64,
+    device_io: &DeviceIoGate,
 ) -> Result<bool, WriteError> {
     let lock = light_write_lock(target);
     let _guard = lock.lock().await;
@@ -189,15 +198,28 @@ async fn apply_light_settings(
         return Ok(false);
     }
     for command in commands_for_light_settings(*light, capabilities) {
+        if !device_io.allows_io() {
+            return Ok(false);
+        }
         apply_light_unlocked(target, command).await?;
     }
     Ok(true)
 }
 
 /// Apply a semantic command to a supported standalone light.
-pub async fn apply_light(route: &DeviceRoute, command: LightCommand) -> Result<(), WriteError> {
+pub async fn apply_light(
+    device_io: &DeviceIoGate,
+    route: &DeviceRoute,
+    command: LightCommand,
+) -> Result<(), WriteError> {
+    if !device_io.allows_io() {
+        return Err(WriteError::DeviceNotFound);
+    }
     let lock = light_write_lock(route);
     let _guard = lock.lock().await;
+    if !device_io.allows_io() {
+        return Err(WriteError::DeviceNotFound);
+    }
     apply_light_unlocked(route, command).await
 }
 
