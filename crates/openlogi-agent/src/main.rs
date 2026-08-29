@@ -107,6 +107,11 @@ fn main() {
     let device_io_signal = openlogi_hid::host::device_io_signal();
     #[cfg(target_os = "macos")]
     {
+        // Fail closed before the core thread can enumerate or open HID devices.
+        // AppKit releases this startup hold only after its workspace observers
+        // have received the initial session state and Core Graphics has
+        // reported whether the display is already asleep.
+        let _ = device_io_signal.suspend();
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
