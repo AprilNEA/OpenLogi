@@ -36,13 +36,28 @@ struct ScrollPreferenceSnapshot {
 }
 
 impl ScrollPreferenceSnapshot {
-    fn motion_tuning(self) -> MotionTuning {
+    fn motion_tuning(self, source: &ScrollSource) -> MotionTuning {
         MotionTuning {
             step: self.tuning.step.multiplier(),
             duration: Duration::from_millis(u64::from(u16::from(self.tuning.duration))),
-            max_gain: self.tuning.acceleration.max_gain(),
+            max_gain: if os_hook_input_is_preaccelerated(source) {
+                1.0
+            } else {
+                self.tuning.acceleration.max_gain()
+            },
         }
     }
+}
+
+/// Whether `source` delivers wheel distance with an OS acceleration curve
+/// already applied. macOS bakes its scroll-acceleration curve into the
+/// fractional line deltas the hook reports — a fast spin arrives an order of
+/// magnitude longer than the wheel's physical rotation — so applying
+/// tick-rate gain on top would accelerate twice. Diverted HID++ wheels
+/// report raw counts and keep the configured gain, as do the raw-delta
+/// hooks on other platforms.
+fn os_hook_input_is_preaccelerated(source: &ScrollSource) -> bool {
+    cfg!(target_os = "macos") && matches!(source, ScrollSource::OsHook(_))
 }
 
 /// Atomically published settings read from input callbacks and the scroll
@@ -499,13 +514,8 @@ fn run_worker(
                 let snapshot = preferences.load();
                 match input.output {
                     ScrollOutputMode::Smooth { at } if snapshot.smooth_scroll => {
-                        engine.impulse(
-                            input.source,
-                            input.impulse,
-                            at,
-                            snapshot.motion_tuning(),
-                            emit_smooth,
-                        );
+                        let tuning = snapshot.motion_tuning(&input.source);
+                        engine.impulse(input.source, input.impulse, at, tuning, emit_smooth);
                     }
                     ScrollOutputMode::Direct => {
                         engine.cancel_source(&input.source, emit_smooth);
@@ -553,6 +563,30 @@ mod tests {
             self::sensitivity(sensitivity),
             neutral_tuning(),
         ))
+    }
+
+    #[test]
+    fn preaccelerated_os_hook_input_forfeits_configured_gain() {
+        let snapshot = ScrollPreferenceSnapshot {
+            smooth_scroll: true,
+            vertical_sensitivity: sensitivity(14),
+            tuning: SmoothScrollTuning {
+                step: SmoothScrollStep::MAX,
+                duration: SmoothScrollDurationMs::MIN,
+                acceleration: SmoothScrollAcceleration::MAX,
+            },
+        };
+        let configured = SmoothScrollAcceleration::MAX.max_gain();
+        let hook = ScrollSource::OsHook(thread::current().id());
+        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+
+        let hook_gain = snapshot.motion_tuning(&hook).max_gain;
+        if cfg!(target_os = "macos") {
+            assert!((hook_gain - 1.0).abs() < f64::EPSILON);
+        } else {
+            assert!((hook_gain - configured).abs() < f64::EPSILON);
+        }
+        assert!((snapshot.motion_tuning(&hidpp).max_gain - configured).abs() < f64::EPSILON);
     }
 
     #[test]
