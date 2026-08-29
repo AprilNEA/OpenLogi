@@ -61,7 +61,9 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: `Agent::switch_host` + [`SwitchHostError`] appended — software-initiated
+///      multi-host device switching.
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -419,6 +421,55 @@ pub enum ActionRingCommandError {
     SlotEmpty,
 }
 
+/// Why [`Agent::switch_host`] could not issue a device host switch.
+///
+/// A successful call means either the device was already on the requested
+/// host or its fire-and-forget ChangeHost write was issued. It cannot confirm
+/// arrival because a switching device leaves the sender's radio channel.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+pub enum SwitchHostError {
+    /// No currently connected device matched the requested route.
+    #[error("no connected device matched the route")]
+    DeviceNotFound,
+    /// The device does not expose the HID++ ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
+    /// The requested zero-based host index is outside the device's host count.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
+    },
+    /// The device explicitly reports that the requested host slot is unpaired.
+    #[error("host {host} is not paired on this device")]
+    HostSlotEmpty {
+        /// The zero-based host slot that has no pairing.
+        host: u8,
+    },
+    /// HID transport-level failure serialized as text.
+    #[error("HID transport error: {message}")]
+    Hid {
+        /// Transport error detail.
+        message: String,
+    },
+    /// HID++ protocol failure serialized as text.
+    #[error("HID++ protocol error: {message}")]
+    Hidpp {
+        /// Protocol error detail, including the failed operation.
+        message: String,
+    },
+    /// A required HID++ operation exceeded its time budget.
+    #[error("HID++ operation timed out while {operation}")]
+    TimedOut {
+        /// Description of the operation that exceeded its budget.
+        operation: String,
+    },
+}
+
 /// What kind of client a connection is, declared through
 /// [`Agent::declare_client`] right after the version handshake.
 ///
@@ -560,4 +611,12 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Switch `route` to the zero-based host slot `host` through HID++
+    /// ChangeHost (`0x1814`). The agent validates the device-reported host
+    /// count and, when available, rejects a slot reported as unpaired.
+    ///
+    /// A successful fire-and-forget write means the command was issued, not
+    /// that the device arrived: once it takes effect, this host is blind to the
+    /// device because its radio link has moved.
+    async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), SwitchHostError>;
 }

@@ -191,4 +191,29 @@ mod tests {
             other => panic!("expected Diag(Wheel), got {other:?}"),
         }
     }
+
+    #[test]
+    fn host_switch_requires_a_device_and_maps_the_zero_based_host() {
+        Cli::try_parse_from(["openlogi", "diag", "host-switch", "--host", "1"])
+            .expect_err("host-switch without --device must be rejected");
+
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "host-switch",
+            "--device",
+            "MX Master 3S",
+            "--host",
+            "1",
+        ])
+        .expect("valid host-switch invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::HostSwitch(args)) => {
+                assert_eq!(args.device, "MX Master 3S");
+                assert_eq!(args.host, 1);
+            }
+            other => panic!("expected Diag(HostSwitch), got {other:?}"),
+        }
+    }
 }

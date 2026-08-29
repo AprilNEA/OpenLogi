@@ -47,7 +47,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
     Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SwitchHostError,
 };
 use succession::{Compat, Run};
 
@@ -101,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -205,6 +205,48 @@ fn request_variant_order() {
             kind: ClientKind::Overlay,
         },
         "1902",
+    );
+    assert_wire(
+        &AgentRequest::SwitchHost {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            host: 2,
+        },
+        "1a000846303044434146450102",
+    );
+}
+
+#[test]
+fn switch_host_errors() {
+    assert_wire(&SwitchHostError::DeviceNotFound, "00");
+    assert_wire(&SwitchHostError::FeatureUnsupported, "01");
+    assert_wire(
+        &SwitchHostError::HostOutOfRange {
+            host: 2,
+            host_count: 2,
+        },
+        "020202",
+    );
+    assert_wire(&SwitchHostError::HostSlotEmpty { host: 2 }, "0302");
+    assert_wire(
+        &SwitchHostError::Hid {
+            message: "gone".into(),
+        },
+        "0404676f6e65",
+    );
+    assert_wire(
+        &SwitchHostError::Hidpp {
+            message: "busy".into(),
+        },
+        "050462757379",
+    );
+    assert_wire(
+        &SwitchHostError::TimedOut {
+            operation: "reading current host".into(),
+        },
+        "061472656164696e672063757272656e7420686f7374",
     );
 }
 
