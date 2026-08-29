@@ -10,6 +10,8 @@ show_in_menu_bar = true
 capture_mouse_events = true
 smooth_scroll = false
 vertical_scroll_sensitivity = 14
+# Opt in to restoring Windows/macOS/Linux keyboard mode after reconnects.
+enforce_native_keyboard_platform = false
 auto_download_assets = true
 asset_source = "automatic"
 language = "en"

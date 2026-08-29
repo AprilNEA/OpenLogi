@@ -898,6 +898,19 @@ fn app_settings_vertical_scroll_sensitivity_defaults_and_roundtrips() {
 }
 
 #[test]
+fn native_keyboard_platform_is_opt_in_and_roundtrips() {
+    let mut cfg = Config::default();
+    assert!(!cfg.app_settings.enforce_native_keyboard_platform);
+
+    cfg.app_settings.enforce_native_keyboard_platform = true;
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    let parsed = write_and_read(&cfg);
+
+    assert!(body.contains("enforce_native_keyboard_platform = true"));
+    assert!(parsed.app_settings.enforce_native_keyboard_platform);
+}
+
+#[test]
 fn app_settings_ui_scale_roundtrips() {
     let mut cfg = Config::default();
     cfg.app_settings.ui_scale = UiScale::ExtraLarge;

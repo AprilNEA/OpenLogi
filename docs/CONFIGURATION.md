@@ -40,6 +40,9 @@ optional physical device key.
 `[app_settings]` contains application-wide preferences:
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
+- `enforce_native_keyboard_platform`: opt in to selecting the host OS through a
+  compatible keyboard's advertised HID++ platform descriptors whenever it
+  appears, reconnects, or resumes
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
