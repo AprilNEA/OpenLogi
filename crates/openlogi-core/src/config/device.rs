@@ -486,6 +486,8 @@ struct RawDeviceConfig {
     dpi_presets: Vec<Dpi>,
     #[serde(default, deserialize_with = "deserialize_optional_dpi")]
     dpi: Option<Dpi>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report_rate: Option<ReportRateHz>,
     #[serde(default)]
     lighting: Option<Lighting>,
     #[serde(default)]
@@ -557,7 +559,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
-            report_rate: None,
+            report_rate: raw.report_rate,
             lighting: raw.lighting,
             light: raw.light,
             smartshift: raw.smartshift,
