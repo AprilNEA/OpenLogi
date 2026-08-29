@@ -24,6 +24,7 @@ fn locale_files_have_the_same_keys() {
     );
 
     let catalogs = [
+        ("be", include_str!("../locales/be.yml")),
         ("ja", include_str!("../locales/ja.yml")),
         ("ru", include_str!("../locales/ru.yml")),
         ("uk", include_str!("../locales/uk.yml")),

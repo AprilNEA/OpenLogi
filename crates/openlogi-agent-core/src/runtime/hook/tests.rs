@@ -7,6 +7,26 @@ fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
 }
 
+#[test]
+fn senderless_buttons_follow_the_platform_source_policy() {
+    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
+}
+
+#[test]
+fn attributed_sources_still_follow_the_device_policy() {
+    let trackpad = EventDevice {
+        product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+        ..EventDevice::default()
+    };
+    let logitech_mouse = EventDevice {
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+
+    assert!(!button_source_may_remap(Some(&trackpad)));
+    assert!(button_source_may_remap(Some(&logitech_mouse)));
+}
+
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
 // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
 // commit with the exact press and held button, and matching the release.

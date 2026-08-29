@@ -397,6 +397,9 @@ mod tests {
     use openlogi_hid::PairingError;
 
     fn shared_runtime() -> SharedRuntime {
+        let (_, capture_plans) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+        let (_, keyboard_spec) = tokio::sync::watch::channel(None);
+        let (_, host_switch_links) = tokio::sync::watch::channel(Arc::new(Vec::new()));
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
@@ -405,15 +408,15 @@ mod tests {
                 VerticalScrollSensitivity::DEFAULT,
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
-            capture_plans: Arc::new(RwLock::new(Vec::new())),
+            capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
             channel_pool: openlogi_hid::host::channel_pool(),
-            keyboard_spec: Arc::new(RwLock::new(None)),
+            keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(0.into()),
             receiver_access: ReceiverAccess::default(),
-            host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            host_switch_links,
         }
     }
 

@@ -28,6 +28,7 @@ ctrlc = "3"
 # CGEventTap stays on core-graphics/core-foundation (the freeze-hazard run-loop
 # machinery). The frontmost-app read uses objc2 (NSWorkspace) so no raw `objc`.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { workspace = true }
 core-graphics = { workspace = true }
 core-foundation = { workspace = true }
 # For `ForeignType::as_ptr` on `CGEvent` (to reach the raw `CGEventRef` for the
@@ -37,6 +38,13 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber"] }
+objc2-foundation = { workspace = true, features = [
+    "block2",
+    "NSDictionary",
+    "NSNotification",
+    "NSOperation",
+    "NSString",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [

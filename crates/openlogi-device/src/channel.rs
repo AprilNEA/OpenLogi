@@ -56,4 +56,8 @@ impl SharedChannel {
     pub(crate) fn device_index(&self) -> u8 {
         self.route.device_index()
     }
+
+    pub(crate) fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
 }

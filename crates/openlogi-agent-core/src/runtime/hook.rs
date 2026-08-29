@@ -183,20 +183,17 @@ thread_local! {
 
 /// Whether a button event's physical source may be remapped/suppressed.
 ///
-/// macOS attributes every CGEvent to an IOKit sender and fails closed: only
-/// known Logitech non-trackpad devices are remappable, so the built-in
-/// trackpad can never be swallowed. Linux/Windows often lack attribution
-/// (`device: None`); those platforms already restrict which devices the hook
-/// attaches to, so unknown sources stay remappable.
+/// macOS fails closed because its hook is global: only a known Logitech,
+/// non-trackpad source may be suppressed. Bluetooth-direct Back/Forward
+/// gestures are captured through their device-specific HID++ session instead
+/// of weakening this policy. Linux/Windows restrict hook attachment upstream,
+/// so an unavailable source remains eligible there.
 fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
-        None => {
-            // Attribution missing: safe on Linux/Windows (device selection is
-            // upstream of the callback). On macOS fail closed — an unattributed
-            // event is more likely a trackpad/system source than a Logi mouse.
-            !cfg!(target_os = "macos")
-        }
+        // Linux/Windows restrict which devices the hook attaches to upstream.
+        // macOS uses one global tap, so an unattributed event must fail closed.
+        None => !cfg!(target_os = "macos"),
     }
 }
 

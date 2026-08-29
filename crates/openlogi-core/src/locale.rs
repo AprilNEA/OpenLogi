@@ -28,6 +28,7 @@ use fluent_langneg::{LanguageIdentifier, NegotiationStrategy, negotiate_language
 /// Order here is the order shown in the Settings picker (after "Follow system"):
 /// native-name alphabetical within each script.
 pub const SUPPORTED: &[(&str, &str)] = &[
+    ("be", "Беларуская"),
     ("da", "Dansk"),
     ("de", "Deutsch"),
     ("en", "English"),
@@ -178,6 +179,8 @@ mod tests {
         assert_eq!(match_supported("nb-NO"), Some("nb"));
         assert_eq!(match_supported("no"), Some("nb"));
         assert_eq!(match_supported("nn"), Some("nb"));
+        assert_eq!(match_supported("be"), Some("be"));
+        assert_eq!(match_supported("be-BY"), Some("be"));
         assert_eq!(match_supported("klingon"), None);
     }
 

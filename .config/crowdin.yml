@@ -5,6 +5,7 @@ base_path: ".."
 preserve_hierarchy: true
 
 export_languages:
+  - be
   - da
   - de
   - es-ES
@@ -34,6 +35,7 @@ files:
     update_option: "update_as_unapproved"
     languages_mapping:
       locale:
+        be: "be"
         da: "da"
         de: "de"
         es-ES: "es"

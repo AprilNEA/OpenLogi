@@ -24,14 +24,17 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Stable identity of one HID++ capture-session incarnation, unique across
-/// every manager that mints one: the shared button and scroll runtimes key
-/// cancellation on it, so two live sessions with equal identities would
-/// cancel each other's presses.
+/// Process-unique identity of one HID++ hardware capture incarnation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CaptureEpoch(u64);
+
+/// A capture epoch bound to the config namespace its actions currently use.
+/// The namespace can hot-swap while the epoch remains the task's stable input
+/// identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HidppSessionId {
     device_key: Arc<str>,
-    epoch: u64,
+    epoch: CaptureEpoch,
 }
 
 /// Feeds [`HidppSessionId::new`] — one counter for the whole process.
@@ -46,7 +49,7 @@ impl HidppSessionId {
     pub(crate) fn new(device_key: &str) -> Self {
         Self {
             device_key: Arc::from(device_key),
-            epoch: NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed),
+            epoch: CaptureEpoch(NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)),
         }
     }
 
@@ -56,7 +59,7 @@ impl HidppSessionId {
     pub(crate) fn with_epoch(device_key: &str, epoch: u64) -> Self {
         Self {
             device_key: Arc::from(device_key),
-            epoch,
+            epoch: CaptureEpoch(epoch),
         }
     }
 
@@ -65,7 +68,19 @@ impl HidppSessionId {
     }
 
     pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
+        self.epoch.0
+    }
+
+    /// Whether two IDs name the same hardware capture incarnation even when
+    /// its hot-swappable config namespace has changed.
+    pub(crate) fn same_epoch(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+    }
+
+    /// Move future dispatch from this hardware epoch to a different config
+    /// namespace. Managers cancel the old action lifecycle before calling it.
+    pub(crate) fn rekey(&mut self, device_key: &str) {
+        self.device_key = Arc::from(device_key);
     }
 }
 

@@ -5636,6 +5636,7 @@ dependencies = [
 name = "openlogi-hook"
 version = "0.8.1"
 dependencies = [
+ "block2 0.6.2",
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
  "ctrlc",
@@ -5646,6 +5647,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-application-services",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "openlogi-core",
  "openlogi-inject",
  "thiserror 2.0.18",

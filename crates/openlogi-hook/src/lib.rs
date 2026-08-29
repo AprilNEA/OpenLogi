@@ -523,11 +523,27 @@ impl Hook {
 /// `None` when no app is frontmost, when reading fails, or on an unsupported
 /// platform — including a pure-Wayland session with no backend (see
 /// `linux::detect_frontmost_source`). Costs one X11 round-trip on Linux and a
-/// handful of `objc_msgSend`s on macOS — well under a millisecond at the
-/// agent's 1 Hz polling cadence (`openlogi_agent_core::watchers::foreground_app`).
+/// handful of `objc_msgSend`s on macOS. macOS callers can use
+/// `watch_frontmost_application_activations` to drive reads from native
+/// activation notifications instead of polling.
 #[must_use]
 pub fn frontmost_application() -> Option<ForegroundApp> {
     Backend::frontmost_app()
+}
+
+#[cfg(target_os = "macos")]
+pub use macos::ForegroundApplicationObserver;
+
+/// Observe macOS foreground-application activations.
+///
+/// Each callback carries the application from AppKit's activation notification;
+/// it may run on any thread and must return quickly. Dropping the returned
+/// handle unregisters the native observer and releases its block.
+#[cfg(target_os = "macos")]
+pub fn watch_frontmost_application_activations(
+    on_activation: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
+) -> ForegroundApplicationObserver {
+    macos::watch_frontmost_application_activations(on_activation)
 }
 
 /// Return the current global cursor position without installing an input hook.
