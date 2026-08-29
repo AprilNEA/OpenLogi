@@ -276,6 +276,7 @@ pub fn reapply_mouse_volatile_in_background(
     inverted: Option<bool>,
     dpi: Option<Dpi>,
     smartshift: Option<SmartShiftStatus>,
+    report_rate: Option<openlogi_core::hid::ReportRateHz>,
 ) {
     let Ok(shared) = op.resolve() else {
         debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
@@ -327,6 +328,20 @@ pub fn reapply_mouse_volatile_in_background(
                     Err(_) => warn!(
                         index,
                         "SmartShift write timed out (device asleep/unresponsive)"
+                    ),
+                }
+            }
+            if let Some(rate) = report_rate {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    openlogi_hid::set_report_rate_on(&shared, rate).await
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => debug!(index, %rate, "report rate written to device"),
+                    Ok(Err(e)) => warn!(error = ?e, "report rate write failed"),
+                    Err(_) => warn!(
+                        %rate,
+                        "report rate write timed out (device asleep/unresponsive)"
                     ),
                 }
             }

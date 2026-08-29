@@ -53,6 +53,21 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
 }
 
+/// Read the report rate and supported values of the device `route` reaches.
+pub async fn get_report_rate_info(
+    route: &DeviceRoute,
+) -> Result<device::ReportRateInfo, WriteError> {
+    device::get_report_rate_info(&*native_backend(), route).await
+}
+
+/// Write a new report rate to the device `route` reaches.
+pub async fn set_report_rate(
+    route: &DeviceRoute,
+    rate: device::ReportRateHz,
+) -> Result<(), WriteError> {
+    device::set_report_rate(&*native_backend(), route, rate).await
+}
+
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.
 pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
     device::get_smartshift_status(&*native_backend(), route).await

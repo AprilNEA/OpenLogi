@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfileSnapshot, ReceiverSelector,
+    ReportRateHz, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
@@ -104,14 +105,27 @@ pub enum GuiUpdate {
 /// the GUI can surface device failures after an optimistic update.
 pub enum Command {
     SetDpi(DeviceRoute, Dpi),
+    SetReportRate(DeviceRoute, ReportRateHz),
     SetLighting(DeviceRoute, Lighting),
     SetLight(DeviceRoute, LightCommand, String, u64),
     SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftStatus),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
+    ReadReportRate(
+        DeviceRoute,
+        oneshot::Sender<Result<ReportRateInfo, WriteError>>,
+    ),
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
+    ),
+    ReadOnboardProfile(
+        DeviceRoute,
+        oneshot::Sender<Result<OnboardProfileSnapshot, WriteError>>,
+    ),
+    ReadLightingInfo(
+        DeviceRoute,
+        oneshot::Sender<Result<openlogi_core::hid::LightingInfo, WriteError>>,
     ),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -524,6 +538,9 @@ async fn handle(
     let ctx = context::current();
     match cmd {
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
+        Command::SetReportRate(route, rate) => {
+            log_apply(client.set_report_rate(ctx, route, rate).await)?;
+        }
         Command::SetLighting(route, lighting) => {
             log_apply(client.set_lighting(ctx, route, lighting).await)?;
         }
@@ -551,8 +568,17 @@ async fn handle(
         Command::ReadDpi(route, reply) => {
             let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
         }
+        Command::ReadReportRate(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_report_rate(ctx, route).await)?);
+        }
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
+        }
+        Command::ReadOnboardProfile(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_onboard_profile(ctx, route).await)?);
+        }
+        Command::ReadLightingInfo(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_lighting_info(ctx, route).await)?);
         }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
@@ -660,7 +686,7 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
 /// fire-and-forget so they have nothing to reply to.
 #[expect(
     clippy::match_same_arms,
-    reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
+    reason = "the read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
 fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command) {
     // Transient, not a permanent feature error: the agent is just restarting,
@@ -669,7 +695,16 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
         Command::ReadDpi(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
+        Command::ReadReportRate(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
         Command::ReadSmartShift(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadOnboardProfile(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadLightingInfo(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

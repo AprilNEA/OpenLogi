@@ -12,7 +12,7 @@ use super::settings::{
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{Dpi, ReportRateHz};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -114,6 +114,9 @@ pub struct LinkOverrides {
     /// SmartShift.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Report/polling rate in hertz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRateHz>,
 }
 
 impl LinkOverrides {
@@ -218,6 +221,11 @@ pub struct DeviceConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub dpi: Option<Dpi>,
+    /// Report/polling rate in hertz. Persisted because the value lives in
+    /// device RAM and resets on a power cycle; the agent re-applies it when
+    /// the device reconnects. `None` until the user first changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRateHz>,
     /// Per-device RGB lighting (static color + brightness + on/off). `None`
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,6 +326,15 @@ impl DeviceConfig {
             .or(self.smartshift)
     }
 
+    /// Report rate on `route_key`: the link's override when the user set one
+    /// there, else the device-level value.
+    #[must_use]
+    pub fn effective_report_rate(&self, route_key: &str) -> Option<ReportRateHz> {
+        self.link_overrides(route_key)
+            .and_then(|overrides| overrides.report_rate)
+            .or(self.report_rate)
+    }
+
     fn link_overrides(&self, route_key: &str) -> Option<&LinkOverrides> {
         self.links.get(route_key).map(|link| &link.overrides)
     }
@@ -359,6 +376,7 @@ impl Default for DeviceConfig {
             action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
             dpi: None,
+            report_rate: None,
             lighting: None,
             light: None,
             smartshift: None,
@@ -539,6 +557,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
+            report_rate: None,
             lighting: raw.lighting,
             light: raw.light,
             smartshift: raw.smartshift,

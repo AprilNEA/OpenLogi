@@ -290,6 +290,34 @@ impl Agent for AgentServer {
         let _ = self.demand.send(kind);
     }
 
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::ReportRateInfo, WriteError> {
+        let route_for_read = route.clone();
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadReportRate, |c| async move {
+                openlogi_hid::get_report_rate_info_on(&c, &route_for_read).await
+            })
+            .await
+    }
+
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: openlogi_core::hid::ReportRateHz,
+    ) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WriteReportRate, |c| async move {
+                openlogi_hid::set_report_rate_on(&c, rate).await
+            })
+            .await
+    }
+
     async fn action_ring_hover(
         self,
         _: Context,

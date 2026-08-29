@@ -23,7 +23,10 @@ mod fn_lock;
 mod haptic;
 mod hires_wheel;
 mod lighting;
+mod lighting_catalog;
 mod litra;
+mod onboard;
+mod report_rate;
 mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
@@ -47,11 +50,26 @@ pub use lighting::{
     LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
     set_keyboard_color_with_on,
 };
+pub use lighting_catalog::{
+    LightingApply, apply_lighting, apply_lighting_on, pack_effect_params, per_key_zone_ids_on,
+    read_lighting_info, read_lighting_info_on, set_led_software_control_on, set_per_key_colors_on,
+    set_zonal_colors_on,
+};
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
+};
+pub use onboard::{
+    ButtonBinding, OnboardButtonSlot, OnboardMode, OnboardProfilesDump, ProfileDirectoryEntry,
+    ProfilesDescription, apply_onboard_button_bindings, apply_onboard_button_bindings_on,
+    dump_onboard_profiles, dump_onboard_profiles_on, read_onboard_button_bindings,
+    read_onboard_button_bindings_on, read_onboard_profile, read_onboard_profile_on,
+};
+pub use report_rate::{
+    ReportRateCapabilities, ReportRateHz, ReportRateInfo, get_report_rate_info,
+    get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

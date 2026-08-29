@@ -31,6 +31,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::report_rate::ReportRatePanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
@@ -90,6 +91,7 @@ pub(super) struct DetailPanels<'a> {
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
+    pub report_rate_panel: &'a gpui::Entity<ReportRatePanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
@@ -120,9 +122,13 @@ pub(super) fn detail_content(
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.report_rate_panel,
+            panels.smartshift_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -306,6 +312,7 @@ fn action_ring_tab(
 /// controls don't force a vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
+    report_rate_panel: &gpui::Entity<ReportRatePanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
@@ -330,6 +337,14 @@ fn pointer_tab(
                     tr!("SmartShift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
                     smartshift_panel.clone().into_any_element(),
+                )
+                .fill(),
+            ))
+            .child(pointer_grid_card(
+                PanelCard::new(
+                    tr!("Report rate"),
+                    Icon::empty().path("action-icons/bolt.svg"),
+                    report_rate_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))
