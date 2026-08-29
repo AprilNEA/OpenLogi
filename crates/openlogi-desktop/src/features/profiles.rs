@@ -10,10 +10,11 @@ use std::rc::Rc;
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
 use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
 use openlogi_core::binding::{ActionRingConfig, ActionRingLayout, ActionRingSlot};
+use openlogi_core::device::DeviceKey;
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
 use self::shell::ProfileScopeShell;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, Typography as _};
 
 #[derive(Clone)]
@@ -297,6 +298,18 @@ fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::Sh
 }
 
 fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {
+    let Some(device_key) = AppState::try_read(cx).and_then(|state| {
+        if !state.current_device_is_persistent() {
+            return None;
+        }
+        state
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+    }) else {
+        return;
+    };
+    let app = profile.app.clone();
     let question = remove_profile_question(profile);
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
@@ -311,11 +324,16 @@ fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &
                     .cancel_text(tr!("Cancel"))
                     .show_cancel(true),
             )
-            .on_ok(move |_event, _window, cx| {
-                AppState::update_bindings(cx, |state| {
-                    state.remove_editing_app_profile();
-                });
-                true
+            .on_ok({
+                let device_key = device_key.clone();
+                move |_event, _window, cx| {
+                    let event_key = DeviceKey::from(device_key.as_str());
+                    AppState::update(cx, |state, cx| {
+                        state.remove_app_profile_for_device(&device_key, &app);
+                        cx.emit(StateEvent::BindingsChanged(event_key));
+                    });
+                    true
+                }
             })
     });
 }

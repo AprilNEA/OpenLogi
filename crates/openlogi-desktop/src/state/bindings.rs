@@ -258,6 +258,25 @@ impl AppState {
         self.persist_and_reload("per-app binding");
     }
 
+    /// Delete `app`'s profile for `device_key`. If that profile is the one this
+    /// window has open, fall back to editing the device's global bindings.
+    ///
+    /// Confirm dialogs must capture the device key up front and call this
+    /// instead of [`Self::remove_editing_app_profile`] so removal does not
+    /// depend on [`Self::current_record`] still being available when the
+    /// dialog closes.
+    pub(crate) fn remove_app_profile_for_device(&mut self, device_key: &str, app: &str) {
+        self.config
+            .edit(|config| config.remove_app_profile(device_key, app));
+        if self.bindings.editing_app(Some(device_key)) == Some(app) {
+            self.bindings
+                .set_editing_app(&self.config, Some(device_key), None);
+        } else if self.editing_app() == Some(app) {
+            self.set_editing_app(None);
+        }
+        self.persist_and_reload("per-app profile");
+    }
+
     /// Delete the open per-app profile outright and fall back to editing the
     /// device's global bindings.
     pub fn remove_editing_app_profile(&mut self) {
@@ -271,10 +290,7 @@ impl AppState {
         let Some(app) = self.editing_app().map(str::to_string) else {
             return;
         };
-        self.config
-            .edit(|config| config.remove_app_profile(&key, &app));
-        self.set_editing_app(None);
-        self.persist_and_reload("per-app profile");
+        self.remove_app_profile_for_device(&key, &app);
     }
 
     /// The open per-app profile's overrides, so the panel can tell an override

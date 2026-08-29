@@ -74,7 +74,7 @@ mod settings;
 mod smartshift;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
