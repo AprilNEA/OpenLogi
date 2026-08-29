@@ -185,12 +185,11 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// Process-wide HID backend, created once and reused for every enumeration.
 ///
 /// async-hid's macOS backend wraps an `IOHIDManager`; `HidBackend::default()`
-/// builds, schedules, and (on drop) cancels one. The inventory watcher
-/// enumerates every ~2 s, so building a fresh backend per call spun up and tore
-/// down an `IOHIDManager` on every tick — needless churn that kept the process
-/// busy and its heap dirty around the clock (issue #99). Reusing one long-lived
-/// backend is the usage async-hid intends, and keeps the device set warm between
-/// polls. `HidBackend` is `Arc`-backed, so this is shared, not copied.
+/// builds, schedules, and (on drop) cancels one. Building a fresh backend per
+/// reconciliation spun up and tore down an `IOHIDManager` repeatedly — needless
+/// churn (issue #99). Reusing one long-lived backend is the usage async-hid
+/// intends, and keeps the device set warm between event/recovery passes.
+/// `HidBackend` is `Arc`-backed, so this is shared, not copied.
 ///
 /// Inventory and route-addressed standalone operations may enumerate through
 /// this one backend concurrently. That is sound: async-hid declares the backend
@@ -414,8 +413,8 @@ pub(crate) async fn open_hidpp_channel(
             }
         };
         // Logged once per actual open. The inventory watcher reuses channels across
-        // ticks, so a steadily-connected device should log this on first sight (and
-        // on reconnect) only — not every ~2s tick.
+        // reconciliations, so a steadily-connected device should log this on first
+        // sight (and on reconnect) only — not every pass.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
         Ok(Some(channel))
     }

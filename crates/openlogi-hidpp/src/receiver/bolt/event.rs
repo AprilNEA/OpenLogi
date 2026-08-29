@@ -53,8 +53,10 @@ enum DiscoveryPart {
 /// drops.
 ///
 /// Kept separate from the message listener in [`super::Receiver::new`] so the
-/// wire layout is reachable from tests without a HID channel behind it.
-pub(super) fn decode(msg: &v10::Message) -> Option<Event> {
+/// wire layout is reachable from consumers and tests without a HID channel
+/// behind it.
+#[must_use]
+pub fn decode(msg: &v10::Message) -> Option<Event> {
     let header = msg.header();
     let payload = msg.extend_payload();
 

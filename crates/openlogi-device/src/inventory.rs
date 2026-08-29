@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     hash::Hash,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_concurrency::future::Join as _;
@@ -16,10 +16,11 @@ use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
-use crate::channel::route::{DeviceRoute, is_receiver_pid};
+use crate::channel::route::{DeviceRoute, find_receiver, is_receiver_pid};
 use ledger::NodeLedger;
 
 mod cache;
+pub mod events;
 mod features;
 pub mod hotplug;
 mod ledger;
@@ -29,6 +30,7 @@ mod probe;
 pub mod standalone;
 
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
+use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
 use probe::{NodeProbe, probe_one};
 
@@ -44,11 +46,12 @@ const MAX_BOLT_SLOTS: u8 = 6;
 
 /// Upper bound on probing one HID node. `hidpp`'s request/response has no
 /// timeout of its own, so without this a single unresponsive (e.g. asleep)
-/// device wedges the whole enumeration — and the GUI runs `enumerate` on a
-/// polling watcher, so a permanent hang would stall every later refresh.
+/// device wedges the whole enumeration, so a permanent hang would stall every
+/// later event or recovery reconciliation.
 ///
-/// A timed-out node is skipped and re-probed on the next watcher tick (~2 s),
-/// and the first probe usually wakes the device so the retry succeeds fast.
+/// A timed-out node is skipped and re-probed by the bounded two-second repair
+/// deadline, and the first probe usually wakes the device so the retry succeeds
+/// fast.
 /// Slots are probed concurrently on both receiver paths, so a receiver's worst
 /// case is the 1.5 s arrival drain plus a single slot's [`BOLT_SLOT_PROBE`] /
 /// [`UNIFYING_SLOT_PROBE`] — not their sum — plus, on Bolt only, the
@@ -90,7 +93,7 @@ const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
 /// per-slot cap ensures each slot's feature walk is bounded independently of
 /// how many other slots are being probed at the same time.  A timed-out slot
 /// still surfaces in the inventory (kind + wpid from the arrival event) — it
-/// just lacks capabilities / battery until the next tick.
+/// just lacks capabilities / battery until the next reconciliation.
 const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 
 /// Per-slot budget when a Unifying device already has a fresh immutable probe.
@@ -99,7 +102,7 @@ const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 /// occasionally omit that reply even though their receiver has just emitted a
 /// live device-arrival event. Do not let that optional refresh consume the
 /// full first-sight feature-walk budget or delay publication of a known-online
-/// mouse on every watcher tick.
+/// mouse on every reconciliation.
 const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(750);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
@@ -130,20 +133,20 @@ pub enum InventoryError {
     AmbiguousRawDevice,
 }
 
-/// Stateful device enumerator: holds the per-device probe cache so the polling
-/// watcher reuses immutable data across ticks instead of re-handshaking every
-/// device every ~2s. One-shot callers use the [`enumerate`] free function, which
+/// Stateful device enumerator: owns persistent channels and the per-device
+/// probe cache so the event-first watcher reuses immutable data across
+/// reconciliations. One-shot callers use the [`enumerate`] free function, which
 /// runs against a fresh (empty) cache.
 pub struct Enumerator {
     /// The HID stack this enumerator walks. `openlogi-hid` supplies this
     /// host's; tests and other hosts supply their own.
     backend: Arc<dyn HidBackend>,
     cache: HashMap<CacheKey, Cached>,
-    /// Consecutive ticks each cached device has been missing, for grace-period
+    /// Consecutive passes each cached device has been missing, for grace-period
     /// eviction.
     misses: HashMap<CacheKey, u8>,
-    /// Open HID++ channels reused across ticks, keyed by OS node id. Opening (and
-    /// tearing down) a device every ~2s tick is the churn issue #99 is about —
+    /// Open HID++ channels reused across reconciliations, keyed by OS node id.
+    /// Opening (and tearing down) a device every pass is the churn issue #99 is about —
     /// each open also leaks an `io_service_t` in async-hid's macOS backend — so a
     /// steadily-connected node is opened once here and reused until it
     /// disconnects.
@@ -155,15 +158,19 @@ pub struct Enumerator {
     /// Optional publication sink used by the persistent Agent watcher. One-shot
     /// callers keep this `None` and retain the route-opening library behavior.
     registry: Option<ChannelRegistry>,
-    tick: u64,
     /// Where the immutable probe cache is kept across restarts, `None` for a
     /// memory-only enumerator (one-shot CLI calls, tests).
     store: Option<Arc<dyn ProbeCacheStore>>,
     /// Whether the persistable cache content changed since the last save —
-    /// fresh full probes and evictions, not per-tick battery refreshes.
+    /// fresh full probes and evictions, not per-pass battery refreshes.
     cache_dirty: bool,
-    /// Whether the most recent tick failed to open at least one HID++ node.
+    /// Whether the most recent pass failed to open at least one HID++ node.
     open_failures_last_tick: bool,
+    /// Whether the most recent pass needs a bounded fast follow-up to advance
+    /// ledger/channel/cache grace or retry a failed open.
+    retry_needed_last_tick: bool,
+    /// Coalesced lifecycle-event sink installed on newly opened channels.
+    event_notifier: Option<EventNotifier>,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -173,10 +180,13 @@ pub struct Enumerator {
 struct CachedChannel {
     info: NodeInfo,
     channel: Arc<HidppChannel>,
+    events: Option<ChannelEventSubscriptions>,
 }
 
+type ActiveNode = (NodeInfo, Arc<HidppChannel>, Option<EventSubscriptionHandle>);
+
 struct PreparedNodes {
-    active: Vec<(NodeInfo, Arc<HidppChannel>)>,
+    active: Vec<ActiveNode>,
     open_failures: Vec<NodeId>,
     retiring: Vec<NodeId>,
 }
@@ -344,7 +354,7 @@ fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
 pub async fn enumerate(
     backend: Arc<dyn HidBackend>,
 ) -> Result<Vec<DeviceInventory>, InventoryError> {
-    // The polling [`Enumerator`] keeps a per-node ledger across ticks, so a
+    // The persistent [`Enumerator`] keeps a per-node ledger across passes, so a
     // transient probe miss replays the node's last good inventory. A one-shot
     // caller (CLI `list` / `diag`) builds a fresh `Enumerator` whose ledger is
     // empty, so a miss has nothing to replay and would surface as an empty or
@@ -442,7 +452,7 @@ const ONESHOT_ATTEMPTS: u8 = 4;
 /// asleep device, so a short pause lets the next attempt read it cleanly.
 const ONESHOT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
-/// Nodes that remain valid for this tick: everything the OS enumerated plus
+/// Nodes that remain valid for this pass: everything the OS enumerated plus
 /// cached channels whose open transport still reports a live connection.
 fn retained_nodes<K>(
     enumerated: &HashSet<K>,
@@ -465,7 +475,7 @@ where
 fn append_live_cached_channels(
     nodes: &mut HashSet<NodeId>,
     channels: &ChannelCache<NodeId, CachedChannel>,
-    active: &mut Vec<(NodeInfo, Arc<HidppChannel>)>,
+    active: &mut Vec<ActiveNode>,
 ) {
     let retained = retained_nodes(
         nodes,
@@ -480,23 +490,34 @@ fn append_live_cached_channels(
                 name = %open.info.name,
                 "OS enumeration omitted a live HID node; probing cached channel"
             );
-            active.push((open.info.clone(), Arc::clone(&open.channel)));
+            active.push((
+                open.info.clone(),
+                Arc::clone(&open.channel),
+                open.events.as_ref().map(ChannelEventSubscriptions::handle),
+            ));
         }
     }
     *nodes = retained;
 }
 
 impl Enumerator {
-    /// Whether the most recent [`enumerate`](Self::enumerate) tick failed to
-    /// open at least one HID++ node. `false` before the first tick.
+    /// Whether the most recent [`enumerate`](Self::enumerate) pass failed to
+    /// open at least one HID++ node. `false` before the first pass.
     ///
-    /// On macOS a run of ticks with this set is the observable signature of a
+    /// On macOS a run of passes with this set is the observable signature of a
     /// denied Input Monitoring grant or a stale permission session — paired
     /// with the grant state it separates "grant it" from "log out", which the
     /// bare open error cannot (the denial is silent).
     #[must_use]
     pub fn open_failures_last_tick(&self) -> bool {
         self.open_failures_last_tick
+    }
+
+    /// Whether the last pass needs a bounded fast follow-up to advance a
+    /// probe/channel/cache recovery policy. `false` before the first pass.
+    #[must_use]
+    pub fn retry_needed_last_tick(&self) -> bool {
+        self.retry_needed_last_tick
     }
 
     /// An enumerator that walks `backend` — this host's HID stack, a scripted
@@ -510,18 +531,27 @@ impl Enumerator {
             channels: ChannelCache::default(),
             ledger: NodeLedger::default(),
             registry: None,
-            tick: 0,
             store: None,
             cache_dirty: false,
             open_failures_last_tick: false,
+            retry_needed_last_tick: false,
+            event_notifier: None,
         }
     }
 
     /// Publish this enumerator's already-open channels into `registry` after
-    /// each settled inventory tick.
+    /// each settled inventory pass.
     #[must_use]
     pub fn with_registry(mut self, registry: ChannelRegistry) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// Subscribe this enumerator's already-open channels to lifecycle events
+    /// and coalesce them into reconciliation requests sent through `notifier`.
+    #[must_use]
+    pub fn with_event_notifier(mut self, notifier: EventNotifier) -> Self {
+        self.event_notifier = Some(notifier);
         self
     }
 
@@ -562,23 +592,37 @@ impl Enumerator {
                 continue;
             }
             if let Some(open) = self.channels.get(&node) {
-                active.push((open.info.clone(), Arc::clone(&open.channel)));
+                active.push((
+                    open.info.clone(),
+                    Arc::clone(&open.channel),
+                    open.events.as_ref().map(ChannelEventSubscriptions::handle),
+                ));
                 continue;
             }
             match backend.open_hidpp(&info).await {
                 Ok(Some(channel)) => {
+                    // Attach before the first feature/register check. Receiver
+                    // events are recognizable immediately; per-device feature
+                    // indexes are registered during the ensuing table walk.
+                    let events = self.event_notifier.as_ref().map(|notifier| {
+                        let protocol = find_receiver(info.vendor_id, info.product_id)
+                            .map(|receiver| receiver.protocol);
+                        ChannelEventSubscriptions::attach(&channel, protocol, notifier.clone())
+                    });
+                    let event_handle = events.as_ref().map(ChannelEventSubscriptions::handle);
                     self.channels.insert(
                         node,
                         CachedChannel {
                             info: info.clone(),
                             channel: Arc::clone(&channel),
+                            events,
                         },
                     );
-                    active.push((info, channel));
+                    active.push((info, channel, event_handle));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    warn!(error = ?e, "failed to open HID++ channel — retrying next tick");
+                    warn!(error = ?e, "failed to open HID++ channel — requesting repair");
                     open_failures.push(node);
                 }
             }
@@ -607,8 +651,8 @@ impl Enumerator {
     }
 
     /// Write the cache through to its store when the persistable content
-    /// changed this tick. Best-effort: a failed write is logged and retried on
-    /// the next dirty tick.
+    /// changed this pass. Best-effort: a failed write is logged and retried on
+    /// the next cache-dirty pass.
     fn flush_cache(&mut self) {
         if !self.cache_dirty {
             return;
@@ -649,8 +693,7 @@ impl Enumerator {
     async fn enumerate_reporting_completeness(
         &mut self,
     ) -> Result<(Vec<DeviceInventory>, bool, bool), InventoryError> {
-        self.tick = self.tick.wrapping_add(1);
-        let tick = self.tick;
+        let now = Instant::now();
         let backend = Arc::clone(&self.backend);
         let candidates = backend.enumerate_hidpp().await?;
         debug!(count = candidates.len(), "HID++ candidate interfaces");
@@ -670,7 +713,7 @@ impl Enumerator {
             let cache = &self.cache;
             active
                 .into_iter()
-                .map(|(info, channel)| async move {
+                .map(|(info, channel, events)| async move {
                     let node = info.id.clone();
                     // Receivers answer register reads over local USB in
                     // milliseconds; only direct (esp. Bluetooth) devices need
@@ -684,8 +727,11 @@ impl Enumerator {
                     } else {
                         PROBE_BUDGET
                     };
-                    let probe =
-                        timeout(budget, probe_one(info, Arc::clone(&channel), cache, tick)).await;
+                    let probe = timeout(
+                        budget,
+                        probe_one(info, Arc::clone(&channel), cache, now, events.as_ref()),
+                    )
+                    .await;
                     (node, channel, probe, budget, receiver)
                 })
                 .collect::<Vec<_>>()
@@ -729,7 +775,7 @@ impl Enumerator {
             // exceeds it. Evicting on that unpublishes *every* device behind
             // the receiver — a Bolt publishes all six slots under one node —
             // and tears down each one's capture plan. A channel whose delivery
-            // really is dead times out again on the next tick and is replaced
+            // really is dead times out again on the repair pass and is replaced
             // then, with the ledger replaying its last-good inventory
             // meanwhile, so nothing disappears from the GUI in between.
             if settled.evict_channel {
@@ -764,7 +810,7 @@ impl Enumerator {
                 &mut all_healthy,
             ));
         }
-        // Nodes that wouldn't open this tick still replay their last snapshot
+        // Nodes that wouldn't open this pass still replay their last snapshot
         // (they have no cached channel to evict).
         for node in open_failures {
             inventories.extend(settle_unhealthy_node(
@@ -777,11 +823,12 @@ impl Enumerator {
 
         let seen_keys = self.apply_outcomes(outcomes);
         self.evict_unseen(&seen_keys);
+        self.retry_needed_last_tick = !all_healthy || !self.misses.is_empty();
         self.flush_cache();
         Ok((inventories, all_complete, all_healthy))
     }
 
-    /// Fold this tick's probe outcomes into the cache, returning the keys seen
+    /// Fold this pass's probe outcomes into the cache, returning the keys seen
     /// so [`Self::evict_unseen`] can age out the rest.
     fn apply_outcomes(&mut self, outcomes: Vec<CacheOutcome>) -> HashSet<CacheKey> {
         let mut seen_keys = HashSet::new();
@@ -791,7 +838,7 @@ impl Enumerator {
                     seen_keys.insert(key.clone());
                     // A completed full probe of a persistable device is worth
                     // writing through; battery `Update`s are not (they would
-                    // rewrite the file every tick for a value that is re-read
+                    // rewrite the file every pass for a value that is re-read
                     // live anyway), and neither are keys `persist::save`
                     // filters out — dirtying on those would rewrite an
                     // unchanged file on every refresh of a direct-only system.
@@ -811,7 +858,7 @@ impl Enumerator {
         seen_keys
     }
 
-    /// Drop cache entries for devices not seen this tick, after a short grace so
+    /// Drop cache entries for devices not seen this pass, after a short grace so
     /// a transient receiver timeout doesn't discard a still-present device.
     fn evict_unseen(&mut self, seen_keys: &HashSet<CacheKey>) {
         for key in seen_keys {

@@ -22,8 +22,10 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   string, and `openlogi_core::device::DeviceKind`) — the same small integers mean
   different things in each. Never cross them by raw value; convert at the boundary.
   `kind` is identity-only; capability decisions come from the feature table.
-- Enumeration runs on a poll with cache/ledger grace logic so sleeping or briefly
-  unreachable devices keep their identity and panels. Changes to probing must keep the
-  "replay last-good inventory through transient failures" behavior intact — run the
-  inventory/watcher tests and think about the partial-failure paths, not just clean
-  enumeration.
+- The Agent's persistent enumerator is event-first: OS hotplug and HID++ lifecycle
+  notifications request authoritative reconciliation, while a named low-frequency
+  recovery scan covers missed/unsupported events and non-broadcast battery features.
+  Cache/ledger grace keeps sleeping or briefly unreachable devices visible. Changes to
+  probing must preserve last-good replay, bounded repair, and channel retirement/reopen
+  ordering — run the inventory/watcher tests and inspect partial-failure paths, not just
+  clean enumeration.
