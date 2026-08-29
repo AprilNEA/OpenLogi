@@ -75,26 +75,38 @@ fn pulse_curve_is_normalized_clamped_and_monotone() {
 
 #[test]
 fn accel_gain_follows_the_published_curve() {
-    let gain = |millis, cap| accel_gain(Duration::from_millis(millis), cap);
-    assert!((gain(10, 7.0) - 2.0).abs() < f64::EPSILON);
-    assert!((gain(5, 7.0) - 3.5).abs() < f64::EPSILON);
-    assert!((gain(20, 7.0) - 1.25).abs() < f64::EPSILON);
-    assert!((gain(30, 7.0) - 1.0).abs() < f64::EPSILON);
+    // A notched wheel at one tick per `dt` ms fills the window with `70/dt`
+    // ticks, reproducing the classic per-interval fixtures.
     assert!(
-        (gain(40, 7.0) - 1.0).abs() < f64::EPSILON,
-        "sub-window slow ticks stay at 1×"
+        (accel_gain(7.0, 7.0) - 2.0).abs() < f64::EPSILON,
+        "dt 10 ms"
     );
     assert!(
-        (gain(70, 10.0) - 1.0).abs() < f64::EPSILON,
-        "window boundary is unaccelerated"
-    );
-    assert!((gain(1, 7.0) - 7.0).abs() < f64::EPSILON, "cap binds");
-    assert!(
-        (gain(0, 7.0) - 7.0).abs() < f64::EPSILON,
-        "zero interval clamps to one millisecond"
+        (accel_gain(14.0, 7.0) - 3.5).abs() < f64::EPSILON,
+        "dt 5 ms"
     );
     assert!(
-        (gain(1, 1.0) - 1.0).abs() < f64::EPSILON,
+        (accel_gain(3.5, 7.0) - 1.25).abs() < f64::EPSILON,
+        "dt 20 ms"
+    );
+    assert!(
+        (accel_gain(70.0 / 30.0, 7.0) - 1.0).abs() < f64::EPSILON,
+        "dt 30 ms is the neutral rate"
+    );
+    assert!(
+        (accel_gain(1.0, 7.0) - 1.0).abs() < f64::EPSILON,
+        "a lone tick never gains"
+    );
+    assert!(
+        (accel_gain(0.0, 7.0) - 1.0).abs() < f64::EPSILON,
+        "an empty window never gains"
+    );
+    assert!(
+        (accel_gain(70.0, 7.0) - 7.0).abs() < f64::EPSILON,
+        "cap binds"
+    );
+    assert!(
+        (accel_gain(70.0, 1.0) - 1.0).abs() < f64::EPSILON,
         "max_gain 1 disables acceleration"
     );
 }
@@ -166,8 +178,10 @@ fn synthetic_fast_ticks_gain_amplitude_deterministically() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
     let mut frames = Vec::new();
-    // 10 ms spacing gains 2×; a 30 ms follow-up gains nothing.
-    for millis in [0, 10, 40] {
+    // A notched wheel at 10 ms per tick: the k-th tick sees k ticks in the
+    // window, gaining `((1 + 30k/70) / 2).max(1)` — the rate ramps as the
+    // window fills and reaches the classic curve's 2× at steady state.
+    for millis in (0..=70).step_by(10) {
         engine.impulse(
             source(),
             wheel(0.0, 1.0),
@@ -176,11 +190,12 @@ fn synthetic_fast_ticks_gain_amplitude_deterministically() {
             &mut |frame| frames.push(frame),
         );
     }
-    engine.advance_due(base + Duration::from_millis(200), &mut |frame| {
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
         frames.push(frame);
     });
 
-    assert_delta(cumulative(&frames), wheel(0.0, 1.0 + 2.0 + 1.0));
+    // Gains: 1, 1, 16/14, 19/14, 22/14, 25/14, 28/14, 31/14 → 169/14 total.
+    assert_delta(cumulative(&frames), wheel(0.0, 169.0 / 14.0));
     assert!(engine.active.is_empty());
 }
 
@@ -189,13 +204,15 @@ fn synthetic_frame_interval_ticks_coalesce_and_cap_at_max_gain() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
     let mut frames = Vec::new();
-    // 1 ms spacing would gain 15.5×; the configured cap holds it at 7×, and
-    // the tick lands inside the newest pulse instead of opening another.
-    for millis in [0, 1] {
+    // 40 ticks over two frame intervals: a monster free-spin burst. Ticks
+    // inside one frame interval coalesce into the newest pulse, and once the
+    // window holds `70 × (2×7 − 1) / 30 ≈ 30.3` ticks the configured cap
+    // pins every later gain at 7×.
+    for tick in 0..40 {
         engine.impulse(
             source(),
             wheel(0.0, 1.0),
-            base + Duration::from_millis(millis),
+            base + Duration::from_micros(tick * 400),
             tuning(1.0, 100, 7.0),
             &mut |frame| frames.push(frame),
         );
@@ -206,13 +223,16 @@ fn synthetic_frame_interval_ticks_coalesce_and_cap_at_max_gain() {
             .values()
             .map(|motion| motion.pulses.len())
             .sum::<usize>(),
-        1
+        2,
+        "the 16 ms burst coalesces into one pulse per frame interval"
     );
-    engine.advance_due(base + Duration::from_millis(200), &mut |frame| {
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
         frames.push(frame);
     });
 
-    assert_delta(cumulative(&frames), wheel(0.0, 1.0 + 7.0));
+    // Gains: 1× for ticks 1–2, `(7 + 3k)/14` ramp for 3–30 (sum 113), the
+    // 7× cap for 31–40 → 2 + 113 + 70 = 185 total.
+    assert_delta(cumulative(&frames), wheel(0.0, 185.0));
     assert!(engine.active.is_empty());
 }
 
@@ -477,8 +497,8 @@ fn same_sign_input_never_emits_an_opposing_frame() {
     }
 
     assert!(frames.iter().all(|frame| frame.delta.y >= 0.0));
-    // Gains: 1× (first), 2× (10 ms), 2× (10 ms), 1× (30 ms) at step 3.
-    assert_delta(cumulative(&frames), wheel(0.0, 3.0 * 6.0));
+    // Window gains: 1, 1, 16/14, 19/14 → 4.5 ticks at step 3.
+    assert_delta(cumulative(&frames), wheel(0.0, 3.0 * 4.5));
     assert!(engine.active.is_empty());
 }
 

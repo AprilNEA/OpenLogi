@@ -10,8 +10,8 @@ mod worker;
 
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -23,13 +23,18 @@ use crate::runtime::HidppSessionId;
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
 /// do not slow or lengthen the animation.
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
-/// Ticks separated by at least this much never gain amplitude, whatever the
-/// acceleration curve would say.
+/// Sliding window over which a source's recent tick distance becomes its
+/// wheel rate for acceleration. Sized so a notched wheel emitting one full
+/// tick every `dt < ACCEL_WINDOW` reproduces the classic per-interval gain.
 const ACCEL_WINDOW: Duration = Duration::from_millis(70);
-/// Numerator of the tick-rate acceleration curve, in milliseconds: a tick
-/// arriving `dt` after its predecessor gains `(1 + ACCEL_RATE_MS/dt) / 2`,
+/// Numerator of the tick-rate acceleration curve, in milliseconds: a source
+/// whose window holds one tick per `dt` ms gains `(1 + ACCEL_RATE_MS/dt) / 2`,
 /// clamped between 1 and the configured cap.
 const ACCEL_RATE_MS: f64 = 30.0;
+/// Upper bound on remembered window entries; overflow drops the oldest, which
+/// can only understate the rate. 128 entries cover ~1.8 kHz reporting across
+/// the full window — beyond any real wheel.
+const ACCEL_WINDOW_MAX_TICKS: usize = 128;
 /// Ratio of the pulse curve's viscous tail to its damped-force head.
 const PULSE_TAIL_RATIO: f64 = 3.0;
 /// Upper bound on in-flight pulses per source; free-spin bursts coalesce into
@@ -53,14 +58,18 @@ fn pulse_curve(progress: f64) -> f64 {
     (raw(progress.clamp(0.0, 1.0) * scale) / raw(scale)).clamp(0.0, 1.0)
 }
 
-/// Amplitude gain for a tick arriving `interval` after its source's previous
-/// tick. Deliberately deterministic so traces are exactly testable.
-fn accel_gain(interval: Duration, max_gain: f64) -> f64 {
-    if interval >= ACCEL_WINDOW {
-        return 1.0;
-    }
-    let millis = (interval.as_secs_f64() * 1000.0).max(1.0);
-    f64::midpoint(1.0, ACCEL_RATE_MS / millis).clamp(1.0, max_gain)
+/// Amplitude gain for a source whose ticks summed to `window_ticks` of raw
+/// wheel distance across the trailing [`ACCEL_WINDOW`]. Rate-based rather
+/// than interval-based: a high-resolution or free-spin wheel reports many
+/// tiny deltas milliseconds apart, so the gap between events says nothing
+/// about how fast the wheel is actually turning — only the distance covered
+/// per unit time does. A notched wheel (one full tick per report, `dt`
+/// apart) fills the window with `ACCEL_WINDOW/dt` ticks and lands on the
+/// classic `(1 + ACCEL_RATE_MS/dt) / 2` within one tick's worth of rate.
+/// Deliberately deterministic so traces are exactly testable.
+fn accel_gain(window_ticks: f64, max_gain: f64) -> f64 {
+    let rate_per_ms = window_ticks / (ACCEL_WINDOW.as_secs_f64() * 1000.0);
+    f64::midpoint(1.0, ACCEL_RATE_MS * rate_per_ms).clamp(1.0, max_gain)
 }
 
 /// Motion settings captured per accepted tick, so a live settings change
@@ -211,31 +220,50 @@ struct ActiveMotion {
     settled: WheelDelta,
     emitted: WheelDelta,
     next_frame: Instant,
-    last_tick_at: Instant,
+    /// Trailing [`ACCEL_WINDOW`] of accepted ticks — `(arrival, raw wheel
+    /// distance)` — from which [`accel_gain`] derives the source's rate.
+    recent_ticks: VecDeque<(Instant, f64)>,
 }
 
 impl ActiveMotion {
     fn new(impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> Self {
-        Self {
-            pulses: vec![Pulse {
-                amplitude: impulse.scale(tuning.step),
-                started_at: at,
-                duration: tuning.duration,
-            }],
+        let mut motion = Self {
+            pulses: Vec::new(),
             settled: WheelDelta::ZERO,
             emitted: WheelDelta::ZERO,
             next_frame: at + FRAME_INTERVAL,
-            last_tick_at: at,
+            recent_ticks: VecDeque::new(),
+        };
+        let gain = motion.windowed_gain(impulse, at, tuning.max_gain);
+        motion.pulses.push(Pulse {
+            amplitude: impulse.scale(tuning.step * gain),
+            started_at: at,
+            duration: tuning.duration,
+        });
+        motion
+    }
+
+    /// Record one tick in the rate window and return its amplitude gain.
+    fn windowed_gain(&mut self, impulse: WheelDelta, at: Instant, max_gain: f64) -> f64 {
+        while self
+            .recent_ticks
+            .front()
+            .is_some_and(|(tick_at, _)| at.saturating_duration_since(*tick_at) > ACCEL_WINDOW)
+        {
+            self.recent_ticks.pop_front();
         }
+        self.recent_ticks
+            .push_back((at, impulse.x.abs() + impulse.y.abs()));
+        if self.recent_ticks.len() > ACCEL_WINDOW_MAX_TICKS {
+            self.recent_ticks.pop_front();
+        }
+        let window_ticks = self.recent_ticks.iter().map(|(_, ticks)| ticks).sum();
+        accel_gain(window_ticks, max_gain)
     }
 
     /// Superpose one tick's pulse and evaluate the position at its timestamp.
     fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
-        let gain = accel_gain(
-            at.saturating_duration_since(self.last_tick_at),
-            tuning.max_gain,
-        );
-        self.last_tick_at = at;
+        let gain = self.windowed_gain(impulse, at, tuning.max_gain);
         let amplitude = impulse.scale(tuning.step * gain);
         let coalesce = self.pulses.len() >= MAX_PULSES
             || self.pulses.last().is_some_and(|pulse| {
