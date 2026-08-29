@@ -638,7 +638,7 @@ fn removing_a_per_app_profile_drops_it_and_returns_to_the_default() {
         vec![("com.apple.Safari", 1)]
     );
 
-    state.remove_app_profile("com.apple.Safari");
+    state.remove_editing_app_profile();
 
     assert_eq!(
         state.editing_app(),
@@ -677,7 +677,7 @@ fn removing_a_profile_that_is_not_open_leaves_the_editor_scope_alone() {
         );
     });
 
-    state.remove_app_profile("com.google.Chrome");
+    state.remove_app_profile_for_device(KNOWN_MOUSE_KEY, "com.google.Chrome");
 
     assert_eq!(state.editing_app(), Some("com.apple.Safari"));
     assert_eq!(
