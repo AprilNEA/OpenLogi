@@ -33,7 +33,8 @@ use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
+    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
+    PropType, RelativeAxisCode,
 };
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
@@ -413,6 +414,28 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     }
 }
 
+/// Negate a vertical wheel event when software scroll inversion is on.
+///
+/// Applied at re-emission, on the original event, so the value written back is
+/// in the same evdev units the device produced — no conversion, no rounding.
+/// Both wheel axes carry vertical motion (`REL_WHEEL_HI_RES` on a hi-res
+/// wheel, `REL_WHEEL` otherwise) and exactly one of them reaches this point
+/// per scroll, so negating either is enough. Horizontal scrolling is left
+/// alone: the setting reverses the wheel, not the thumb wheel.
+fn invert_wheel(event: InputEvent, inverted: bool) -> InputEvent {
+    if !inverted {
+        return event;
+    }
+    match event.destructure() {
+        EventSummary::RelativeAxis(
+            _,
+            axis @ (RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES),
+            value,
+        ) => InputEvent::new(EventType::RELATIVE.0, axis.0, value.saturating_neg()),
+        _ => event,
+    }
+}
+
 fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     match key {
         KeyCode::BTN_LEFT => Some(ButtonId::LeftClick),
@@ -518,7 +541,9 @@ fn device_thread(
                     None => EventDisposition::PassThrough,
                 };
                 match disposition {
-                    EventDisposition::PassThrough => pending.push(event),
+                    EventDisposition::PassThrough => {
+                        pending.push(invert_wheel(event, crate::scroll_inversion()));
+                    }
                     EventDisposition::Suppress => {}
                 }
             }
@@ -1145,5 +1170,66 @@ mod tests {
         let mut caps = Caps::mouse();
         caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
         assert!(caps.is_hookable());
+    }
+}
+
+#[cfg(test)]
+mod scroll_inversion_tests {
+    use super::*;
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn value_of(event: InputEvent) -> i32 {
+        event.value()
+    }
+
+    /// Both wheel axes are negated: a hi-res wheel reports `REL_WHEEL_HI_RES`
+    /// and a detented one `REL_WHEEL`, and the Signature M650 this was
+    /// verified against advertises both.
+    #[test]
+    fn inversion_negates_either_vertical_wheel_axis() {
+        for axis in [
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 120), true)), -120);
+            assert_eq!(value_of(invert_wheel(rel(axis, -1), true)), 1);
+        }
+    }
+
+    /// Off is a pass-through, byte for byte — the setting must cost nothing
+    /// when it is not in use.
+    #[test]
+    fn inversion_off_leaves_the_wheel_alone() {
+        let event = rel(RelativeAxisCode::REL_WHEEL, 120);
+        assert_eq!(value_of(invert_wheel(event, false)), 120);
+    }
+
+    /// The setting reverses the wheel, not the thumb wheel or the pointer.
+    #[test]
+    fn inversion_leaves_horizontal_and_pointer_axes_alone() {
+        for axis in [
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 7), true)), 7);
+        }
+    }
+
+    /// `i32::MIN` has no positive counterpart; saturating keeps the scroll
+    /// pinned at the extreme instead of wrapping it back to the same sign.
+    #[test]
+    fn inversion_saturates_instead_of_wrapping() {
+        assert_eq!(
+            value_of(invert_wheel(
+                rel(RelativeAxisCode::REL_WHEEL, i32::MIN),
+                true
+            )),
+            i32::MAX
+        );
     }
 }

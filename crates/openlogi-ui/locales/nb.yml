@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "Inverter rulleretning"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Inverterer rullehjulet på denne musen. Styreplaten beholder systemets rulleretning."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "Denne enheten har ingen innebygd invertering, så OpenLogi snur hjulet mens det fanges opp. Styreflaten beholder systemets rulleretning."
 "Wheel resolution": "Hjuloppløsning"
 "Device default": "Enhetsstandard"
 "Standard": "Standard"

@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "Scrollrichtung umkehren"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Kehrt das Scrollrad dieser Maus um. Dein Trackpad behält die Scrollrichtung des Systems."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "Dieses Gerät kann nicht selbst invertieren, also dreht OpenLogi das Rad beim Erfassen um. Dein Trackpad behält die Scrollrichtung des Systems."
 "Wheel resolution": "Mausradauflösung"
 "Device default": "Gerätestandard"
 "Standard": "Standard"

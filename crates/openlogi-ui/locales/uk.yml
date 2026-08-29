@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "Інвертувати напрямок прокручування"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Змінити напрямок коліщатка цієї миші на протилежний. Трекпад зберігає системний напрямок прокручування."
 "This device does not report native HID++ scroll inversion support.": "Цей пристрій не повідомляє про власну підтримку інверсії прокручування через HID++."
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "Цей пристрій не має власної інверсії, тож OpenLogi перевертає коліщатко під час перехоплення. Ваш тачпад зберігає системний напрямок прокручування."
 "Wheel resolution": "Роздільність коліщатка"
 "Device default": "За замовчуванням пристрою"
 "Standard": "Стандартна"

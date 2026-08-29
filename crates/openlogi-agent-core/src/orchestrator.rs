@@ -335,7 +335,33 @@ impl Orchestrator {
             self.hook_maps_for(key, self.current_app.as_deref()),
             "hook_maps",
         );
+        self.publish_scroll_inversion(key);
         self.publish_device_runtime();
+    }
+
+    /// Tell the capture layer whether to reverse the wheel for the selected
+    /// device.
+    ///
+    /// Only for devices with no native `0x2121` invert bit: one that has it
+    /// gets the firmware write from [`configured_wheel_mode`] instead, and
+    /// doing both would cancel out. A device that is disabled, unselected or
+    /// not asking for inversion turns the flag off, so the hook stops
+    /// transforming as soon as the setting is withdrawn.
+    fn publish_scroll_inversion(&self, key: Option<&str>) {
+        let wanted = key.is_some_and(|key| {
+            self.config.device_enabled(key)
+                && self.config.invert_scroll(key)
+                && self
+                    .devices
+                    .iter()
+                    .find(|device| device.config_key == key)
+                    .is_some_and(|device| {
+                        device
+                            .capabilities
+                            .is_some_and(|capabilities| !capabilities.scroll_inversion)
+                    })
+        });
+        openlogi_hook::set_scroll_inversion(wanted);
     }
 
     /// Republish the runtime views derived from the device set + config: the

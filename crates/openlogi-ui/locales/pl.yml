@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "Odwróć kierunek przewijania"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Odwraca kółko przewijania tej myszy. Gładzik zachowuje systemowy kierunek przewijania."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "To urządzenie nie ma natywnej inwersji, więc OpenLogi odwraca kółko podczas przechwytywania. Twój gładzik zachowuje systemowy kierunek przewijania."
 "Wheel resolution": "Rozdzielczość kółka"
 "Device default": "Domyślne urządzenia"
 "Standard": "Standardowa"

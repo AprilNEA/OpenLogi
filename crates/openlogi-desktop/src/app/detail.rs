@@ -363,8 +363,13 @@ struct ScrollingFacts {
     /// support still renders, checked and disabled — so these are two named
     /// fields, not a sum type.
     inverted: bool,
-    /// Whether the current link reports HID++ inversion support.
+    /// Whether the current link reports HID++ inversion support — native or
+    /// software (see `inversion_is_software`).
     inversion_supported: bool,
+    /// Whether `inversion_supported` is true only because OpenLogi reverses
+    /// the wheel itself as it captures it (the device's own firmware has no
+    /// invert bit). Meaningless when `inversion_supported` is false.
+    inversion_is_software: bool,
     resolution: Option<openlogi_core::config::ScrollResolution>,
     hires: HiresWheel,
 }
@@ -384,15 +389,35 @@ enum HiresWheel {
 /// Scrolling card: per-device native inversion and wheel-resolution controls.
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
+/// Explains the scrolling card's inversion toggle for the three cases a
+/// device can be in — and the middle one has to say so: a device whose
+/// firmware has no invert bit is reversed by OpenLogi's own capture layer,
+/// which is a different guarantee from the device doing it itself.
+fn inversion_description(supported: bool, is_software: bool) -> gpui::SharedString {
+    match (supported, is_software) {
+        (false, _) => tr!("This device does not report native HID++ scroll inversion support."),
+        (true, false) => {
+            tr!(
+                "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction."
+            )
+        }
+        (true, true) => tr!(
+            "This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction."
+        ),
+    }
+}
+
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let ScrollingFacts {
         inverted,
         inversion_supported,
+        inversion_is_software,
         resolution,
         hires,
     } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
         inverted: state.current_invert_scroll(),
         inversion_supported: state.current_scroll_inversion_supported(),
+        inversion_is_software: state.current_scroll_inversion_is_software(),
         resolution: state.current_scroll_resolution(),
         hires: if state.current_hires_wheel_supported() {
             HiresWheel::Here
@@ -402,11 +427,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             HiresWheel::Nowhere
         },
     });
-    let inversion_description = if inversion_supported {
-        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
-    } else {
-        tr!("This device does not report native HID++ scroll inversion support.")
-    };
+    let inversion_description = inversion_description(inversion_supported, inversion_is_software);
     let inversion_row = h_flex()
         .justify_between()
         .items_center()

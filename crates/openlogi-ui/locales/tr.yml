@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "Kaydırma yönünü ters çevir"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Bu farenin kaydırma tekerleğini ters çevir. Dokunmatik yüzeyiniz sistem kaydırma yönünü korur."
 "This device does not report native HID++ scroll inversion support.": "Bu cihaz yerel HID++ kaydırma ters çevirme desteği bildirmiyor."
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "Bu cihazın yerel ters çevirme desteği yok; OpenLogi tekerleği yakalarken ters çevirir. Dokunmatik yüzeyiniz sistem kaydırma yönünü korur."
 "Wheel resolution": "Tekerlek çözünürlüğü"
 "Device default": "Cihaz varsayılanı"
 "Standard": "Standart"

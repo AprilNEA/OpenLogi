@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "Αντιστροφή κατεύθυνσης κύλισης"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Αντιστρέφει τον τροχό κύλισης αυτού του ποντικιού. Το trackpad διατηρεί την κατεύθυνση κύλισης του συστήματος."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "Η συσκευή δεν υποστηρίζει εγγενή αντιστροφή, οπότε το OpenLogi αντιστρέφει τον τροχό κατά τη λήψη. Το trackpad διατηρεί την κατεύθυνση κύλισης του συστήματος."
 "Wheel resolution": "Ανάλυση τροχού"
 "Device default": "Προεπιλογή συσκευής"
 "Standard": "Τυπική"

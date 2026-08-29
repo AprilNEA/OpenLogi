@@ -325,6 +325,7 @@ _version: 1
 "Invert scroll direction": "反转滚动方向"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "反转这只鼠标的滚轮方向。触控板仍保持系统的滚动方向。"
 "This device does not report native HID++ scroll inversion support.": "此设备未报告原生 HID++ 滚动反转支持。"
+"This device has no native inversion, so OpenLogi reverses the wheel as it captures it. Your trackpad keeps the system scroll direction.": "该设备不支持原生反转，因此 OpenLogi 在捕获滚轮时将其反转。触控板仍保持系统滚动方向。"
 "Wheel resolution": "滚轮分辨率"
 "Device default": "设备默认值"
 "Standard": "标准"

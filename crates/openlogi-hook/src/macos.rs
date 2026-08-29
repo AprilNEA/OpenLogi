@@ -719,6 +719,44 @@ fn hooked_event_types() -> Vec<CGEventType> {
 }
 
 /// Invoke the user callback under `catch_unwind`, always failing open.
+/// Whether this event is a mouse-wheel scroll software inversion applies to.
+///
+/// Trackpad scrolling is excluded by contract — the setting reverses one
+/// mouse, not the system direction — and so is any source the hook would not
+/// remap buttons for, so a second vendor's mouse is left alone.
+fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
+    matches!(
+        event,
+        HookEvent::Mouse(MouseEvent::Scroll {
+            delta,
+            from_trackpad: false,
+            device,
+            ..
+        }) if delta.y() != 0.0 && crate::source_is_remappable(device.as_ref())
+    )
+}
+
+/// Negate the vertical scroll fields of `event`, in place.
+///
+/// Every field the reader might have used is negated, so the
+/// value that reaches the desktop is the device's own magnitude with its sign
+/// flipped. Re-synthesising the event from the normalised `delta_y` instead
+/// would have to choose a unit, and a hi-res wheel reports pixels in one field
+/// while a detented one reports lines in another — writing back the same
+/// fields sidesteps the choice entirely.
+fn invert_scroll_event(event: &CGEvent) {
+    for field in [VERTICAL.point, VERTICAL.fixed] {
+        let value = event.get_double_value_field(field);
+        if value != 0.0 {
+            event.set_double_value_field(field, -value);
+        }
+    }
+    let lines = event.get_integer_value_field(VERTICAL.line);
+    if lines != 0 {
+        event.set_integer_value_field(VERTICAL.line, -lines);
+    }
+}
+
 fn run_tap_callback(
     cb: &dyn Fn(HookEvent) -> EventDisposition,
     etype: CGEventType,
@@ -733,8 +771,17 @@ fn run_tap_callback(
         } else {
             return CallbackResult::Keep;
         };
+        // Decided before the callback consumes the event: a Logitech wheel
+        // scroll (never a trackpad) is the only thing software inversion may
+        // touch.
+        let invert = crate::scroll_inversion() && wheel_scroll_to_invert(&hook_event);
         match cb(hook_event) {
-            EventDisposition::PassThrough => CallbackResult::Keep,
+            EventDisposition::PassThrough => {
+                if invert {
+                    invert_scroll_event(event);
+                }
+                CallbackResult::Keep
+            }
             EventDisposition::Suppress => CallbackResult::Drop,
         }
     }));
