@@ -65,11 +65,12 @@ pub fn test_monitor_input(
     Ok(())
 }
 
-pub fn apply_input_assignments(assignments: &[MonitorInputAssignment]) {
+pub fn apply_input_assignments(assignments: &[MonitorInputAssignment]) -> Result<(), MonitorError> {
     let mut ordered = assignments.iter().enumerate().collect::<Vec<_>>();
     ordered
         .sort_by_key(|(index, assignment)| (monitor_switch_order(&assignment.monitor_id), *index));
 
+    let mut first_error = None;
     for (_, assignment) in ordered {
         if let Err(error) = set_monitor_input(&assignment.monitor_id, assignment.input) {
             tracing::warn!(
@@ -78,7 +79,12 @@ pub fn apply_input_assignments(assignments: &[MonitorInputAssignment]) {
                 input = assignment.input,
                 "monitor input switch failed"
             );
+            first_error.get_or_insert(error);
         }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
