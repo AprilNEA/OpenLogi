@@ -1316,7 +1316,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1928,7 +1928,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2989,7 +2989,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3017,7 +3017,7 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
- "gpui_macros",
+ "gpui_macros 0.1.0 (git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys)",
  "gpui_shared_string",
  "gpui_util",
  "heapless",
@@ -3082,7 +3082,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "gpui",
- "gpui_macros",
+ "gpui_macros 0.1.0 (git+https://github.com/zed-industries/zed)",
  "instant",
  "lsp-types",
  "objc2 0.6.4",
@@ -3116,7 +3116,7 @@ dependencies = [
  "gpui-base",
  "gpui-component-assets",
  "gpui-component-macros",
- "gpui_macros",
+ "gpui_macros 0.1.0 (git+https://github.com/zed-industries/zed)",
  "html5ever",
  "instant",
  "itertools 0.13.0",
@@ -3190,7 +3190,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3291,6 +3291,17 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "gpui_macros"
+version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
 dependencies = [
  "heck 0.5.0",
@@ -3302,7 +3313,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3315,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "schemars",
  "serde",
@@ -3325,7 +3336,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "anyhow",
  "log",
@@ -3335,7 +3346,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3358,7 +3369,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3388,7 +3399,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3641,7 +3652,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -4735,7 +4746,7 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -5958,6 +5969,7 @@ dependencies = [
  "appcatalog",
  "appicon",
  "backon",
+ "block2 0.6.2",
  "derive_more",
  "disclaim",
  "embed-resource",
@@ -6336,7 +6348,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "collections",
  "serde",
@@ -7146,7 +7158,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "derive_refineable",
 ]
@@ -7550,7 +7562,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8156,7 +8168,7 @@ dependencies = [
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "heapless",
  "log",
@@ -9265,7 +9277,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "perf",
  "quote",
@@ -11303,7 +11315,7 @@ dependencies = [
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11320,7 +11332,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -11331,7 +11343,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+source = "git+https://github.com/tournierjc/zed?branch=openlogi%2Fnumpad-digit-keys#41d752258a4ab128063a23247dfe2d981a0c7271"
 
 [[package]]
 name = "zune-core"

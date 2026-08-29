@@ -493,6 +493,10 @@ fn held_keycode(key: HeldKey) -> Option<KeyCode> {
 
 /// Map a platform-neutral USB HID keyboard usage to evdev.
 fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
+    hid_linux_letter_digit_fn(usage).or_else(|| hid_linux_named(usage))
+}
+
+fn hid_linux_letter_digit_fn(usage: u8) -> Option<KeyCode> {
     const LETTERS: [KeyCode; 26] = [
         KeyCode::KEY_A,
         KeyCode::KEY_B,
@@ -560,6 +564,23 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
         0x3a..=0x45 => FUNCTIONS.get(usize::from(usage - 0x3a)).copied(),
         0x68..=0x6f => FUNCTIONS.get(usize::from(usage - 0x68 + 12)).copied(),
+        _ => None,
+    }
+}
+
+fn hid_linux_named(usage: u8) -> Option<KeyCode> {
+    const KEYPAD_1_9: [KeyCode; 9] = [
+        KeyCode::KEY_KP1,
+        KeyCode::KEY_KP2,
+        KeyCode::KEY_KP3,
+        KeyCode::KEY_KP4,
+        KeyCode::KEY_KP5,
+        KeyCode::KEY_KP6,
+        KeyCode::KEY_KP7,
+        KeyCode::KEY_KP8,
+        KeyCode::KEY_KP9,
+    ];
+    match usage {
         0x28 => Some(KeyCode::KEY_ENTER),
         0x29 => Some(KeyCode::KEY_ESC),
         0x2a => Some(KeyCode::KEY_BACKSPACE),
@@ -576,6 +597,11 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         0x36 => Some(KeyCode::KEY_COMMA),
         0x37 => Some(KeyCode::KEY_DOT),
         0x38 => Some(KeyCode::KEY_SLASH),
+        0x39 => Some(KeyCode::KEY_CAPSLOCK),
+        0x46 => Some(KeyCode::KEY_SYSRQ),
+        0x47 => Some(KeyCode::KEY_SCROLLLOCK),
+        0x48 => Some(KeyCode::KEY_PAUSE),
+        0x49 => Some(KeyCode::KEY_INSERT),
         0x4a => Some(KeyCode::KEY_HOME),
         0x4b => Some(KeyCode::KEY_PAGEUP),
         0x4c => Some(KeyCode::KEY_DELETE),
@@ -585,6 +611,17 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         0x50 => Some(KeyCode::KEY_LEFT),
         0x51 => Some(KeyCode::KEY_DOWN),
         0x52 => Some(KeyCode::KEY_UP),
+        0x53 => Some(KeyCode::KEY_NUMLOCK),
+        0x54 => Some(KeyCode::KEY_KPSLASH),
+        0x55 => Some(KeyCode::KEY_KPASTERISK),
+        0x56 => Some(KeyCode::KEY_KPMINUS),
+        0x57 => Some(KeyCode::KEY_KPPLUS),
+        0x58 => Some(KeyCode::KEY_KPENTER),
+        0x59..=0x61 => KEYPAD_1_9.get(usize::from(usage - 0x59)).copied(),
+        0x62 => Some(KeyCode::KEY_KP0),
+        0x63 => Some(KeyCode::KEY_KPDOT),
+        0x65 => Some(KeyCode::KEY_MENU),
+        0x67 => Some(KeyCode::KEY_KPEQUAL),
         _ => None,
     }
 }
@@ -760,6 +797,8 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x50), Some(KeyCode::KEY_LEFT));
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
+        assert_eq!(hid_usage_to_linux(0x49), Some(KeyCode::KEY_INSERT));
+        assert_eq!(hid_usage_to_linux(0x56), Some(KeyCode::KEY_KPMINUS));
         assert_eq!(hid_usage_to_linux(0xff), None);
     }
 

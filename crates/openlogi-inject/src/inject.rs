@@ -468,13 +468,13 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x27 => Some(u16::from(b'0')),
         0x3a..=0x45 => Some(0x70 + u16::from(usage - 0x3a)),
         0x68..=0x6f => Some(0x7c + u16::from(usage - 0x68)),
-        0x28 => Some(0x0d),
+        0x28 | 0x58 => Some(0x0d),
         0x29 => Some(0x1b),
         0x2a => Some(0x08),
         0x2b => Some(0x09),
         0x2c => Some(0x20),
         0x2d => Some(0xbd),
-        0x2e => Some(0xbb),
+        0x2e | 0x67 => Some(0xbb),
         0x2f => Some(0xdb),
         0x30 => Some(0xdd),
         0x31 => Some(0xdc),
@@ -484,6 +484,11 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x36 => Some(0xbc),
         0x37 => Some(0xbe),
         0x38 => Some(0xbf),
+        0x39 => Some(0x14),
+        0x46 => Some(0x2c),
+        0x47 => Some(0x91),
+        0x48 => Some(0x13),
+        0x49 => Some(0x2d),
         0x4a => Some(0x24),
         0x4b => Some(0x21),
         0x4c => Some(0x2e),
@@ -493,8 +498,27 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x50 => Some(0x25),
         0x51 => Some(0x28),
         0x52 => Some(0x26),
+        0x53 => Some(0x90),
+        0x54 => Some(0x6f),
+        0x55 => Some(0x6a),
+        0x56 => Some(0x6d),
+        0x57 => Some(0x6b),
+        0x59..=0x61 => Some(0x61 + u16::from(usage - 0x59)),
+        0x62 => Some(0x60),
+        0x63 => Some(0x6e),
+        0x65 => Some(0x5d),
         _ => None,
     }
+}
+
+/// Whether a HID keyboard usage needs `KEYEVENTF_EXTENDEDKEY` on Windows.
+#[cfg_attr(
+    not(target_os = "windows"),
+    expect(clippy::allow_attributes, reason = "see hid_usage_to_windows"),
+    allow(dead_code, reason = "called only by the Windows backend")
+)]
+fn hid_usage_extended_key(usage: u8) -> bool {
+    usage == 0x58
 }
 
 #[cfg(test)]
@@ -673,7 +697,7 @@ mod tests {
 
     #[test]
     fn hid_usages_map_across_windows_key_categories() {
-        use super::hid_usage_to_windows;
+        use super::{hid_usage_extended_key, hid_usage_to_windows};
 
         assert_eq!(hid_usage_to_windows(0x04), Some(0x41)); // A
         assert_eq!(hid_usage_to_windows(0x1e), Some(0x31)); // 1
@@ -682,6 +706,10 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
+        assert_eq!(hid_usage_to_windows(0x49), Some(0x2d)); // Insert
+        assert_eq!(hid_usage_to_windows(0x56), Some(0x6d)); // Numpad subtract
+        assert!(!hid_usage_extended_key(0x28)); // Main Enter
+        assert!(hid_usage_extended_key(0x58)); // Numpad Enter
         assert_eq!(hid_usage_to_windows(0xff), None);
     }
 }

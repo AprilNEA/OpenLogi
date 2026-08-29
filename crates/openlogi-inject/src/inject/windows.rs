@@ -5,10 +5,10 @@ use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
 use openlogi_core::binding::{
@@ -120,7 +120,7 @@ fn parse_shortcut(text: &str) -> KeyCombo {
 fn press_shortcut(shortcut: Shortcut) {
     match combo(shortcut) {
         Ok(combo) => post_custom_shortcut(&combo),
-        Err(vk) => post_key(vk, &[]),
+        Err(vk) => post_key(vk, &[], false),
     }
 }
 
@@ -129,16 +129,16 @@ fn press_shortcut(shortcut: Shortcut) {
 /// synthesis (see the comment below) and is skipped.
 fn dispatch_native(native: NativeAction) {
     match native {
-        NativeAction::MissionControl | NativeAction::AppExpose => post_key(VK_TAB, &[VK_LWIN]),
-        NativeAction::PreviousDesktop => post_key(VK_LEFT, &[VK_LWIN, VK_CONTROL]),
-        NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
-        NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
-        NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
-        NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
+        NativeAction::MissionControl | NativeAction::AppExpose => post_key(VK_TAB, &[VK_LWIN], false),
+        NativeAction::PreviousDesktop => post_key(VK_LEFT, &[VK_LWIN, VK_CONTROL], false),
+        NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL], false),
+        NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN], false),
+        NativeAction::LaunchpadShow => post_key(VK_LWIN, &[], false),
+        NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN], false),
         // Win+Shift+S opens the snip overlay, which serves both full-screen
         // and region capture on Windows.
         NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
+            post_key(VK_S, &[VK_LWIN, VK_SHIFT], false);
         }
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
@@ -151,12 +151,12 @@ fn dispatch_native(native: NativeAction) {
 
 fn dispatch_media(key: MediaKey) {
     match key {
-        MediaKey::PlayPause => post_key(VK_MEDIA_PLAY_PAUSE, &[]),
-        MediaKey::NextTrack => post_key(VK_MEDIA_NEXT_TRACK, &[]),
-        MediaKey::PrevTrack => post_key(VK_MEDIA_PREV_TRACK, &[]),
-        MediaKey::VolumeUp => post_key(VK_VOLUME_UP, &[]),
-        MediaKey::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
-        MediaKey::Mute => post_key(VK_VOLUME_MUTE, &[]),
+        MediaKey::PlayPause => post_key(VK_MEDIA_PLAY_PAUSE, &[], false),
+        MediaKey::NextTrack => post_key(VK_MEDIA_NEXT_TRACK, &[], false),
+        MediaKey::PrevTrack => post_key(VK_MEDIA_PREV_TRACK, &[], false),
+        MediaKey::VolumeUp => post_key(VK_VOLUME_UP, &[], false),
+        MediaKey::VolumeDown => post_key(VK_VOLUME_DOWN, &[], false),
+        MediaKey::Mute => post_key(VK_VOLUME_MUTE, &[], false),
     }
 }
 
@@ -215,15 +215,15 @@ fn post_click(button: MouseButton) {
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
 }
 
-fn post_key(vk: u16, modifiers: &[u16]) {
+fn post_key(vk: u16, modifiers: &[u16], extended: bool) {
     let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
     for modifier in modifiers {
-        inputs.push(key_input(*modifier, false));
+        inputs.push(key_input(*modifier, false, false));
     }
-    inputs.push(key_input(vk, false));
-    inputs.push(key_input(vk, true));
+    inputs.push(key_input(vk, false, extended));
+    inputs.push(key_input(vk, true, extended));
     for modifier in modifiers.iter().rev() {
-        inputs.push(key_input(*modifier, true));
+        inputs.push(key_input(*modifier, true, false));
     }
     send_inputs(&inputs);
 }
@@ -269,16 +269,21 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 }
 
 fn post_custom_shortcut(combo: &KeyCombo) {
-    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
+    let usage = combo.key().code();
+    let Some(vk) = super::hid_usage_to_windows(usage) else {
         tracing::warn!(
-            usage = combo.key().code(),
+            usage,
             chord = %combo.rendered_label(),
             "CustomShortcut key has no Windows mapping yet; press ignored"
         );
         return;
     };
 
-    post_key(vk, &combo_modifiers(combo));
+    post_key(
+        vk,
+        &combo_modifiers(combo),
+        super::hid_usage_extended_key(usage),
+    );
 }
 
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
@@ -305,27 +310,42 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
         .filter_map(|key| held_virtual_key(*key))
         .collect();
     let key_up = phase == KeyPhase::Up;
-    let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
+    let mut inputs: Vec<_> = keys
+        .iter()
+        .map(|key| key_input(key.vk, key_up, key.extended))
+        .collect();
     if key_up {
         inputs.reverse();
     }
     send_inputs(&inputs);
 }
 
-fn held_virtual_key(key: HeldKey) -> Option<u16> {
+struct VirtualKey {
+    vk: u16,
+    extended: bool,
+}
+
+fn held_virtual_key(key: HeldKey) -> Option<VirtualKey> {
     match key {
-        HeldKey::Control => Some(VK_CONTROL),
-        HeldKey::Shift => Some(VK_SHIFT),
-        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Control => Some(VirtualKey {
+            vk: VK_CONTROL,
+            extended: false,
+        }),
+        HeldKey::Shift => Some(VirtualKey {
+            vk: VK_SHIFT,
+            extended: false,
+        }),
+        HeldKey::Alt => Some(VirtualKey {
+            vk: VK_MENU,
+            extended: false,
+        }),
         HeldKey::Key(usage) => {
-            let key = super::hid_usage_to_windows(usage.code());
-            if key.is_none() {
-                tracing::warn!(
-                    usage = usage.code(),
-                    "held shortcut usage has no Windows mapping — edge ignored"
-                );
-            }
-            key
+            let code = usage.code();
+            let vk = super::hid_usage_to_windows(code)?;
+            Some(VirtualKey {
+                vk,
+                extended: super::hid_usage_extended_key(code),
+            })
         }
     }
 }
@@ -353,10 +373,13 @@ fn send_inputs(inputs: &[INPUT]) {
     }
 }
 
-fn key_input(vk: u16, key_up: bool) -> INPUT {
+fn key_input(vk: u16, key_up: bool, extended: bool) -> INPUT {
     let mut flags = 0;
     if key_up {
         flags |= KEYEVENTF_KEYUP;
+    }
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
     }
     INPUT {
         r#type: INPUT_KEYBOARD,

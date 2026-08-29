@@ -1,8 +1,8 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, SharedString, Size, Styled, Window, WindowBounds, WindowOptions, div, px, rems,
+    App, AppContext as _, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, Role, SharedString, Size, Styled, Window, WindowBounds, WindowOptions, div, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -21,6 +21,7 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
+use super::shortcut_capture::ShortcutCapture;
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -94,10 +95,11 @@ struct ComponentGallery {
     profile_selected: usize,
     preset_selected: bool,
     carousel_selected: usize,
+    shortcut: Entity<ShortcutCapture>,
 }
 
 impl ComponentGallery {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -107,6 +109,11 @@ impl ComponentGallery {
             profile_selected: 1,
             preset_selected: true,
             carousel_selected: 1,
+            shortcut: cx.new(|cx| {
+                let mut capture = ShortcutCapture::new("gallery-shortcut-capture", cx);
+                capture.set_placeholder("Press a shortcut".into(), cx);
+                capture
+            }),
         }
     }
 
@@ -188,6 +195,7 @@ impl ComponentGallery {
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
             .child(Self::battery_panel(pal))
+            .child(self.shortcut_panel(pal))
     }
 
     fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -417,6 +425,15 @@ impl ComponentGallery {
                     BatteryLevel::Unknown,
                     BatteryStatus::Error,
                 ))),
+            pal,
+        )
+    }
+
+    fn shortcut_panel(&self, pal: Palette) -> gpui::Div {
+        gallery_panel(
+            "ShortcutCapture",
+            IconName::Settings,
+            v_flex().gap_2().w_full().child(self.shortcut.clone()),
             pal,
         )
     }

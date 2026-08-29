@@ -14,7 +14,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo, default_binding};
 
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions, asset_dimensions_for_png,
@@ -27,11 +27,12 @@ use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as pain
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profiles::{friendly_app_name, profile_canvas_status};
+use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::control_button;
+use crate::ui::shortcut_capture::ShortcutCapture;
 use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 
 const SIDE_GAP: f32 = 24.;
@@ -129,10 +130,11 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
-    shortcut_input: Entity<InputState>,
+    shortcut_input: Entity<ShortcutCapture>,
     /// G-series depots split thumb buttons onto `device_side`.
     show_side: bool,
     _state_obs: Subscription,
+    _shortcut_obs: Subscription,
 }
 
 impl MouseModelView {
@@ -146,8 +148,10 @@ impl MouseModelView {
             }
         })
         .detach();
-        let shortcut_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Shortcut, e.g. Cmd+Shift+P")));
+        let shortcut_input = cx.new(|cx| ShortcutCapture::new("inspector-shortcut-capture", cx));
+        let shortcut_obs = cx.subscribe(&shortcut_input, |this, _, combo: &KeyCombo, cx| {
+            this.apply_custom_shortcut(combo.clone(), cx);
+        });
         let state = AppState::global(cx);
         let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
             let relevant = match event {
@@ -176,6 +180,7 @@ impl MouseModelView {
             shortcut_input,
             show_side: false,
             _state_obs: state_obs,
+            _shortcut_obs: shortcut_obs,
         }
     }
 
@@ -192,6 +197,22 @@ impl MouseModelView {
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
+    }
+
+    fn apply_custom_shortcut(&mut self, combo: KeyCombo, cx: &mut Context<Self>) {
+        let Some(MouseControlId::Button(button)) = self.selected else {
+            return;
+        };
+        let action = Action::CustomShortcut(combo);
+        AppState::update_bindings(cx, |state| {
+            if let Some(direction) = self.gesture_active_dir {
+                state.commit_gesture_binding(button, direction, action);
+            } else {
+                state.commit_binding(button, action);
+            }
+        });
+        self.close_action_picker();
+        cx.notify();
     }
 
     fn reset_for_device(&mut self, device_key: Option<&str>) {
@@ -249,12 +270,9 @@ impl Render for MouseModelView {
             window,
             cx,
         );
-        crate::ui::components::localize_placeholder(
-            &self.shortcut_input,
-            tr!("Shortcut, e.g. Cmd+Shift+P"),
-            window,
-            cx,
-        );
+        self.shortcut_input.update(cx, |capture, cx| {
+            capture.set_placeholder(tr!("Press a shortcut"), cx);
+        });
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,

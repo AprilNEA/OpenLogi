@@ -492,7 +492,7 @@ _version: 1
 "Palette": "Palett"
 "Book": "Bok"
 "Custom shortcut": "Anpassat kortkommando"
-"Shortcut, e.g. Cmd+Shift+P": "Kortkommando, t.ex. Cmd+Shift+P"
+"Press a shortcut": "Tryck på ett kortkommando"
 "Application, folder path, or URL": "Program, mappsökväg eller URL"
 "Open application or folder": "Öppna program eller mapp"
 

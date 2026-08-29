@@ -33,8 +33,7 @@ KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"
 # seat, so those rules never tag it and its event node stays root:input 0660.
 #
 # Scoped to event nodes the kernel classifies as a mouse (ID_INPUT_MOUSE, set by
-# the input_id builtin in 60-input-id.rules, which runs before this file): a
-# Logitech keyboard's keystrokes must never become readable session-wide. The
+# the input_id builtin in 60-input-id.rules, which runs before this file). The
 # two matchers cover the same two transports as the hidraw block above.
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", ATTRS{idVendor}=="046d", TAG+="uaccess"
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", KERNELS=="*:046D:*", TAG+="uaccess"

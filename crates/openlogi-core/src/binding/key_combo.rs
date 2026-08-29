@@ -233,6 +233,24 @@ impl KeyCombo {
         self.modifiers & MOD_OPTION != 0
     }
 
+    /// Build a chord from a GUI key-capture event.
+    ///
+    /// `key` is the GPUI/xkb key name (`home`, `insert`, `subtract`, `6`),
+    /// not the character the layout would type. AZERTY number-row punctuation
+    /// (`-` on the 6 key) is mapped back to the physical HID usage so a G502
+    /// binding injects KEY_6 rather than KEY_MINUS.
+    #[must_use]
+    pub fn from_captured(stroke: CapturedKeystroke<'_>) -> Option<Self> {
+        if stroke.key.is_empty() || is_modifier_key_name(stroke.key) {
+            return None;
+        }
+        let key = parse_key(remap_captured_key(stroke.key, stroke.layout_name)).ok()?;
+        Some(Self {
+            modifiers: stroke.modifiers,
+            key,
+        })
+    }
+
     /// Canonical user-facing chord label.
     #[must_use]
     pub fn rendered_label(&self) -> String {
@@ -251,6 +269,62 @@ impl KeyCombo {
         }
         parts.push(self.key.label());
         parts.join("+")
+    }
+}
+
+/// One key-down from the settings app's shortcut recorder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedKeystroke<'a> {
+    modifiers: u8,
+    key: &'a str,
+    layout_name: &'a str,
+}
+
+impl<'a> CapturedKeystroke<'a> {
+    /// GPUI `Keystroke.key` plus the host layout name (`French`, `English (US)`, …).
+    #[must_use]
+    pub const fn new(key: &'a str, layout_name: &'a str) -> Self {
+        Self {
+            modifiers: 0,
+            key,
+            layout_name,
+        }
+    }
+
+    /// Command/Meta/Super is down.
+    #[must_use]
+    pub const fn command(mut self, down: bool) -> Self {
+        if down {
+            self.modifiers |= MOD_COMMAND;
+        }
+        self
+    }
+
+    /// Shift is down.
+    #[must_use]
+    pub const fn shift(mut self, down: bool) -> Self {
+        if down {
+            self.modifiers |= MOD_SHIFT;
+        }
+        self
+    }
+
+    /// Control is down.
+    #[must_use]
+    pub const fn control(mut self, down: bool) -> Self {
+        if down {
+            self.modifiers |= MOD_CONTROL;
+        }
+        self
+    }
+
+    /// Option/Alt is down.
+    #[must_use]
+    pub const fn option(mut self, down: bool) -> Self {
+        if down {
+            self.modifiers |= MOD_OPTION;
+        }
+        self
     }
 }
 
@@ -377,18 +451,106 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             "down" => 0x51,
             "up" => 0x52,
             "numlock" | "num-lock" => 0x53,
-            "kpdivide" | "kp-divide" => 0x54,
-            "kpmultiply" | "kp-multiply" => 0x55,
-            "kpminus" | "kp-minus" => 0x56,
-            "kpplus" | "kp-plus" => 0x57,
-            "kpenter" | "kp-enter" => 0x58,
-            "kpdecimal" | "kp-decimal" => 0x63,
+            "minus" => 0x2d,
+            "kpdivide" | "kp-divide" | "kp_divide" | "divide" => 0x54,
+            "kpmultiply" | "kp-multiply" | "kp_multiply" | "multiply" => 0x55,
+            "kpminus" | "kp-minus" | "kp_minus" | "subtract" | "kp-subtract" | "kp_subtract" => {
+                0x56
+            }
+            "kpplus" | "kp-plus" | "kp_plus" | "add" | "kp-add" | "kp_add" => 0x57,
+            "kpenter" | "kp-enter" | "kp_enter" | "numpadenter" => 0x58,
+            "kpdecimal" | "kp-decimal" | "kp_decimal" | "decimal" | "kp-separator"
+            | "kp_separator" => 0x63,
             "menu" => 0x65,
             "kpequals" | "kp-equals" => 0x67,
             _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
         }
     };
     KeyboardUsage::try_from(usage).map_err(|_| KeyComboParseError::UnknownToken(token.to_string()))
+}
+
+fn is_modifier_key_name(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "control"
+            | "ctrl"
+            | "shift"
+            | "alt"
+            | "option"
+            | "cmd"
+            | "command"
+            | "meta"
+            | "win"
+            | "super"
+            | "fn"
+            | "function"
+    )
+}
+
+/// GPUI Linux reports the xkb keysym, so AZERTY's 6 key arrives as `-`.
+/// Non-ASCII unshifted glyphs (`é`) arrive as xkb names (`eacute`).
+fn remap_captured_key<'a>(key: &'a str, layout_name: &str) -> &'a str {
+    if is_french_france_layout(layout_name) {
+        return remap_french_number_row(key);
+    }
+    if is_belgian_layout(layout_name) {
+        return remap_belgian_number_row(key);
+    }
+    key
+}
+
+fn remap_french_number_row(key: &str) -> &str {
+    match key {
+        "&" => "1",
+        "é" | "eacute" => "2",
+        "\"" => "3",
+        "'" => "4",
+        "(" => "5",
+        "-" => "6",
+        "è" | "egrave" => "7",
+        "_" => "8",
+        "ç" | "ccedilla" => "9",
+        "à" | "agrave" => "0",
+        ")" => "-",
+        "²" | "twosuperior" => "`",
+        _ => key,
+    }
+}
+
+fn remap_belgian_number_row(key: &str) -> &str {
+    match key {
+        "&" => "1",
+        "é" | "eacute" => "2",
+        "\"" => "3",
+        "'" => "4",
+        "(" => "5",
+        "§" | "section" => "6",
+        "è" | "egrave" => "7",
+        "!" => "8",
+        "ç" | "ccedilla" => "9",
+        "à" | "agrave" => "0",
+        _ => key,
+    }
+}
+
+fn is_french_france_layout(name: &str) -> bool {
+    if is_belgian_layout(name) {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("switzerland") || lower.contains("canada") {
+        return false;
+    }
+    lower.contains("azerty")
+        || lower == "fr"
+        || lower == "french"
+        || lower.starts_with("french ")
+        || lower.starts_with("français")
+}
+
+fn is_belgian_layout(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("belgian") || lower.contains("belge") || lower == "be"
 }
 
 #[cfg(test)]
@@ -434,6 +596,44 @@ mod tests {
         let plus = KeyCombo::from_hid_report(0, 0x57).expect("keypad plus is a valid usage");
         assert_eq!(plus.rendered_label(), "KpPlus");
         assert_eq!("KpPlus".parse::<KeyCombo>(), Ok(plus));
+    }
+
+    fn captured(key: &str, layout: &str) -> KeyCombo {
+        KeyCombo::from_captured(CapturedKeystroke::new(key, layout))
+            .unwrap_or_else(|| panic!("captured {key:?} on {layout:?}"))
+    }
+
+    #[test]
+    fn captured_named_keys_and_keypad_operators() {
+        assert_eq!(captured("home", "English (US)").key().code(), 0x4a);
+        assert_eq!(captured("insert", "English (US)").key().code(), 0x49);
+        assert_eq!(captured("minus", "English (US)").key().code(), 0x2d);
+        assert_eq!(captured("subtract", "English (US)").key().code(), 0x56);
+        assert_eq!(captured("kp_subtract", "English (US)").key().code(), 0x56);
+        assert_eq!(captured("add", "English (US)").key().code(), 0x57);
+        assert_eq!(captured("6", "English (US)").key().code(), 0x23);
+        assert_eq!(captured("kp6", "English (US)").key().code(), 0x5e);
+        assert_eq!(captured("kp0", "English (US)").key().code(), 0x62);
+        assert_eq!(captured("-", "English (US)").key().code(), 0x2d);
+        assert_eq!(
+            KeyCombo::from_captured(CapturedKeystroke::new("home", "English (US)").control(true),)
+                .expect("Ctrl+Home")
+                .rendered_label(),
+            "Ctrl+Home"
+        );
+    }
+
+    #[test]
+    fn azerty_number_row_punctuation_maps_to_physical_hid_keys() {
+        assert_eq!(captured("-", "French").key().code(), 0x23);
+        assert_eq!(captured("eacute", "French").key().code(), 0x1f);
+        assert_eq!(captured(")", "French").key().code(), 0x2d);
+        assert_eq!(captured("subtract", "French").key().code(), 0x56);
+        assert_eq!(captured("-", "Belgian").key().code(), 0x2d);
+        assert_eq!(captured("section", "Belgian").key().code(), 0x23);
+        assert_eq!(captured("-", "English (US)").key().code(), 0x2d);
+        assert_eq!(captured("-", "French (Switzerland)").key().code(), 0x2d);
+        assert!(KeyCombo::from_captured(CapturedKeystroke::new("shift", "French")).is_none());
     }
 
     #[test]

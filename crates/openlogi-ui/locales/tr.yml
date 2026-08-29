@@ -491,7 +491,7 @@ _version: 1
 "Palette": "Palet"
 "Book": "Kitap"
 "Custom shortcut": "Özel kısayol"
-"Shortcut, e.g. Cmd+Shift+P": "Kısayol, örn. Cmd+Shift+P"
+"Press a shortcut": "Bir kısayola basın"
 "Application, folder path, or URL": "Uygulama, klasör yolu veya URL"
 "Open application or folder": "Uygulama veya klasör aç"
 "%{app} overrides %{count} buttons. Others inherit Default.": "%{app} %{count} düğmeyi geçersiz kılıyor. Diğerleri Varsayılan'dan devralır."

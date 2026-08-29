@@ -492,7 +492,7 @@ _version: 1
 "Palette": "Paleta"
 "Book": "Livro"
 "Custom shortcut": "Atalho personalizado"
-"Shortcut, e.g. Cmd+Shift+P": "Atalho, por exemplo, Cmd+Shift+P"
+"Press a shortcut": "Pressione um atalho"
 "Application, folder path, or URL": "Aplicativo, caminho de pasta ou URL"
 "Open application or folder": "Abrir aplicativo ou pasta"
 
