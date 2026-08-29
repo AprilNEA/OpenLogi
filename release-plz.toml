@@ -126,6 +126,11 @@ release = false
 publish = false
 
 [[package]]
+name = "openlogi-flow"
+release = false
+publish = false
+
+[[package]]
 name = "openlogi-agent"
 release = false
 publish = false
