@@ -666,10 +666,31 @@ fn reversal_cooldown_scales_by_time_since_the_departed_direction() {
     assert!((cooldown.attenuate(-5.0, at(0)) + 5.0).abs() < EPSILON);
     // A flip 68 ms later (the measured hot case) passes 68/400 of its value.
     assert!((cooldown.attenuate(4.0, at(68)) - 4.0 * 0.17).abs() < EPSILON);
-    // The committed new direction keeps ramping against the same reference…
+    // The committed new direction keeps ramping against the same reference
+    // (2.0 stays below the knee, so only the ramp scales it).
     assert!((cooldown.attenuate(4.0, at(200)) - 4.0 * 0.5).abs() < EPSILON);
-    // …and runs unscaled once the cooldown has fully elapsed.
-    assert!((cooldown.attenuate(4.0, at(400)) - 4.0).abs() < EPSILON);
+    // Once the ramp elapses only the knee compression remains, fading with
+    // the corrective burst's age (332 ms of the 2000 ms recovery).
+    let compressed = 3.25 + (4.0 - 3.25) * (332.0 / 2000.0);
+    assert!((cooldown.attenuate(4.0, at(400)) - compressed).abs() < EPSILON);
+    // A tick after the full recovery window runs unscaled.
+    assert!((cooldown.attenuate(4.0, at(2068)) - 4.0).abs() < EPSILON);
+}
+
+#[test]
+fn reversal_compression_tames_the_corrective_burst_and_fades() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    assert!((cooldown.attenuate(-5.0, at(0)) + 5.0).abs() < EPSILON);
+    // A cold flip (past the ramp) is still compressed above the knee:
+    // 8 lines → 3 + 5/4 at the burst's start.
+    assert!((cooldown.attenuate(8.0, at(500)) - 4.25).abs() < EPSILON);
+    // Halfway through recovery the compression has faded halfway.
+    assert!((cooldown.attenuate(8.0, at(1500)) - (4.25 + 3.75 * 0.5)).abs() < EPSILON);
+    // Past recovery the burst runs at full magnitude again.
+    assert!((cooldown.attenuate(8.0, at(2500)) - 8.0).abs() < EPSILON);
 }
 
 #[test]
@@ -696,12 +717,13 @@ fn quick_reversal_of_preaccelerated_input_restarts_cold() {
 }
 
 #[test]
-fn leisurely_reversal_of_preaccelerated_input_is_unscaled() {
+fn leisurely_reversal_skips_the_ramp_but_still_compresses() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
     let mut frames = Vec::new();
     // The opposing tick arrives a full cooldown after the departed
-    // direction's last tick — already cold, so it passes untouched.
+    // direction's last tick — already cold, so the ramp passes it whole —
+    // but at 5 lines it exceeds the knee: 3 + 2/4 = 3.5 at burst start.
     for (millis, delta) in [(0, -5.0), (50, -5.0), (460, 5.0)] {
         engine.impulse(
             source(),
@@ -714,7 +736,7 @@ fn leisurely_reversal_of_preaccelerated_input_is_unscaled() {
     engine.advance_due(base + Duration::from_millis(700), &mut |frame| {
         frames.push(frame);
     });
-    assert_delta(cumulative(&frames), wheel(0.0, -5.0));
+    assert_delta(cumulative(&frames), wheel(0.0, -10.0 + 3.5));
     assert!(engine.active.is_empty());
 }
 

@@ -52,6 +52,19 @@ const REVERSAL_COOLDOWN: Duration = Duration::from_millis(400);
 /// of a tick backwards at the end of a flick; below this floor the opposing
 /// ticks are attenuated but the resumed main direction stays untouched.
 const REVERSAL_COMMIT: f64 = 0.5;
+/// Per-tick line magnitude above which a corrective burst is compressed.
+/// The OS acceleration curve reaches ~8 lines per tick within half a second
+/// even from a cold start; that speed reads as intended travel when the
+/// direction is sustained but as overshoot when it follows a reversal
+/// (measured 2026-08-29: physically identical bursts were flagged as
+/// overshoot only in the reversal context).
+const REVERSAL_KNEE: f64 = 3.0;
+/// Compression slope above [`REVERSAL_KNEE`] at the moment of the flip.
+const REVERSAL_KNEE_RATIO: f64 = 4.0;
+/// How long after the first opposing tick the corrective compression takes
+/// to fade back to unity, so a reversal that turns into sustained scrolling
+/// regains full throughput.
+const REVERSAL_RECOVERY: Duration = Duration::from_millis(2000);
 
 /// Normalized two-phase pulse: a damped-force head (`u − 1 + e^(−u)`) blending
 /// C¹-continuously into an exponential viscous tail at one part head to
@@ -255,8 +268,11 @@ struct ReversalCooldown {
     /// Arrival of the committed direction's most recent tick.
     last_at: Option<Instant>,
     /// Last tick time of the direction scrolled away from, kept while a flip
-    /// is still inside the cooldown.
+    /// is still recovering.
     flip_ref: Option<Instant>,
+    /// Arrival of the pending flip's first opposing tick — the corrective
+    /// burst's own age, from which the knee compression fades.
+    flip_started: Option<Instant>,
     /// Raw opposing distance accumulated towards [`REVERSAL_COMMIT`].
     pending: f64,
     /// Whether the pending flip has crossed [`REVERSAL_COMMIT`] and `dir`
@@ -267,13 +283,30 @@ struct ReversalCooldown {
 impl ReversalCooldown {
     fn clear_flip(&mut self) {
         self.flip_ref = None;
+        self.flip_started = None;
         self.pending = 0.0;
         self.committed = false;
     }
 
-    fn cooldown_factor(flip_ref: Instant, at: Instant) -> f64 {
-        (at.saturating_duration_since(flip_ref).as_secs_f64() / REVERSAL_COOLDOWN.as_secs_f64())
-            .min(1.0)
+    /// Scale one tick of a reversal in progress: the cooldown ramp re-imposes
+    /// a cold start relative to the departed direction's last tick (the OS
+    /// acceleration stays hot across a quick flip), and the knee compression
+    /// tames the corrective burst's peak speed, fading out over
+    /// [`REVERSAL_RECOVERY`] from the burst's first opposing tick.
+    fn rescale(value: f64, flip_ref: Instant, flip_started: Instant, at: Instant) -> f64 {
+        let ramp = (at.saturating_duration_since(flip_ref).as_secs_f64()
+            / REVERSAL_COOLDOWN.as_secs_f64())
+        .min(1.0);
+        let recovery = (at.saturating_duration_since(flip_started).as_secs_f64()
+            / REVERSAL_RECOVERY.as_secs_f64())
+        .min(1.0);
+        let magnitude = value.abs() * ramp;
+        let compressed = if magnitude > REVERSAL_KNEE {
+            REVERSAL_KNEE + (magnitude - REVERSAL_KNEE) / REVERSAL_KNEE_RATIO
+        } else {
+            magnitude
+        };
+        value.signum() * (compressed + (magnitude - compressed) * recovery)
     }
 
     fn attenuate(&mut self, value: f64, at: Instant) -> f64 {
@@ -288,37 +321,37 @@ impl ReversalCooldown {
         }
         if sign == self.dir {
             self.last_at = Some(at);
-            return match self.flip_ref {
-                // Post-commit ramp: keep re-imposing the cold start until
-                // the cooldown fully elapses.
-                Some(flip_ref) if self.committed => {
-                    let factor = Self::cooldown_factor(flip_ref, at);
-                    if factor >= 1.0 {
+            return match (self.flip_ref, self.flip_started) {
+                // Committed reversal still recovering: keep rescaling until
+                // the compression has fully faded.
+                (Some(flip_ref), Some(flip_started)) if self.committed => {
+                    if at.saturating_duration_since(flip_started) >= REVERSAL_RECOVERY {
                         self.clear_flip();
                         value
                     } else {
-                        value * factor
+                        Self::rescale(value, flip_ref, flip_started, at)
                     }
                 }
                 // The opposing ticks never committed — free-spin jitter —
                 // and the main direction resumed; drop the pending flip.
-                Some(_) => {
+                (Some(_), _) => {
                     self.clear_flip();
                     value
                 }
-                None => value,
+                _ => value,
             };
         }
-        // Opposing tick: reference the departed direction's last arrival,
-        // starting a fresh flip unless one is already pending.
-        let flip_ref = match self.flip_ref {
-            Some(flip_ref) if !self.committed => flip_ref,
+        // Opposing tick: keep the pending flip's references, or start a
+        // fresh flip from the departed direction's last arrival.
+        let (flip_ref, flip_started) = match (self.flip_ref, self.flip_started) {
+            (Some(flip_ref), Some(flip_started)) if !self.committed => (flip_ref, flip_started),
             _ => {
                 let flip_ref = self.last_at.unwrap_or(at);
                 self.flip_ref = Some(flip_ref);
+                self.flip_started = Some(at);
                 self.pending = 0.0;
                 self.committed = false;
-                flip_ref
+                (flip_ref, at)
             }
         };
         self.pending += value.abs();
@@ -327,7 +360,7 @@ impl ReversalCooldown {
             self.last_at = Some(at);
             self.committed = true;
         }
-        value * Self::cooldown_factor(flip_ref, at)
+        Self::rescale(value, flip_ref, flip_started, at)
     }
 }
 
