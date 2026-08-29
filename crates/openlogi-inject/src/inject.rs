@@ -511,6 +511,16 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
     }
 }
 
+/// Whether a HID keyboard usage needs `KEYEVENTF_EXTENDEDKEY` on Windows.
+#[cfg_attr(
+    not(target_os = "windows"),
+    expect(clippy::allow_attributes, reason = "see hid_usage_to_windows"),
+    allow(dead_code, reason = "called only by the Windows backend")
+)]
+fn hid_usage_extended_key(usage: u8) -> bool {
+    usage == 0x58
+}
+
 #[cfg(test)]
 mod tests {
     use openlogi_core::scroll::ScrollDelta;
@@ -687,7 +697,7 @@ mod tests {
 
     #[test]
     fn hid_usages_map_across_windows_key_categories() {
-        use super::hid_usage_to_windows;
+        use super::{hid_usage_extended_key, hid_usage_to_windows};
 
         assert_eq!(hid_usage_to_windows(0x04), Some(0x41)); // A
         assert_eq!(hid_usage_to_windows(0x1e), Some(0x31)); // 1
@@ -698,6 +708,8 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
         assert_eq!(hid_usage_to_windows(0x49), Some(0x2d)); // Insert
         assert_eq!(hid_usage_to_windows(0x56), Some(0x6d)); // Numpad subtract
+        assert!(!hid_usage_extended_key(0x28)); // Main Enter
+        assert!(hid_usage_extended_key(0x58)); // Numpad Enter
         assert_eq!(hid_usage_to_windows(0xff), None);
     }
 }
