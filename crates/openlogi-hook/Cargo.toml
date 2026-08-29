@@ -16,6 +16,7 @@ tracing = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }
+futures-lite = { workspace = true }
 libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
