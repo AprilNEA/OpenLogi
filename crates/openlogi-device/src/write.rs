@@ -26,6 +26,7 @@ mod lighting;
 mod lighting_catalog;
 mod litra;
 mod onboard;
+mod report_rate;
 mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
@@ -65,6 +66,11 @@ pub use onboard::{
     ProfilesDescription, apply_onboard_button_bindings, apply_onboard_button_bindings_on,
     dump_onboard_profiles, dump_onboard_profiles_on, read_onboard_button_bindings,
     read_onboard_button_bindings_on, read_onboard_profile, read_onboard_profile_on,
+    cycle_onboard_profile, cycle_onboard_profile_on,
+};
+pub use report_rate::{
+    ReportRateCapabilities, ReportRateHz, ReportRateInfo, get_report_rate_info,
+    get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 33);
+    assert_eq!(PROTOCOL_VERSION, 34);
 }
 
 #[test]
@@ -238,6 +238,25 @@ fn request_variant_order() {
         },
         "1c0008463030444341464501",
     );
+    assert_wire(
+        &AgentRequest::ReadReportRate {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1d0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetReportRate {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            rate: openlogi_core::hid::ReportRateHz::new(1000),
+        },
+        "1e0008463030444341464501fbe803",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -290,6 +309,8 @@ fn action_ring_types() {
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
     assert_wire(&HidppOperation::OnboardProfiles, "0f");
+    assert_wire(&HidppOperation::ReadReportRate, "10");
+    assert_wire(&HidppOperation::WriteReportRate, "11");
 }
 
 #[test]
@@ -448,12 +469,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                report_rate: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010100",
     );
 }
 
@@ -511,13 +533,13 @@ fn device_settings_payloads() {
         &WriteError::RequestTimedOut {
             operation: HidppOperation::WriteDpi,
         },
-        "0804",
+        "0904",
     );
     assert_wire(
         &WriteError::RequestTimedOut {
             operation: HidppOperation::Light,
         },
-        "080d",
+        "090d",
     );
     assert_wire(
         &WriteError::HidppFeature {
@@ -525,22 +547,22 @@ fn device_settings_payloads() {
             feature_hex: 0x2201,
             kind: HidppFeatureErrorKind::OutOfRange,
         },
-        "0604fb012203",
+        "0704fb012203",
     );
     assert_wire(
         &WriteError::UnsupportedResponse {
             operation: HidppOperation::Lighting,
             feature_hex: 0x8070,
         },
-        "0707fb7080",
+        "0807fb7080",
     );
     assert_wire(
         &WriteError::RuntimeInit {
             message: "boom".into(),
         },
-        "0904626f6f6d",
+        "0a04626f6f6d",
     );
-    assert_wire(&WriteError::AgentUnavailable, "0a");
+    assert_wire(&WriteError::AgentUnavailable, "0b");
 
     // serde encodes SmartShiftMode's variant *index* (Free=0, Ratchet=1), not
     // the `#[repr(u8)]` firmware discriminants (1/2) — pinned here because it
@@ -636,13 +658,13 @@ fn standalone_light_dtos_commands_and_errors() {
             control: "temperature_kelvin".into(),
             value: 2750,
         },
-        "0b1274656d70657261747572655f6b656c76696efbbe0a",
+        "0c1274656d70657261747572655f6b656c76696efbbe0a",
     );
     assert_wire(
         &WriteError::LightUnsupported {
             control: "color".into(),
         },
-        "0c05636f6c6f72",
+        "0d05636f6c6f72",
     );
-    assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+    assert_wire(&WriteError::AmbiguousRawDevice, "0e");
 }

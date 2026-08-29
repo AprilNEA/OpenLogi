@@ -98,7 +98,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         | Action::NextDpiPreset
         | Action::PrevDpiPreset
         | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
-        Action::ToggleSmartShift | Action::CycleOnboardProfile => "action-icons/refresh-cw.svg",
+        Action::ToggleSmartShift | Action::CycleOnboardProfile | Action::CycleAppProfile => {
+            "action-icons/refresh-cw.svg"
+        }
         Action::ScrollUp => "action-icons/chevrons-up.svg",
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",

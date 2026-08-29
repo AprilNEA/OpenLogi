@@ -24,7 +24,7 @@ pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, LightingLoad, SmartShiftLoad};
+pub use load::{DpiStatus, LightingLoad, ReportRateStatus, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,7 @@ mod light;
 mod lighting;
 mod load;
 mod pointer;
+mod report_rate;
 mod scroll;
 mod settings;
 mod smartshift;
@@ -101,6 +102,8 @@ pub(crate) enum StateEvent {
     BindingsChanged(DeviceKey),
     /// DPI data or the active DPI value changed.
     DpiChanged(DeviceKey),
+    /// Report-rate data or the active polling rate changed.
+    ReportRateChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
     /// Device or standalone-light settings changed.
@@ -216,6 +219,7 @@ impl AppState {
     pub(crate) fn load_current_device_reads(cx: &mut App) {
         Self::update(cx, |state, cx| {
             state.load_current_dpi(cx);
+            state.load_current_report_rate(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_onboard_bindings(cx);
@@ -339,6 +343,14 @@ impl AppState {
                 .and_then(|device| device.effective_dpi(&record.route_key))
         }) {
             self.pointer.dpi = dpi;
+        }
+        if let Some(rate) = self.current_record().and_then(|record| {
+            record
+                .persistent_config_key()
+                .and_then(|key| self.config.devices.get(key))
+                .and_then(|device| device.effective_report_rate(&record.route_key))
+        }) {
+            self.pointer.report_rate = rate;
         }
     }
 

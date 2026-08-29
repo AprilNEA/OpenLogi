@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfileSnapshot, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    ReportRateHz, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
@@ -105,11 +105,16 @@ pub enum GuiUpdate {
 /// the GUI can surface device failures after an optimistic update.
 pub enum Command {
     SetDpi(DeviceRoute, Dpi),
+    SetReportRate(DeviceRoute, ReportRateHz),
     SetLighting(DeviceRoute, Lighting),
     SetLight(DeviceRoute, LightCommand, String, u64),
     SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftStatus),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
+    ReadReportRate(
+        DeviceRoute,
+        oneshot::Sender<Result<ReportRateInfo, WriteError>>,
+    ),
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
@@ -533,6 +538,9 @@ async fn handle(
     let ctx = context::current();
     match cmd {
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
+        Command::SetReportRate(route, rate) => {
+            log_apply(client.set_report_rate(ctx, route, rate).await)?;
+        }
         Command::SetLighting(route, lighting) => {
             log_apply(client.set_lighting(ctx, route, lighting).await)?;
         }
@@ -559,6 +567,9 @@ async fn handle(
         }
         Command::ReadDpi(route, reply) => {
             let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
+        }
+        Command::ReadReportRate(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_report_rate(ctx, route).await)?);
         }
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
@@ -682,6 +693,9 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
     // so the panel should keep retrying, not latch "unsupported".
     match cmd {
         Command::ReadDpi(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadReportRate(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {

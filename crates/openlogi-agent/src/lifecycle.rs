@@ -269,6 +269,12 @@ impl Armed {
                 Some(device_key) = self.inputs.triggers.recv() => {
                     self.begin_action_ring(device_key.as_deref()).await;
                 }
+                Some(device_key) = self.inputs.app_profile_cycles.recv() => {
+                    let changed = self.orchestrator.lock().await.cycle_app_profile(&device_key);
+                    if changed {
+                        self.inputs.dispatcher.cancel_all_buttons();
+                    }
+                }
                 () = self.signals.recv() => self.shut_down("shutdown signal"),
                 // Uninstalled while running — leave through the same door so
                 // the event tap goes with us (#807).

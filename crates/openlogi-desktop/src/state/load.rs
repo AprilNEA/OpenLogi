@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, LightingInfo, SmartShiftStatus};
+use openlogi_core::hid::{DpiInfo, LightingInfo, ReportRateInfo, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -24,6 +24,7 @@ pub enum Load<T> {
 
 /// Per-device DPI capability load state. See [`Load`].
 pub type DpiStatus = Load<Arc<DpiInfo>>;
+pub type ReportRateStatus = Load<Arc<ReportRateInfo>>;
 
 /// Per-device SmartShift (`0x2111`) config load state. See [`Load`]. Unlike DPI
 /// presets, the resolved config is *not* persisted to `config.toml` — the device

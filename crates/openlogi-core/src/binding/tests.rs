@@ -334,6 +334,7 @@ fn persisted_action_variant_names_are_stable() {
         "Cut",
         "CycleDpiPresets",
         "CycleOnboardProfile",
+        "CycleAppProfile",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -452,6 +453,7 @@ fn category_dpi_variants() {
     assert_eq!(Action::NextDpiPreset.category(), Category::Dpi);
     assert_eq!(Action::PrevDpiPreset.category(), Category::Dpi);
     assert_eq!(Action::CycleOnboardProfile.category(), Category::Dpi);
+    assert_eq!(Action::CycleAppProfile.category(), Category::Dpi);
     assert_eq!(Action::ToggleSmartShift.category(), Category::Dpi);
 }
 

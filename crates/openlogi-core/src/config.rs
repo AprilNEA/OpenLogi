@@ -43,7 +43,7 @@ use crate::binding::{
     RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::device_order::PhysicalDeviceKey;
-use crate::hid::Dpi;
+use crate::hid::{Dpi, ReportRateHz};
 #[cfg(feature = "fs")]
 use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
@@ -864,6 +864,21 @@ impl Config {
     /// re-apply it when the device reconnects (#189).
     pub fn set_dpi(&mut self, device_key: &str, dpi: Dpi) {
         self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
+    }
+
+    /// The committed report rate for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn report_rate(&self, device_key: &str) -> Option<ReportRateHz> {
+        self.devices.get(device_key).and_then(|d| d.report_rate)
+    }
+
+    /// Record the committed report rate for `device_key`, so the agent can
+    /// re-apply it when the device reconnects.
+    pub fn set_report_rate(&mut self, device_key: &str, rate: ReportRateHz) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .report_rate = Some(rate);
     }
 
     /// The SmartShift wheel config for `device_key`, or `None` if never set.

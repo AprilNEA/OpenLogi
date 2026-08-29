@@ -22,7 +22,9 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+use crate::hardware::{
+    cycle_onboard_profile_in_background, toggle_smartshift_in_background, write_dpi_in_background,
+};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
@@ -63,6 +65,7 @@ struct ActionExecutor {
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    app_profile_cycle: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 impl ActionExecutor {
@@ -108,6 +111,31 @@ impl ActionExecutor {
                     &self.receiver_access,
                     target,
                 );
+                return;
+            }
+            Action::CycleOnboardProfile => {
+                let target = self
+                    .dpi_cycle
+                    .read()
+                    .ok()
+                    .and_then(|cycles| cycles.target_for(device_key));
+                info!("onboard profile cycle → writing to device");
+                cycle_onboard_profile_in_background(
+                    &self.capture,
+                    &self.registry,
+                    &self.receiver_access,
+                    target,
+                );
+                return;
+            }
+            Action::CycleAppProfile => {
+                let Some(key) = device_key else {
+                    warn!("app profile cycle ignored — no target device");
+                    return;
+                };
+                if self.app_profile_cycle.send(key.to_string()).is_err() {
+                    warn!("app profile cycle runtime unavailable — trigger ignored");
+                }
                 return;
             }
             // BrowserBack/BrowserForward fall through to the keyboard shortcut
@@ -218,6 +246,7 @@ impl ActionRuntime {
         registry: ChannelRegistry,
         receiver_access: ReceiverAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        app_profile_cycle: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
@@ -225,6 +254,7 @@ impl ActionRuntime {
             registry,
             receiver_access,
             action_ring,
+            app_profile_cycle,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;

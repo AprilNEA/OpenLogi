@@ -119,6 +119,7 @@ fn spawn_ipc_server(
 pub(crate) struct InputServices {
     pub(crate) ring: Arc<ActionRingManager>,
     pub(crate) triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    pub(crate) app_profile_cycles: tokio::sync::mpsc::UnboundedReceiver<String>,
     pub(crate) dispatcher: ActionDispatcher,
     action_runtime: ActionRuntime,
     pub(crate) scroll_input: ScrollInputHandle,
@@ -128,13 +129,15 @@ pub(crate) struct InputServices {
 impl InputServices {
     fn start(shared: &SharedRuntime) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
-        let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
+        let (ring_sender, triggers) = tokio::sync::mpsc::unbounded_channel();
+        let (app_profile_sender, app_profile_cycles) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime = match ActionRuntime::new(
             shared.dpi_cycle.clone(),
             shared.capture_channel.clone(),
             shared.channel_registry.clone(),
             shared.receiver_access.clone(),
-            sender,
+            ring_sender,
+            app_profile_sender,
         ) {
             Ok(runtime) => runtime,
             Err(e) => {
@@ -154,6 +157,7 @@ impl InputServices {
         Some(Self {
             ring,
             triggers,
+            app_profile_cycles,
             dispatcher,
             action_runtime,
             scroll_input,

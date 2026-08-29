@@ -22,6 +22,7 @@ use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::report_rate::ReportRatePanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
@@ -172,6 +173,7 @@ pub struct AppView {
     action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
+    report_rate_panel: Entity<ReportRatePanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
@@ -234,6 +236,7 @@ impl AppView {
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
+        let report_rate_panel = cx.new(ReportRatePanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
@@ -281,6 +284,7 @@ impl AppView {
                 // language switch already refreshes every window, and the root
                 // caches no localized text.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::ReportRateChanged(_)
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -304,6 +308,7 @@ impl AppView {
             action_ring_panel,
             keyboard_model,
             dpi_panel,
+            report_rate_panel,
             smartshift_panel,
             lighting_panel,
             camera_preview,
@@ -617,6 +622,7 @@ impl Render for AppView {
                         action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
+                        report_rate_panel: &self.report_rate_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
@@ -847,6 +853,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            report_rate: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -869,6 +876,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            report_rate: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
@@ -889,6 +897,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            report_rate: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));

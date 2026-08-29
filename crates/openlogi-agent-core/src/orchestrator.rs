@@ -142,6 +142,8 @@ pub struct Orchestrator {
     devices: Vec<AgentDevice>,
     current: usize,
     current_app: Option<String>,
+    /// Manual per-device app-profile choice from [`Action::CycleAppProfile`].
+    app_profile_override: HashMap<String, Option<String>>,
     /// The latest inventory snapshot, kept so the IPC server can answer the
     /// GUI's `inventory()` polls without re-enumerating (the agent owns all
     /// device I/O). The enum keeps "nothing checked yet" and "enumeration
@@ -234,6 +236,7 @@ impl Orchestrator {
             devices: Vec::new(),
             current: 0,
             current_app: None,
+            app_profile_override: HashMap::new(),
             inventory: InventoryState::Pending,
             reapply_all_next_refresh: false,
             hid_open_failures: false,
@@ -311,7 +314,7 @@ impl Orchestrator {
         let bindings = button_bindings_for(
             &self.config,
             Some(&dev.config_key),
-            self.current_app.as_deref(),
+            self.effective_app_for(&dev.config_key),
         );
         let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
             .iter()
@@ -337,11 +340,12 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
+        let app = key.and_then(|device_key| self.effective_app_for(device_key));
         // One write publishes both hook maps atomically, so a button press during
         // an owner switch can't observe a half-updated state.
         write_value(
             &self.shared.hook_maps,
-            self.hook_maps_for(key, self.current_app.as_deref()),
+            self.hook_maps_for(key, app),
             "hook_maps",
         );
         self.publish_device_runtime();
@@ -424,7 +428,7 @@ impl Orchestrator {
                     &self.config,
                     &dev.config_key,
                     route,
-                    self.current_app.as_deref(),
+                    self.effective_app_for(&dev.config_key),
                     rearm_generation,
                 ))
             })
@@ -694,7 +698,7 @@ impl Orchestrator {
         if !ring.enabled {
             return None;
         }
-        let layout = ring.effective_layout(self.current_app.as_deref());
+        let layout = ring.effective_layout(self.effective_app_for(key));
         if layout.slots.is_empty() {
             return None;
         }
@@ -780,13 +784,18 @@ impl Orchestrator {
     pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
         let id = app.as_ref().map(|app| app.id.clone());
         self.observable.set_foreground(app);
+        self.app_profile_override.clear();
         if id == self.current_app {
             return false;
         }
         self.current_app = id;
         write_value(
             &self.shared.hook_maps,
-            self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
+            self.hook_maps_for(
+                self.current_key(),
+                self.current_key()
+                    .and_then(|key| self.effective_app_for(key)),
+            ),
             "hook_maps",
         );
         // Capture plans are app-scoped (per-app binding overlays); republish
@@ -871,7 +880,7 @@ impl Orchestrator {
             };
             let stored = self
                 .config
-                .effective_bindings(&dev.config_key, self.current_app.as_deref());
+                .effective_bindings(&dev.config_key, self.effective_app_for(&dev.config_key));
             if stored.is_empty() {
                 continue;
             }
@@ -900,6 +909,68 @@ impl Orchestrator {
                 crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
             }
         }
+    }
+
+    /// Resolved application profile for `device_key`: a manual cycle override
+    /// when set, otherwise the foreground application.
+    #[must_use]
+    pub fn effective_app_for(&self, device_key: &str) -> Option<&str> {
+        if let Some(app) = self.app_profile_override.get(device_key) {
+            return app.as_deref();
+        }
+        self.current_app.as_deref()
+    }
+
+    /// Advance the saved application-profile scope for `device_key`.
+    pub fn cycle_app_profile(&mut self, device_key: &str) -> bool {
+        let profiles: Vec<Option<String>> = std::iter::once(None)
+            .chain(
+                self.config
+                    .app_profiles(device_key)
+                    .map(str::to_string),
+            )
+            .collect();
+        if profiles.len() <= 1 {
+            tracing::info!(device_key, "no app profiles configured — cycle ignored");
+            return false;
+        }
+        let current = if let Some(stored) = self.app_profile_override.get(device_key) {
+            stored.clone()
+        } else {
+            self.current_app.clone().filter(|id| {
+                profiles
+                    .iter()
+                    .any(|profile| profile.as_deref() == Some(id.as_str()))
+            })
+        };
+        let idx = profiles
+            .iter()
+            .position(|profile| *profile == current)
+            .unwrap_or(0);
+        let next = profiles[(idx + 1) % profiles.len()].clone();
+        self.app_profile_override
+            .insert(device_key.to_string(), next.clone());
+        tracing::info!(device_key, profile = ?next, "cycled application profile");
+        self.publish_capture_plans();
+        publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+        if self.current_key() == Some(device_key) {
+            write_value(
+                &self.shared.hook_maps,
+                self.hook_maps_for(
+                    Some(device_key),
+                    self.effective_app_for(device_key),
+                ),
+                "hook_maps",
+            );
+        }
+        if let Some(dev) = self
+            .devices
+            .iter()
+            .find(|dev| dev.config_key == device_key && dev.online)
+        {
+            self.reapply_volatile_settings(dev);
+        }
+        true
     }
 }
 

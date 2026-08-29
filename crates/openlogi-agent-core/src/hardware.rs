@@ -28,7 +28,7 @@ use openlogi_hid::{
     SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::receiver_access::ReceiverAccess;
 
@@ -238,6 +238,36 @@ pub fn toggle_smartshift_in_background(
     );
 }
 
+/// Spawn an OS thread that advances the active onboard flash profile on the
+/// device at `target`.
+pub fn cycle_onboard_profile_in_background(
+    capture: &CaptureChannel,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
+    target: Option<DeviceRoute>,
+) {
+    let Some(target) = target else {
+        debug!("no target device — onboard profile cycle skipped");
+        return;
+    };
+    let index = target.device_index();
+    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+        "onboard profile cycle",
+        |shared| async move { openlogi_hid::cycle_onboard_profile_on(&shared).await },
+        move |result| match result {
+            Ok(Ok(profile)) => info!(index, profile, "onboard profile cycled"),
+            Ok(Err(WriteError::FeatureUnsupported { .. })) => {
+                debug!(index, "onboard profile cycle unsupported");
+            }
+            Ok(Err(error)) => warn!(error = ?error, index, "onboard profile cycle failed"),
+            Err(_) => warn!(
+                index,
+                "onboard profile cycle timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
+}
+
 /// Spawn an OS thread that writes the keyboard Fn-lock state to `op`'s device
 /// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
@@ -307,6 +337,7 @@ pub fn reapply_mouse_volatile_in_background(
     inverted: Option<bool>,
     dpi: Option<Dpi>,
     smartshift: Option<SmartShiftStatus>,
+    report_rate: Option<openlogi_core::hid::ReportRateHz>,
 ) {
     let Ok(shared) = op.resolve() else {
         debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
@@ -358,6 +389,20 @@ pub fn reapply_mouse_volatile_in_background(
                     Err(_) => warn!(
                         index,
                         "SmartShift write timed out (device asleep/unresponsive)"
+                    ),
+                }
+            }
+            if let Some(rate) = report_rate {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    openlogi_hid::set_report_rate_on(&shared, rate).await
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => debug!(index, %rate, "report rate written to device"),
+                    Ok(Err(e)) => warn!(error = ?e, "report rate write failed"),
+                    Err(_) => warn!(
+                        %rate,
+                        "report rate write timed out (device asleep/unresponsive)"
                     ),
                 }
             }

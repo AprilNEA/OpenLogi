@@ -43,6 +43,9 @@ pub enum WriteError {
     /// Device reported no valid DPI values.
     #[error("device returned no supported DPI values")]
     EmptyDpiList,
+    /// Device reported no valid report-rate values.
+    #[error("device returned no supported report-rate values")]
+    EmptyReportRateList,
     /// Generic HID++ protocol error serialized as text.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
@@ -136,6 +139,10 @@ pub enum HidppOperation {
     /// Read or write HID++ `0x8100` onboard profiles. Appended last — variant
     /// order is wire format.
     OnboardProfiles,
+    /// Read the active report rate and supported values.
+    ReadReportRate,
+    /// Write the active report rate.
+    WriteReportRate,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

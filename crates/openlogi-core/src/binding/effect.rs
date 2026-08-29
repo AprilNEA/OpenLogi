@@ -266,6 +266,7 @@ impl Action {
             | Action::NextDpiPreset
             | Action::PrevDpiPreset
             | Action::CycleOnboardProfile
+            | Action::CycleAppProfile
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::ShowActionsRing

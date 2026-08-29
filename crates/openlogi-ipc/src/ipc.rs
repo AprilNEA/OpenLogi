@@ -18,7 +18,7 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, LightingInfo, OnboardProfileSnapshot, PairingError,
-    PasskeyMethod, ReceiverSelector, SmartShiftStatus, WriteError,
+    PasskeyMethod, ReceiverSelector, ReportRateHz, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -69,7 +69,9 @@ pub use succession::Identity;
 ///      DPI slots and LED effects alongside the button table.
 /// v33: [`Lighting`] appended `effect`/`speed`/`zones`; [`Agent::read_lighting_info`]
 ///      appended so the Lighting tab can filter firmware and host prefabs.
-pub const PROTOCOL_VERSION: u32 = 33;
+/// v34: [`Capabilities::report_rate`] appended; [`Agent::read_report_rate`] and
+///      [`Agent::set_report_rate`] appended for HID++ `0x8060`/`0x8061`.
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -332,6 +334,9 @@ impl From<PairingError> for PairingFailure {
             PairingError::MalformedNotification(what) => Self::Hid {
                 message: format!("malformed pairing notification ({what})"),
             },
+            PairingError::UnsupportedCommand => Self::Hid {
+                message: "unsupported pairing command".into(),
+            },
         }
     }
 }
@@ -576,4 +581,8 @@ pub trait Agent {
     /// availability. The GUI caches this per device; it is not polled with
     /// inventory.
     async fn read_lighting_info(route: DeviceRoute) -> Result<LightingInfo, WriteError>;
+    /// Read the current report rate and supported values from `route`.
+    async fn read_report_rate(route: DeviceRoute) -> Result<ReportRateInfo, WriteError>;
+    /// Apply a report rate to `route` now.
+    async fn set_report_rate(route: DeviceRoute, rate: ReportRateHz) -> Result<(), WriteError>;
 }

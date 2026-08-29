@@ -17,6 +17,7 @@ use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
 use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
+use openlogi_device::SharedChannel;
 use openlogi_device::ChannelPool;
 use openlogi_device::DeviceRoute;
 use openlogi_device::backend::{HidBackend, HotplugStream};
@@ -51,6 +52,21 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the report rate and supported values of the device `route` reaches.
+pub async fn get_report_rate_info(
+    route: &DeviceRoute,
+) -> Result<device::ReportRateInfo, WriteError> {
+    device::get_report_rate_info(&*native_backend(), route).await
+}
+
+/// Write a new report rate to the device `route` reaches.
+pub async fn set_report_rate(
+    route: &DeviceRoute,
+    rate: device::ReportRateHz,
+) -> Result<(), WriteError> {
+    device::set_report_rate(&*native_backend(), route, rate).await
 }
 
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.
@@ -236,6 +252,16 @@ pub async fn apply_onboard_button_bindings(
     >,
 ) -> Result<(), WriteError> {
     device::apply_onboard_button_bindings(&*native_backend(), route, bindings).await
+}
+
+/// Advance the active onboard profile stored in device flash for `route`.
+pub async fn cycle_onboard_profile(route: &DeviceRoute) -> Result<u8, WriteError> {
+    device::cycle_onboard_profile(&*native_backend(), route).await
+}
+
+/// Advance the active onboard profile on an already-open channel.
+pub async fn cycle_onboard_profile_on(shared: &SharedChannel) -> Result<u8, WriteError> {
+    device::cycle_onboard_profile_on(shared).await
 }
 
 /// Read the raw battery report of the device `route` reaches.

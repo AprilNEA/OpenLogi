@@ -229,11 +229,18 @@ struct DpiState {
     capabilities: DpiCapabilities,
 }
 
+/// Mutable report-rate state for one scripted device.
+struct ReportRateState {
+    current: openlogi_core::hid::ReportRateHz,
+    capabilities: openlogi_core::hid::ReportRateCapabilities,
+}
+
 /// What one scripted device answers to the settings RPCs. `None` / `false`
 /// answer [`WriteError::FeatureUnsupported`], exercising the GUI's permanent-
 /// error path (it must stop re-probing).
 struct DeviceSettings {
     dpi: Option<DpiState>,
+    report_rate: Option<ReportRateState>,
     smartshift: Option<SmartShiftStatus>,
     lighting: bool,
 }
@@ -242,6 +249,7 @@ impl DeviceSettings {
     fn unsupported() -> Self {
         Self {
             dpi: None,
+            report_rate: None,
             smartshift: None,
             lighting: false,
         }
@@ -295,6 +303,7 @@ impl State {
                     current: Dpi::new(1600),
                     capabilities: DpiCapabilities::new((200u16..=8000).step_by(50).collect())?,
                 }),
+                report_rate: None,
                 smartshift: Some(SmartShiftStatus {
                     mode: SmartShiftMode::Ratchet,
                     auto_disengage: SmartShiftAutoDisengage::Threshold(
@@ -310,6 +319,7 @@ impl State {
             KEYBOARD_SLOT,
             DeviceSettings {
                 dpi: None,
+                report_rate: None,
                 smartshift: None,
                 lighting: true,
             },
@@ -320,6 +330,12 @@ impl State {
                 dpi: Some(DpiState {
                     current: Dpi::new(1000),
                     capabilities: DpiCapabilities::new((400u16..=4000).step_by(100).collect())?,
+                }),
+                report_rate: Some(ReportRateState {
+                    current: openlogi_core::hid::ReportRateHz::new(1000),
+                    capabilities: openlogi_core::hid::ReportRateCapabilities::new(vec![
+                        125, 250, 500, 1000, 2000,
+                    ])?,
                 }),
                 smartshift: None,
                 lighting: false,
@@ -596,6 +612,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: true,
                     haptic_feedback: true,
                     haptic_panel: true,
+                    report_rate: true,
                 }),
             },
             PairedDevice {
@@ -643,6 +660,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    report_rate: false,
                 }),
             },
         ],
@@ -692,6 +710,7 @@ fn direct_inventory() -> DeviceInventory {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                report_rate: false,
             }),
         }],
     }
@@ -911,6 +930,44 @@ impl Agent for MockAgent {
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })
+    }
+
+    async fn read_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::ReportRateInfo, WriteError> {
+        let state = self.state.lock().await;
+        state
+            .settings_for(&route)?
+            .report_rate
+            .as_ref()
+            .map(|rate| openlogi_core::hid::ReportRateInfo {
+                current: rate.current,
+                capabilities: rate.capabilities.clone(),
+            })
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x8060,
+            })
+    }
+
+    async fn set_report_rate(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        rate: openlogi_core::hid::ReportRateHz,
+    ) -> Result<(), WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let report_rate = settings
+            .report_rate
+            .as_mut()
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x8060,
+            })?;
+        report_rate.current = rate;
+        info!(%route, %rate, "set_report_rate");
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

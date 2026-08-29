@@ -14,6 +14,7 @@ pub mod light;
 pub mod lighting;
 pub mod onboard;
 pub mod pairing;
+pub mod report_rate;
 pub mod route;
 pub mod smartshift;
 
@@ -26,6 +27,7 @@ pub use lighting::{
 };
 pub use onboard::{OnboardLed, OnboardLedMode, OnboardProfileSnapshot};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
+pub use report_rate::{ReportRateCapabilities, ReportRateHz, ReportRateInfo};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
     ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,

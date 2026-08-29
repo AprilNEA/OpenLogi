@@ -231,6 +231,58 @@ pub async fn read_onboard_profile_on(
     Ok(snapshot_from_dump(&dump))
 }
 
+/// Advance the active onboard profile on an already-open channel.
+pub async fn cycle_onboard_profile_on(shared: &SharedChannel) -> Result<u8, WriteError> {
+    cycle_onboard_profile_on_channel(
+        shared.channel(),
+        shared.device_index(),
+        route_product_id(shared.route()),
+    )
+    .await
+}
+
+/// Advance the active onboard profile for `route`.
+pub async fn cycle_onboard_profile(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<u8, WriteError> {
+    let index = route.device_index();
+    let product_id = route_product_id(route);
+    with_route(backend, route, move |channel| async move {
+        cycle_onboard_profile_on_channel(&channel, index, product_id).await
+    })
+    .await
+}
+
+async fn cycle_onboard_profile_on_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    index: u8,
+    product_id: Option<u16>,
+) -> Result<u8, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<OnboardProfilesFeature>(&mut device).await?;
+    let description = feature.get_profiles_description().await.map_err(classify)?;
+    if description.profile_count <= 1 {
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: FEATURE,
+        });
+    }
+    if feature.get_onboard_mode().await.map_err(classify)? != OnboardMode::Onboard {
+        feature
+            .set_onboard_mode(OnboardMode::Onboard)
+            .await
+            .map_err(classify)?;
+    }
+    let raw = feature.get_current_profile_raw().await.map_err(classify)?;
+    let one_based = product_id.is_some_and(profile_index_is_one_based);
+    let active = decode_active_profile_index(raw, description.profile_count, one_based);
+    let next = (active + 1) % description.profile_count;
+    feature.set_current_profile(next).await.map_err(classify)?;
+    Ok(next)
+}
+
 fn snapshot_from_dump(dump: &OnboardProfilesDump) -> OnboardProfileSnapshot {
     OnboardProfileSnapshot {
         bindings: actions_from_dump(dump),

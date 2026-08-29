@@ -193,6 +193,9 @@ pub enum Action {
     PrevDpiPreset,
     /// Cycle the mouse's onboard flash profiles.
     CycleOnboardProfile,
+    /// Cycle OpenLogi application profiles (default, then each saved per-app
+    /// profile) for the triggering device.
+    CycleAppProfile,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -287,7 +290,8 @@ macro_rules! for_each_unit_action {
             CycleDpiPresets "Cycle DPI Presets" Dpi Gauge,
             NextDpiPreset "DPI Up" Dpi Gauge,
             PrevDpiPreset "DPI Down" Dpi Gauge,
-            CycleOnboardProfile "Cycle Profile" Dpi Refresh,
+            CycleOnboardProfile "Cycle Onboard Profile" Dpi Refresh,
+            CycleAppProfile "Cycle App Profile" Dpi Refresh,
             ToggleSmartShift "Toggle SmartShift" Dpi Refresh,
             // Scroll
             ScrollUp "Scroll Up" Scroll ArrowUp,

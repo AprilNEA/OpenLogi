@@ -174,6 +174,7 @@ impl AppState {
         // when the previous one vanished); re-seed the displayed DPI so it
         // tracks the now-current device rather than the old one.
         self.pointer.dpi = self.dpi_for_current();
+        self.pointer.report_rate = self.report_rate_for_current();
         self.refresh_binding_projections();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
@@ -380,6 +381,7 @@ impl AppState {
         // selected device's known DPI so the panel doesn't keep showing the
         // previous device's number until a fresh read lands.
         self.pointer.dpi = self.dpi_for_current();
+        self.pointer.report_rate = self.report_rate_for_current();
         self.refresh_binding_projections();
         let Some(key) = self
             .current_record()

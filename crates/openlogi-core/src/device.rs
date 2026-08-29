@@ -129,6 +129,9 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// Adjustable report/polling rate — HID++ `0x8060` / `0x8061`.
+    #[serde(default)]
+    pub report_rate: bool,
 }
 
 impl Capabilities {
@@ -138,6 +141,7 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 6] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04, 0x8100];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
+        const REPORT_RATE: [u16; 2] = [0x8060, 0x8061];
         // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
         // (0x8080) — all three driven by `set_keyboard_color`, which prefers
         // 0x8070's fixed effect to override a running onboard profile and falls
@@ -154,6 +158,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            report_rate: has(&REPORT_RATE),
         }
     }
 
@@ -174,6 +179,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                report_rate: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -479,6 +485,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+            report_rate: false,
                 }),
             }],
         }
@@ -549,6 +556,7 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+            report_rate: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -565,6 +573,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+            report_rate: false,
             }
         );
         // No driving features → nothing offered.

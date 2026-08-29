@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, LightingInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{
+    DeviceRoute, DpiInfo, LightingInfo, ReportRateInfo, SmartShiftStatus, WriteError,
+};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
@@ -14,11 +16,13 @@ use tokio::sync::mpsc;
 
 use super::ipc::Command;
 use crate::state::{
-    AppState, DeviceKey, DpiStatus, LightingLoad, Load, SmartShiftLoad, StateEvent,
+    AppState, DeviceKey, DpiStatus, LightingLoad, Load, ReportRateStatus, SmartShiftLoad,
+    StateEvent,
 };
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
+const REPORT_RATE: &str = "report-rate";
 const SMARTSHIFT: &str = "smartshift";
 const LIGHTING: &str = "lighting";
 
@@ -51,6 +55,7 @@ pub(crate) struct DeviceReads {
     runtime: Option<Arc<dyn Runtime>>,
     next_generation: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
+    report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     lighting: BTreeMap<DeviceKey, DeviceRead<LightingInfo>>,
 }
@@ -104,6 +109,68 @@ impl DeviceReads {
             }
         });
         self.dpi.insert(
+            key,
+            DeviceRead {
+                route,
+                generation,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+
+    /// Start the report-rate query unless the same device route is already subscribed.
+    pub(crate) fn ensure_report_rate(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .report_rate
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_report_rate(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let generation = self.take_generation();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| Command::ReadReportRate(route, reply), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !report_rate_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(REPORT_RATE, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), report_rate_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), report_rate_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_report_rate(&observed_key, generation, load)
+            {
+                state.apply_report_rate_read(&observed_key);
+                cx.emit(StateEvent::ReportRateChanged(observed_key.clone()));
+            }
+        });
+        self.report_rate.insert(
             key,
             DeviceRead {
                 route,
@@ -290,6 +357,28 @@ impl DeviceReads {
     }
 
     #[must_use]
+    pub(crate) fn report_rate_status(&self, key: &DeviceKey) -> ReportRateStatus {
+        self.report_rate
+            .get(key)
+            .map_or(Load::Unknown, |read| read.load.clone())
+    }
+
+    #[must_use]
+    pub(crate) fn report_rate_load(&self, key: &DeviceKey) -> Option<&ReportRateStatus> {
+        self.report_rate.get(key).map(|read| &read.load)
+    }
+
+    pub(crate) fn retry_report_rate(&mut self, key: &DeviceKey) {
+        let Some(read) = self.report_rate.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    #[must_use]
     pub(crate) fn smartshift_status(&self, key: &DeviceKey) -> SmartShiftLoad {
         self.smartshift
             .get(key)
@@ -340,6 +429,7 @@ impl DeviceReads {
     /// Forget both feature queries for a device and fence their old flights.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
+        self.remove_report_rate(key);
         self.remove_smartshift(key);
         self.remove_lighting(key);
     }
@@ -348,6 +438,13 @@ impl DeviceReads {
         if let Some(read) = self.dpi.remove(key) {
             drop(read);
             self.clear::<DpiInfo>(DPI, key);
+        }
+    }
+
+    pub(crate) fn remove_report_rate(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.report_rate.remove(key) {
+            drop(read);
+            self.clear::<ReportRateInfo>(REPORT_RATE, key);
         }
     }
 
@@ -377,6 +474,7 @@ impl DeviceReads {
         let removed: BTreeSet<_> = self
             .dpi
             .keys()
+            .chain(self.report_rate.keys())
             .chain(self.smartshift.keys())
             .chain(self.lighting.keys())
             .filter(|key| !present(key.as_str()))
@@ -416,6 +514,26 @@ impl DeviceReads {
     fn update_dpi(&mut self, key: &DeviceKey, generation: u64, load: DpiStatus) -> bool {
         let Some(read) = self
             .dpi
+            .get_mut(key)
+            .filter(|read| read.generation == generation)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_report_rate(
+        &mut self,
+        key: &DeviceKey,
+        generation: u64,
+        load: ReportRateStatus,
+    ) -> bool {
+        let Some(read) = self
+            .report_rate
             .get_mut(key)
             .filter(|read| read.generation == generation)
         else {
@@ -509,6 +627,13 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
     matches!(
         error,
         WriteError::FeatureUnsupported { .. } | WriteError::EmptyDpiList
+    )
+}
+
+fn report_rate_error_is_permanent(error: &WriteError) -> bool {
+    matches!(
+        error,
+        WriteError::FeatureUnsupported { .. } | WriteError::EmptyReportRateList
     )
 }
 

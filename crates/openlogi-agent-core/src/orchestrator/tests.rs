@@ -904,6 +904,37 @@ fn app_switch_republishes_capture_plans() {
 }
 
 #[test]
+fn cycle_app_profile_advances_default_and_per_app_bindings() {
+    let mut config = Config::default();
+    config.set_per_app_binding("a", "com.example.editor", ButtonId::Back, Some(Action::Undo));
+    config.set_per_app_binding("a", "com.example.browser", ButtonId::Back, Some(Action::Redo));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    assert_eq!(published_back_binding(&orch), Some(Action::MouseBack));
+
+    assert!(orch.cycle_app_profile("a"));
+    assert_eq!(orch.effective_app_for("a"), Some("com.example.browser"));
+    assert_eq!(published_back_binding(&orch), Some(Action::Redo));
+
+    assert!(orch.cycle_app_profile("a"));
+    assert_eq!(orch.effective_app_for("a"), Some("com.example.editor"));
+    assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+
+    assert!(orch.cycle_app_profile("a"));
+    assert_eq!(orch.effective_app_for("a"), None);
+    assert_eq!(published_back_binding(&orch), Some(Action::MouseBack));
+}
+
+#[test]
+fn cycle_app_profile_is_noop_without_saved_profiles() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    assert!(!orch.cycle_app_profile("a"));
+}
+
+#[test]
 fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
