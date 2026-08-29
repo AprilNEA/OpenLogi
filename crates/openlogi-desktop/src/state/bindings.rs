@@ -271,8 +271,6 @@ impl AppState {
         if self.bindings.editing_app(Some(device_key)) == Some(app) {
             self.bindings
                 .set_editing_app(&self.config, Some(device_key), None);
-        } else if self.editing_app() == Some(app) {
-            self.set_editing_app(None);
         }
         self.persist_and_reload("per-app profile");
     }
