@@ -6,6 +6,7 @@ paths:
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
+  - "crates/openlogi-agent/src/system_mouse/macos.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-inject/src/inject/macos.rs"
@@ -23,6 +24,7 @@ files; **keep this table in sync when you add or move one**:
 | File | What it carries |
 |---|---|
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
+| `openlogi-agent/src/system_mouse/macos.rs` | IOHIDSystem live primary-button mode + the persistent CFPreferences mirror |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |

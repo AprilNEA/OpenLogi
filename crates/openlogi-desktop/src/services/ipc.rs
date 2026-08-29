@@ -35,6 +35,8 @@ use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
 };
+#[cfg(target_os = "macos")]
+use openlogi_ipc::{PrimaryMouseButton, SystemMouseSettingError};
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
@@ -91,12 +93,28 @@ pub enum GuiUpdate {
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
+    /// Result of changing the host-wide primary mouse button. Unlike the
+    /// authoritative value, which arrives through [`Self::Snapshot`], this
+    /// reports whether the user's write was accepted or rejected.
+    #[cfg(target_os = "macos")]
+    PrimaryMouseButtonResult(Result<PrimaryMouseButton, PrimaryMouseButtonCommandError>),
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+}
+
+/// Why a primary-mouse-button command did not complete.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimaryMouseButtonCommandError {
+    /// The agent reached the platform backend, which rejected or could not
+    /// verify the requested change.
+    Rejected(SystemMouseSettingError),
+    /// The command could not reach a compatible running agent.
+    AgentUnavailable,
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
@@ -108,6 +126,8 @@ pub enum Command {
     SetLight(DeviceRoute, LightCommand, String, u64),
     SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftStatus),
+    #[cfg(target_os = "macos")]
+    SetPrimaryMouseButton(PrimaryMouseButton),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
     ReadSmartShift(
         DeviceRoute,
@@ -548,6 +568,13 @@ async fn handle(
         Command::SetSmartShift(route, status) => {
             log_apply(client.set_smartshift(ctx, route, status).await)?;
         }
+        #[cfg(target_os = "macos")]
+        Command::SetPrimaryMouseButton(button) => {
+            send_system_mouse_result(
+                update_tx,
+                client.set_primary_mouse_button(ctx, button).await,
+            )?;
+        }
         Command::ReadDpi(route, reply) => {
             let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
         }
@@ -624,6 +651,36 @@ fn log_apply(r: Result<Result<(), WriteError>, tarpc::client::RpcError>) -> Resu
     }
 }
 
+/// Forward a host-setting result to the GUI while keeping the observed snapshot
+/// as the authoritative value. A transport drop also tells the caller to
+/// reconnect after publishing the visible failure.
+#[cfg(target_os = "macos")]
+fn send_system_mouse_result(
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    result: Result<Result<PrimaryMouseButton, SystemMouseSettingError>, tarpc::client::RpcError>,
+) -> Result<(), ()> {
+    match result {
+        Ok(Ok(button)) => {
+            let _ = update_tx.send(GuiUpdate::PrimaryMouseButtonResult(Ok(button)));
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            warn!(?error, "agent could not change the primary mouse button");
+            let _ = update_tx.send(GuiUpdate::PrimaryMouseButtonResult(Err(
+                PrimaryMouseButtonCommandError::Rejected(error),
+            )));
+            Ok(())
+        }
+        Err(error) => {
+            warn!(%error, "primary mouse button command lost its agent connection");
+            let _ = update_tx.send(GuiUpdate::PrimaryMouseButtonResult(Err(
+                PrimaryMouseButtonCommandError::AgentUnavailable,
+            )));
+            Err(())
+        }
+    }
+}
+
 fn send_light_result(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     key: String,
@@ -656,13 +713,22 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     r.map_err(|_| ())
 }
 
-/// Reply to a read command that the agent is unreachable; writes are
-/// fire-and-forget so they have nothing to reply to.
+/// Reply to a command that could not reach the agent. Most writes are
+/// fire-and-forget; the primary-button and standalone-light controls retain a
+/// local result so their UI can explain why an attempted change did not land.
 #[expect(
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
 fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command) {
+    #[cfg(target_os = "macos")]
+    if matches!(&cmd, Command::SetPrimaryMouseButton(_)) {
+        let _ = update_tx.send(GuiUpdate::PrimaryMouseButtonResult(Err(
+            PrimaryMouseButtonCommandError::AgentUnavailable,
+        )));
+        return;
+    }
+
     // Transient, not a permanent feature error: the agent is just restarting,
     // so the panel should keep retrying, not latch "unsupported".
     match cmd {
@@ -768,5 +834,42 @@ mod tests {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_rejected_primary_button_write_reaches_the_gui() {
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let error = SystemMouseSettingError::Unavailable {
+            message: "persistent write rejected".to_string(),
+        };
+
+        send_system_mouse_result(&update_tx, Ok(Err(error.clone()))).unwrap();
+
+        let GuiUpdate::PrimaryMouseButtonResult(Err(PrimaryMouseButtonCommandError::Rejected(
+            actual,
+        ))) = update_rx.try_recv().unwrap()
+        else {
+            panic!("a typed platform refusal must be forwarded to the GUI");
+        };
+        assert_eq!(actual, error);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_undeliverable_primary_button_write_is_reported() {
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+
+        reply_disconnected(
+            &update_tx,
+            Command::SetPrimaryMouseButton(PrimaryMouseButton::Right),
+        );
+
+        assert!(matches!(
+            update_rx.try_recv(),
+            Ok(GuiUpdate::PrimaryMouseButtonResult(Err(
+                PrimaryMouseButtonCommandError::AgentUnavailable
+            )))
+        ));
     }
 }

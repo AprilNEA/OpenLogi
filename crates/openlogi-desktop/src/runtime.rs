@@ -275,6 +275,16 @@ impl Runtime {
                     });
                 });
             }
+            #[cfg(target_os = "macos")]
+            ipc::GuiUpdate::PrimaryMouseButtonResult(result) => {
+                cx.update(|cx| {
+                    AppState::update(cx, |state, cx| {
+                        if state.apply_primary_mouse_button_result(result) {
+                            cx.emit(StateEvent::SettingsChanged);
+                        }
+                    });
+                });
+            }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
@@ -330,6 +340,8 @@ impl Runtime {
                         state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
                     let camera_changed = state.set_camera_active(snapshot.camera_active);
                     let foreground_changed = state.set_foreground(snapshot.foreground.clone());
+                    let primary_mouse_button_changed =
+                        state.set_primary_mouse_button(snapshot.primary_mouse_button);
                     if merged {
                         cx.emit(StateEvent::InventoryChanged);
                     }
@@ -341,6 +353,9 @@ impl Runtime {
                     }
                     if foreground_changed {
                         cx.emit(StateEvent::ForegroundChanged);
+                    }
+                    if primary_mouse_button_changed {
+                        cx.emit(StateEvent::SettingsChanged);
                     }
                     let settings = state.app_settings();
                     (

@@ -496,6 +496,7 @@ impl Render for SettingsView {
                     thumbwheel: self.thumbwheel_sensitivity_slider.clone(),
                 },
                 self.registration_status,
+                cx,
             ))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod

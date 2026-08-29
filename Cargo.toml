@@ -83,6 +83,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }
 objc2-service-management = { version = "0.3.2", default-features = false }
 block2 = "0.6.2"
+mach2 = "0.6"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component
 # declares them (an explicit rev here would fork the git source and conflict).

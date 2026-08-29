@@ -58,7 +58,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    PairingPhase, PairingUpdate, PrimaryMouseButton, RingObservation, SystemMouseSettingError,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -282,6 +282,7 @@ struct State {
     phase: Option<PairingPhase>,
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
+    primary_mouse_button: PrimaryMouseButton,
     started: Instant,
 }
 
@@ -333,6 +334,7 @@ impl State {
             pairing_updates: None,
             phase: None,
             next_pairing_id: 0,
+            primary_mouse_button: PrimaryMouseButton::Left,
             started: Instant::now(),
         })
     }
@@ -760,6 +762,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
+        primary_mouse_button: cfg!(target_os = "macos").then_some(state.primary_mouse_button),
     }
 }
 
@@ -813,6 +816,19 @@ impl Agent for MockAgent {
             generation: 1,
             invocation: None,
         }
+    }
+
+    async fn set_primary_mouse_button(
+        self,
+        _: Context,
+        button: PrimaryMouseButton,
+    ) -> Result<PrimaryMouseButton, SystemMouseSettingError> {
+        if !cfg!(target_os = "macos") {
+            return Err(SystemMouseSettingError::Unsupported);
+        }
+        self.state.lock().await.primary_mouse_button = button;
+        info!(?button, "set_primary_mouse_button");
+        Ok(button)
     }
 
     async fn action_ring_hover(

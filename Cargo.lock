@@ -2822,7 +2822,7 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "lyon",
- "mach2",
+ "mach2 0.5.0",
  "media",
  "metal",
  "num_cpus",
@@ -3065,7 +3065,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "log",
- "mach2",
+ "mach2 0.5.0",
  "media",
  "metal",
  "objc",
@@ -4363,6 +4363,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5386,15 +5392,19 @@ dependencies = [
  "embed-resource",
  "futures",
  "interprocess",
+ "mach2 0.6.0",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-io-kit",
  "opener",
  "openlogi-agent-core",
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-ipc",
+ "plist",
  "rust-i18n",
  "succession",
  "sysinfo 0.38.4",

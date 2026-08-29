@@ -1,14 +1,54 @@
 //! Agent connection status and debug monitor state.
 
 use openlogi_core::device::DeviceInventory;
-use openlogi_ipc::ForegroundApps;
+use openlogi_ipc::{ForegroundApps, PrimaryMouseButton};
+
+#[cfg(target_os = "macos")]
+use crate::services::ipc::PrimaryMouseButtonCommandError;
 
 use super::{AgentLink, AppState};
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum PrimaryMouseButtonCommandState {
+    #[default]
+    Idle,
+    Pending(PrimaryMouseButton),
+    Failed(PrimaryMouseButtonCommandError),
+    /// The agent may have applied this request before the RPC connection
+    /// dropped. A matching authoritative snapshot resolves the ambiguity.
+    AwaitingConfirmation(PrimaryMouseButton),
+}
+
+#[cfg(target_os = "macos")]
+impl PrimaryMouseButtonCommandState {
+    fn error(&self) -> Option<PrimaryMouseButtonCommandError> {
+        match self {
+            Self::Failed(error) => Some(error.clone()),
+            Self::AwaitingConfirmation(_) => Some(PrimaryMouseButtonCommandError::AgentUnavailable),
+            Self::Idle | Self::Pending(_) => None,
+        }
+    }
+
+    fn reconcile_observation(&mut self, button: Option<PrimaryMouseButton>) -> bool {
+        let Self::AwaitingConfirmation(requested) = self else {
+            return false;
+        };
+        if button != Some(*requested) {
+            return false;
+        }
+        *self = Self::Idle;
+        true
+    }
+}
 
 /// Agent-owned observations accepted by the GUI for this process session.
 pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
+    primary_mouse_button: Option<PrimaryMouseButton>,
+    #[cfg(target_os = "macos")]
+    primary_mouse_button_command: PrimaryMouseButtonCommandState,
     last_ready_inventory: Vec<DeviceInventory>,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
@@ -21,6 +61,9 @@ impl Default for AgentSession {
         Self {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
+            primary_mouse_button: None,
+            #[cfg(target_os = "macos")]
+            primary_mouse_button_command: PrimaryMouseButtonCommandState::default(),
             last_ready_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
@@ -113,5 +156,96 @@ impl AppState {
 
     pub(super) fn foreground(&self) -> &ForegroundApps {
         &self.agent.foreground
+    }
+
+    /// The latest host-wide primary mouse button reported by the agent.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn primary_mouse_button(&self) -> Option<PrimaryMouseButton> {
+        self.agent.primary_mouse_button
+    }
+
+    /// Whether a host-wide primary-button write is waiting for the agent.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn primary_mouse_button_pending(&self) -> bool {
+        matches!(
+            self.agent.primary_mouse_button_command,
+            PrimaryMouseButtonCommandState::Pending(_)
+        )
+    }
+
+    /// The last primary-button write failure, retained until the user retries
+    /// or an authoritative snapshot confirms an indeterminate write.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn primary_mouse_button_error(&self) -> Option<PrimaryMouseButtonCommandError> {
+        self.agent.primary_mouse_button_command.error()
+    }
+
+    /// Adopt a host-wide primary mouse button observation, using it to resolve
+    /// a write whose RPC reply was lost after the agent may have applied it.
+    pub fn set_primary_mouse_button(&mut self, button: Option<PrimaryMouseButton>) -> bool {
+        let button_changed = self.agent.primary_mouse_button != button;
+        if button_changed {
+            self.agent.primary_mouse_button = button;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let command_changed = self
+                .agent
+                .primary_mouse_button_command
+                .reconcile_observation(button);
+            button_changed || command_changed
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            button_changed
+        }
+    }
+
+    /// Ask the agent to change the macOS system setting. The observed snapshot,
+    /// not this pending request, remains the GUI's source of truth. Returns
+    /// whether request/error presentation changed.
+    #[cfg(target_os = "macos")]
+    pub fn request_primary_mouse_button(&mut self, button: PrimaryMouseButton) -> bool {
+        let previous = self.agent.primary_mouse_button_command.clone();
+        self.agent.primary_mouse_button_command = if self
+            .send_ipc(crate::services::ipc::Command::SetPrimaryMouseButton(button))
+        {
+            PrimaryMouseButtonCommandState::Pending(button)
+        } else {
+            PrimaryMouseButtonCommandState::Failed(PrimaryMouseButtonCommandError::AgentUnavailable)
+        };
+        previous != self.agent.primary_mouse_button_command
+    }
+
+    /// Record whether the agent accepted the latest primary-button write. A
+    /// lost reply keeps the requested value so an authoritative snapshot can
+    /// still confirm it; the snapshot remains responsible for the switch value.
+    #[cfg(target_os = "macos")]
+    pub fn apply_primary_mouse_button_result(
+        &mut self,
+        result: Result<PrimaryMouseButton, PrimaryMouseButtonCommandError>,
+    ) -> bool {
+        let previous = self.agent.primary_mouse_button_command.clone();
+        self.agent.primary_mouse_button_command = match result {
+            Ok(_) => PrimaryMouseButtonCommandState::Idle,
+            Err(PrimaryMouseButtonCommandError::AgentUnavailable) => match &previous {
+                PrimaryMouseButtonCommandState::Pending(requested)
+                    if self.agent.primary_mouse_button == Some(*requested) =>
+                {
+                    PrimaryMouseButtonCommandState::Idle
+                }
+                PrimaryMouseButtonCommandState::Pending(requested) => {
+                    PrimaryMouseButtonCommandState::AwaitingConfirmation(*requested)
+                }
+                _ => PrimaryMouseButtonCommandState::Failed(
+                    PrimaryMouseButtonCommandError::AgentUnavailable,
+                ),
+            },
+            Err(error) => PrimaryMouseButtonCommandState::Failed(error),
+        };
+        previous != self.agent.primary_mouse_button_command
     }
 }

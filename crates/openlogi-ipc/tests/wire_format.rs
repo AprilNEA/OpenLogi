@@ -47,7 +47,8 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
     Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    PairingFailure, PairingPhase, PairingUpdate, PrimaryMouseButton, RingObservation,
+    SystemMouseSettingError,
 };
 use succession::{Compat, Run};
 
@@ -101,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -205,6 +206,12 @@ fn request_variant_order() {
             kind: ClientKind::Overlay,
         },
         "1902",
+    );
+    assert_wire(
+        &AgentRequest::SetPrimaryMouseButton {
+            button: PrimaryMouseButton::Right,
+        },
+        "1a01",
     );
 }
 
@@ -319,15 +326,29 @@ fn agent_snapshot() {
         // Pinned on its own in `foreground_apps` below, like the inventory and
         // pairing fields.
         foreground: ForegroundApps::default(),
+        primary_mouse_button: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
+}
+
+#[test]
+fn system_mouse_types() {
+    assert_wire(&PrimaryMouseButton::Left, "00");
+    assert_wire(&PrimaryMouseButton::Right, "01");
+    assert_wire(&SystemMouseSettingError::Unsupported, "00");
+    assert_wire(
+        &SystemMouseSettingError::Unavailable {
+            message: "bad".into(),
+        },
+        "0103626164",
+    );
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
