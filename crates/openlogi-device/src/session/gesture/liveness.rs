@@ -63,6 +63,8 @@ pub(super) enum PingOutcome {
     Delivered,
     /// Neither a response nor any other report arrived before the timeout.
     AllSilent,
+    /// The channel failed before delivery could be established.
+    ChannelFailed,
 }
 
 /// What capture should do after accounting for a completed probe.
@@ -119,6 +121,9 @@ impl CaptureLiveness {
     ) -> LivenessDecision {
         let activity = self.take_activity(now, generation);
         self.idle_deadline = now + IDLE_INTERVAL;
+        if outcome == PingOutcome::ChannelFailed {
+            return LivenessDecision::Restart;
+        }
         if activity || outcome == PingOutcome::Delivered {
             self.silent_strikes = 0;
             return LivenessDecision::Continue;
@@ -232,6 +237,22 @@ mod tests {
                 Instant::now(),
                 activity.generation(),
                 PingOutcome::AllSilent,
+            ),
+            LivenessDecision::Restart
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_failure_restarts_without_a_second_probe() {
+        let activity = ChannelActivity::default();
+        let mut liveness = CaptureLiveness::new(Instant::now(), activity.generation());
+
+        tokio::time::advance(IDLE_INTERVAL).await;
+        assert!(matches!(
+            liveness.finish_ping(
+                Instant::now(),
+                activity.generation(),
+                PingOutcome::ChannelFailed,
             ),
             LivenessDecision::Restart
         ));

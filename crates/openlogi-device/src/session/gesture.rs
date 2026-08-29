@@ -331,9 +331,10 @@ async fn run_capture_session_on(
     // replies and events silently routed elsewhere) turns every captured
     // button to dead air with nothing to notice. Ping the device through this
     // channel; consecutive all-silent pings mean the channel — not the device
-    // — is gone (a sleeping/unreachable device still gets us an error *reply*,
-    // which proves delivery and resets the count). Exiting lets the manager
-    // re-arm on a fresh channel.
+    // — is gone (a sleeping/unreachable device can still send an HID++ error
+    // reply, which proves delivery and resets the count). A transport/setup
+    // error proves neither delivery nor silence, so it restarts immediately.
+    // Exiting lets the manager re-arm on a fresh channel.
     let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
     let wireless = root
         .get_feature(WirelessDeviceStatusFeature::ID)
@@ -583,9 +584,14 @@ async fn monitor_capture(
                         hidpp::channel::ChannelError::Timeout
                         | hidpp::channel::ChannelError::NoResponse,
                     )) => PingOutcome::AllSilent,
-                    // Any reply — pong, feature error, unreachable-device
-                    // error — proves the channel still delivers.
-                    _ => PingOutcome::Delivered,
+                    // A pong, feature error, or unsupported response all prove
+                    // that this channel still receives device replies.
+                    Ok(_)
+                    | Err(
+                        v20::Hidpp20Error::Feature(_)
+                        | v20::Hidpp20Error::UnsupportedResponse,
+                    ) => PingOutcome::Delivered,
+                    Err(_) => PingOutcome::ChannelFailed,
                 };
                 if liveness.finish_ping(
                     tokio::time::Instant::now(),
