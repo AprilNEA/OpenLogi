@@ -5395,6 +5395,7 @@ dependencies = [
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-ipc",
+ "openlogi-monitor",
  "rust-i18n",
  "succession",
  "sysinfo 0.38.4",
@@ -5418,6 +5419,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "openlogi-monitor",
  "tokio",
  "tracing",
 ]
@@ -5486,6 +5488,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hid",
  "openlogi-ipc",
+ "openlogi-monitor",
  "png 0.17.16",
  "tarpc",
  "tokio",
@@ -5544,6 +5547,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hook",
  "openlogi-ipc",
+ "openlogi-monitor",
  "openlogi-permissions",
  "openlogi-ui",
  "rust-i18n",
@@ -5687,10 +5691,21 @@ dependencies = [
  "bincode",
  "interprocess",
  "openlogi-core",
+ "openlogi-monitor",
  "serde",
  "succession",
  "tarpc",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "openlogi-monitor"
+version = "0.8.1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

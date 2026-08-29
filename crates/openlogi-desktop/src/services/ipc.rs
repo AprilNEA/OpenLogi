@@ -32,8 +32,8 @@ use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, MonitorCommandError,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -113,6 +113,13 @@ pub enum Command {
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
     ),
+    ReadMonitors(oneshot::Sender<Result<Vec<openlogi_monitor::MonitorInfo>, MonitorCommandError>>),
+    TestMonitorInput {
+        monitor_id: String,
+        input: u32,
+        restore_after_ms: u64,
+        reply: oneshot::Sender<Result<(), MonitorCommandError>>,
+    },
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
@@ -554,6 +561,21 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
+        Command::ReadMonitors(reply) => {
+            let _ = reply.send(rpc_result(client.list_monitors(ctx).await)?);
+        }
+        Command::TestMonitorInput {
+            monitor_id,
+            input,
+            restore_after_ms,
+            reply,
+        } => {
+            let _ = reply.send(rpc_result(
+                client
+                    .test_monitor_input(ctx, monitor_id, input, restore_after_ms)
+                    .await,
+            )?);
+        }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
             // is still a reload that did not happen — and the file on disk has
@@ -671,6 +693,16 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
         }
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadMonitors(reply) => {
+            let _ = reply.send(Err(MonitorCommandError {
+                message: "agent unavailable".into(),
+            }));
+        }
+        Command::TestMonitorInput { reply, .. } => {
+            let _ = reply.send(Err(MonitorCommandError {
+                message: "agent unavailable".into(),
+            }));
         }
         Command::SetLight(_, command, key, request_id) => {
             let _ = update_tx.send(GuiUpdate::LightCommandResult {

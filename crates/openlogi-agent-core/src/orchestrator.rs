@@ -1003,7 +1003,35 @@ fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitch
                         .and_then(|device| device.route.clone())
                 })
                 .collect::<Vec<_>>();
-            (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
+            let monitor_inputs = if settings.host_switch_monitor_enabled {
+                settings
+                    .host_switch_monitor_inputs
+                    .iter()
+                    .filter_map(|(host, assignments)| {
+                        let Ok(host @ 0..=2) = host.parse::<u8>() else {
+                            warn!(host, "ignoring invalid host switch monitor input key");
+                            return None;
+                        };
+                        Some((
+                            host,
+                            assignments
+                                .iter()
+                                .map(|assignment| openlogi_monitor::MonitorInputAssignment {
+                                    monitor_id: assignment.monitor_id.clone(),
+                                    input: assignment.input,
+                                })
+                                .collect::<Vec<_>>(),
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            } else {
+                BTreeMap::new()
+            };
+            (!targets.is_empty() || !monitor_inputs.is_empty()).then_some(HostSwitchLink {
+                keyboard,
+                targets,
+                monitor_inputs,
+            })
         })
         .collect()
 }

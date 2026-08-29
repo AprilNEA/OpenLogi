@@ -1,5 +1,6 @@
 //! Keep configured keyboard → pointing-device host-switch links armed.
 
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 
@@ -10,7 +11,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use crate::observable::ObservableState;
 use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess, ReceiverRequestState};
+use std::sync::Arc;
 
 const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -23,13 +26,20 @@ pub struct HostSwitchLink {
     pub keyboard: DeviceRoute,
     /// Pointing devices that follow the keyboard.
     pub targets: Vec<DeviceRoute>,
+    /// Monitor DDC/CI input switches keyed by zero-based host index.
+    pub monitor_inputs: BTreeMap<u8, Vec<openlogi_monitor::MonitorInputAssignment>>,
 }
 
 /// Read-only, lossless, coalescing view of resolved links.
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
 /// Spawn the host switch session manager.
-pub fn spawn(links: &HostSwitchLinks, channel_pool: ChannelPool, receiver_access: ReceiverAccess) {
+pub fn spawn(
+    links: &HostSwitchLinks,
+    channel_pool: ChannelPool,
+    receiver_access: ReceiverAccess,
+    observable: Arc<ObservableState>,
+) {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     thread::spawn(move || {
@@ -48,6 +58,7 @@ pub fn spawn(links: &HostSwitchLinks, channel_pool: ChannelPool, receiver_access
             channel_pool,
             receiver_access,
             receiver_requests,
+            observable,
         ));
     });
 }
@@ -125,6 +136,7 @@ async fn manage(
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
+    observable: Arc<ObservableState>,
 ) {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionCompletion>();
     let mut state = HostSwitchManagerState::new();
@@ -163,7 +175,15 @@ async fn manage(
                     let _ = completed.task.await;
                     if let Some((link, host)) = completion.request {
                         stop_all(&mut state.sessions, HostSwitchStopReason::Graceful).await;
-                        run_transition(&mut links, &channel_pool, &receiver_access, link, host).await;
+                        run_transition(
+                            &mut links,
+                            &channel_pool,
+                            &receiver_access,
+                            Arc::clone(&observable),
+                            link,
+                            host,
+                        )
+                        .await;
                     } else {
                         state.restart_after.push((completed.link, Instant::now() + RETRY_DELAY));
                     }
@@ -271,6 +291,7 @@ async fn run_transition(
     links: &mut watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>,
     channel_pool: &ChannelPool,
     receiver_access: &ReceiverAccess,
+    observable: Arc<ObservableState>,
     link: HostSwitchLink,
     host: u8,
 ) {
@@ -278,12 +299,41 @@ async fn run_transition(
         .acquire_exclusive(ExclusiveAccessReason::HostTransition)
         .await;
     match switch_linked_hosts(&link.keyboard, &link.targets, host, channel_pool).await {
-        Ok(true) => wait_for_departure(links, &link.keyboard).await,
+        Ok(true) => {
+            observable.set_host_switch_warning(None);
+            wait_for_departure(links, &link.keyboard).await;
+            match apply_monitor_inputs(&link, host).await {
+                Ok(()) => observable.set_host_switch_warning(None),
+                Err(error) => observable.set_host_switch_warning(Some(format!(
+                    "显示器联动失败：{error}。键盘和鼠标已经切到目标电脑，但至少一台显示器没有切到配置的输入源；请手动检查显示器输入源。"
+                ))),
+            }
+        }
         Ok(false) => {}
         Err(error) => {
-            debug!(%error, route = %link.keyboard, host, "keyboard host switch failed");
+            warn!(%error, route = %link.keyboard, host, "host switch transition failed");
+            observable.set_host_switch_warning(Some(format!(
+                "Easy-Switch 联动失败：{error}。OpenLogi 已尝试把已切换的设备切回原电脑，但设备或接收器离开当前电脑后可能无法保证恢复；请检查键盘、鼠标和显示器输入源。"
+            )));
         }
     }
+}
+
+async fn apply_monitor_inputs(
+    link: &HostSwitchLink,
+    host: u8,
+) -> Result<(), openlogi_monitor::MonitorError> {
+    let Some(assignments) = link.monitor_inputs.get(&host).cloned() else {
+        return Ok(());
+    };
+    if assignments.is_empty() {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || openlogi_monitor::apply_input_assignments(&assignments))
+        .await
+        .map_err(|_| openlogi_monitor::MonitorError::WindowsApi {
+            operation: "switching monitor inputs on a blocking task",
+        })?
 }
 
 async fn wait_for_departure(
@@ -331,6 +381,7 @@ mod tests {
         let link = HostSwitchLink {
             keyboard: keyboard.clone(),
             targets: vec![route(2)],
+            monitor_inputs: BTreeMap::new(),
         };
         let (links, mut published) = watch::channel(std::sync::Arc::new(vec![link]));
         let started = Instant::now();
