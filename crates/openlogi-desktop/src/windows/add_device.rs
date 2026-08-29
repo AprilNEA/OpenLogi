@@ -364,7 +364,13 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                             v_flex()
                                 .items_center()
                                 .gap_0p5()
-                                .child(svg().path(click_icon(*click)).size_6().flex_none())
+                                .child(
+                                    svg()
+                                        .path(click_icon(*click))
+                                        .size_6()
+                                        .flex_none()
+                                        .text_color(pal.text_primary),
+                                )
                                 .child(
                                     div()
                                         .text_caption()
