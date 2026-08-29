@@ -9,7 +9,7 @@
 //! map.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
@@ -19,6 +19,7 @@ use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
 };
+use tokio::sync::watch;
 
 /// Hardware identity of one HID++ capture session.
 ///
@@ -73,8 +74,8 @@ pub struct DeviceCapturePlan {
     pub dispatch: DispatchPlan,
 }
 
-/// Shared plan list, rewritten by the orchestrator and read by the watcher.
-pub type SharedCapturePlans = Arc<RwLock<Vec<DeviceCapturePlan>>>;
+/// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
+pub type SharedCapturePlans = watch::Receiver<Arc<Vec<DeviceCapturePlan>>>;
 
 /// Back/Forward gesture maps that macOS must own through device-specific HID++
 /// capture because Bluetooth-direct CGEvents may carry no sender identity.

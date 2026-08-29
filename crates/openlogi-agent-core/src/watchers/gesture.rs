@@ -33,19 +33,18 @@ use openlogi_hid::{
     CaptureChannel, CaptureSessionOutcome, CapturedInput, PendingCaptureRestore,
     run_capture_session_with_registry_spec,
 };
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
 use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
-use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
+use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
-/// Fallback interval for reconciling a missed plan notification and pacing the
-/// respawn of a session that ended on its own (see `manage`).
-const TARGET_POLL: Duration = Duration::from_secs(1);
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Output capabilities shared by every HID++ gesture capture session.
 #[derive(Clone)]
@@ -79,13 +78,14 @@ impl GestureOutputs {
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
 pub fn spawn(
-    capture_plans: SharedCapturePlans,
-    capture_plan_changed: Arc<Notify>,
+    capture_plans: &SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     channel_registry: openlogi_hid::ChannelRegistry,
     outputs: GestureOutputs,
 ) {
+    let plans = capture_plans.clone();
+    let receiver_requests = receiver_access.subscribe_requests();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -98,10 +98,10 @@ pub fn spawn(
             }
         };
         runtime.block_on(manage(
-            capture_plans,
-            capture_plan_changed,
+            plans,
             capture_channel,
             receiver_access,
+            receiver_requests,
             channel_registry,
             outputs,
         ));
@@ -125,6 +125,19 @@ struct SessionDone {
 enum SessionEvent {
     Input(CapturedEvent),
     Done(SessionDone),
+}
+
+struct PendingRestore {
+    token: PendingCaptureRestore,
+    retry_at: Instant,
+}
+
+struct GestureManagerState {
+    sessions: HashMap<PhysicalDeviceKey, RunningSession>,
+    pending_restores: HashMap<PhysicalDeviceKey, PendingRestore>,
+    restart_after: HashMap<PhysicalDeviceKey, Instant>,
+    input_dispatcher: InputDispatcher,
+    lease: std::sync::Weak<SessionReceiverLease>,
 }
 
 #[derive(Clone)]
@@ -178,25 +191,18 @@ fn dispatch_context_for<'a>(
         .map(|session| (session.id(), session.dispatch()))
 }
 
-/// Snapshot the sessions that should be armed on this tick. Pairing owns the
-/// receiver exclusively, so its request temporarily makes the wanted set
-/// empty and lets the normal teardown path restore every control.
+/// Snapshot the sessions that should be armed. An exclusive request
+/// temporarily makes the wanted set empty so normal teardown restores every
+/// control.
+#[cfg(test)]
 fn wanted_sessions(
-    receiver_access: &ReceiverAccess,
-    capture_plans: &SharedCapturePlans,
-) -> HashMap<PhysicalDeviceKey, DeviceCapturePlan> {
-    if receiver_access.exclusive_requested() {
-        return HashMap::new();
+    requests: ReceiverRequestState,
+    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+) -> Arc<Vec<DeviceCapturePlan>> {
+    if requests.any() {
+        return Arc::new(Vec::new());
     }
-    capture_plans
-        .read()
-        .map(|plans| {
-            plans
-                .iter()
-                .map(|plan| (plan.target.physical_key.clone(), plan.clone()))
-                .collect()
-        })
-        .unwrap_or_default()
+    Arc::clone(&capture_plans.borrow())
 }
 
 fn reconcile_session(
@@ -212,36 +218,43 @@ fn reconcile_session(
 }
 
 /// Reconcile one tracked slot directly against the latest publication. Input
-/// calls this before dispatch so an event cannot slip through the interval
-/// between publishing a hot action update and processing its notification.
+/// calls this before dispatch so an event cannot slip between publishing a hot
+/// action update and processing its notification.
 fn reconcile_published_session(
     key: &PhysicalDeviceKey,
     session: &mut RunningSession,
-    receiver_access: &ReceiverAccess,
-    capture_plans: &SharedCapturePlans,
+    receiver_requests: &watch::Receiver<ReceiverRequestState>,
+    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if receiver_access.exclusive_requested() {
+    if receiver_requests.borrow().any() {
         reconcile_session(session, None, dispatcher);
     } else {
-        match capture_plans.read() {
-            Ok(plans) => {
-                let wanted = plans
-                    .iter()
-                    .find(|plan| plan.target.physical_key == *key)
-                    .map(|plan| (&plan.target, &plan.dispatch));
-                reconcile_session(session, wanted, dispatcher);
-            }
-            Err(_) => reconcile_session(session, None, dispatcher),
-        }
+        let plans = capture_plans.borrow();
+        let wanted = plans
+            .iter()
+            .find(|plan| plan.target.physical_key == *key)
+            .map(|plan| (&plan.target, &plan.dispatch));
+        reconcile_session(session, wanted, dispatcher);
     }
 }
 
-async fn wait_for_reconcile(ticker: &mut tokio::time::Interval, changed: &Notify) {
-    tokio::select! {
-        _ = ticker.tick() => {}
-        () = changed.notified() => {}
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
     }
+}
+
+async fn wait_for_registry_change(
+    changes: &mut watch::Receiver<()>,
+    has_pending_restore: bool,
+) -> bool {
+    if !has_pending_restore {
+        return std::future::pending().await;
+    }
+    changes.changed().await.is_ok()
 }
 
 fn acquire_session_lease(
@@ -257,16 +270,134 @@ fn acquire_session_lease(
 }
 
 async fn retry_pending_restores(
-    pending_restores: &mut HashMap<PhysicalDeviceKey, PendingCaptureRestore>,
+    pending_restores: &mut HashMap<PhysicalDeviceKey, PendingRestore>,
     registry: &openlogi_hid::ChannelRegistry,
+    now: Instant,
 ) {
-    let keys: Vec<_> = pending_restores.keys().cloned().collect();
+    let keys: Vec<_> = pending_restores
+        .iter()
+        .filter(|(_, pending)| pending.retry_at <= now)
+        .map(|(key, _)| key.clone())
+        .collect();
     for key in keys {
         let Some(pending) = pending_restores.remove(&key) else {
             continue;
         };
-        if let CaptureSessionOutcome::RestorePending(pending) = pending.retry(registry).await {
-            pending_restores.insert(key, pending);
+        if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
+            pending_restores.insert(
+                key,
+                PendingRestore {
+                    token,
+                    retry_at: Instant::now() + RETRY_DELAY,
+                },
+            );
+        }
+    }
+}
+
+fn next_deadline(
+    requests: ReceiverRequestState,
+    pending_restores: &HashMap<PhysicalDeviceKey, PendingRestore>,
+    restart_after: &HashMap<PhysicalDeviceKey, Instant>,
+) -> Option<Instant> {
+    if requests.any() {
+        return None;
+    }
+    pending_restores
+        .values()
+        .map(|pending| pending.retry_at)
+        .chain(restart_after.values().copied())
+        .min()
+}
+
+fn restart_deadline(unexpected: bool, now: Instant) -> Option<Instant> {
+    unexpected.then_some(now + RETRY_DELAY)
+}
+
+impl GestureManagerState {
+    fn new(outputs: GestureOutputs) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            pending_restores: HashMap::new(),
+            restart_after: HashMap::new(),
+            input_dispatcher: InputDispatcher::new(outputs),
+            lease: std::sync::Weak::new(),
+        }
+    }
+
+    fn deadline(&self, requests: ReceiverRequestState) -> Option<Instant> {
+        next_deadline(requests, &self.pending_restores, &self.restart_after)
+    }
+
+    fn expedite_pending_restores(&mut self) {
+        let now = Instant::now();
+        for pending in self.pending_restores.values_mut() {
+            pending.retry_at = now;
+        }
+    }
+
+    async fn reconcile(
+        &mut self,
+        requests: ReceiverRequestState,
+        published: &Arc<Vec<DeviceCapturePlan>>,
+        receiver_access: &ReceiverAccess,
+        channels: &SessionChannels,
+    ) {
+        let now = Instant::now();
+        let wanted = if requests.any() {
+            &[][..]
+        } else {
+            published.as_slice()
+        };
+        for (key, session) in &mut self.sessions {
+            let wanted = wanted
+                .iter()
+                .find(|plan| plan.target.physical_key == *key)
+                .map(|plan| (&plan.target, &plan.dispatch));
+            reconcile_session(session, wanted, &mut self.input_dispatcher);
+        }
+        self.restart_after.retain(|key, _| {
+            published
+                .iter()
+                .any(|plan| plan.target.physical_key == *key)
+        });
+
+        // Firmware ownership outlives the desired plan. Keep the strong lease
+        // through successor spawning so restore→rearm is uninterrupted.
+        let due_restore = self
+            .pending_restores
+            .values()
+            .any(|pending| pending.retry_at <= now);
+        let restore_lease = if due_restore {
+            acquire_session_lease(receiver_access, &mut self.lease)
+        } else {
+            None
+        };
+        if restore_lease.is_some() {
+            retry_pending_restores(&mut self.pending_restores, &channels.registry, now).await;
+        }
+
+        for plan in wanted {
+            let key = &plan.target.physical_key;
+            if self.sessions.contains_key(key) || self.pending_restores.contains_key(key) {
+                continue;
+            }
+            if self
+                .restart_after
+                .get(key)
+                .is_some_and(|deadline| *deadline > now)
+            {
+                continue;
+            }
+            self.restart_after.remove(key);
+            let Some(session_lease) = acquire_session_lease(receiver_access, &mut self.lease)
+            else {
+                self.restart_after.insert(key.clone(), now + RETRY_DELAY);
+                continue;
+            };
+            let id = HidppSessionId::new(&plan.dispatch.config_key);
+            let session = spawn_session(id, plan.clone(), session_lease, channels);
+            self.sessions.insert(key.clone(), session);
         }
     }
 }
@@ -275,23 +406,20 @@ async fn retry_pending_restores(
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(
-    capture_plans: SharedCapturePlans,
-    capture_plan_changed: Arc<Notify>,
+    mut capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    mut receiver_requests: watch::Receiver<ReceiverRequestState>,
     channel_registry: openlogi_hid::ChannelRegistry,
     outputs: GestureOutputs,
 ) {
     let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mut sessions: HashMap<PhysicalDeviceKey, RunningSession> = HashMap::new();
-    let mut pending_restores: HashMap<PhysicalDeviceKey, PendingCaptureRestore> = HashMap::new();
-    let mut ticker = tokio::time::interval(TARGET_POLL);
-    let mut input_dispatcher = InputDispatcher::new(outputs);
+    let mut registry_changes = channel_registry.subscribe();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
     // key and the epoch it started under: a dead *current* session re-arms on the
-    // next tick, a deliberately stopped one merely frees its key for the
+    // retry deadline, a deliberately stopped one immediately frees its key for the
     // replacement once its teardown has drained, and stale completions are
     // ignored by the shared capture-session lifecycle.
     let channels = SessionChannels {
@@ -299,32 +427,46 @@ async fn manage(
         capture: capture_channel,
         registry: channel_registry,
     };
-    // The capture-vs-pairing arbiter hands out one exclusive lease. All session
-    // tasks share it through an `Arc`; the manager keeps only a `Weak` so the
-    // lease frees itself when the last session exits (letting pairing proceed).
-    let mut lease: std::sync::Weak<SessionReceiverLease> = std::sync::Weak::new();
+    let mut state = GestureManagerState::new(outputs);
+    let mut reconcile = true;
 
     loop {
+        if reconcile {
+            reconcile = false;
+            let requests = *receiver_requests.borrow_and_update();
+            let published = Arc::clone(&capture_plans.borrow_and_update());
+            state
+                .reconcile(requests, &published, &receiver_access, &channels)
+                .await;
+        }
+
+        let requests = *receiver_requests.borrow();
+        let deadline = state.deadline(requests);
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            reconcile = true;
+            continue;
+        }
+
         tokio::select! {
             Some(event) = event_rx.recv() => {
                 match event {
                     SessionEvent::Input(event) => {
                         let key = &event.physical_key;
-                        if let Some(session) = sessions.get_mut(key) {
+                        if let Some(session) = state.sessions.get_mut(key) {
                             reconcile_published_session(
                                 key,
                                 session,
-                                &receiver_access,
+                                &receiver_requests,
                                 &capture_plans,
-                                &mut input_dispatcher,
+                                &mut state.input_dispatcher,
                             );
                         }
-                        let live = sessions.get(key);
+                        let live = state.sessions.get(key);
                         let dispatch_context = dispatch_context_for(&event.session, live);
                         if let Some((session, plan)) = dispatch_context {
-                            input_dispatcher.dispatch(session, plan, event.input);
+                            state.input_dispatcher.dispatch(session, plan, event.input);
                         } else {
-                            input_dispatcher.cancel_session(&event.session);
+                            state.input_dispatcher.cancel_session(&event.session);
                             debug!(key = key.as_str(), epoch = event.session.epoch(), "input from a stale capture session — ignored");
                         }
                     }
@@ -334,79 +476,50 @@ async fn manage(
                         // accepted during restoration, so cancellation cannot
                         // overtake the last diverted edge.
                         if let Some((CompletionAction::Remove { unexpected }, dispatch_session)) =
-                            sessions.get(key).map(|session| {
+                            state.sessions.get(key).map(|session| {
                                 (session.completion(&done.session), session.id().clone())
                             })
                         {
                             if let Some(pending) = done.pending_restore {
-                                pending_restores.insert(key.clone(), pending);
+                                state.pending_restores.insert(
+                                    key.clone(),
+                                    PendingRestore {
+                                        token: pending,
+                                        retry_at: Instant::now() + RETRY_DELAY,
+                                    },
+                                );
                             }
-                            input_dispatcher.cancel_session(&dispatch_session);
-                            if unexpected {
-                                warn!(key = key.as_str(), "capture session ended unexpectedly, re-arming");
+                            state.input_dispatcher.cancel_session(&dispatch_session);
+                            if let Some(deadline) = restart_deadline(unexpected, Instant::now()) {
+                                state.restart_after.insert(key.clone(), deadline);
+                                warn!(key = key.as_str(), "capture session ended unexpectedly, delaying re-arm");
                             }
-                            sessions.remove(key);
+                            state.sessions.remove(key);
+                            reconcile = true;
                         }
                     }
                 }
             }
-            () = wait_for_reconcile(&mut ticker, &capture_plan_changed) => {
-                // While pairing is waiting or active, release every capture
-                // session so run_pairing can own the receiver's HID node (one
-                // process can't read it through two channels).
-                let want = wanted_sessions(&receiver_access, &capture_plans);
-                // Stop sessions whose device disappeared or whose plan changed.
-                // Sending on the oneshot lets the session restore its controls.
-                // A stopped session stays tracked in the draining phase until
-                // its task reports completion below, and a tracked key is never
-                // re-armed: arming the replacement while the old task may still
-                // be mid-restore could interleave its divert writes with the
-                // restore writes on the same device, leaving a control
-                // un-diverted while the new session believes it owns it,
-                // however many ticks the restore takes. Its lifecycle stays
-                // live until completion so already-diverted edges can settle
-                // against the retiring plan during teardown.
-                for (key, session) in &mut sessions {
-                    let wanted = want.get(key).map(|plan| (&plan.target, &plan.dispatch));
-                    reconcile_session(session, wanted, &mut input_dispatcher);
+            result = capture_plans.changed() => match result {
+                Ok(()) => reconcile = true,
+                Err(_) => return,
+            },
+            result = receiver_requests.changed() => match result {
+                Ok(()) => reconcile = true,
+                Err(_) => return,
+            },
+            open = wait_for_registry_change(
+                &mut registry_changes,
+                !state.pending_restores.is_empty(),
+            ) => {
+                if !open {
+                    return;
                 }
-                // Firmware ownership outlives the desired plan. Retry every
-                // pending restore even when the device was disabled or its
-                // plan disappeared, and consume/reinsert the typed token so a
-                // successful attempt cannot accidentally be retried.
-                // Keep the strong lease through successor spawning below: the
-                // restore→rearm transition is one uninterrupted shared-access
-                // interval from pairing's perspective.
-                let restore_lease = if pending_restores.is_empty() {
-                    None
-                } else {
-                    let Some(restore_lease) = acquire_session_lease(
-                        &receiver_access,
-                        &mut lease,
-                    ) else {
-                        continue;
-                    };
-                    Some(restore_lease)
-                };
-                if restore_lease.is_some() {
-                    retry_pending_restores(&mut pending_restores, &channels.registry).await;
-                }
-                for (key, plan) in want {
-                    if sessions.contains_key(&key) || pending_restores.contains_key(&key) {
-                        continue;
-                    }
-                    // Restoration and capture both touch the receiver channel,
-                    // so acquire the shared session lease before either. This
-                    // closes the window where pairing could acquire exclusive
-                    // access between a pending restore and successor arming.
-                    let Some(session_lease) = acquire_session_lease(&receiver_access, &mut lease)
-                    else {
-                        continue;
-                    };
-                    let id = HidppSessionId::new(&plan.dispatch.config_key);
-                    let session = spawn_session(id, plan, session_lease, &channels);
-                    sessions.insert(key, session);
-                }
+                state.expedite_pending_restores();
+                reconcile = true;
+            }
+            () = wait_for_deadline(deadline) => {
+                reconcile = true;
             }
         }
     }

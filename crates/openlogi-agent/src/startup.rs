@@ -170,20 +170,19 @@ impl InputServices {
 /// Start the HID++ background sessions that do not need Accessibility.
 pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
     watchers::gesture::spawn(
-        shared.capture_plans.clone(),
-        Arc::clone(&shared.capture_plan_changed),
+        &shared.capture_plans,
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
         GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
     );
     watchers::host_switch::spawn(
-        shared.host_switch_links.clone(),
+        &shared.host_switch_links,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
     );
     watchers::keyboard::spawn(
-        shared.keyboard_spec.clone(),
+        &shared.keyboard_spec,
         shared.keyboard_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),

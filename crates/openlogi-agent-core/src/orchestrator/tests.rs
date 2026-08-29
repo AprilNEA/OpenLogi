@@ -18,7 +18,6 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::Dpi;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::observable::ObservableState;
 
@@ -870,13 +869,12 @@ fn config_reload_clears_override_when_camera_mode_changes() {
 
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
-    orch.shared.capture_plans.read().ok().and_then(|plans| {
-        plans.first().and_then(|plan| {
-            plan.dispatch
-                .bindings
-                .get(&ButtonId::Back)
-                .map(Binding::click_action)
-        })
+    let plans = orch.shared.capture_plans.borrow();
+    plans.first().and_then(|plan| {
+        plan.dispatch
+            .bindings
+            .get(&ButtonId::Back)
+            .map(Binding::click_action)
     })
 }
 
@@ -905,23 +903,18 @@ fn app_switch_republishes_capture_plans() {
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
 
-#[tokio::test]
-async fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+#[test]
+fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
-    let capture_plan_changed = Arc::clone(&orch.shared.capture_plan_changed);
-    tokio::time::timeout(Duration::from_millis(100), capture_plan_changed.notified())
-        .await
-        .expect("initial capture-plan notification should be pending");
+    let mut capture_plans = orch.shared.capture_plans.clone();
+    let _ = capture_plans.borrow_and_update();
 
     let side_gesture_is_armed = |orch: &Orchestrator| {
-        orch.shared
-            .capture_plans
-            .read()
-            .expect("capture plans should not be poisoned")[0]
+        orch.shared.capture_plans.borrow()[0]
             .target
             .spec
             .divert_gesture_buttons
@@ -934,9 +927,14 @@ async fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     );
 
     orch.set_os_mouse_hook_available(true);
-    tokio::time::timeout(Duration::from_millis(100), capture_plan_changed.notified())
-        .await
-        .expect("hook installation should wake capture reconciliation");
+    assert_eq!(
+        capture_plans
+            .has_changed()
+            .expect("publication remains open"),
+        cfg!(target_os = "macos"),
+        "only a semantic capture-plan change should wake reconciliation"
+    );
+    let _ = capture_plans.borrow_and_update();
     if cfg!(target_os = "macos") {
         let hook_maps = orch
             .shared
@@ -956,13 +954,47 @@ async fn macos_side_gesture_capture_follows_mouse_hook_availability() {
         assert!(!side_gesture_is_armed(&orch));
     }
 
-    let revoked = capture_plan_changed.notified();
     orch.set_os_mouse_hook_available(false);
-    tokio::time::timeout(Duration::from_millis(100), revoked)
-        .await
-        .expect("hook revocation should wake capture reconciliation");
+    assert_eq!(
+        capture_plans
+            .has_changed()
+            .expect("publication remains open"),
+        cfg!(target_os = "macos"),
+        "only a semantic capture-plan change should wake reconciliation"
+    );
     assert!(
         !side_gesture_is_armed(&orch),
         "revoking the movement hook must restore native HID++ controls"
+    );
+}
+
+#[test]
+fn equal_runtime_projection_does_not_wake_managers() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    let mut capture_plans = orch.shared.capture_plans.clone();
+    let mut keyboard_spec = orch.shared.keyboard_spec.clone();
+    let mut host_switch_links = orch.shared.host_switch_links.clone();
+    let _ = capture_plans.borrow_and_update();
+    let _ = keyboard_spec.borrow_and_update();
+    let _ = host_switch_links.borrow_and_update();
+
+    orch.publish_device_runtime();
+
+    assert!(
+        !capture_plans
+            .has_changed()
+            .expect("publication remains open")
+    );
+    assert!(
+        !keyboard_spec
+            .has_changed()
+            .expect("publication remains open")
+    );
+    assert!(
+        !host_switch_links
+            .has_changed()
+            .expect("publication remains open")
     );
 }

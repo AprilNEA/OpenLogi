@@ -1,7 +1,7 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
 #![expect(
     unsafe_code,
-    reason = "the event tap is built on Core Graphics / Core Foundation C APIs"
+    reason = "the event tap uses Core Graphics / Core Foundation C APIs, and workspace observation uses typed Objective-C notification APIs"
 )]
 
 mod watchdog;
@@ -9,11 +9,13 @@ mod watchdog;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use block2::RcBlock;
 use core_foundation::base::{CFTypeRef, TCFType as _};
 use core_foundation::number::CFNumber;
 use core_foundation::runloop::{
@@ -26,7 +28,14 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types_shared::ForeignType as _;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_app_kit::{
+    NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+    NSWorkspaceDidActivateApplicationNotification,
+};
 use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -57,6 +66,91 @@ pub(crate) struct HookInner {
 // documentation states that CFRunLoop objects can be passed between
 // threads; only CFRunLoopRun must be called on the owning thread.
 unsafe impl Send for HookInner {}
+
+/// Owner of an `NSWorkspace` activation observer.
+///
+/// The notification center retains the registration block. The returned token
+/// identifies that registration; removing it releases the center's block
+/// reference, and dropping the token releases the caller's final reference.
+#[must_use]
+pub struct ForegroundApplicationObserver {
+    center: Retained<NSNotificationCenter>,
+    token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+impl Drop for ForegroundApplicationObserver {
+    fn drop(&mut self) {
+        objc2::rc::autoreleasepool(|_| {
+            // SAFETY: `token` came from this center's block-observer registration
+            // and is removed exactly once, before both retained objects are dropped.
+            unsafe { self.center.removeObserver(self.token.as_ref()) };
+        });
+    }
+}
+
+/// Register for `NSWorkspaceDidActivateApplicationNotification`.
+pub(crate) fn watch_frontmost_application_activations(
+    on_activation: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
+) -> ForegroundApplicationObserver {
+    objc2::rc::autoreleasepool(|_| {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let center = workspace.notificationCenter();
+        let block: RcBlock<dyn Fn(NonNull<NSNotification>)> =
+            RcBlock::new(move |notification: NonNull<NSNotification>| {
+                // A panic must not unwind across the Objective-C block boundary.
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let activation = objc2::rc::autoreleasepool(|pool| {
+                        // SAFETY: NotificationCenter passes a live, non-null
+                        // NSNotification to the block for the duration of this call.
+                        let notification = unsafe { notification.as_ref() };
+                        let info = notification.userInfo()?;
+                        // SAFETY: AppKit documents NSWorkspaceApplicationKey as this
+                        // notification's NSRunningApplication-valued user-info entry.
+                        let app = info
+                            .objectForKey(unsafe { NSWorkspaceApplicationKey } as &AnyObject)?
+                            .downcast::<NSRunningApplication>()
+                            .ok()?;
+                        foreground_app_from_running_application(&app, pool)
+                    });
+                    on_activation(activation);
+                }));
+                if result.is_err() {
+                    error!("foreground-application activation callback panicked");
+                }
+            });
+        // SAFETY: AppKit exports the name as an immutable process-lifetime
+        // constant. The block captures only `Send + Sync` state and accepts the
+        // exact `NSNotification` argument required by the API. A nil queue asks
+        // the center to invoke it synchronously on the notification-posting thread.
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceDidActivateApplicationNotification),
+                Some(&workspace),
+                None,
+                &block,
+            )
+        };
+        ForegroundApplicationObserver { center, token }
+    })
+}
+
+fn foreground_app_from_running_application(
+    app: &NSRunningApplication,
+    pool: objc2::rc::AutoreleasePool<'_>,
+) -> Option<ForegroundApp> {
+    let bundle_id = app.bundleIdentifier()?;
+    let name = app.localizedName();
+    // SAFETY: Both UTF-8 views are copied into owned Strings before `pool`
+    // drains, so no borrowed Objective-C storage escapes.
+    let (id, name) = unsafe {
+        (
+            bundle_id.to_str(pool).to_owned(),
+            name.as_ref().map(|name| name.to_str(pool).to_owned()),
+        )
+    };
+    let display_name = name.unwrap_or_else(|| id.clone());
+    Some(ForegroundApp { id, display_name })
+}
 
 /// Opaque `IOHIDEventRef` — the HID event backing a `CGEvent`.
 type IOHIDEventRef = *mut std::ffi::c_void;
@@ -663,26 +757,10 @@ impl HookBackend for Backend {
     /// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
     fn frontmost_app() -> Option<ForegroundApp> {
         use objc2::rc::autoreleasepool;
-        use objc2_app_kit::NSWorkspace;
 
         autoreleasepool(|pool| {
             let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-            let bundle_id = app.bundleIdentifier()?;
-            let name = app.localizedName();
-            // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime.
-            // Both are copied into owned `String`s here, before the pool — and
-            // the `NSString`s borrowing from it — drop, so neither view escapes.
-            let (id, name) = unsafe {
-                (
-                    bundle_id.to_str(pool).to_owned(),
-                    name.as_ref().map(|name| name.to_str(pool).to_owned()),
-                )
-            };
-            // An app with no localized name is possible (a bare bundle, a
-            // background helper that briefly activates); the identifier is the
-            // only thing guaranteed, so it doubles as the name.
-            let display_name = name.unwrap_or_else(|| id.clone());
-            Some(ForegroundApp { id, display_name })
+            foreground_app_from_running_application(&app, pool)
         })
     }
 

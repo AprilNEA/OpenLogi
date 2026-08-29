@@ -45,6 +45,59 @@ fn draining_session_with_epoch(epoch: u64) -> RunningSession {
     session
 }
 
+#[tokio::test(start_paused = true)]
+async fn planned_done_allows_an_immediate_successor_but_unexpected_done_is_paced() {
+    let planned = draining_session_with_epoch(7);
+    let CompletionAction::Remove {
+        unexpected: planned_unexpected,
+    } = planned.completion(&session_id(7))
+    else {
+        panic!("the tracked planned completion should remove its session");
+    };
+    assert!(
+        restart_deadline(planned_unexpected, Instant::now()).is_none(),
+        "ordered Done after planned retirement must reconcile its successor immediately"
+    );
+
+    let unexpected = live_session_with_epoch(8);
+    let CompletionAction::Remove { unexpected: failed } = unexpected.completion(&session_id(8))
+    else {
+        panic!("the tracked unexpected completion should remove its session");
+    };
+    let retry_at =
+        restart_deadline(failed, Instant::now()).expect("an unexpected completion must be paced");
+    assert_eq!(retry_at, Instant::now() + RETRY_DELAY);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_deadline_is_not_postponed_by_ready_input() {
+    let retry_at = Instant::now() + RETRY_DELAY;
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let waiter = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = wait_for_deadline(Some(retry_at)) => return Instant::now(),
+                Some(()) = input_rx.recv() => {}
+            }
+        }
+    });
+
+    for _ in 0..10 {
+        input_tx
+            .send(())
+            .expect("the deadline waiter should remain alive");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+    }
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        waiter.await.expect("deadline waiter should finish"),
+        retry_at,
+        "recreating an absolute sleep after unrelated input must not postpone it"
+    );
+}
+
 #[tokio::test]
 async fn input_accepted_during_restoration_precedes_session_done() {
     let id = session_id(7);
@@ -130,8 +183,10 @@ async fn exclusive_request_retires_capture_without_rejecting_owned_input() {
     .await
     .expect("pairing should announce its exclusive request");
 
-    let plans = Arc::new(std::sync::RwLock::new(vec![plan()]));
-    assert!(wanted_sessions(&access, &plans).is_empty());
+    let (plans, _) = tokio::sync::watch::channel(Arc::new(vec![plan()]));
+    let plans = plans.subscribe();
+    let requests = access.subscribe_requests();
+    assert!(wanted_sessions(*requests.borrow(), &plans).is_empty());
 
     let mut session = live_session_with_epoch(7);
     assert_eq!(session.reconcile(None), ReconcileAction::Retiring);

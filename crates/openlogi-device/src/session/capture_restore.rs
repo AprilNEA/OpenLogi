@@ -13,8 +13,6 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::Thumbwheel;
 use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
 
-const REGISTRY_CURRENT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
-
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
@@ -307,10 +305,16 @@ pub(crate) async fn wait_for_channel_change(
     let Some(registry) = registry else {
         return std::future::pending().await;
     };
+    let mut changes = registry.subscribe();
     loop {
-        tokio::time::sleep(REGISTRY_CURRENT_POLL).await;
         if !registry.is_current(retired) {
             return CaptureStop::ChannelChanged;
+        }
+        if changes.changed().await.is_err() {
+            // The borrowed registry owns the sender, so this is unreachable;
+            // preserve standalone-like pending semantics if that invariant is
+            // ever changed rather than inventing a channel transition.
+            return std::future::pending().await;
         }
     }
 }

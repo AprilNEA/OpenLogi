@@ -27,7 +27,7 @@ use openlogi_hid::{
     KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
@@ -66,9 +66,9 @@ struct AgentDevice {
     online: bool,
 }
 
-/// The shared runtime handed to the hook and the gesture watcher. Every field
-/// is an `Arc`, so cloning is cheap; the orchestrator rewrites the inner values
-/// on each rebuild and the background threads observe them on their next read.
+/// Cheaply cloneable runtime handles handed to hooks and background managers.
+/// The orchestrator remains the sole producer for its watch-backed projections;
+/// consumers receive only read capabilities through this type.
 #[derive(Clone)]
 pub struct SharedRuntime {
     /// The OS-hook callback's single-action + gesture maps, behind one lock so a
@@ -86,9 +86,6 @@ pub struct SharedRuntime {
     /// dispatch, keyed by the device the events arrive on. Carries each
     /// device's effective thumb-wheel sensitivity.
     pub capture_plans: SharedCapturePlans,
-    /// Wakes the capture manager when a published plan needs immediate
-    /// reconciliation; periodic polling remains the failure-recovery path.
-    pub capture_plan_changed: Arc<Notify>,
     pub capture_channel: CaptureChannel,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
@@ -175,6 +172,11 @@ pub struct Orchestrator {
     /// broader mouse-remapping path is available so losing the hook leaves the
     /// side buttons native.
     os_mouse_hook_available: bool,
+    /// Private producer halves for the read-only runtime projections in
+    /// `shared`, keeping the orchestrator's single-writer contract structural.
+    capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
+    keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
+    host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     shared: SharedRuntime,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -197,14 +199,17 @@ enum InventoryState {
 }
 
 impl Orchestrator {
-    /// Build from a loaded config. Creates the shared `Arc`s and seeds them
-    /// from the config with no devices yet; the first inventory tick fills in
-    /// the routes and presets.
+    /// Build from a loaded config. Creates the shared runtime handles and seeds
+    /// them from the config with no devices yet; the first inventory tick fills
+    /// in the routes and presets.
     ///
     /// `observable` is the cell the IPC server answers from; the config facts
     /// it carries are seeded here.
     #[must_use]
     pub fn new(config: Config, observable: Arc<ObservableState>) -> Self {
+        let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
+        let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
+        let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -213,16 +218,15 @@ impl Orchestrator {
                 config.app_settings.vertical_scroll_sensitivity,
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
-            capture_plans: Arc::new(RwLock::new(Vec::new())),
-            capture_plan_changed: Arc::new(Notify::new()),
+            capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
             channel_pool: openlogi_hid::host::channel_pool(),
-            keyboard_spec: Arc::new(RwLock::new(None)),
+            keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
-            host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            host_switch_links,
         };
         let orch = Self {
             config,
@@ -236,6 +240,9 @@ impl Orchestrator {
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
             os_mouse_hook_available: false,
+            capture_plans_tx,
+            keyboard_spec_tx,
+            host_switch_links_tx,
             shared,
             observable,
         };
@@ -355,25 +362,15 @@ impl Orchestrator {
             self.config.keyboard.bindings.clone(),
             "keyboard_bindings",
         );
-        write_value(
-            &self.shared.host_switch_links,
+        publish_arc_if_changed(
+            &self.host_switch_links_tx,
             host_switch_links(&self.config, &self.devices),
-            "host_switch_links",
         );
-        write_value(
-            &self.shared.keyboard_spec,
-            self.keyboard_spec_for(),
-            "keyboard_spec",
-        );
+        publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
     }
 
     fn publish_capture_plans(&self) {
-        write_value(
-            &self.shared.capture_plans,
-            self.capture_plans_for(),
-            "capture_plans",
-        );
-        self.shared.capture_plan_changed.notify_one();
+        publish_arc_if_changed(&self.capture_plans_tx, self.capture_plans_for());
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,
@@ -1150,6 +1147,30 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
         Ok(mut guard) => *guard = value,
         Err(e) => warn!(error = %e, lock = name, "lock poisoned — keeping stale value"),
     }
+}
+
+/// Publish a fresh immutable snapshot only when its projected value changed.
+fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {
+    publication.send_if_modified(|current| {
+        if current.as_ref() == &value {
+            return false;
+        }
+        *current = Arc::new(value);
+        true
+    });
+}
+
+fn publish_optional_arc_if_changed<T: PartialEq>(
+    publication: &watch::Sender<Option<Arc<T>>>,
+    value: Option<T>,
+) {
+    publication.send_if_modified(|current| {
+        if current.as_deref() == value.as_ref() {
+            return false;
+        }
+        *current = value.map(Arc::new);
+        true
+    });
 }
 
 #[cfg(test)]
