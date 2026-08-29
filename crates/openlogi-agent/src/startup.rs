@@ -5,6 +5,7 @@
 //! is `crate::lifecycle`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -225,7 +226,11 @@ pub(crate) enum Watcher {
 /// stream.
 pub(crate) fn spawn_state_watchers(
     shared: &SharedRuntime,
-) -> impl Stream<Item = WatcherEvent> + Unpin + use<> {
+    resume_pending: Option<Arc<AtomicBool>>,
+) -> (
+    impl Stream<Item = WatcherEvent> + Unpin + use<>,
+    watchers::inventory::InventoryRefresh,
+) {
     fn tagged<T: Send + 'static>(
         rx: tokio::sync::mpsc::UnboundedReceiver<T>,
         source: Watcher,
@@ -238,12 +243,11 @@ pub(crate) fn spawn_state_watchers(
         .chain(stream::iter([WatcherEvent::Lost(source)]))
         .boxed()
     }
-    stream::select_all([
+    let inventory =
+        watchers::inventory::spawn_with_registry(shared.channel_registry.clone(), resume_pending);
+    let streams = stream::select_all([
         tagged(
-            watchers::inventory::spawn_with_registry(
-                Duration::from_secs(2),
-                shared.channel_registry.clone(),
-            ),
+            inventory.events,
             Watcher::Inventory,
             WatcherEvent::Inventory,
         ),
@@ -267,7 +271,8 @@ pub(crate) fn spawn_state_watchers(
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
-    ])
+    ]);
+    (streams, inventory.refresh)
 }
 
 /// Seed the permission facts with non-prompting reads, so a client that

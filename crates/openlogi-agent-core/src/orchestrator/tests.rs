@@ -614,6 +614,23 @@ fn plan_reapply_skips_a_followup_that_went_offline() {
     assert!(followup.is_empty());
 }
 
+#[test]
+fn orchestrator_exposes_only_the_bounded_confirmation_run() {
+    let mut orchestrator = orchestrator(Config::default());
+    let inventory = direct_inventory(Some("serial-1"), [1, 2, 3, 4]);
+
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(orchestrator.needs_reapply_confirmation());
+
+    for confirmations_left in (0..VOLATILE_REAPPLY_CONFIRM_RETRIES).rev() {
+        orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+        assert_eq!(
+            orchestrator.needs_reapply_confirmation(),
+            confirmations_left > 0
+        );
+    }
+}
+
 /// An *empty* snapshot still flips the health to `Ready`: the watcher only
 /// forwards completed enumerations, so "checked and found nothing" must not
 /// be reported as "still scanning" — that's the whole distinction the

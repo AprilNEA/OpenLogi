@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
-use openlogi_agent_core::watchers::inventory::InventoryEvent;
+use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -260,12 +260,25 @@ impl Armed {
 
         // HID++ watchers need no Accessibility — start them up front.
         startup::spawn_hidpp_watchers(&self.shared, &self.inputs);
-        let mut watchers = startup::spawn_state_watchers(&self.shared);
+        let resume_pending = {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                Some(Arc::clone(&self.resume_pending))
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                None
+            }
+        };
+        let (mut watchers, inventory_refresh) =
+            startup::spawn_state_watchers(&self.shared, resume_pending);
 
         info!("openlogi-agent started");
         loop {
             tokio::select! {
-                Some(event) = watchers.next() => self.apply_watcher(event).await,
+                Some(event) = watchers.next() => {
+                    self.apply_watcher(event, &inventory_refresh).await;
+                }
                 Some(device_key) = self.inputs.triggers.recv() => {
                     self.begin_action_ring(device_key.as_deref()).await;
                 }
@@ -301,16 +314,22 @@ impl Armed {
     }
 
     /// Fold one watcher event into the agent's state.
-    async fn apply_watcher(&mut self, event: startup::WatcherEvent) {
+    async fn apply_watcher(
+        &mut self,
+        event: startup::WatcherEvent,
+        inventory_refresh: &InventoryRefresh,
+    ) {
         use startup::{Watcher, WatcherEvent};
 
-        // Inventory and foreground-app samples make this a periodic health
+        // Inventory and foreground-app samples make this a health
         // reconciliation without another timer in the control-plane loop.
         #[cfg(target_os = "windows")]
         self.apply_hook_health().await;
 
         match event {
-            WatcherEvent::Inventory(event) => self.apply_inventory(event).await,
+            WatcherEvent::Inventory(event) => {
+                self.apply_inventory(event, inventory_refresh).await;
+            }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
@@ -334,7 +353,7 @@ impl Armed {
     }
 
     /// Fold one inventory-watcher event into the orchestrator.
-    async fn apply_inventory(&self, event: InventoryEvent) {
+    async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
             InventoryEvent::Snapshot {
                 inventories,
@@ -342,15 +361,12 @@ impl Armed {
                 hid_open_failures,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                // Native suspend/resume notifications cover the sleeps the
-                // polling gap misses; consume the coalesced signal at the
-                // point that can replay it.
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                if self.resume_pending.swap(false, Ordering::Relaxed) {
-                    info!("native resume notification — replaying volatile settings");
-                    orchestrator.reapply_volatile_on_next_refresh();
-                }
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                let confirm_settings = orchestrator.needs_reapply_confirmation();
+                drop(orchestrator);
+                if confirm_settings {
+                    refresh.request_settings_confirmation();
+                }
             }
             InventoryEvent::Unavailable => {
                 self.orchestrator.lock().await.mark_inventory_unavailable();

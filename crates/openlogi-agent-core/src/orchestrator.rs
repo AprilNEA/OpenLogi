@@ -153,7 +153,7 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
-    /// Whether the last enumeration tick failed to open HID++ nodes; published
+    /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
@@ -452,7 +452,7 @@ impl Orchestrator {
     /// altering the device *set*), but only re-picks the selection and rebuilds
     /// the shared maps when the device set or runtime selection changed —
     /// `rebuild()` is driven by `config_key` + route and resets the live
-    /// DPI-cycle index, so running it every 2s tick on a steady selection
+    /// DPI-cycle index, so running it on every steady reconciliation
     /// would snap DPI back to `preset[0]` (and burn three `RwLock` writes)
     /// for nothing.
     pub fn refresh_inventory(
@@ -517,6 +517,13 @@ impl Orchestrator {
         self.devices = devices;
         self.current = next_current;
         self.rebuild();
+    }
+
+    /// Whether volatile-setting writes still need a delayed inventory pass to
+    /// confirm them after device boot or system resume.
+    #[must_use]
+    pub fn needs_reapply_confirmation(&self) -> bool {
+        !self.reapply_followup.is_empty()
     }
 
     /// Force a volatile-settings re-apply for every online device on the next
@@ -1059,13 +1066,13 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many inventory ticks a first-sighted or wake-flagged device keeps
-/// re-applying its volatile settings after the initial write. A cold restart
-/// leaves a Bolt/Unifying mouse slow to enumerate — and a system wake can
-/// enumerate a receiver whose mouse link is still re-establishing — so the
-/// first write (and a single confirm) can both time out against a
-/// still-booting device; retrying for ~8s at the 2s cadence lets the write
-/// land once it finishes booting.
+/// How many explicit confirmation passes a first-sighted or wake-flagged
+/// device keeps re-applying its volatile settings after the initial write. A
+/// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
+/// wake can enumerate a receiver whose mouse link is still re-establishing —
+/// so the first write (and a single confirm) can both time out against a
+/// still-booting device. Four confirmations are requested at two-second
+/// intervals; any intervening authoritative reconciliation satisfies one.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
