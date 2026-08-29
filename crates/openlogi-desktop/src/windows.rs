@@ -16,9 +16,9 @@ pub mod update_consent;
 
 use crate::ui::theme::Typography as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Global, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, Styled as _, Subscription, TitlebarOptions, WindowBounds, WindowHandle,
-    WindowOptions, div,
+    App, AppContext as _, Bounds, Context, Decorations, Global, IntoElement, ParentElement as _,
+    Pixels, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
@@ -39,31 +39,51 @@ pub struct WindowRegistry {
 
 impl Global for WindowRegistry {}
 
+/// Linux window-decoration request passed to GPUI at open time.
+///
+/// OpenLogi asks for client-side decorations so the compositor drops its own
+/// chrome and the in-app [`TitleBar`] can own minimize / maximize / close.
+/// Compositors may still ignore the request; [`paints_client_titlebar`] gates
+/// the in-app bar so a refused request does not stack two titlebars.
+pub fn linux_window_decorations() -> Option<WindowDecorations> {
+    cfg!(target_os = "linux").then_some(WindowDecorations::Client)
+}
+
 /// Titlebar options for an app window.
 ///
 /// On Linux this returns transparent options so the view can draw a client-side
-/// [`TitleBar`] (see [`aux_title_bar`]); the compositor declines server-side
-/// decorations there and gpui's client-side fallback is otherwise unpainted,
-/// leaving the window with no titlebar or controls. On macOS / Windows it keeps
-/// the native titlebar carrying `title`, unchanged.
+/// [`TitleBar`] when the compositor granted CSD (see [`paints_client_titlebar`]).
+/// On macOS / Windows it keeps the native titlebar carrying `title`, unchanged.
 pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
+    let title = title.into();
     if cfg!(target_os = "linux") {
-        TitleBar::title_bar_options()
+        TitlebarOptions {
+            title: Some(title),
+            ..TitleBar::title_bar_options()
+        }
     } else {
         TitlebarOptions {
-            title: Some(title.into()),
+            title: Some(title),
             appears_transparent: false,
             traffic_light_position: None,
         }
     }
 }
 
+/// Whether this window should draw gpui-component's in-app [`TitleBar`].
+///
+/// Linux windows request CSD via [`linux_window_decorations`]; this is true
+/// only when the compositor actually granted it. If a compositor keeps SSD
+/// despite the request, the in-app bar stays hidden so controls are not
+/// doubled. macOS / Windows always use the native titlebar.
+pub fn paints_client_titlebar(window: &Window) -> bool {
+    cfg!(target_os = "linux") && matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
 /// Client-side window titlebar for auxiliary windows: window controls
-/// (minimize / maximize / close on Linux + Windows), the drag region, and the
-/// window `title` centred. Each auxiliary view renders this as the top of its
-/// layout so the window has a titlebar and controls on Linux, where the
-/// compositor declines server-side decorations and gpui's client-side fallback
-/// is otherwise unpainted. On macOS the widget reserves the traffic-light space.
+/// (minimize / maximize / close), the drag region, and the window `title`
+/// centred. Callers must gate this on [`paints_client_titlebar`]. On macOS the
+/// widget reserves the traffic-light space.
 pub fn aux_title_bar(title: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     let title = title.into();
     TitleBar::new().child(
@@ -143,6 +163,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
         // own `gnome_shell` frontmost backend.
         app_id: Some(APP_ID.into()),
         titlebar: Some(titlebar_options(title.clone())),
+        window_decorations: linux_window_decorations(),
         ..WindowOptions::default()
     };
 

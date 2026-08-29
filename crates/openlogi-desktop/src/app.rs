@@ -485,11 +485,9 @@ fn request_accessibility(cx: &mut App) {
 }
 
 /// Client-side main-window titlebar: window controls (minimize / maximize /
-/// close on Linux + Windows), the drag region, and the app name centred.
-/// Replaces the native titlebar so Linux — where the compositor declines
-/// server-side decorations and gpui falls back to client-side ones it doesn't
-/// paint — still gets a titlebar and window controls. On macOS the widget
-/// reserves the traffic-light space.
+/// close), the drag region, and the app name centred. Painted only when
+/// [`crate::windows::paints_client_titlebar`] is true (Linux CSD). On macOS the
+/// widget reserves the traffic-light space.
 fn app_title_bar(cx: &App) -> impl IntoElement {
     let pal = theme::palette(cx);
     TitleBar::new().child(
@@ -526,11 +524,9 @@ impl Render for AppView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar (window controls + drag region)
-            // as the first row of every frame — including the pre-connection and
-            // error frames — so the chrome is present from the first frame on.
-            // macOS / Windows keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Client-side titlebar only when the compositor did not already
+            // draw one. KDE/KWin SSD plus this row is the double-chrome bug.
+            .when(crate::windows::paints_client_titlebar(window), |this| {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);

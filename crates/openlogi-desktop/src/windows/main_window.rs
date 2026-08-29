@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::app::AppView;
 use crate::ui::theme;
-use crate::windows::{WindowRegistry, titlebar_options};
+use crate::windows::{WindowRegistry, linux_window_decorations, titlebar_options};
 
 fn window_options(cx: &mut App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1280.), px(820.)), cx);
@@ -31,10 +31,10 @@ fn window_options(cx: &mut App) -> WindowOptions {
         // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
-        // Linux: transparent chrome so `AppView::render` can draw a client-side
-        // `TitleBar` (the compositor declines server-side decorations and gpui's
-        // fallback is unpainted). macOS/Windows keep their native titlebar.
+        // Linux: request CSD so `AppView::render` can draw the in-app `TitleBar`.
+        // macOS/Windows keep their native titlebar.
         titlebar: Some(titlebar_options("OpenLogi")),
+        window_decorations: linux_window_decorations(),
         ..WindowOptions::default()
     }
 }

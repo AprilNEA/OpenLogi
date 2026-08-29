@@ -39,7 +39,10 @@ pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 /// Sizes that several components need to agree on.
 pub const HEADER_H: f32 = 64.;
 pub const FOOTER_H: f32 = 40.;
-pub const DETAIL_RAIL_W: f32 = 168.;
+/// Width of the device-detail section rail. Matches the Settings sidebar so
+/// localized section labels fit beside their icon instead of overflowing
+/// the content divider.
+pub const DETAIL_RAIL_W: f32 = 210.;
 /// Height of standalone form controls: buttons, text inputs, tabs.
 /// gpui-component's `.small()` maps to a 24 px `h_6`, which reads undersized
 /// against this 30 px control rhythm — small controls pin the height
