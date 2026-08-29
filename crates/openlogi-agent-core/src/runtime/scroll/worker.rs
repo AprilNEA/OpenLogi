@@ -620,6 +620,12 @@ fn run_worker(
                             distance_scale: input.distance_scale,
                             ..snapshot.motion_tuning(&input.source)
                         };
+                        tracing::trace!(
+                            x = input.impulse.x,
+                            y = input.impulse.y,
+                            queued_us = at.elapsed().as_micros(),
+                            "smooth wheel impulse"
+                        );
                         engine.impulse(input.source, input.impulse, at, tuning, emit_smooth);
                     }
                     ScrollOutputMode::Phased { at } => {
