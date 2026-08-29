@@ -412,10 +412,20 @@ impl ActiveMotion {
         if !tuning.preaccelerated {
             return impulse;
         }
-        WheelDelta {
+        let cooled = WheelDelta {
             x: self.reversal_x.attenuate(impulse.x, at),
             y: self.reversal_y.attenuate(impulse.y, at),
+        };
+        if cooled != impulse {
+            tracing::trace!(
+                raw_x = impulse.x,
+                raw_y = impulse.y,
+                cooled_x = cooled.x,
+                cooled_y = cooled.y,
+                "reversal cooldown attenuated a tick"
+            );
         }
+        cooled
     }
 
     /// Superpose one tick's pulse and evaluate the position at its timestamp.
