@@ -809,6 +809,60 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
 }
 
 #[test]
+fn removing_a_profile_on_a_background_device_does_not_clobber_active_projections() {
+    const SECOND_MOUSE_KEY: &str = "unit:11223344";
+
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[
+            direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+            second_mouse_inventory(),
+        ],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    let other = state
+        .devices()
+        .iter()
+        .position(|record| record.config_key == SECOND_MOUSE_KEY)
+        .expect("the fixture pairs a second device");
+    let known = state
+        .devices()
+        .iter()
+        .position(|record| record.config_key == KNOWN_MOUSE_KEY)
+        .expect("the fixture pairs the known mouse");
+
+    state.set_current_device(known);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_binding(ButtonId::Back, Action::Undo);
+
+    state.set_current_device(other);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_binding(ButtonId::Back, Action::Redo);
+    let active_bindings = state.button_bindings().clone();
+
+    state.remove_app_profile_for_device(KNOWN_MOUSE_KEY, "com.apple.Safari");
+
+    assert_eq!(state.button_bindings(), &active_bindings);
+    assert_eq!(state.editing_app(), Some("com.apple.Safari"));
+    assert_eq!(
+        state.config.per_app_overrides(SECOND_MOUSE_KEY, "com.apple.Safari"),
+        Some(&BTreeMap::from([(ButtonId::Back, Action::Redo)]))
+    );
+    assert!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .is_none()
+    );
+}
+
+#[test]
 fn invalid_device_selection_preserves_the_valid_current_device() {
     let mut state = state_with_a_known_mouse();
     let selected = state.selected_device_index();

@@ -1,11 +1,11 @@
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::FluentBuilder as _, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName, Root, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -385,6 +385,22 @@ impl AppView {
         }))
     }
 
+    /// gpui-component registers dialogs/sheets/notifications on [`Root`], but
+    /// [`Root::render`] does not paint those layers — the inner view must.
+    fn mount_modal_layers(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        content: impl IntoElement,
+    ) -> AnyElement {
+        div()
+            .size_full()
+            .child(content)
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
+            .into_any_element()
+    }
+
     fn accessibility_gate(cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         v_flex()
@@ -526,9 +542,11 @@ impl Render for AppView {
         self.config_issue_visible = config_issue.is_some();
         if let Some(issue) = config_issue {
             window.set_window_title("OpenLogi");
-            return root
-                .child(status::config_issue_body(issue, cx))
-                .into_any_element();
+            return Self::mount_modal_layers(
+                window,
+                cx,
+                root.child(status::config_issue_body(issue, cx)),
+            );
         }
 
         // The agent is the source of truth for both the permission state and
@@ -544,15 +562,15 @@ impl Render for AppView {
         let status = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::connecting_body(cx)).into_any_element();
+                return Self::mount_modal_layers(window, cx, root.child(status::connecting_body(cx)));
             }
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return Self::mount_modal_layers(window, cx, root.child(status::unreachable_body(cx)));
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::outdated_gui_body(cx)).into_any_element();
+                return Self::mount_modal_layers(window, cx, root.child(status::outdated_gui_body(cx)));
             }
             AgentLink::Ready(status) => status,
         };
@@ -560,7 +578,10 @@ impl Render for AppView {
         let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return root.child(Self::accessibility_gate(cx)).into_any_element();
+            let content = root
+                .child(Self::accessibility_gate(cx).into_any_element())
+                .into_any_element();
+            return Self::mount_modal_layers(window, cx, content);
         }
 
         let has_device = AppState::try_global(cx)
@@ -655,10 +676,13 @@ impl Render for AppView {
             )
         };
 
-        root.child(header_el)
-            .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(cx)))
-            .into_any_element()
+        Self::mount_modal_layers(
+            window,
+            cx,
+            root.child(header_el)
+                .child(content_el)
+                .when(!granted, |this| this.child(status::attention_footer(cx))),
+        )
     }
 }
 
