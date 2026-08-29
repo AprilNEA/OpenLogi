@@ -25,6 +25,16 @@ fn tuning(step: f64, duration_ms: u64, max_gain: f64) -> MotionTuning {
         step,
         duration: Duration::from_millis(duration_ms),
         max_gain,
+        preaccelerated: false,
+    }
+}
+
+/// Step 1×, pre-accelerated input: gain stays off (as the worker forces on
+/// that path) and quick reversals cool down.
+fn preaccelerated() -> MotionTuning {
+    MotionTuning {
+        preaccelerated: true,
+        ..tuning(1.0, 100, 1.0)
     }
 }
 
@@ -643,5 +653,113 @@ fn acceleration_windows_are_kept_per_axis() {
         frames.push(frame);
     });
     assert_delta(cumulative(&frames), wheel(1.0, 169.0 / 14.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn reversal_cooldown_scales_by_time_since_the_departed_direction() {
+    const EPSILON: f64 = 1.0e-9;
+    let base = Instant::now();
+    let at = |millis| base + Duration::from_millis(millis);
+    let mut cooldown = ReversalCooldown::default();
+    // First input commits a direction unscaled.
+    assert!((cooldown.attenuate(-5.0, at(0)) + 5.0).abs() < EPSILON);
+    // A flip 68 ms later (the measured hot case) passes 68/400 of its value.
+    assert!((cooldown.attenuate(4.0, at(68)) - 4.0 * 0.17).abs() < EPSILON);
+    // The committed new direction keeps ramping against the same reference…
+    assert!((cooldown.attenuate(4.0, at(200)) - 4.0 * 0.5).abs() < EPSILON);
+    // …and runs unscaled once the cooldown has fully elapsed.
+    assert!((cooldown.attenuate(4.0, at(400)) - 4.0).abs() < EPSILON);
+}
+
+#[test]
+fn quick_reversal_of_preaccelerated_input_restarts_cold() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // Hot downward stream, then an opposing tick 40 ms after its last tick:
+    // the reversal passes only 40/400 of its pre-accelerated magnitude.
+    for (millis, delta) in [(0, -5.0), (50, -5.0), (90, 5.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -5.0 - 5.0 + 0.5));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn leisurely_reversal_of_preaccelerated_input_is_unscaled() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // The opposing tick arrives a full cooldown after the departed
+    // direction's last tick — already cold, so it passes untouched.
+    for (millis, delta) in [(0, -5.0), (50, -5.0), (460, 5.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(700), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -5.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn free_spin_jitter_never_scales_the_resumed_direction() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // A sub-commit opposing jitter tick is itself attenuated (0.2 × 30/400)
+    // but must not cool the main direction when it resumes.
+    for (millis, delta) in [(0, -5.0), (50, -5.0), (80, 0.2), (120, -5.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(400), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -15.0 + 0.2 * 0.075));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn raw_input_reverses_without_attenuation() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // Non-pre-accelerated sources (HID++ divert, other platforms) keep the
+    // exact conserve-net-distance reversal semantics.
+    for (millis, delta) in [(0, -5.0), (8, 5.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            neutral(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, 0.0));
     assert!(engine.active.is_empty());
 }

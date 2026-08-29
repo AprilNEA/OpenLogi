@@ -41,6 +41,17 @@ const PULSE_TAIL_RATIO: f64 = 3.0;
 /// the newest pulse past this (see [`ActiveMotion::add_tick`]), keeping frame
 /// evaluation O(1)-ish.
 const MAX_PULSES: usize = 64;
+/// How long the OS acceleration baked into pre-accelerated input takes to
+/// decay after the wheel changes direction. Measured on macOS 15.7 with an
+/// MX Master 4: a flip 68 ms after the opposing stream arrived with its
+/// first tick 14× the cold-start magnitude, while flips ≥ 435 ms after it
+/// started cold like every from-rest burst.
+const REVERSAL_COOLDOWN: Duration = Duration::from_millis(400);
+/// Raw opposing distance (in the input's own units) a flip must accumulate
+/// before the tracked direction changes. Free-spin wheels jitter a fraction
+/// of a tick backwards at the end of a flick; below this floor the opposing
+/// ticks are attenuated but the resumed main direction stays untouched.
+const REVERSAL_COMMIT: f64 = 0.5;
 
 /// Normalized two-phase pulse: a damped-force head (`u − 1 + e^(−u)`) blending
 /// C¹-continuously into an exponential viscous tail at one part head to
@@ -83,6 +94,11 @@ pub(crate) struct MotionTuning {
     pub(crate) duration: Duration,
     /// Cap on [`accel_gain`]; `1.0` disables acceleration.
     pub(crate) max_gain: f64,
+    /// Whether the source's distances already carry an OS acceleration curve
+    /// keyed on unsigned wheel speed. Such input stays hot across a quick
+    /// direction flip, so opposing ticks get a cold start re-imposed via
+    /// [`ReversalCooldown`].
+    pub(crate) preaccelerated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -221,6 +237,100 @@ impl Pulse {
     }
 }
 
+/// One axis of cold-start attenuation for quick direction reversals of
+/// pre-accelerated input.
+///
+/// The OS acceleration baked into such input is keyed on unsigned wheel
+/// speed, so the first ticks after a fast flip arrive as hot as the stream
+/// they interrupt instead of ramping from rest — amplified by the step
+/// multiplier, that is felt as reversal overshoot. Scaling an opposing tick
+/// by the time elapsed since the departed direction's last tick, relative to
+/// [`REVERSAL_COOLDOWN`], reproduces the measured cold-start ramp on quick
+/// flips and leaves leisurely reversals (which arrive cold anyway) exactly
+/// unscaled.
+#[derive(Default)]
+struct ReversalCooldown {
+    /// Sign of the committed scroll direction; `0` before any input.
+    dir: i8,
+    /// Arrival of the committed direction's most recent tick.
+    last_at: Option<Instant>,
+    /// Last tick time of the direction scrolled away from, kept while a flip
+    /// is still inside the cooldown.
+    flip_ref: Option<Instant>,
+    /// Raw opposing distance accumulated towards [`REVERSAL_COMMIT`].
+    pending: f64,
+    /// Whether the pending flip has crossed [`REVERSAL_COMMIT`] and `dir`
+    /// now points the new way.
+    committed: bool,
+}
+
+impl ReversalCooldown {
+    fn clear_flip(&mut self) {
+        self.flip_ref = None;
+        self.pending = 0.0;
+        self.committed = false;
+    }
+
+    fn cooldown_factor(flip_ref: Instant, at: Instant) -> f64 {
+        (at.saturating_duration_since(flip_ref).as_secs_f64() / REVERSAL_COOLDOWN.as_secs_f64())
+            .min(1.0)
+    }
+
+    fn attenuate(&mut self, value: f64, at: Instant) -> f64 {
+        if value == 0.0 {
+            return value;
+        }
+        let sign: i8 = if value > 0.0 { 1 } else { -1 };
+        if self.dir == 0 {
+            self.dir = sign;
+            self.last_at = Some(at);
+            return value;
+        }
+        if sign == self.dir {
+            self.last_at = Some(at);
+            return match self.flip_ref {
+                // Post-commit ramp: keep re-imposing the cold start until
+                // the cooldown fully elapses.
+                Some(flip_ref) if self.committed => {
+                    let factor = Self::cooldown_factor(flip_ref, at);
+                    if factor >= 1.0 {
+                        self.clear_flip();
+                        value
+                    } else {
+                        value * factor
+                    }
+                }
+                // The opposing ticks never committed — free-spin jitter —
+                // and the main direction resumed; drop the pending flip.
+                Some(_) => {
+                    self.clear_flip();
+                    value
+                }
+                None => value,
+            };
+        }
+        // Opposing tick: reference the departed direction's last arrival,
+        // starting a fresh flip unless one is already pending.
+        let flip_ref = match self.flip_ref {
+            Some(flip_ref) if !self.committed => flip_ref,
+            _ => {
+                let flip_ref = self.last_at.unwrap_or(at);
+                self.flip_ref = Some(flip_ref);
+                self.pending = 0.0;
+                self.committed = false;
+                flip_ref
+            }
+        };
+        self.pending += value.abs();
+        if self.pending >= REVERSAL_COMMIT {
+            self.dir = sign;
+            self.last_at = Some(at);
+            self.committed = true;
+        }
+        value * Self::cooldown_factor(flip_ref, at)
+    }
+}
+
 /// A source exists in the state map only while it has in-flight pulses.
 ///
 /// Overlapping pulses superpose: the source's position is the settled distance
@@ -240,6 +350,8 @@ struct ActiveMotion {
     /// axis's own rate, so a fast spin on one axis never accelerates slow
     /// movement on the other.
     recent_ticks: VecDeque<(Instant, WheelDelta)>,
+    reversal_x: ReversalCooldown,
+    reversal_y: ReversalCooldown,
 }
 
 impl ActiveMotion {
@@ -250,7 +362,10 @@ impl ActiveMotion {
             emitted: WheelDelta::ZERO,
             next_frame: at + FRAME_INTERVAL,
             recent_ticks: VecDeque::new(),
+            reversal_x: ReversalCooldown::default(),
+            reversal_y: ReversalCooldown::default(),
         };
+        let impulse = motion.cooled(impulse, at, tuning);
         let gain = motion.windowed_gain(impulse, at, tuning.max_gain);
         motion.pulses.push(Pulse {
             amplitude: impulse.scale(tuning.step).scale_axes(gain),
@@ -291,6 +406,18 @@ impl ActiveMotion {
         }
     }
 
+    /// Attenuate quick direction reversals of pre-accelerated input; raw
+    /// sources pass through untouched.
+    fn cooled(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> WheelDelta {
+        if !tuning.preaccelerated {
+            return impulse;
+        }
+        WheelDelta {
+            x: self.reversal_x.attenuate(impulse.x, at),
+            y: self.reversal_y.attenuate(impulse.y, at),
+        }
+    }
+
     /// Superpose one tick's pulse and evaluate the position at its timestamp.
     ///
     /// Ticks landing within one frame of the newest pulse's first tick merge
@@ -305,6 +432,7 @@ impl ActiveMotion {
     /// unconditionally; that is the one place the model approximates, and it
     /// still conserves distance and continuity.
     fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
+        let impulse = self.cooled(impulse, at, tuning);
         let gain = self.windowed_gain(impulse, at, tuning.max_gain);
         let amplitude = impulse.scale(tuning.step).scale_axes(gain);
         let merge = self.pulses.len() >= MAX_PULSES
