@@ -24,6 +24,29 @@ fn next_idle_recovery_deadline(now: Instant) -> Instant {
     now + IDLE_RECOVERY_INTERVAL
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdleRecovery {
+    ReadCurrent,
+    RenewObserver,
+}
+
+enum ObserverExit {
+    RecoverAfterDrop,
+    RetryAfterFailure,
+}
+
+/// Linux's selected native source moves onto the observer worker, so reads
+/// while it is active intentionally return the latest publication. Renewing
+/// the observer returns that source to the synchronous reader before recovery;
+/// macOS and Windows can query their OS state independently.
+const fn idle_recovery() -> IdleRecovery {
+    if cfg!(target_os = "linux") {
+        IdleRecovery::RenewObserver
+    } else {
+        IdleRecovery::ReadCurrent
+    }
+}
+
 /// Channel item: `Some(app)` when an app is frontmost; `None` for "no
 /// foreground app" (rare on macOS — Finder is usually frontmost even when
 /// nothing else is).
@@ -32,7 +55,7 @@ pub type ForegroundUpdate = Option<ForegroundApp>;
 /// Watch foreground application changes.
 ///
 /// macOS, Linux, and Windows use native platform events plus a slow idle
-/// recovery read. Unsupported targets return a receiver that never yields.
+/// recovery pass. Unsupported targets return a receiver that never yields.
 #[must_use]
 pub fn spawn() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     if !cfg!(any(
@@ -56,8 +79,8 @@ pub fn spawn() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
 }
 
 /// The last value published to the orchestrator, used only to suppress
-/// duplicate snapshots. `NSWorkspace`, not this adapter, remains the source of
-/// truth for the current application.
+/// duplicate snapshots. The native platform source, not this adapter, remains
+/// the source of truth for the current application.
 #[derive(Default)]
 struct ForegroundChanges {
     published: Option<ForegroundUpdate>,
@@ -74,8 +97,10 @@ impl ForegroundChanges {
 }
 
 /// Treat native callbacks as invalidations, then read the hook crate's current
-/// application SSOT. After 30 seconds without an event, one authoritative read
-/// and health check recover from a missed event or silent observer failure.
+/// application SSOT. After 30 seconds without an event, a health check and
+/// authoritative read recover from a missed event or silent observer failure.
+/// Linux first renews its observer because its active source owns the native
+/// transport and serves reads from the last event publication.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -113,7 +138,7 @@ fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                 };
                 recovery_deadline = next_idle_recovery_deadline(Instant::now());
 
-                loop {
+                let observer_exit = loop {
                     let timeout = recovery_deadline.saturating_duration_since(Instant::now());
                     match native_rx.recv_timeout(timeout) {
                         Ok(()) => {
@@ -130,7 +155,10 @@ fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                             }
                             if let Err(error) = observer.check_health() {
                                 warn!(%error, "native foreground-app observer stopped; restarting");
-                                break;
+                                break ObserverExit::RetryAfterFailure;
+                            }
+                            if idle_recovery() == IdleRecovery::RenewObserver {
+                                break ObserverExit::RecoverAfterDrop;
                             }
                             if !publish_current(&tx, &mut changes) {
                                 return;
@@ -139,17 +167,27 @@ fn spawn_native() -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                         }
                         Err(RecvTimeoutError::Disconnected) => {
                             warn!("native foreground-app observer disconnected; restarting");
-                            break;
+                            break ObserverExit::RetryAfterFailure;
                         }
                     }
-                }
+                };
 
+                // On Linux this synchronously returns the selected native
+                // source to `frontmost_application`, so the recovery read below
+                // cannot be satisfied by the stale observer publication.
                 drop(observer);
                 if tx.is_closed() {
                     debug!("foreground-app watcher receiver dropped — exiting");
                     return;
                 }
-                thread::sleep(OBSERVER_RETRY_INTERVAL);
+                match observer_exit {
+                    ObserverExit::RecoverAfterDrop => {
+                        if !publish_current(&tx, &mut changes) {
+                            return;
+                        }
+                    }
+                    ObserverExit::RetryAfterFailure => thread::sleep(OBSERVER_RETRY_INTERVAL),
+                }
             }
         });
     if let Err(error) = spawned {
@@ -218,5 +256,11 @@ mod tests {
             IDLE_RECOVERY_INTERVAL
         );
         assert!(deferred > original);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_idle_recovery_renews_the_observer_before_reading() {
+        assert_eq!(idle_recovery(), IdleRecovery::RenewObserver);
     }
 }
