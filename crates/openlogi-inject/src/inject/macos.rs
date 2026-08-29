@@ -26,10 +26,6 @@ static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
-// `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
-const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
-const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
-
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
 const NX_KEYTYPE_SOUND_DOWN: i32 = 1;
@@ -648,7 +644,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     ev.post(CGEventTapLocation::HID);
 }
 
-pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
+pub(super) fn post_smooth_scroll(delta: ScrollDelta, _phase: SmoothScrollPhase) {
     const POINTS_PER_WHEEL_TICK: f64 = 10.0;
 
     let units_per_input = match delta {
@@ -662,6 +658,13 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     let delta = quantizer.quantize(delta, units_per_input);
     drop(quantizer);
 
+    // Sub-pixel frames quantize to zero; posting them would only flood the
+    // event stream. With no phase fields on the output there is nothing else
+    // a zero-distance frame could carry, terminal or not.
+    if delta == QuantizedScroll::default() {
+        return;
+    }
+
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for smooth scroll");
         return;
@@ -671,20 +674,15 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         tracing::warn!("CGEvent::new_scroll_event failed for smooth scroll");
         return;
     };
+    // Deliberately phaseless: continuous events with zeroed gesture/momentum
+    // phases scroll everywhere a wheel does, while a Began/Changed/Ended
+    // stream declares a trackpad gesture — which switches AppKit/WebKit into
+    // gesture handling (rubber-band overscroll appears on wheel scrolls, and
+    // WebKit's gesture latching can starve sites that scroll from JS wheel
+    // handlers).
     set_continuous_scroll_fields(&ev, delta);
-    ev.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
-    ev.set_integer_value_field(MOMENTUM_PHASE, 0);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
-}
-
-const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {
-    match phase {
-        SmoothScrollPhase::Began => 1,
-        SmoothScrollPhase::Changed => 2,
-        SmoothScrollPhase::Ended => 4,
-        SmoothScrollPhase::Cancelled => 8,
-    }
 }
 
 fn set_continuous_scroll_fields(event: &CGEvent, delta: QuantizedScroll) {
