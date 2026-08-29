@@ -37,14 +37,16 @@ struct ScrollPreferenceSnapshot {
 
 impl ScrollPreferenceSnapshot {
     fn motion_tuning(self, source: &ScrollSource) -> MotionTuning {
+        let preaccelerated = os_hook_input_is_preaccelerated(source);
         MotionTuning {
             step: self.tuning.step.multiplier(),
             duration: Duration::from_millis(u64::from(u16::from(self.tuning.duration))),
-            max_gain: if os_hook_input_is_preaccelerated(source) {
+            max_gain: if preaccelerated {
                 1.0
             } else {
                 self.tuning.acceleration.max_gain()
             },
+            preaccelerated,
         }
     }
 }
