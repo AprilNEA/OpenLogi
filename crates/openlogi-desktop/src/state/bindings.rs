@@ -67,6 +67,16 @@ impl BindingState {
         self.refresh_device(config, persistent_key);
     }
 
+    fn clear_editing_scope_for(&mut self, device_key: &str) {
+        if self
+            .editing_scope
+            .as_ref()
+            .is_some_and(|scope| scope.device_key == device_key)
+        {
+            self.editing_scope = None;
+        }
+    }
+
     fn refresh_device(&mut self, config: &Config, persistent_key: Option<&str>) {
         let button_bindings =
             bindings_for(config, persistent_key, self.editing_app(persistent_key));
@@ -269,8 +279,8 @@ impl AppState {
         self.config
             .edit(|config| config.remove_app_profile(device_key, app));
         if self.bindings.editing_app(Some(device_key)) == Some(app) {
-            self.bindings
-                .set_editing_app(&self.config, Some(device_key), None);
+            self.bindings.clear_editing_scope_for(device_key);
+            self.refresh_binding_projections();
         }
         self.persist_and_reload("per-app profile");
     }
