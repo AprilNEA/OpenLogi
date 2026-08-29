@@ -302,7 +302,12 @@ async fn run_transition(
         Ok(true) => {
             observable.set_host_switch_warning(None);
             wait_for_departure(links, &link.keyboard).await;
-            apply_monitor_inputs(&link, host).await;
+            match apply_monitor_inputs(&link, host).await {
+                Ok(()) => observable.set_host_switch_warning(None),
+                Err(error) => observable.set_host_switch_warning(Some(format!(
+                    "显示器联动失败：{error}。键盘和鼠标已经切到目标电脑，但至少一台显示器没有切到配置的输入源；请手动检查显示器输入源。"
+                ))),
+            }
         }
         Ok(false) => {}
         Err(error) => {
@@ -314,17 +319,21 @@ async fn run_transition(
     }
 }
 
-async fn apply_monitor_inputs(link: &HostSwitchLink, host: u8) {
+async fn apply_monitor_inputs(
+    link: &HostSwitchLink,
+    host: u8,
+) -> Result<(), openlogi_monitor::MonitorError> {
     let Some(assignments) = link.monitor_inputs.get(&host).cloned() else {
-        return;
+        return Ok(());
     };
     if assignments.is_empty() {
-        return;
+        return Ok(());
     }
-    let _ = tokio::task::spawn_blocking(move || {
-        openlogi_monitor::apply_input_assignments(&assignments);
-    })
-    .await;
+    tokio::task::spawn_blocking(move || openlogi_monitor::apply_input_assignments(&assignments))
+        .await
+        .map_err(|_| openlogi_monitor::MonitorError::WindowsApi {
+            operation: "switching monitor inputs on a blocking task",
+        })?
 }
 
 async fn wait_for_departure(
@@ -372,6 +381,7 @@ mod tests {
         let link = HostSwitchLink {
             keyboard: keyboard.clone(),
             targets: vec![route(2)],
+            monitor_inputs: BTreeMap::new(),
         };
         let (links, mut published) = watch::channel(std::sync::Arc::new(vec![link]));
         let started = Instant::now();

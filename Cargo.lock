@@ -5396,7 +5396,6 @@ dependencies = [
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-monitor",
- "plist",
  "rust-i18n",
  "succession",
  "sysinfo 0.38.4",

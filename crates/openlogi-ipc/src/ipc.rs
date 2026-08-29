@@ -67,7 +67,6 @@ pub use succession::Identity;
 /// v33: monitor input test can request a delayed restore.
 /// v34: `AgentSnapshot::host_switch_warning` appended.
 pub const PROTOCOL_VERSION: u32 = 34;
-pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
