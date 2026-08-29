@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 mod device;
 #[cfg(feature = "fs")]
 mod file;
+mod flow;
 mod identity;
 mod key_trigger;
 mod settings;
@@ -28,6 +29,7 @@ pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
+pub use flow::{FlowConfig, FlowDevice, FlowEdge, FlowLayout, FlowPeer};
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
@@ -50,6 +52,9 @@ use settings::GestureOwner;
 /// before consuming the rest of the file.
 ///
 /// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
+///
+/// Flow is an additive, default-empty section and does not require a schema
+/// migration; configs without it continue to deserialize to disabled Flow.
 ///
 /// v5 also drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
 /// names the mouse *and the cable it was plugged into*, so a device moved to a
@@ -104,6 +109,9 @@ pub struct Config {
     /// first paired device. `None` means "fall back to the first device".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_device: Option<String>,
+    /// Cross-machine Flow handoff configuration.
+    #[serde(default, skip_serializing_if = "FlowConfig::is_default")]
+    pub flow: FlowConfig,
     /// When set (see [`Self::ephemeral`]), [`Self::save_atomic`] is a no-op:
     /// this config never writes the on-disk file. Never true for a loaded or
     /// default-constructed config.
@@ -136,6 +144,7 @@ impl Default for Config {
             schema_version: SCHEMA_VERSION,
             app_settings: AppSettings::default(),
             selected_device: None,
+            flow: FlowConfig::default(),
             devices: BTreeMap::new(),
             ephemeral: false,
             keyboard: KeyboardConfig::default(),
