@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Палітра"
 "Book": "Книга"
 "Custom shortcut": "Власне сполучення клавіш"
-"Shortcut, e.g. Cmd+Shift+P": "Сполучення клавіш, напр. Cmd+Shift+P"
+"Press a shortcut": "Натисніть сполучення клавіш"
 "Application, folder path, or URL": "Програма, шлях до папки або URL"
 "Open application or folder": "Відкрити програму або папку"
 

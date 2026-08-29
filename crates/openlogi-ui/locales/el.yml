@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Παλέτα"
 "Book": "Βιβλίο"
 "Custom shortcut": "Προσαρμοσμένη συντόμευση"
-"Shortcut, e.g. Cmd+Shift+P": "Συντόμευση, π.χ. Cmd+Shift+P"
+"Press a shortcut": "Πατήστε μια συντόμευση"
 "Application, folder path, or URL": "Εφαρμογή, διαδρομή φακέλου ή URL"
 "Open application or folder": "Άνοιγμα εφαρμογής ή φακέλου"
 

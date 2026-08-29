@@ -438,7 +438,7 @@ _version: 1
 "Palette": "调色板"
 "Book": "书籍"
 "Custom shortcut": "自定义快捷键"
-"Shortcut, e.g. Cmd+Shift+P": "快捷键，例如 Cmd+Shift+P"
+"Press a shortcut": "按下快捷键"
 "Application, folder path, or URL": "应用、文件夹路径或 URL"
 "Open application or folder": "打开应用或文件夹"
 

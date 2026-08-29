@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Farvepalet"
 "Book": "Bog"
 "Custom shortcut": "Brugerdefineret genvej"
-"Shortcut, e.g. Cmd+Shift+P": "Genvej, f.eks. Cmd+Shift+P"
+"Press a shortcut": "Tryk på en genvej"
 "Application, folder path, or URL": "Program, mappesti eller URL"
 "Open application or folder": "Åbn program eller mappe"
 

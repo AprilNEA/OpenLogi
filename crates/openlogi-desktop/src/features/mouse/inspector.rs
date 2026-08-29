@@ -24,6 +24,7 @@ use super::view::MouseModelView;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_button, control_input};
+use crate::ui::shortcut_capture::ShortcutCapture;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
@@ -43,12 +44,14 @@ pub(super) struct BindingInspectorData<'a> {
 struct ActionPickerContext<'a> {
     open: bool,
     search: &'a Entity<InputState>,
+    shortcut: &'a Entity<ShortcutCapture>,
     view: &'a Entity<MouseModelView>,
 }
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     action_search: &Entity<InputState>,
+    shortcut_input: &Entity<ShortcutCapture>,
     view: &Entity<MouseModelView>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -56,6 +59,7 @@ pub(super) fn binding_inspector(
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,
+        shortcut: shortcut_input,
         view,
     };
     let body = match data.selected {
@@ -212,6 +216,7 @@ fn button_inspector(
                 "inspector-action",
                 Some(&action),
                 picker.search,
+                picker.shortcut,
                 &on_pick,
                 pal,
                 cx,
@@ -265,6 +270,7 @@ fn inherited_gesture_inspector(
                 "inspector-gesture-override",
                 None,
                 picker.search,
+                picker.shortcut,
                 &on_pick,
                 pal,
                 cx,
@@ -328,6 +334,7 @@ fn gesture_inspector(
                 "inspector-gesture-action",
                 Some(&current),
                 picker.search,
+                picker.shortcut,
                 &on_pick,
                 pal,
                 cx,
@@ -620,6 +627,7 @@ fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
     action_search: &Entity<InputState>,
+    shortcut_input: &Entity<ShortcutCapture>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
@@ -629,6 +637,7 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
+        .child(shortcut_editor(shortcut_input, pal))
         .child(editor_section(tr!("Actions"), pal))
         .child(control_input(action_search).cleanable(true))
         .child(
@@ -645,6 +654,13 @@ fn action_library(
                 })
                 .children(rows),
         )
+}
+
+fn shortcut_editor(capture: &Entity<ShortcutCapture>, pal: Palette) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!("Custom shortcut"), pal))
+        .child(capture.clone())
 }
 
 fn gesture_action(

@@ -9,7 +9,7 @@ use gpui_component::{
     scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
-    Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, KeyCombo,
+    Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category,
     RingAction,
 };
 
@@ -18,13 +18,14 @@ use crate::features::mouse::picker::editor_section;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
+use crate::ui::shortcut_capture::ShortcutCapture;
 use crate::ui::theme::{self, Palette, Typography as _};
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
     current: Option<&ActionRingEntry>,
     application_input: &Entity<InputState>,
-    shortcut_input: &Entity<InputState>,
+    shortcut_input: &Entity<ShortcutCapture>,
     library_scroll: &ScrollHandle,
     pal: Palette,
 ) -> impl IntoElement {
@@ -80,7 +81,7 @@ pub(super) fn action_library(
                         pal,
                     ))
                 })
-                .child(shortcut_editor(slot, shortcut_input, pal))
+                .child(shortcut_editor(shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
                 .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
@@ -152,36 +153,11 @@ fn icon_button(
         .tooltip(label)
 }
 
-fn shortcut_editor(
-    slot: ActionRingSlot,
-    input: &Entity<InputState>,
-    pal: Palette,
-) -> impl IntoElement {
-    let submit_input = input.clone();
+fn shortcut_editor(capture: &Entity<ShortcutCapture>, pal: Palette) -> impl IntoElement {
     v_flex()
         .gap_1()
         .child(editor_section(tr!("Custom shortcut"), pal))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(control_input(input).cleanable(true)),
-                )
-                .child(
-                    Button::new("ring-add-shortcut")
-                        .compact()
-                        .label(tr!("Add"))
-                        .on_click(move |_, _, cx| {
-                            let shortcut = submit_input.read(cx).value().to_string();
-                            if let Ok(combo) = shortcut.parse::<KeyCombo>() {
-                                commit_action(slot, Action::CustomShortcut(combo), cx);
-                            }
-                        }),
-                ),
-        )
+        .child(capture.clone())
 }
 
 fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -> impl IntoElement {
@@ -278,7 +254,7 @@ fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
     sections
 }
 
-fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
+pub(super) fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
     let Ok(action) = RingAction::new(action) else {
         return;
     };

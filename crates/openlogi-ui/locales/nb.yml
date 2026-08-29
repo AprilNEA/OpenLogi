@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Palett"
 "Book": "Bok"
 "Custom shortcut": "Egendefinert snarvei"
-"Shortcut, e.g. Cmd+Shift+P": "Snarvei, f.eks. Cmd+Shift+P"
+"Press a shortcut": "Trykk på en snarvei"
 "Application, folder path, or URL": "Program, mappebane eller URL"
 "Open application or folder": "Åpne program eller mappe"
 

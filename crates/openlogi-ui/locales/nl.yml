@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Palet"
 "Book": "Boek"
 "Custom shortcut": "Aangepaste sneltoets"
-"Shortcut, e.g. Cmd+Shift+P": "Sneltoets, bijv. Cmd+Shift+P"
+"Press a shortcut": "Druk op een sneltoets"
 "Application, folder path, or URL": "Toepassing, mappad of URL"
 "Open application or folder": "Toepassing of map openen"
 

@@ -415,6 +415,8 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
         0x36 => Some(0x2b),
         0x37 => Some(0x2f),
         0x38 => Some(0x2c),
+        0x39 => Some(0x39),
+        0x49 => Some(0x72),
         0x4a => Some(0x73),
         0x4b => Some(0x74),
         0x4c => Some(0x75),
@@ -424,6 +426,19 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
         0x50 => Some(0x7b),
         0x51 => Some(0x7d),
         0x52 => Some(0x7e),
+        0x53 => Some(0x47),
+        0x54 => Some(0x4b),
+        0x55 => Some(0x43),
+        0x56 => Some(0x4e),
+        0x57 => Some(0x45),
+        0x58 => Some(0x4c),
+        0x59..=0x61 => {
+            const KEYPAD_1_9: [u16; 9] = [0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5b, 0x5c];
+            KEYPAD_1_9.get(usize::from(usage - 0x59)).copied()
+        }
+        0x62 => Some(0x52),
+        0x63 => Some(0x41),
+        0x67 => Some(0x51),
         _ => None,
     }
 }
@@ -443,6 +458,8 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0x50), Some(0x7b));
         assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
         assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
+        assert_eq!(hid_usage_to_macos(0x49), Some(0x72));
+        assert_eq!(hid_usage_to_macos(0x56), Some(0x4e));
         assert_eq!(hid_usage_to_macos(0xff), None);
     }
 

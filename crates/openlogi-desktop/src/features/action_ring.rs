@@ -14,13 +14,14 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    Action, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot, KeyCombo,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
 use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::ui::shortcut_capture::ShortcutCapture;
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -29,10 +30,11 @@ pub struct ActionRingPanel {
     focus_handle: FocusHandle,
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
-    shortcut_input: Option<Entity<InputState>>,
+    shortcut_input: Entity<ShortcutCapture>,
     library_scroll: ScrollHandle,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
+    _shortcut_obs: Subscription,
 }
 
 impl ActionRingPanel {
@@ -50,13 +52,22 @@ impl ActionRingPanel {
                 cx.notify();
             }
         });
+        let shortcut_input = cx.new(|cx| ShortcutCapture::new("ring-shortcut-capture", cx));
+        let shortcut_obs = cx.subscribe(&shortcut_input, |this, _, combo: &KeyCombo, cx| {
+            editor::commit_action(
+                this.selected_slot,
+                Action::CustomShortcut(combo.clone()),
+                cx,
+            );
+        });
         Self {
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
             application_input: None,
-            shortcut_input: None,
+            shortcut_input,
             library_scroll: ScrollHandle::new(),
             state_obs,
+            _shortcut_obs: shortcut_obs,
         }
     }
 }
@@ -70,7 +81,9 @@ impl Focusable for ActionRingPanel {
 impl Render for ActionRingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (ring, layout) = action_ring_editor_state(cx);
+        let ring = AppState::try_read(cx)
+            .map(AppState::current_action_ring)
+            .unwrap_or_default();
         let haptics_supported = current_device_supports_haptics(cx);
         let application_input = editor_input(
             &mut self.application_input,
@@ -78,12 +91,13 @@ impl Render for ActionRingPanel {
             window,
             cx,
         );
-        let shortcut_input = editor_input(
-            &mut self.shortcut_input,
-            tr!("Shortcut, e.g. Cmd+Shift+P"),
-            window,
-            cx,
-        );
+        let shortcut_input = {
+            let capture = self.shortcut_input.clone();
+            capture.update(cx, |capture, cx| {
+                capture.set_placeholder(tr!("Press a shortcut"), cx);
+            });
+            capture
+        };
         let view = cx.entity();
 
         v_flex()
@@ -108,10 +122,10 @@ impl Render for ActionRingPanel {
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                    .child(ring_preview(&ring.default, self.selected_slot, &view, pal))
                     .child(action_library(
                         self.selected_slot,
-                        layout.slots.get(&self.selected_slot),
+                        ring.default.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
                         &self.library_scroll,
@@ -167,21 +181,6 @@ impl Render for ActionRingPanel {
                 )
             })
     }
-}
-
-fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
-    AppState::try_read(cx).map_or_else(
-        || {
-            let ring = ActionRingConfig::default();
-            let layout = ring.default.clone();
-            (ring, layout)
-        },
-        |state| {
-            let ring = state.current_action_ring();
-            let layout = state.current_action_ring_layout();
-            (ring, layout)
-        },
-    )
 }
 
 fn editor_input(

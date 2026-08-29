@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Farbpalette"
 "Book": "Buch"
 "Custom shortcut": "Benutzerdefinierter Kurzbefehl"
-"Shortcut, e.g. Cmd+Shift+P": "Tastenkürzel, z. B. Cmd+Shift+P"
+"Press a shortcut": "Tastenkürzel drücken"
 "Application, folder path, or URL": "Anwendung, Ordnerpfad oder URL"
 "Open application or folder": "Anwendung oder Ordner öffnen"
 

@@ -438,7 +438,7 @@ _version: 1
 "Palette": "パレット"
 "Book": "本"
 "Custom shortcut": "カスタムショートカット"
-"Shortcut, e.g. Cmd+Shift+P": "ショートカット（例: Cmd+Shift+P）"
+"Press a shortcut": "ショートカットを押してください"
 "Application, folder path, or URL": "アプリ、フォルダのパス、またはURL"
 "Open application or folder": "アプリまたはフォルダを開く"
 

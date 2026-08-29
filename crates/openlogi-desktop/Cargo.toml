@@ -65,8 +65,9 @@ embed-resource = "3.0.9"
 # Window chrome, host OS string, and installed-app icon lookup only — the
 # menu-bar status item lives in the agent, not here.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance", "NSEvent", "block2"] }
 objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
 

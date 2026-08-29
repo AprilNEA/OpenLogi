@@ -154,4 +154,13 @@ strip = "symbols"
 # the two `gpui` packages now present in the zed repository; the exact commit
 # stays pinned in Cargo.lock so this patch does not fork the git source.
 [patch.crates-io]
-gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2" }
+gpui = { git = "https://github.com/tournierjc/zed", branch = "openlogi/numpad-digit-keys", version = "=0.2.2" }
+
+# Preserve numpad digit identity in GPUI keystrokes for shortcut capture.
+# Fork: https://github.com/tournierjc/zed/tree/openlogi/numpad-digit-keys
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/tournierjc/zed", branch = "openlogi/numpad-digit-keys" }
+gpui_platform = { git = "https://github.com/tournierjc/zed", branch = "openlogi/numpad-digit-keys" }
+gpui_linux = { git = "https://github.com/tournierjc/zed", branch = "openlogi/numpad-digit-keys" }
+gpui_macos = { git = "https://github.com/tournierjc/zed", branch = "openlogi/numpad-digit-keys" }
+gpui_windows = { git = "https://github.com/tournierjc/zed", branch = "openlogi/numpad-digit-keys" }

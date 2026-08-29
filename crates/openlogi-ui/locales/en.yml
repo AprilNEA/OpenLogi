@@ -438,7 +438,7 @@ _version: 1
 "Palette": "Palette"
 "Book": "Book"
 "Custom shortcut": "Custom shortcut"
-"Shortcut, e.g. Cmd+Shift+P": "Shortcut, e.g. Cmd+Shift+P"
+"Press a shortcut": "Press a shortcut"
 "Application, folder path, or URL": "Application, folder path, or URL"
 "Open application or folder": "Open application or folder"
 
