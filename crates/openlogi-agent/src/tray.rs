@@ -19,6 +19,7 @@
 )]
 
 use std::cell::RefCell;
+use std::sync::{Mutex, PoisonError};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -35,7 +36,7 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
     NSWorkspaceWillSleepNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationName, NSString};
+use objc2_foundation::{NSNotification, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -110,7 +111,12 @@ pub fn relocalize() {
 
 struct ActivityTargetIvars {
     signal: DeviceIoSignal,
+    suspended_by: Mutex<u8>,
 }
+
+const SYSTEM_SLEEP: u8 = 1 << 0;
+const SCREEN_SLEEP: u8 = 1 << 1;
+const SESSION_INACTIVE: u8 = 1 << 2;
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `ActivityTarget`
@@ -121,27 +127,73 @@ define_class!(
     struct ActivityTarget;
 
     impl ActivityTarget {
-        #[unsafe(method(workspaceDidSuspend:))]
-        fn workspace_did_suspend(&self, _notification: &NSNotification) {
-            if self.ivars().signal.suspend() {
-                info!("display/session suspended — pausing device I/O");
-            }
+        #[unsafe(method(workspaceWillSleep:))]
+        fn workspace_will_sleep(&self, _notification: &NSNotification) {
+            self.suspend_from(SYSTEM_SLEEP);
         }
 
-        #[unsafe(method(workspaceDidResume:))]
-        fn workspace_did_resume(&self, _notification: &NSNotification) {
-            if self.ivars().signal.resume() {
-                info!("display/session resumed — enabling device I/O");
-            }
+        #[unsafe(method(workspaceScreensDidSleep:))]
+        fn workspace_screens_did_sleep(&self, _notification: &NSNotification) {
+            self.suspend_from(SCREEN_SLEEP);
+        }
+
+        #[unsafe(method(workspaceSessionDidResignActive:))]
+        fn workspace_session_did_resign_active(&self, _notification: &NSNotification) {
+            self.suspend_from(SESSION_INACTIVE);
+        }
+
+        #[unsafe(method(workspaceScreensDidWake:))]
+        fn workspace_screens_did_wake(&self, _notification: &NSNotification) {
+            self.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+        }
+
+        #[unsafe(method(workspaceSessionDidBecomeActive:))]
+        fn workspace_session_did_become_active(&self, _notification: &NSNotification) {
+            self.resume_from(SYSTEM_SLEEP | SESSION_INACTIVE);
         }
     }
 );
 
 impl ActivityTarget {
     fn new(signal: DeviceIoSignal) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(ActivityTargetIvars { signal });
+        let this = Self::alloc().set_ivars(ActivityTargetIvars {
+            signal,
+            suspended_by: Mutex::new(0),
+        });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
+    }
+
+    fn suspend_from(&self, source: u8) {
+        let changed = {
+            let mut suspended_by = self
+                .ivars()
+                .suspended_by
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let was_allowed = *suspended_by == 0;
+            *suspended_by |= source;
+            was_allowed && self.ivars().signal.suspend()
+        };
+        if changed {
+            info!("display/session suspended — pausing device I/O");
+        }
+    }
+
+    fn resume_from(&self, sources: u8) {
+        let changed = {
+            let mut suspended_by = self
+                .ivars()
+                .suspended_by
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let was_suspended = *suspended_by != 0;
+            *suspended_by &= !sources;
+            was_suspended && *suspended_by == 0 && self.ivars().signal.resume()
+        };
+        if changed {
+            info!("display/session resumed — enabling device I/O");
+        }
     }
 }
 
@@ -291,51 +343,51 @@ fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget>
     let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
-    for name in suspend_notification_names() {
-        // SAFETY: `ActivityTarget` implements `workspaceDidSuspend:` with the
-        // exact one-NSNotification argument signature, and the caller retains
-        // the target for the AppKit loop's lifetime.
-        unsafe {
-            center.addObserver_selector_name_object(
-                &target,
-                sel!(workspaceDidSuspend:),
-                Some(name),
-                Some(&workspace),
-            );
-        }
-    }
-    for name in resume_notification_names() {
-        // SAFETY: `ActivityTarget` implements `workspaceDidResume:` with the
-        // exact one-NSNotification argument signature, and the caller retains
-        // the target for the AppKit loop's lifetime.
-        unsafe {
-            center.addObserver_selector_name_object(
-                &target,
-                sel!(workspaceDidResume:),
-                Some(name),
-                Some(&workspace),
-            );
-        }
-    }
-    target
-}
-
-fn suspend_notification_names() -> [&'static NSNotificationName; 3] {
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
-    [system_sleep, screen_sleep, session_inactive]
-}
-
-fn resume_notification_names() -> [&'static NSNotificationName; 2] {
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
-    [screen_wake, session_active]
+    // SAFETY: Every selector below has exactly one `NSNotification` argument,
+    // and the caller retains the target for the AppKit loop's lifetime.
+    unsafe {
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceWillSleep:),
+            Some(system_sleep),
+            Some(&workspace),
+        );
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceScreensDidSleep:),
+            Some(screen_sleep),
+            Some(&workspace),
+        );
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceSessionDidResignActive:),
+            Some(session_inactive),
+            Some(&workspace),
+        );
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceScreensDidWake:),
+            Some(screen_wake),
+            Some(&workspace),
+        );
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceSessionDidBecomeActive:),
+            Some(session_active),
+            Some(&workspace),
+        );
+    }
+    target
 }
 
 /// Build and install the menu-bar status item, returning the objects that must
@@ -430,16 +482,27 @@ mod tests {
     use openlogi_hid::device_io_channel;
 
     #[test]
-    fn darkwake_does_not_reopen_device_io() {
+    fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
 
-        let screen_sleep = suspend_notification_names()[1];
+        // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+        let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
+        // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+        let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
+        // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+        let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(system_sleep, Some(&workspace)) };
         // SAFETY: `workspace` is live, matches the registration filter, and
         // notification delivery completes synchronously.
         unsafe { center.postNotificationName_object(screen_sleep, Some(&workspace)) };
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(session_inactive, Some(&workspace)) };
         assert!(!gate.allows_io());
 
         // `DidWake` is a maintenance/system wake and intentionally has no
@@ -450,10 +513,21 @@ mod tests {
         unsafe { center.postNotificationName_object(darkwake, Some(&workspace)) };
         assert!(!gate.allows_io());
 
-        let screen_wake = resume_notification_names()[0];
+        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
+        let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
         // SAFETY: `workspace` is live, matches the registration filter, and
         // notification delivery completes synchronously.
         unsafe { center.postNotificationName_object(screen_wake, Some(&workspace)) };
+        assert!(
+            !gate.allows_io(),
+            "screen wake must not override an inactive session",
+        );
+
+        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
+        let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
+        // SAFETY: `workspace` is live, matches the registration filter, and
+        // notification delivery completes synchronously.
+        unsafe { center.postNotificationName_object(session_active, Some(&workspace)) };
         assert!(gate.allows_io());
 
         // SAFETY: This is the same live target registered with `center` above.
