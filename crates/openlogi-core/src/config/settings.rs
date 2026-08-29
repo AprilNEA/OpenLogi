@@ -204,6 +204,26 @@ pub struct AppSettings {
     /// message there.
     #[serde(default)]
     pub smooth_scroll: bool,
+    /// Distance every wheel tick animates while [`Self::smooth_scroll`] is
+    /// active, as a multiple of the native line distance (≈10 px on macOS).
+    /// Synthetic continuous output never receives the OS wheel-acceleration
+    /// curve, so without a step above 1× smooth scrolling travels *shorter*
+    /// than the raw wheel; the default reproduces the widely-shipped 90 px
+    /// commercial step.
+    #[serde(default)]
+    pub smooth_scroll_step: SmoothScrollStep,
+    /// How long one wheel tick's smooth animation runs. Longer durations
+    /// glide; shorter ones stop crisply. Overlapping ticks each keep their
+    /// own full duration, so this never changes total distance.
+    #[serde(default)]
+    pub smooth_scroll_duration_ms: SmoothScrollDurationMs,
+    /// Upper bound on the tick-rate acceleration gain applied while
+    /// [`Self::smooth_scroll`] is active: ticks arriving in quick succession
+    /// count for up to this multiple of [`Self::smooth_scroll_step`],
+    /// restoring the fast-spin reach the bypassed OS acceleration curve
+    /// would have provided. `1` disables acceleration entirely.
+    #[serde(default)]
+    pub smooth_scroll_acceleration: SmoothScrollAcceleration,
     /// Distance multiplier for traditional vertical mouse-wheel input.
     /// [`VerticalScrollSensitivity::DEFAULT`] means 1×; trackpad and other
     /// continuous pixel input is never scaled.
@@ -440,12 +460,200 @@ fn rounded_sensitivity(value: f32) -> u8 {
         .saturating_as::<u8>()
 }
 
+const SMOOTH_SCROLL_STEP_MIN: u8 = 1;
+const SMOOTH_SCROLL_STEP_MAX: u8 = 20;
+const SMOOTH_SCROLL_STEP_DEFAULT: u8 = 9;
+
+/// Per-tick smooth-scroll amplitude in native wheel lines.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = SMOOTH_SCROLL_STEP_MIN, less_or_equal = SMOOTH_SCROLL_STEP_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct SmoothScrollStep(u8);
+
+impl SmoothScrollStep {
+    /// Smallest selectable step: one native line per tick.
+    pub const MIN: Self = match Self::try_new(SMOOTH_SCROLL_STEP_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum smooth-scroll step"),
+    };
+    /// Largest selectable step.
+    pub const MAX: Self = match Self::try_new(SMOOTH_SCROLL_STEP_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum smooth-scroll step"),
+    };
+    /// Out-of-the-box step (≈90 px per tick on macOS).
+    pub const DEFAULT: Self = match Self::try_new(SMOOTH_SCROLL_STEP_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default smooth-scroll step"),
+    };
+
+    /// Amplitude multiplier applied to each accepted wheel tick.
+    #[must_use]
+    pub fn multiplier(self) -> f64 {
+        f64::from(self.into_inner())
+    }
+}
+
+impl Default for SmoothScrollStep {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+const SMOOTH_SCROLL_DURATION_MIN: u16 = 80;
+const SMOOTH_SCROLL_DURATION_MAX: u16 = 1000;
+const SMOOTH_SCROLL_DURATION_DEFAULT: u16 = 360;
+
+/// Duration of one wheel tick's smooth animation, in milliseconds.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = SMOOTH_SCROLL_DURATION_MIN,
+        less_or_equal = SMOOTH_SCROLL_DURATION_MAX
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct SmoothScrollDurationMs(u16);
+
+impl SmoothScrollDurationMs {
+    /// Shortest selectable animation.
+    pub const MIN: Self = match Self::try_new(SMOOTH_SCROLL_DURATION_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum smooth-scroll duration"),
+    };
+    /// Longest selectable animation.
+    pub const MAX: Self = match Self::try_new(SMOOTH_SCROLL_DURATION_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum smooth-scroll duration"),
+    };
+    /// Out-of-the-box animation length.
+    pub const DEFAULT: Self = match Self::try_new(SMOOTH_SCROLL_DURATION_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default smooth-scroll duration"),
+    };
+}
+
+impl Default for SmoothScrollDurationMs {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+const SMOOTH_SCROLL_ACCELERATION_MIN: u8 = 1;
+const SMOOTH_SCROLL_ACCELERATION_MAX: u8 = 10;
+const SMOOTH_SCROLL_ACCELERATION_DEFAULT: u8 = 7;
+
+/// Cap on the smooth-scroll tick-rate acceleration gain. `1` disables
+/// acceleration.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = SMOOTH_SCROLL_ACCELERATION_MIN,
+        less_or_equal = SMOOTH_SCROLL_ACCELERATION_MAX
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct SmoothScrollAcceleration(u8);
+
+impl SmoothScrollAcceleration {
+    /// Acceleration disabled: every tick counts once.
+    pub const MIN: Self = match Self::try_new(SMOOTH_SCROLL_ACCELERATION_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum smooth-scroll acceleration"),
+    };
+    /// Highest selectable gain cap.
+    pub const MAX: Self = match Self::try_new(SMOOTH_SCROLL_ACCELERATION_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum smooth-scroll acceleration"),
+    };
+    /// Out-of-the-box gain cap.
+    pub const DEFAULT: Self = match Self::try_new(SMOOTH_SCROLL_ACCELERATION_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default smooth-scroll acceleration"),
+    };
+
+    /// Largest amplitude multiple a rapid tick may reach.
+    #[must_use]
+    pub fn max_gain(self) -> f64 {
+        f64::from(self.into_inner())
+    }
+}
+
+impl Default for SmoothScrollAcceleration {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The validated smooth-scroll motion settings, published to the scroll
+/// worker as one value so a reload can never tear them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SmoothScrollTuning {
+    /// Per-tick amplitude in native wheel lines.
+    pub step: SmoothScrollStep,
+    /// Animation length of one tick.
+    pub duration: SmoothScrollDurationMs,
+    /// Tick-rate acceleration gain cap.
+    pub acceleration: SmoothScrollAcceleration,
+}
+
 impl AppSettings {
     /// `skip_serializing_if` helper: true when nothing diverges from the
     /// default, so empty settings don't clutter `config.toml`.
     #[must_use]
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// The smooth-scroll motion settings as one publishable value.
+    #[must_use]
+    pub fn smooth_scroll_tuning(&self) -> SmoothScrollTuning {
+        SmoothScrollTuning {
+            step: self.smooth_scroll_step,
+            duration: self.smooth_scroll_duration_ms,
+            acceleration: self.smooth_scroll_acceleration,
+        }
     }
 }
 
@@ -459,6 +667,9 @@ impl Default for AppSettings {
             show_in_menu_bar: true,
             capture_mouse_events: true,
             smooth_scroll: false,
+            smooth_scroll_step: SmoothScrollStep::DEFAULT,
+            smooth_scroll_duration_ms: SmoothScrollDurationMs::DEFAULT,
+            smooth_scroll_acceleration: SmoothScrollAcceleration::DEFAULT,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
