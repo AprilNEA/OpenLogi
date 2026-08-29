@@ -156,12 +156,15 @@ async fn run_host_loop(
                 break;
             }
             let seconds = started.elapsed().as_secs_f32();
+            let sample_audio = lighting.effect == LightingEffect::AudioVisualizer;
             let inputs = HostInputs {
                 screen: (lighting.effect == LightingEffect::ScreenSampler)
                     .then(screen::sample_primary)
                     .flatten(),
-                audio_rms: audio::rms(),
-                audio_bands: audio::bands(),
+                audio_rms: sample_audio.then(audio::rms).unwrap_or(0.0),
+                audio_bands: sample_audio
+                    .then(audio::bands)
+                    .unwrap_or([0.0; 8]),
                 press_age_ms: millis_since_press(),
             };
             let frame = render::frame(
