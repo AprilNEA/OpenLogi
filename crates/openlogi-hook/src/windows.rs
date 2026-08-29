@@ -33,10 +33,6 @@ use crate::{
     KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
-#[expect(
-    dead_code,
-    reason = "Windows-internal observer API awaits the cross-platform public facade"
-)]
 pub(crate) mod foreground;
 
 const WHEEL_DELTA: f64 = 120.0;

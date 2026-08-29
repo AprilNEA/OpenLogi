@@ -1,5 +1,5 @@
-//! Background watchers that observe external state — event-first HID inventory,
-//! polled foreground app and permissions, device pairing — and forward changes
+//! Background watchers that observe external state — event-first HID inventory
+//! and foreground app, polled permissions, device pairing — and forward changes
 //! over channels to a consumer (the agent's orchestrator, or the GUI).
 
 pub mod accessibility;

@@ -3,23 +3,22 @@
 //! Every process start walks the same ladder, and each state is a type:
 //!
 //! ```text
-//! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──run──► exit
-//!         │                 │                                    │
-//!         └─ init failed    └─ dormant start nobody wanted       └─ signal / uninstall
+//! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──► Running ──► exit
+//!         │                 │                                         │
+//!         └─ init failed    └─ dormant start nobody wanted            └─ signal / uninstall
 //! ```
 //!
-//! The moves are the type protection for three contracts: the uninstall
-//! receiver travels inside the states (gate consumes it first, then the run
-//! loop — no third consumer can exist), the demand channel dies at
+//! The moves are the type protection for these lifecycle contracts: the
+//! uninstall receiver travels inside the states (gate consumes it first, then
+//! the run loop — no third consumer can exist), the demand channel dies at
 //! [`Wanted::arm`], and arming without settling the dormancy question is
 //! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is
-//! the gate. The gate *waits* only on macOS, where the sunk launch-at-login
-//! switch makes an unwanted login start possible; Windows and Linux only ever
-//! start wanted, so their gate passes unconditionally.
+//! the gate. Moving `Armed` into `Running` also hands the single-consumer resume
+//! stream to inventory exactly once. The gate *waits* only on macOS, where the
+//! sunk launch-at-login switch makes an unwanted login start possible; Windows
+//! and Linux only ever start wanted, so their gate passes unconditionally.
 
 use std::sync::Arc;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -29,7 +28,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
-use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
+use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh, ResumeEvents};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
@@ -55,7 +54,7 @@ const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
     config: Config,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+    resume_events: ResumeEvents,
     uninstalled: UnboundedReceiver<()>,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
 ) {
@@ -65,8 +64,7 @@ pub(crate) async fn run(
 
     let Some(booted) = Booted::bootstrap(
         config,
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        resume_pending,
+        resume_events,
         uninstalled,
         #[cfg(target_os = "macos")]
         armed_tx,
@@ -99,14 +97,13 @@ struct Booted {
     /// Releases the main thread's tray loop once the agent arms.
     #[cfg(target_os = "macos")]
     armed_tx: std::sync::mpsc::Sender<()>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    resume_pending: Arc<AtomicBool>,
+    resume_events: ResumeEvents,
 }
 
 impl Booted {
     async fn bootstrap(
         config: Config,
-        #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+        resume_events: ResumeEvents,
         uninstalled: UnboundedReceiver<()>,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
@@ -124,8 +121,7 @@ impl Booted {
             launch_at_login,
             #[cfg(target_os = "macos")]
             armed_tx,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            resume_pending,
+            resume_events,
         })
     }
 
@@ -195,8 +191,7 @@ impl Wanted {
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            resume_pending,
+            resume_events,
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
@@ -217,24 +212,35 @@ impl Wanted {
         // the server's `declare_client` handler.
         drop(demand);
         Armed {
-            orchestrator,
-            shared,
-            observable,
-            event_monitor,
-            inputs,
-            ring_haptics,
-            signals,
-            uninstalled,
-            hook: None,
-            capture_mouse_events,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            resume_pending,
+            resume_events,
+            running: Running {
+                orchestrator,
+                shared,
+                observable,
+                event_monitor,
+                inputs,
+                ring_haptics,
+                signals,
+                uninstalled,
+                hook: None,
+                capture_mouse_events,
+            },
         }
     }
 }
 
-/// The armed agent — everything the select loop folds events into.
+/// An armed agent whose one-shot resume stream has not yet been handed to the
+/// inventory watcher.
 struct Armed {
+    resume_events: ResumeEvents,
+    running: Running,
+}
+
+/// The live agent state into which the select loop folds events.
+///
+/// Separate from [`Armed`] so starting the watcher structurally consumes the
+/// single-owner resume stream; no optional or already-consumed state exists.
+struct Running {
     orchestrator: Arc<Mutex<Orchestrator>>,
     shared: SharedRuntime,
     observable: Arc<ObservableState>,
@@ -247,50 +253,44 @@ struct Armed {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    resume_pending: Arc<AtomicBool>,
 }
 
 impl Armed {
     /// Start the watcher fleets, then drain every control-plane source until
     /// told to leave (low-frequency by contract — [`startup::WatcherEvent`]).
-    async fn run(mut self) {
+    async fn run(self) {
+        let Self {
+            resume_events,
+            mut running,
+        } = self;
         #[cfg(target_os = "macos")]
         request_input_monitoring().await;
 
         // HID++ watchers need no Accessibility — start them up front.
-        startup::spawn_hidpp_watchers(&self.shared, &self.inputs);
-        let resume_pending = {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            {
-                Some(Arc::clone(&self.resume_pending))
-            }
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            {
-                None
-            }
-        };
+        startup::spawn_hidpp_watchers(&running.shared, &running.inputs);
         let (mut watchers, inventory_refresh) =
-            startup::spawn_state_watchers(&self.shared, resume_pending);
+            startup::spawn_state_watchers(&running.shared, resume_events);
 
         info!("openlogi-agent started");
         loop {
             tokio::select! {
                 Some(event) = watchers.next() => {
-                    self.apply_watcher(event, &inventory_refresh).await;
+                    running.apply_watcher(event, &inventory_refresh).await;
                 }
-                Some(device_key) = self.inputs.triggers.recv() => {
-                    self.begin_action_ring(device_key.as_deref()).await;
+                Some(device_key) = running.inputs.triggers.recv() => {
+                    running.begin_action_ring(device_key.as_deref()).await;
                 }
-                () = self.signals.recv() => self.shut_down("shutdown signal"),
+                () = running.signals.recv() => running.shut_down("shutdown signal"),
                 // Uninstalled while running — leave through the same door so
                 // the event tap goes with us (#807).
-                Some(()) = self.uninstalled.recv() => self.shut_down("the app was uninstalled"),
+                Some(()) = running.uninstalled.recv() => running.shut_down("the app was uninstalled"),
                 else => break,
             }
         }
     }
+}
 
+impl Running {
     /// Retire a terminal Windows hook worker and publish that input capture is
     /// no longer installed. The native callbacks have already been cleared,
     /// so the interval before this check remains pass-through rather than

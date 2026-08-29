@@ -26,10 +26,6 @@ pub(super) const SYSTEM_RESUME_SETTLE: Duration = Duration::from_millis(400);
 /// useful, and bounds recovery without returning to constant full HID scans.
 pub(super) const RECOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The wake check does no HID work. It preserves the wall-clock-gap fallback
-/// on platforms without (or after failure of) a native resume notification.
-pub(super) const SYSTEM_WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-
 /// Wall-clock lead over monotonic time that means the monotonic clock paused
 /// during system sleep. NTP false positives only cause harmless re-apply.
 const WAKE_GAP: Duration = Duration::from_mins(1);
@@ -64,7 +60,6 @@ pub(super) enum DeadlinePurpose {
     RepairRetry,
     SettingsConfirmation,
     RecoveryScan,
-    SystemWakeCheck,
 }
 
 /// Scheduling state only; all I/O stays in the watcher loop.
@@ -72,7 +67,6 @@ pub(super) struct Schedule {
     retry_due: Option<Instant>,
     settings_due: Option<Instant>,
     recovery_due: Instant,
-    wake_check_due: Instant,
     retry_count: u8,
 }
 
@@ -82,27 +76,22 @@ impl Schedule {
             retry_due: None,
             settings_due: None,
             recovery_due: now + RECOVERY_SCAN_INTERVAL,
-            wake_check_due: now + SYSTEM_WAKE_CHECK_INTERVAL,
             retry_count: 0,
         }
     }
 
-    /// Earliest deadline and its single purpose. Ties prefer work that will
-    /// perform a reconciliation over the clock-only wake check.
+    /// Earliest deadline and its single purpose.
     pub(super) fn next_deadline(&self) -> (Instant, DeadlinePurpose) {
         let mut next = (self.recovery_due, DeadlinePurpose::RecoveryScan);
         for candidate in [
             self.retry_due.map(|at| (at, DeadlinePurpose::RepairRetry)),
             self.settings_due
                 .map(|at| (at, DeadlinePurpose::SettingsConfirmation)),
-            Some((self.wake_check_due, DeadlinePurpose::SystemWakeCheck)),
         ]
         .into_iter()
         .flatten()
         {
-            if candidate.0 < next.0
-                || (candidate.0 == next.0 && matches!(next.1, DeadlinePurpose::SystemWakeCheck))
-            {
+            if candidate.0 < next.0 {
                 next = candidate;
             }
         }
@@ -136,11 +125,6 @@ impl Schedule {
     /// coalesce, and any intervening full scan satisfies the request.
     pub(super) fn request_settings_confirmation(&mut self, now: Instant) {
         self.settings_due.get_or_insert(now + FAST_RETRY_DELAY);
-    }
-
-    /// Rearm the clock-only wake check after one observation.
-    pub(super) fn wake_check_finished(&mut self, now: Instant) {
-        self.wake_check_due = now + SYSTEM_WAKE_CHECK_INTERVAL;
     }
 }
 
@@ -177,14 +161,8 @@ mod tests {
 
         schedule.scan_finished(ReconcileTrigger::Initial, true, start);
         for _ in 0..FAST_RETRY_LIMIT {
-            let due = loop {
-                let (due, purpose) = schedule.next_deadline();
-                if purpose == DeadlinePurpose::RepairRetry {
-                    break due;
-                }
-                assert_eq!(purpose, DeadlinePurpose::SystemWakeCheck);
-                schedule.wake_check_finished(due);
-            };
+            let (due, purpose) = schedule.next_deadline();
+            assert_eq!(purpose, DeadlinePurpose::RepairRetry);
             schedule.scan_finished(ReconcileTrigger::RepairRetry, true, due);
         }
 

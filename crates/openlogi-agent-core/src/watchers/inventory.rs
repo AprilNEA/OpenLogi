@@ -9,8 +9,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::pending;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Instant, SystemTime};
 
@@ -63,6 +61,41 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
+}
+
+/// Non-blocking producer for native OS resume callbacks.
+#[derive(Clone)]
+pub struct ResumeSignal {
+    sender: mpsc::Sender<()>,
+}
+
+/// Single-consumer stream of coalesced native OS resume transitions.
+pub struct ResumeEvents {
+    receiver: mpsc::Receiver<()>,
+}
+
+/// Create the directional native-resume channel.
+///
+/// Capacity one intentionally coalesces the equivalent wake, screen-wake, and
+/// session-active bursts some operating systems emit for one resume.
+#[must_use]
+pub fn resume_channel() -> (ResumeSignal, ResumeEvents) {
+    let (sender, receiver) = mpsc::channel(1);
+    (ResumeSignal { sender }, ResumeEvents { receiver })
+}
+
+impl ResumeSignal {
+    /// Publish one native resume transition without blocking the OS callback.
+    pub fn notify(&self) {
+        let _ = self.sender.try_send(());
+    }
+}
+
+impl ResumeEvents {
+    /// Wait for one resume transition. `None` means every producer was dropped.
+    pub async fn recv(&mut self) -> Option<()> {
+        self.receiver.recv().await
+    }
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -248,18 +281,18 @@ pub fn spawn() -> InventoryWatcher {
 }
 
 /// Spawn the persistent watcher, publish its already-open HID++ channels into
-/// `registry`, and consume an optional coalesced native-resume flag.
+/// `registry`, and consume a coalesced native-resume signal.
 #[must_use]
 pub fn spawn_with_registry(
     registry: ChannelRegistry,
-    resume_pending: Option<Arc<AtomicBool>>,
+    resume_events: ResumeEvents,
 ) -> InventoryWatcher {
-    spawn_inner(Some(registry), resume_pending)
+    spawn_inner(Some(registry), Some(resume_events))
 }
 
 fn spawn_inner(
     registry: Option<ChannelRegistry>,
-    resume_pending: Option<Arc<AtomicBool>>,
+    resume_events: Option<ResumeEvents>,
 ) -> InventoryWatcher {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
@@ -277,7 +310,7 @@ fn spawn_inner(
                     return;
                 }
             };
-            rt.block_on(run_watcher(worker_tx, refresh_rx, registry, resume_pending));
+            rt.block_on(run_watcher(worker_tx, refresh_rx, registry, resume_events));
         });
     if let Err(e) = spawn_result {
         // OS thread / fork limits are non-fatal for the agent as a whole, but
@@ -297,7 +330,7 @@ async fn run_watcher(
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
     registry: Option<ChannelRegistry>,
-    resume_pending: Option<Arc<AtomicBool>>,
+    resume_events: Option<ResumeEvents>,
 ) {
     // The listener is attached to each inventory-owned channel before its
     // first probe, and its bounded queue is subscribed before every snapshot.
@@ -327,7 +360,7 @@ async fn run_watcher(
         hid_events,
         schedule: Schedule::new(now),
         wake_detector: WakeDetector::new(SystemTime::now(), now),
-        resume_pending,
+        resume_events,
         refresh_open: true,
     }
     .run()
@@ -343,7 +376,7 @@ struct InventoryWorker {
     hid_events: openlogi_hid::inventory::events::EventReceiver,
     schedule: Schedule,
     wake_detector: WakeDetector,
-    resume_pending: Option<Arc<AtomicBool>>,
+    resume_events: Option<ResumeEvents>,
     refresh_open: bool,
 }
 
@@ -420,7 +453,7 @@ impl InventoryWorker {
     }
 
     async fn next_trigger(&mut self) -> ReconcileTrigger {
-        loop {
+        let trigger = loop {
             let (deadline, purpose) = self.schedule.next_deadline();
             let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
             tokio::pin!(sleep);
@@ -440,6 +473,17 @@ impl InventoryWorker {
                 Some(source) = self.hid_events.recv() => {
                     break ReconcileTrigger::HidEvent(source);
                 }
+                resumed = async {
+                    match self.resume_events.as_mut() {
+                        Some(events) => events.recv().await,
+                        None => pending().await,
+                    }
+                } => {
+                    if resumed.is_some() {
+                        break ReconcileTrigger::SystemResume;
+                    }
+                    self.resume_events = None;
+                }
                 request = async {
                     if self.refresh_open {
                         self.refresh_requests.recv().await
@@ -453,7 +497,6 @@ impl InventoryWorker {
                     None => self.refresh_open = false,
                 },
                 () = &mut sleep => {
-                    let now = Instant::now();
                     match purpose {
                         DeadlinePurpose::RepairRetry => {
                             break ReconcileTrigger::RepairRetry;
@@ -464,19 +507,24 @@ impl InventoryWorker {
                         DeadlinePurpose::RecoveryScan => {
                             break ReconcileTrigger::RecoveryScan;
                         }
-                        DeadlinePurpose::SystemWakeCheck => {
-                            self.schedule.wake_check_finished(now);
-                            let native = self.resume_pending.as_ref().is_some_and(|pending| {
-                                pending.swap(false, Ordering::Relaxed)
-                            });
-                            let clock_gap = self.wake_detector.observe(SystemTime::now(), now);
-                            if native || clock_gap {
-                                break ReconcileTrigger::SystemResume;
-                            }
-                        }
                     }
                 }
             }
+        };
+
+        // Any event that wakes this task is also an opportunity to compare the
+        // clocks. This preserves resume recovery when the native source is
+        // unavailable without restoring a dedicated wake-check timer. A
+        // SystemResume reconciliation is already authoritative, so replacing
+        // another trigger loses no inventory work.
+        if trigger != ReconcileTrigger::SystemResume
+            && self
+                .wake_detector
+                .observe(SystemTime::now(), Instant::now())
+        {
+            ReconcileTrigger::SystemResume
+        } else {
+            trigger
         }
     }
 }
@@ -484,11 +532,26 @@ impl InventoryWorker {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::time::Duration;
 
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
     use openlogi_hid::{BackendError, InventoryError};
 
-    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
+    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState, resume_channel};
+
+    #[tokio::test]
+    async fn resume_signal_retains_and_coalesces_native_callbacks() {
+        let (signal, mut events) = resume_channel();
+        signal.notify();
+        signal.notify();
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("a callback before the waiter is retained")
+            .expect("the signal producer remains alive");
+        tokio::time::timeout(Duration::from_millis(10), events.recv())
+            .await
+            .expect_err("equivalent callbacks coalesce into one resume");
+    }
 
     /// A transport-level enumerate failure — what the watcher's `Err` arm now
     /// sees (a partial per-node read is replayed by the hid ledger as `Ok`).

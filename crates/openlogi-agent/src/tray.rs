@@ -19,8 +19,6 @@
 )]
 
 use std::cell::RefCell;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -35,6 +33,7 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationName, NSString};
+use openlogi_agent_core::watchers::inventory::ResumeSignal;
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use tracing::{info, warn};
@@ -107,7 +106,7 @@ pub fn relocalize() {
 }
 
 struct ResumeTargetIvars {
-    pending: Arc<AtomicBool>,
+    signal: ResumeSignal,
 }
 
 define_class!(
@@ -121,14 +120,14 @@ define_class!(
     impl ResumeTarget {
         #[unsafe(method(workspaceDidResume:))]
         fn workspace_did_resume(&self, _notification: &NSNotification) {
-            self.ivars().pending.store(true, Ordering::Relaxed);
+            self.ivars().signal.notify();
         }
     }
 );
 
 impl ResumeTarget {
-    fn new(pending: Arc<AtomicBool>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(ResumeTargetIvars { pending });
+    fn new(signal: ResumeSignal) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(ResumeTargetIvars { signal });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
     }
@@ -240,12 +239,8 @@ fn gui_is_running() -> bool {
 /// tokio core still does all the work). The toggle takes effect on the agent's
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
-/// `resume_pending` forwards coalesced workspace resume notifications to that core.
-pub fn run_app_loop(
-    show_in_menu_bar: bool,
-    app_icon: AppIcon,
-    resume_pending: Arc<AtomicBool>,
-) -> ! {
+/// `resume_signal` forwards coalesced workspace resume notifications to that core.
+pub fn run_app_loop(show_in_menu_bar: bool, app_icon: AppIcon, resume_signal: ResumeSignal) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         #[expect(
@@ -260,7 +255,7 @@ pub fn run_app_loop(
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
-    let _resume_target = install_resume_observer(resume_pending);
+    let _resume_target = install_resume_observer(resume_signal);
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
@@ -271,10 +266,10 @@ pub fn run_app_loop(
     std::process::exit(0);
 }
 
-/// Observe native resume transitions that the inventory polling-gap heuristic
+/// Observe native resume transitions that the inventory clock-gap heuristic
 /// cannot see. The returned target must live for the AppKit loop's lifetime.
-fn install_resume_observer(pending: Arc<AtomicBool>) -> Retained<ResumeTarget> {
-    let target = ResumeTarget::new(pending);
+fn install_resume_observer(signal: ResumeSignal) -> Retained<ResumeTarget> {
+    let target = ResumeTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
     for name in resume_notification_names() {
@@ -392,11 +387,12 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlogi_agent_core::watchers::inventory::resume_channel;
 
-    #[test]
-    fn resume_notifications_are_forwarded_and_coalesced() {
-        let pending = Arc::new(AtomicBool::new(false));
-        let target = install_resume_observer(Arc::clone(&pending));
+    #[tokio::test]
+    async fn resume_notifications_are_forwarded() {
+        let (signal, mut events) = resume_channel();
+        let target = install_resume_observer(signal.clone());
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
 
@@ -404,14 +400,11 @@ mod tests {
             // SAFETY: `workspace` is live, matches the registration filter,
             // and notification delivery completes synchronously.
             unsafe { center.postNotificationName_object(name, Some(&workspace)) };
-            assert!(pending.swap(false, Ordering::Relaxed));
         }
-        for name in resume_notification_names() {
-            // SAFETY: Same live object and synchronous delivery as above.
-            unsafe { center.postNotificationName_object(name, Some(&workspace)) };
-        }
-        assert!(pending.swap(false, Ordering::Relaxed));
-        assert!(!pending.swap(false, Ordering::Relaxed));
+        tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("workspace notification reaches the inventory signal")
+            .expect("the signal producer remains alive");
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };

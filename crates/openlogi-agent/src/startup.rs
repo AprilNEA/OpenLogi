@@ -5,7 +5,6 @@
 //! is `crate::lifecycle`.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -17,6 +16,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
+use openlogi_agent_core::watchers::inventory::ResumeEvents;
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
@@ -226,7 +226,7 @@ pub(crate) enum Watcher {
 /// stream.
 pub(crate) fn spawn_state_watchers(
     shared: &SharedRuntime,
-    resume_pending: Option<Arc<AtomicBool>>,
+    resume_events: ResumeEvents,
 ) -> (
     impl Stream<Item = WatcherEvent> + Unpin + use<>,
     watchers::inventory::InventoryRefresh,
@@ -244,7 +244,7 @@ pub(crate) fn spawn_state_watchers(
         .boxed()
     }
     let inventory =
-        watchers::inventory::spawn_with_registry(shared.channel_registry.clone(), resume_pending);
+        watchers::inventory::spawn_with_registry(shared.channel_registry.clone(), resume_events);
     let streams = stream::select_all([
         tagged(
             inventory.events,
@@ -257,7 +257,7 @@ pub(crate) fn spawn_state_watchers(
             WatcherEvent::Camera,
         ),
         tagged(
-            watchers::foreground_app::spawn(Duration::from_secs(1)),
+            watchers::foreground_app::spawn(),
             Watcher::App,
             WatcherEvent::App,
         ),

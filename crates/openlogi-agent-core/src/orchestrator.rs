@@ -157,8 +157,8 @@ pub struct Orchestrator {
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
-    /// Config keys of devices first sighted (or wake-flagged) recently, with
-    /// remaining confirming re-apply budget: the first write can race the
+    /// Config keys of devices first sighted (or targeted after wake) recently,
+    /// with remaining confirming re-apply budget: the first write can race the
     /// device's own boot or reconnect and be lost.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
@@ -1066,7 +1066,7 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many explicit confirmation passes a first-sighted or wake-flagged
+/// How many explicit confirmation passes a first-sighted or wake-targeted
 /// device keeps re-applying its volatile settings after the initial write. A
 /// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
 /// wake can enumerate a receiver whose mouse link is still re-establishing —

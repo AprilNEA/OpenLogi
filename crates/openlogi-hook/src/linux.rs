@@ -30,6 +30,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc, Condvar, LazyLock, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,6 +39,7 @@ use evdev::uinput::VirtualDevice;
 use evdev::{
     AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
 };
+use thiserror::Error;
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
@@ -1153,6 +1155,18 @@ struct ObserverWorker {
     thread: thread::JoinHandle<Box<dyn FrontmostSource>>,
 }
 
+type ObserverWorkerStart = (Box<dyn FrontmostSource>, StopToken, PublishAppId);
+
+#[derive(Debug, Error)]
+pub(crate) enum ForegroundApplicationObserverError {
+    #[error("could not create the Linux foreground observer stop pipe: {0}")]
+    StopPipe(io::Error),
+    #[error("could not spawn the Linux foreground observer thread: {0}")]
+    ThreadSpawn(io::Error),
+    #[error("the Linux foreground observer thread stopped during startup")]
+    WorkerStoppedDuringStartup,
+}
+
 struct FrontmostRuntime {
     source: Option<Box<dyn FrontmostSource>>,
     worker: Option<ObserverWorker>,
@@ -1206,7 +1220,7 @@ impl FrontmostController {
     fn watch(
         self: &Arc<Self>,
         callback: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
-    ) -> ForegroundApplicationObserver {
+    ) -> Result<ForegroundApplicationObserver, ForegroundApplicationObserverError> {
         let subscriber = Arc::new(Subscriber::new(callback));
         let mut runtime = lock_unpoisoned(&self.runtime);
         while runtime.stopping {
@@ -1218,26 +1232,40 @@ impl FrontmostController {
 
         let id = runtime.next_subscriber_id;
         runtime.next_subscriber_id += 1;
-        if runtime.worker.is_none() {
-            self.publication.begin();
-        }
-        let initial = self.publication.subscribe(id, &subscriber);
+        let initial = if runtime.worker.is_none() {
+            let (stop, stop_token) =
+                stop_pair().map_err(ForegroundApplicationObserverError::StopPipe)?;
+            let (start_tx, start_rx) = mpsc::sync_channel::<ObserverWorkerStart>(0);
+            let thread = thread::Builder::new()
+                .name("openlogi-frontmost".into())
+                .spawn(move || match start_rx.recv() {
+                    Ok((source, stop_token, publish)) => source.observe(stop_token, publish),
+                    Err(_) => Box::new(NullSource),
+                })
+                .map_err(ForegroundApplicationObserverError::ThreadSpawn)?;
 
-        if runtime.worker.is_none() {
+            self.publication.begin();
+            let initial = self.publication.subscribe(id, &subscriber);
             let source = runtime
                 .source
                 .take()
                 .unwrap_or_else(|| Box::new(NullSource));
-            let (stop, stop_token) = stop_pair()
-                .unwrap_or_else(|error| panic!("failed to create frontmost stop pipe: {error}"));
             let publication = Arc::clone(&self.publication);
             let publish: PublishAppId = Arc::new(move |app| publication.publish(app));
-            let thread = thread::Builder::new()
-                .name("openlogi-frontmost".into())
-                .spawn(move || source.observe(stop_token, publish))
-                .unwrap_or_else(|error| panic!("failed to start frontmost observer: {error}"));
+            if let Err(error) = start_tx.send((source, stop_token, publish)) {
+                let (source, _, _) = error.0;
+                runtime.source = Some(source);
+                self.publication.unsubscribe(id);
+                self.publication.finish();
+                drop(runtime);
+                let _ = thread.join();
+                return Err(ForegroundApplicationObserverError::WorkerStoppedDuringStartup);
+            }
             runtime.worker = Some(ObserverWorker { stop, thread });
-        }
+            initial
+        } else {
+            self.publication.subscribe(id, &subscriber)
+        };
         drop(runtime);
 
         // Do not call user code while holding the controller lock. If the
@@ -1247,9 +1275,22 @@ impl FrontmostController {
             subscriber.deliver(version, app);
         }
 
-        ForegroundApplicationObserver {
+        Ok(ForegroundApplicationObserver {
             controller: Arc::clone(self),
             subscriber_id: id,
+        })
+    }
+
+    fn check_health(&self) -> Result<(), &'static str> {
+        let runtime = lock_unpoisoned(&self.runtime);
+        if runtime
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.thread.is_finished())
+        {
+            Err("Linux foreground observer worker stopped")
+        } else {
+            Ok(())
         }
     }
 
@@ -1277,7 +1318,7 @@ impl FrontmostController {
         worker.stop.request();
         let source = worker.thread.join().unwrap_or_else(|panic| {
             error!("foreground-application worker panicked on shutdown: {panic:?}");
-            Box::new(NullSource)
+            detect_frontmost_source()
         });
 
         let mut runtime = lock_unpoisoned(&self.runtime);
@@ -1301,6 +1342,12 @@ pub(crate) struct ForegroundApplicationObserver {
     subscriber_id: u64,
 }
 
+impl ForegroundApplicationObserver {
+    pub(crate) fn check_health(&self) -> Result<(), &'static str> {
+        self.controller.check_health()
+    }
+}
+
 impl Drop for ForegroundApplicationObserver {
     fn drop(&mut self) {
         self.controller.remove_observer(self.subscriber_id);
@@ -1310,14 +1357,9 @@ impl Drop for ForegroundApplicationObserver {
 /// Observe foreground-application changes from the selected native backend.
 pub(crate) fn watch_frontmost_application_activations(
     callback: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
-) -> ForegroundApplicationObserver {
+) -> Result<ForegroundApplicationObserver, ForegroundApplicationObserverError> {
     FRONTMOST.watch(callback)
 }
-
-/// Keep this intentionally unwired Linux-internal API type-checked until the
-/// cross-platform facade adopts it.
-const _: fn(fn(Option<ForegroundApp>)) -> ForegroundApplicationObserver =
-    watch_frontmost_application_activations;
 
 #[cfg(test)]
 mod tests {
@@ -1393,9 +1435,11 @@ mod tests {
             stopped: Arc::clone(&stopped),
         }));
         let (tx, rx) = mpsc::channel();
-        let observer = controller.watch(move |app| {
-            tx.send(app).expect("test receiver remains alive");
-        });
+        let observer = controller
+            .watch(move |app| {
+                tx.send(app).expect("test receiver remains alive");
+            })
+            .expect("observer starts");
 
         let initial = rx
             .recv_timeout(Duration::from_secs(1))
@@ -1417,9 +1461,11 @@ mod tests {
     fn unsupported_foreground_source_publishes_none_and_stops_cleanly() {
         let controller = FrontmostController::new(Box::new(NullSource));
         let (tx, rx) = mpsc::channel();
-        let observer = controller.watch(move |app| {
-            tx.send(app).expect("test receiver remains alive");
-        });
+        let observer = controller
+            .watch(move |app| {
+                tx.send(app).expect("test receiver remains alive");
+            })
+            .expect("observer starts");
 
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))
