@@ -1,5 +1,6 @@
 //! Mouse diagram, hotspots, labels, and binding pickers.
 
+mod button_layout;
 pub mod geometry;
 mod hotspots;
 mod inspector;

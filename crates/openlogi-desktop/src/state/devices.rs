@@ -88,6 +88,11 @@ pub struct DeviceRecord {
 }
 
 impl DeviceRecord {
+    /// Model identity reported by the device, before asset display names.
+    pub(crate) fn model_identity_name(&self) -> &str {
+        self.codename.as_deref().unwrap_or(&self.model_name)
+    }
+
     /// Typed key for `AppState`'s per-device UI caches (DPI/SmartShift load
     /// state, standalone-light overrides, inventory-miss counters). Wraps
     /// [`Self::config_key`] — see [`DeviceKey`].
@@ -576,6 +581,8 @@ fn offline_record(
             || identity.display_name.clone(),
             |asset| asset.display_name.clone(),
         );
+    let mut capabilities = identity.capabilities;
+    capabilities.include_known_model_support(model_info.as_ref(), identity.codename.as_deref());
     DeviceRecord {
         config_key: config_key.to_string(),
         // Nothing was probed this session: the persisted key is all there is.
@@ -597,7 +604,7 @@ fn offline_record(
         route: None,
         capture_id: None,
         kind: identity.kind,
-        capabilities: Some(identity.capabilities),
+        capabilities: Some(capabilities),
         light_capabilities: identity.light_capabilities,
         slot: 0,
         online: false,
@@ -1200,6 +1207,29 @@ mod tests {
         assert!(!rec.online);
         assert!(rec.route.is_none());
         assert_eq!(rec.capabilities, Some(id.capabilities));
+    }
+
+    #[test]
+    fn offline_g502_identity_restores_the_model_authored_panels() {
+        let mut identity = mouse_identity("G502 X Plus");
+        identity.capabilities = Capabilities::from_feature_ids(&[0x8071]);
+        identity.model_info = Some(DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [1, 2, 3, 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0x4099, 0, 0],
+            extended_model_id: 0,
+        });
+        identity.codename = Some("Logitech G502 X Plus".into());
+
+        let record = offline_record("04099", &identity, &AssetResolver::new());
+
+        assert_eq!(
+            record.capabilities.map(|capabilities| capabilities.buttons),
+            Some(true)
+        );
+        assert_eq!(record.model_identity_name(), "Logitech G502 X Plus");
     }
 
     #[test]

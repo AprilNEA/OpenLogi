@@ -441,6 +441,112 @@ async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteEr
     Ok(())
 }
 
+#[tokio::test]
+async fn a_device_with_only_rgb_effects_can_be_coloured() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(rgb_effects_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc547,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let effect_writes: Vec<_> = written
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x08 && report[3] >> 4 == 0x01)
+        .collect();
+    assert_eq!(effect_writes.len(), 2);
+    for (cluster, report) in [0u8, 1].into_iter().zip(effect_writes) {
+        assert_eq!(report[4], cluster);
+        assert_eq!(
+            report[5], 1,
+            "the discovered static effect must be selected"
+        );
+        assert_eq!(&report[6..9], &[0x11, 0x22, 0x33]);
+        assert_eq!(report[16], 1, "the write must be volatile");
+    }
+    assert!(written.iter().all(|report| report.first() != Some(&0x12)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_rgb_effect_support_falls_back_before_writing_and_restores_control()
+-> Result<(), WriteError> {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(partial_rgb_effects_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc547,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let control_writes: Vec<_> = written
+        .iter()
+        .filter(|report| {
+            report.len() == 7 && report[2] == 0x08 && report[3] >> 4 == 0x05 && report[4] == 1
+        })
+        .collect();
+    assert_eq!(control_writes.len(), 2);
+    assert_eq!(&control_writes[0][5..7], &[1, 0]);
+    assert_eq!(&control_writes[1][5..7], &[0, 0]);
+    assert!(
+        written
+            .iter()
+            .all(|report| { !(report.len() == 20 && report[2] == 0x08 && report[3] >> 4 == 0x01) })
+    );
+    assert!(
+        written
+            .iter()
+            .any(|report| { report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == 0x06 })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_rgb_control_restore_stops_the_fallback() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(
+        partial_rgb_effects_with_restore_failure_scripted_response,
+    );
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc547,
+        },
+    );
+
+    let error = set_keyboard_color_on(&shared, 0x11, 0x22, 0x33)
+        .await
+        .expect_err("a failed control restore must abort the fallback");
+
+    assert!(matches!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8071,
+            kind: HidppFeatureErrorKind::Busy,
+        }
+    ));
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| { !(report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == 0x06) })
+    );
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
@@ -586,6 +692,137 @@ fn per_key_v2_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             true
         }
         // setRgbZonesSingleValue and frameEnd: echo the request back.
+        (0x07, 0x06 | 0x07) => {
+            payload[..12].copy_from_slice(&request[4..16]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// A G-series device that exposes `0x8071 RgbEffects` and no other lighting
+/// family. Each of its two clusters advertises a static effect at index 1.
+fn rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x8071) * 0x08;
+            false
+        }
+        // manageSwControl: echo the set request.
+        (0x08, 0x05) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            false
+        }
+        // getInfo: device, cluster, and effect modes share function 0.
+        (0x08, 0x00) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            match (request[4], request[5]) {
+                (0xff, 0xff) => payload[2] = 2,
+                (0 | 1, 0xff) => payload[4] = 2,
+                (0 | 1, effect_index) => {
+                    let effect_id = u16::from(effect_index == 1);
+                    payload[2..4].copy_from_slice(&effect_id.to_be_bytes());
+                }
+                _ => return None,
+            }
+            true
+        }
+        // setRgbClusterEffect: echo the long request.
+        (0x08, 0x01) => {
+            payload.copy_from_slice(&request[4..20]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// A device whose first 0x8071 cluster offers a static effect and whose second
+/// does not. Its 0x8081 zones can still be painted by the automatic fallback.
+fn partial_rgb_effects_with_restore_failure_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() >= 7
+        && request[2] == 0x08
+        && request[3] >> 4 == 0x05
+        && request[4..7] == [1, 0, 0]
+    {
+        return Some(feature_error(request, BUSY));
+    }
+    partial_rgb_effects_scripted_response(request)
+}
+
+fn partial_rgb_effects_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = match feature_id {
+                0x8071 => 0x08,
+                0x8081 => 0x07,
+                _ => 0,
+            };
+            false
+        }
+        (0x08, 0x05) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            false
+        }
+        (0x08, 0x00) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            match (request[4], request[5]) {
+                (0xff, 0xff) => payload[2] = 2,
+                (0 | 1, 0xff) => payload[4] = 1,
+                (cluster @ (0 | 1), 0) => {
+                    let effect_id = u16::from(cluster == 0);
+                    payload[2..4].copy_from_slice(&effect_id.to_be_bytes());
+                }
+                _ => return None,
+            }
+            true
+        }
+        (0x08, 0x01) => {
+            payload.copy_from_slice(&request[4..20]);
+            true
+        }
+        (0x07, 0x00) => {
+            payload[..2].copy_from_slice(&request[4..6]);
+            if request[5] == 0 {
+                payload[2] = 0b0001_1110;
+            }
+            true
+        }
         (0x07, 0x06 | 0x07) => {
             payload[..12].copy_from_slice(&request[4..16]);
             true

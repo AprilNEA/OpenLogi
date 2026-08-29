@@ -211,6 +211,7 @@ pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &Probe
     if fresh.capabilities_incomplete && cached.capabilities.is_some() {
         fresh.capabilities.clone_from(&cached.capabilities);
     }
+    fresh.include_known_model_support();
 }
 
 /// Carry immutable identity data the fresh probe failed to read forward from
@@ -224,22 +225,22 @@ pub(super) fn backfill_identity(fresh: &mut ProbedFeatures, cached: &ProbedFeatu
     if fresh.marketing_name.is_none() {
         fresh.marketing_name.clone_from(&cached.marketing_name);
     }
-    if !fresh.identity_incomplete {
-        return;
-    }
-    match (fresh.model_info.as_mut(), cached.model_info.as_ref()) {
-        (None, Some(previous)) => {
-            fresh.model_info = Some(previous.clone());
-            fresh.identity_incomplete = false;
+    if fresh.identity_incomplete {
+        match (fresh.model_info.as_mut(), cached.model_info.as_ref()) {
+            (None, Some(previous)) => {
+                fresh.model_info = Some(previous.clone());
+                fresh.identity_incomplete = false;
+            }
+            (Some(now), Some(previous))
+                if now.serial_number.is_none() && previous.serial_number.is_some() =>
+            {
+                now.serial_number.clone_from(&previous.serial_number);
+                fresh.identity_incomplete = false;
+            }
+            _ => {}
         }
-        (Some(now), Some(previous))
-            if now.serial_number.is_none() && previous.serial_number.is_some() =>
-        {
-            now.serial_number.clone_from(&previous.serial_number);
-            fresh.identity_incomplete = false;
-        }
-        _ => {}
     }
+    fresh.include_known_model_support();
 }
 
 #[cfg(test)]

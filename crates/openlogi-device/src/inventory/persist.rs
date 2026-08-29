@@ -170,10 +170,12 @@ impl ProbeCacheSnapshot {
         self.entries
             .into_iter()
             .map(|entry| {
+                let mut probe = entry.probe;
+                probe.include_known_model_support();
                 (
                     runtime_key(entry.key),
                     Cached {
-                        probe: entry.probe,
+                        probe,
                         battery: entry.battery,
                         // Restart the refresh clock: the entry serves
                         // immediately as a cache hit, and the periodic

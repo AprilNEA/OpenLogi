@@ -59,6 +59,17 @@ pub(super) struct ProbedFeatures {
     pub(super) capabilities_incomplete: bool,
 }
 
+impl ProbedFeatures {
+    pub(super) fn include_known_model_support(&mut self) {
+        if let Some(capabilities) = self.capabilities.as_mut() {
+            capabilities.include_known_model_support(
+                self.model_info.as_ref(),
+                self.marketing_name.as_deref(),
+            );
+        }
+    }
+}
+
 /// Which battery feature a device exposes plus its runtime feature index. Newer
 /// devices answer the unified `0x1004`; MX2S-era ones only the legacy `0x1000`
 /// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
@@ -276,19 +287,18 @@ pub(super) async fn probe_features(
     // the authoritative kind signal; the marketing name matters especially on
     // Windows Bluetooth, where the OS HID collection is often just `"Mouse"`.
     let (kind, marketing_name) = read_marketing_identity(&device, slot).await;
+    let mut probe = ProbedFeatures {
+        battery,
+        model_info,
+        kind,
+        marketing_name,
+        capabilities,
+        identity_incomplete,
+        capabilities_incomplete,
+    };
+    probe.include_known_model_support();
 
-    (
-        ProbedFeatures {
-            battery,
-            model_info,
-            kind,
-            marketing_name,
-            capabilities,
-            identity_incomplete,
-            capabilities_incomplete,
-        },
-        battery_probe,
-    )
+    (probe, battery_probe)
 }
 
 /// Fill in the capabilities the feature table alone can't answer, each of which

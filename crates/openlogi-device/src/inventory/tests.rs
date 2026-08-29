@@ -644,6 +644,20 @@ fn failed_device_info_read_backfills_from_cache() {
 }
 
 #[test]
+fn backfilled_g502_identity_restores_model_capabilities() {
+    let mut fresh = probed(None, true);
+    fresh.capabilities = Some(Capabilities::from_feature_ids(&[0x8071]));
+    let cached = probed(Some(model([0x46, 0, 0x2e, 0], None)), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert_eq!(
+        fresh.capabilities.map(|capabilities| capabilities.buttons),
+        Some(true)
+    );
+}
+
+#[test]
 fn failed_serial_read_backfills_only_the_serial() {
     let mut fresh = probed(Some(model([1, 2, 3, 4], None)), true);
     let cached = probed(Some(model([9, 9, 9, 9], Some("abc123"))), false);

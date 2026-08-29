@@ -133,8 +133,8 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                  permission: System Settings → Privacy & Security → Input Monitoring."
             );
             println!(
-                "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-                 receivers (Unifying) aren't surfaced yet."
+                "  - LIGHTSPEED mice are normally already paired to their USB receiver; \
+                 Add Device is only for supported pairing flows."
             );
         }
     }

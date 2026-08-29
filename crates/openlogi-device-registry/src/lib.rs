@@ -11,6 +11,7 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod g502;
 pub mod litra;
 pub mod receiver;
 
