@@ -31,9 +31,9 @@ const SENSOR: u8 = 0;
 ///
 /// `0x2201 AdjustableDpi` is the original; `0x2202 ExtendedAdjustableDpi` is
 /// its successor, and some mice expose only the latter (`openlogi diag
-/// features` shows which). `Capabilities::from_feature_ids` turns the DPI panel
-/// on for *either* ID, so both have to be drivable from here — otherwise a
-/// `0x2202`-only mouse gets a panel that cannot read or write anything.
+/// features` shows which). The inventory capability projection turns the DPI
+/// panel on for *either* ID, so both have to be drivable from here — otherwise
+/// a `0x2202`-only mouse gets a panel that cannot read or write anything.
 enum DpiFeature {
     /// `0x2201` — one DPI per sensor, described as a flat list of values.
     Adjustable(Arc<AdjustableDpiFeature>),

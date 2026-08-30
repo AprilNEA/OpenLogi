@@ -1,10 +1,9 @@
 //! `openlogi diag` — real-device smoke tests for the HID++ write path.
 //!
-//! Subcommands exercise direct HID++ reads and verified writes. The intent is
-//! diagnosis, not persistent configuration: nothing here
-//! touches `config.toml` or talks to the GUI; everything runs through the
-//! same `openlogi_hid` API the GPUI app uses, so a green diag means the
-//! GUI's write path works on this host.
+//! Most subcommands exercise direct HID++ reads and verified writes. The
+//! touchpad trace is the deliberate exception: it subscribes to the Agent's
+//! existing capture session because opening a second HID channel would split
+//! the device's report stream. Diagnostics never persist configuration.
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
@@ -16,6 +15,7 @@ pub mod dpi;
 pub mod features;
 pub mod lighting;
 pub mod smartshift;
+pub mod touchpad;
 pub mod wheel;
 
 #[derive(Debug, Subcommand)]
@@ -34,6 +34,8 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Record Agent-owned raw-touchpad and simultaneous native-event traces.
+    Touchpad(touchpad::TouchpadArgs),
 }
 
 impl DiagCmd {
@@ -46,6 +48,7 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::Touchpad(args) => touchpad::run(args).await,
         }
     }
 }

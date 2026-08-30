@@ -128,34 +128,12 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// Raw multi-touch reports — HID++ `0x6100` (`TouchpadRawXy`).
+    #[serde(default)]
+    pub touchpad_raw_xy: bool,
 }
 
 impl Capabilities {
-    /// Derive capabilities from the set of HID++ feature IDs a device reports.
-    /// Membership of a driving feature ID flips the corresponding flag.
-    #[must_use]
-    pub fn from_feature_ids(ids: &[u16]) -> Self {
-        const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
-        const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
-        // (0x8080) — all three driven by `set_keyboard_color`, which prefers
-        // 0x8070's fixed effect to override a running onboard profile and falls
-        // back through 0x8081 to 0x8080. Other families (backlight 0x198x) stay
-        // out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
-        let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
-        Self {
-            buttons: has(&BUTTONS),
-            pointer: has(&POINTER),
-            lighting: has(&LIGHTING),
-            scroll_inversion: false,
-            hires_wheel: ids.contains(&0x2121),
-            thumbwheel: ids.contains(&0x2150),
-            haptic_feedback: ids.contains(&0x19b0),
-            haptic_panel: false,
-        }
-    }
-
     /// Best-effort capabilities for a device we could not probe (offline /
     /// never reached), guessed from its [`DeviceKind`]. Used only as a fallback
     /// when no measured [`Capabilities`] exist — a sleeping mouse should still
@@ -173,6 +151,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                touchpad_raw_xy: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +457,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    touchpad_raw_xy: false,
                 }),
             }],
         }
@@ -528,65 +508,6 @@ mod tests {
         // Unmodelled / empty → no asset opinion.
         assert_eq!(DeviceKind::from_registry_type("webcam"), None);
         assert_eq!(DeviceKind::from_registry_type(""), None);
-    }
-
-    #[test]
-    fn capabilities_track_the_driving_feature_ids() {
-        use super::Capabilities;
-        // A typical MX mouse: ReprogControls (0x1b04) + ExtendedAdjustableDpi
-        // (0x2202), no lighting.
-        let mouse =
-            Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2121, 0x2150, 0x2202, 0x2110]);
-        assert_eq!(
-            mouse,
-            Capabilities {
-                buttons: true,
-                pointer: true,
-                lighting: false,
-                scroll_inversion: false,
-                hires_wheel: true,
-                thumbwheel: true,
-                haptic_feedback: false,
-                haptic_panel: false,
-            }
-        );
-        assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
-        // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
-        let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
-        assert_eq!(
-            keyboard,
-            Capabilities {
-                buttons: false,
-                pointer: false,
-                lighting: true,
-                scroll_inversion: false,
-                hires_wheel: false,
-                thumbwheel: false,
-                haptic_feedback: false,
-                haptic_panel: false,
-            }
-        );
-        // No driving features → nothing offered.
-        assert_eq!(
-            Capabilities::from_feature_ids(&[0x0000, 0x0003]),
-            Capabilities::default()
-        );
-    }
-
-    #[test]
-    fn every_drivable_lighting_family_earns_the_tab() {
-        // `set_keyboard_color` walks 0x8070 → 0x8081 → 0x8080, so a keyboard
-        // exposing any one of them can be coloured and must get the tab.
-        // 0x8081 was missing here, which left such a keyboard with no lighting
-        // UI at all.
-        for id in [0x8070, 0x8080, 0x8081] {
-            assert!(
-                Capabilities::from_feature_ids(&[0x0001, id]).lighting,
-                "0x{id:04x} must offer the lighting tab"
-            );
-        }
-        // Backlight (0x198x) stays out — the panel cannot drive it.
-        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
     }
 
     #[test]

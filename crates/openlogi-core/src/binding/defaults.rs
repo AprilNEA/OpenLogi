@@ -79,7 +79,22 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyPlayPause
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp => Action::None,
+        | ButtonId::KeyVolumeUp
+        | ButtonId::TouchpadTwoFingerTap
+        | ButtonId::TouchpadThreeFingerTap
+        | ButtonId::TouchpadThreeFingerSwipeUp
+        | ButtonId::TouchpadThreeFingerSwipeDown
+        | ButtonId::TouchpadThreeFingerSwipeLeft
+        | ButtonId::TouchpadThreeFingerSwipeRight
+        | ButtonId::TouchpadFourFingerTap
+        | ButtonId::TouchpadFourFingerSwipeUp
+        | ButtonId::TouchpadFourFingerSwipeDown
+        | ButtonId::TouchpadFourFingerSwipeLeft
+        | ButtonId::TouchpadFourFingerSwipeRight
+        | ButtonId::TouchpadFourFingerPinchIn
+        | ButtonId::TouchpadFourFingerPinchOut => Action::None,
+        ButtonId::TouchpadTwoFingerPinchIn => Action::ZoomOut,
+        ButtonId::TouchpadTwoFingerPinchOut => Action::ZoomIn,
     }
 }
 

@@ -1,12 +1,39 @@
-//! Signal-driven shutdown: the `SIGTERM`/`SIGINT` listeners and the exit
-//! path that releases the input hook before the process ends.
+//! Graceful shutdown: process signals and deliberate UI requests converge on
+//! the exit path that restores device state and releases the input hook.
+
+use std::sync::OnceLock;
 
 use openlogi_hook::Hook;
+use tokio::sync::mpsc;
 use tracing::info;
-#[cfg(unix)]
 use tracing::warn;
 
 use crate::startup::InputServices;
+
+static REQUEST: OnceLock<mpsc::UnboundedSender<&'static str>> = OnceLock::new();
+
+/// Create the process-wide deliberate-shutdown channel. The lifecycle owns
+/// the receiver; tray callbacks can request the same graceful exit path
+/// without terminating from their native UI threads.
+pub(crate) fn request_channel() -> mpsc::UnboundedReceiver<&'static str> {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    assert!(
+        REQUEST.set(sender).is_ok(),
+        "shutdown request channel must be initialized exactly once"
+    );
+    receiver
+}
+
+/// Ask the lifecycle thread to perform a deliberate, graceful process exit.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn request(reason: &'static str) {
+    if REQUEST
+        .get()
+        .is_none_or(|sender| sender.send(reason).is_err())
+    {
+        warn!(reason, "could not deliver graceful shutdown request");
+    }
+}
 
 /// A future that fires when `signal` does, or never when the handler could not
 /// be installed.
@@ -20,9 +47,10 @@ async fn fires(signal: &mut Option<tokio::signal::unix::Signal>) {
     }
 }
 
-/// The stop-signal listeners, installed once and consumed by whichever
-/// lifecycle stage is currently in charge.
+/// The shutdown sources, installed once and consumed by whichever lifecycle
+/// stage is currently in charge.
 pub(crate) struct ShutdownSignals {
+    requests: mpsc::UnboundedReceiver<&'static str>,
     #[cfg(unix)]
     sigterm: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
@@ -33,13 +61,14 @@ impl ShutdownSignals {
     /// Install the shutdown-signal handlers. A handler that cannot be
     /// installed is `None`, which simply never fires.
     #[cfg(unix)]
-    pub(crate) fn install() -> Self {
+    pub(crate) fn install(requests: mpsc::UnboundedReceiver<&'static str>) -> Self {
         fn listen(kind: tokio::signal::unix::SignalKind) -> Option<tokio::signal::unix::Signal> {
             tokio::signal::unix::signal(kind)
                 .inspect_err(|error| warn!(%error, ?kind, "could not install signal handler"))
                 .ok()
         }
         Self {
+            requests,
             sigterm: listen(tokio::signal::unix::SignalKind::terminate()),
             sigint: listen(tokio::signal::unix::SignalKind::interrupt()),
         }
@@ -47,25 +76,29 @@ impl ShutdownSignals {
 
     /// No signals exist off unix.
     #[cfg(not(unix))]
-    pub(crate) fn install() -> Self {
-        Self {}
+    pub(crate) fn install(requests: mpsc::UnboundedReceiver<&'static str>) -> Self {
+        Self { requests }
     }
 
     /// Resolves on the first signal that means *stop now*: `SIGTERM` from
     /// launchd or a takeover, `SIGINT` from a dev-run Ctrl-C — both would
     /// otherwise kill the process with the event tap still armed.
     #[cfg(unix)]
-    pub(crate) async fn recv(&mut self) {
+    pub(crate) async fn recv(&mut self) -> &'static str {
         tokio::select! {
-            () = fires(&mut self.sigterm) => {}
-            () = fires(&mut self.sigint) => {}
+            Some(reason) = self.requests.recv() => reason,
+            () = fires(&mut self.sigterm) => "SIGTERM",
+            () = fires(&mut self.sigint) => "SIGINT",
         }
     }
 
     /// No signal to wait for off unix; the future simply never resolves.
     #[cfg(not(unix))]
-    pub(crate) async fn recv(&mut self) {
-        std::future::pending::<()>().await;
+    pub(crate) async fn recv(&mut self) -> &'static str {
+        match self.requests.recv().await {
+            Some(reason) => reason,
+            None => std::future::pending().await,
+        }
     }
 }
 

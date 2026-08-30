@@ -444,12 +444,8 @@ fn quit(hwnd: HWND) {
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
     crate::overlay::evict_on_quit();
-    info!("tray Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from the window procedure on the tray thread: the status cannot travel back through an `extern \"system\"` callback, and ending the message pump would only end this thread while `main` keeps running the agent core"
-    )]
-    std::process::exit(0);
+    info!("tray Quit — requesting graceful agent shutdown");
+    crate::shutdown::request("tray Quit");
 }
 
 /// NUL-terminated UTF-16 for win32 W-APIs.

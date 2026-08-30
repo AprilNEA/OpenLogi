@@ -377,6 +377,8 @@ fn persisted_action_variant_names_are_stable() {
         "VolumeDown",
         "VolumeUp",
         "Workflow",
+        "ZoomIn",
+        "ZoomOut",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);

@@ -379,10 +379,14 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
 
 /// A state holding the one persistent mouse, so per-device config has a key.
 fn state_with_a_known_mouse() -> AppState {
+    state_with_a_known_mouse_config(Config::ephemeral())
+}
+
+fn state_with_a_known_mouse_config(config: Config) -> AppState {
     let cache = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     AppState::with_runtime(
-        Config::ephemeral(),
+        config,
         &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
         &[],
         &cache,
@@ -599,6 +603,58 @@ fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
         state.editing_app(),
         Some("com.apple.Safari"),
         "the Buttons editor keeps its independent scope"
+    );
+}
+
+#[test]
+fn touchpad_management_defaults_off_and_persists_when_enabled() {
+    let mut state = state_with_a_known_mouse();
+    assert!(!state.touchpad_gestures_enabled());
+
+    state.commit_touchpad_gestures_enabled(true);
+
+    assert!(state.touchpad_gestures_enabled());
+    let restored = state_with_a_known_mouse_config(state.config.clone());
+    assert!(restored.touchpad_gestures_enabled());
+}
+
+#[test]
+fn touchpad_binding_commit_updates_the_global_profile() {
+    let mut state = state_with_a_known_mouse();
+    let trigger = ButtonId::TouchpadFourFingerSwipeLeft;
+
+    state.commit_touchpad_binding(trigger, Action::Copy);
+
+    assert_eq!(state.touchpad_bindings().get(&trigger), Some(&Action::Copy));
+    assert_eq!(
+        state.config.bindings_for(KNOWN_MOUSE_KEY).get(&trigger),
+        Some(&Binding::Single(Action::Copy))
+    );
+}
+
+#[test]
+fn touchpad_per_app_override_projects_without_changing_the_global_binding() {
+    let mut state = state_with_a_known_mouse();
+    let trigger = ButtonId::TouchpadFourFingerSwipeRight;
+    state.commit_touchpad_binding(trigger, Action::Copy);
+    state.set_editing_app(Some("com.apple.Safari".into()));
+
+    state.commit_touchpad_binding(trigger, Action::Paste);
+
+    assert_eq!(
+        state.touchpad_bindings().get(&trigger),
+        Some(&Action::Paste)
+    );
+    assert_eq!(
+        state.config.bindings_for(KNOWN_MOUSE_KEY).get(&trigger),
+        Some(&Binding::Single(Action::Copy))
+    );
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .and_then(|bindings| bindings.get(&trigger)),
+        Some(&Action::Paste)
     );
 }
 

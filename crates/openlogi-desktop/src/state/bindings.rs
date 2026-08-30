@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use gpui::App;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
-use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, touchpad_bindings_for,
+};
 use openlogi_core::config::{Config, KeyTrigger};
 use tracing::debug;
 
@@ -30,6 +32,9 @@ pub(super) struct BindingState {
     button_bindings: BTreeMap<ButtonId, Action>,
     /// Device-global per-direction gesture bindings.
     gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Effective raw-touchpad gesture bindings for the selected device and
+    /// open profile.
+    touchpad_bindings: BTreeMap<ButtonId, Action>,
     /// Global keyboard F-key bindings (Esc + F1-F19).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
 }
@@ -41,6 +46,7 @@ impl BindingState {
             active_button: None,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
+            touchpad_bindings: BTreeMap::new(),
             keyboard_bindings: config.keyboard.bindings.clone(),
         };
         state.refresh_device(config, persistent_key);
@@ -71,8 +77,12 @@ impl BindingState {
         let button_bindings =
             bindings_for(config, persistent_key, self.editing_app(persistent_key));
         let gesture_bindings = gesture_maps_for(config, persistent_key);
+        let touchpad_bindings = persistent_key.map_or_else(BTreeMap::new, |key| {
+            touchpad_bindings_for(config, key, self.editing_app(persistent_key))
+        });
         self.button_bindings = button_bindings;
         self.gesture_bindings = gesture_bindings;
+        self.touchpad_bindings = touchpad_bindings;
     }
 
     fn restore(&mut self, config: &Config, persistent_key: Option<&str>) {
@@ -161,6 +171,21 @@ impl AppState {
         &self.bindings.gesture_bindings
     }
 
+    /// Effective raw-touchpad gesture actions for the selected device and open
+    /// profile.
+    #[must_use]
+    pub fn touchpad_bindings(&self) -> &BTreeMap<ButtonId, Action> {
+        &self.bindings.touchpad_bindings
+    }
+
+    /// Whether OpenLogi manages raw-touchpad gestures for the active device.
+    #[must_use]
+    pub fn touchpad_gestures_enabled(&self) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.touchpad_gestures_enabled(key))
+    }
+
     /// Global keyboard F-key bindings.
     #[must_use]
     pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
@@ -224,6 +249,54 @@ impl AppState {
         });
         // The agent owns the hook; have it rebuild its live map from config.
         self.persist_and_reload("binding");
+    }
+
+    /// Update one raw-touchpad gesture in the open profile and have the agent
+    /// rebuild the active recognizer map.
+    pub fn commit_touchpad_binding(&mut self, trigger: ButtonId, action: Action) {
+        assert!(
+            trigger.is_touchpad_gesture(),
+            "touchpad binding commit requires a touchpad gesture trigger"
+        );
+        self.bindings
+            .touchpad_bindings
+            .insert(trigger, action.clone());
+
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!(
+                ?trigger,
+                "no persistent device key — touchpad binding kept in memory only"
+            );
+            return;
+        };
+        let app = self.editing_app().map(str::to_string);
+        self.config.edit(|config| match app {
+            Some(app) => config.set_per_app_binding(&key, &app, trigger, Some(action)),
+            None => config.set_binding(&key, trigger, Binding::Single(action)),
+        });
+        self.persist_and_reload("touchpad gesture binding");
+    }
+
+    /// Enable or disable raw-touchpad capture for the active device. This is
+    /// device-global even while the editor is showing a per-app profile.
+    pub fn commit_touchpad_gestures_enabled(&mut self, enabled: bool) {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if self.config.touchpad_gestures_enabled(&key) == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_touchpad_gestures_enabled(&key, enabled));
+        self.persist_and_reload("touchpad gesture capture state");
     }
 
     /// Drop `button`'s override in the open per-app profile, so it inherits the

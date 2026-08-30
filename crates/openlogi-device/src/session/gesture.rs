@@ -1,28 +1,29 @@
 //! Live control capture for one device: divert the device's gesture sources
 //! (the MX dedicated gesture button and/or the MX Master 4 haptic panel), the
-//! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! DPI/ModeShift button, the thumb wheel, and raw touchpads over HID++ and turn
+//! their events into [`CapturedInput`] the Agent can dispatch.
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
-//! enables diversion on whichever of those controls it exposes, registers one
-//! message listener, and restores every control's default mapping on shutdown.
+//! enables diversion on whichever of those controls it exposes, registers its
+//! event listeners, and restores every control's default mapping on shutdown.
 //! Using one channel matters: a second channel to the same device would split
 //! its input-report stream, so all captured controls share this session.
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
-//! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
-//! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
-//! wheel is special: diverting it stops native horizontal scroll, so the GUI
+//! Agent-core maps each [`CapturedInput`] to the user's bound action and
+//! dispatches it, mirroring how the CGEventTap hook handles the side buttons.
+//! The thumb wheel is special: diverting it stops native horizontal scroll, so the Agent
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
 mod liveness;
+mod touchpad;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, MessageListenerGuard},
     device::Device,
     feature::{
         CreatableFeature, EmittingFeature,
@@ -32,6 +33,7 @@ use hidpp::{
     protocol::v20,
 };
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::touchpad::TouchFrame;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -55,8 +57,17 @@ pub use super::capture_restore::{
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
 
+pub use touchpad::{
+    ArmedRawMode, OPENLOGI_RAW_REPORT_FLAGS, RawModeJournal, TouchpadCaptureError,
+    TouchpadFrameStream, TouchpadJournalError, TouchpadJournalStore, TouchpadStreamError,
+    TouchpadStreamEvent,
+};
+
+/// How often an armed touchpad confirms that no competing manager has changed
+/// its volatile raw-report mode on the same HID++ channel.
+const TOUCHPAD_RAW_MODE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 /// One input captured from the active device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapturedInput {
     /// A completed swipe (or tap click) from a diverted gesture source,
     /// tagged with the source control so dispatch resolves it against that
@@ -91,6 +102,15 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// One complete normalized `0x6100` touchpad frame.
+    TouchpadFrame(TouchFrame),
+    /// The active touchpad contact set ended.
+    TouchpadEnd,
+    /// Unsupported contact count or malformed data cancelled the touchpad stroke.
+    TouchpadCancel,
+    /// Invalid or incomplete `0x6100` logical frames dropped by strict
+    /// assembly. Diagnostic only; action dispatch ignores it.
+    TouchpadDroppedFrames(u64),
 }
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
@@ -195,9 +215,25 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
 ];
 
+/// Lifetime and control scope of one capture session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptureSessionMode {
+    /// Arm all controls requested by [`CaptureSpec`] and listen until stopped.
+    #[default]
+    Continuous,
+    /// Arm only the raw touchpad and listen until stopped.
+    TouchpadOnly,
+    /// Recover a durable raw-touchpad journal record, then exit without
+    /// diverting or listening to any controls.
+    TouchpadRecovery,
+}
+
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
+    /// Whether this is a normal session, explicit touchpad-only capture, or a
+    /// one-shot durable-journal recovery.
+    pub mode: CaptureSessionMode,
     /// Divert the thumb wheel over `0x2150` (rotation rebind / sensitivity /
     /// click bound).
     pub capture_thumbwheel: bool,
@@ -212,34 +248,54 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Enable `0x6100` raw touchpad reports. This is independent from every
+    /// button diversion and defaults off.
+    pub capture_touchpad: bool,
+    /// Stable serial/non-zero-unit identity used for the durable raw-mode
+    /// journal. Raw mode is never armed without one.
+    pub touchpad_journal_id: Option<String>,
 }
 
-/// Capture the controls selected by `spec` on `route` until `shutdown`
-/// resolves, forwarding each event to `sink`.
+/// Runtime resources consumed by one control-capture session.
+pub struct CaptureSessionRequest {
+    /// Controls and capture mode to arm.
+    pub spec: CaptureSpec,
+    /// Durable raw-touchpad ownership journal, when touchpad capture is used.
+    pub touchpad_journal: Option<Arc<dyn TouchpadJournalStore>>,
+    /// Destination for captured input events.
+    pub sink: mpsc::UnboundedSender<CapturedInput>,
+    /// Signal that asks the session to restore its controls and stop.
+    pub shutdown: oneshot::Receiver<()>,
+    /// Shared publication slot for the session's active HID++ channel.
+    pub channel_slot: CaptureChannel,
+    /// Host sleep/wake gate that prevents device I/O while suspended.
+    pub device_io: DeviceIoGate,
+}
+
+/// Run the capture mode selected by `request.spec` on `route`, forwarding each
+/// event to `request.sink`.
 ///
-/// Each gesture source in `spec.divert_gesture_sources` is diverted with
+/// Each gesture source in `request.spec.divert_gesture_sources` is diverted with
 /// raw-XY. A source not in gesture mode keeps its native behavior — unless a
-/// non-default single binding puts it in `spec.divert_buttons`, in which case
-/// it is diverted as a plain button (the OS hook never sees a gesture-source
-/// CID, so this is the binding's only delivery path). The DPI/ModeShift
-/// capture and the channel-reuse slot are independent of this.
+/// non-default single binding puts it in `request.spec.divert_buttons`, in
+/// which case it is diverted as a plain button (the OS hook never sees a
+/// gesture-source CID, so this is the binding's only delivery path). The
+/// DPI/ModeShift capture and the channel-reuse slot are independent of this.
 ///
-/// Opens and holds one HID++ channel, diverts whichever of those controls the
-/// device exposes, and listens. Returns once `shutdown` fires (or its sender is
-/// dropped). A normal stop restores every diverted control before returning;
-/// transport replacement or loss may return
+/// A continuous or touchpad-only session holds one HID++ channel and listens
+/// until `request.shutdown` fires (or its sender is dropped), then restores
+/// every control it diverted. Touchpad recovery opens the device only long
+/// enough to compare-and-restore a durable journal record and returns
+/// immediately. A normal stop restores every diverted control before
+/// returning; transport replacement or loss may return
 /// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
 /// current inventory channel.
 pub async fn run_capture_session(
     backend: &dyn HidBackend,
     route: DeviceRoute,
-    spec: CaptureSpec,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
-    device_io: DeviceIoGate,
+    request: CaptureSessionRequest,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    if !device_io.allows_io() {
+    if !request.device_io.allows_io() {
         return Err(GestureError::Hid(BackendError::Backend(
             "host device I/O is suspended".into(),
         ))
@@ -250,7 +306,7 @@ pub async fn run_capture_session(
         .map_err(GestureError::from)?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());
-    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, None, device_io).await
+    run_capture_session_on(shared, request, None).await
 }
 
 /// Capture through the inventory-owned channel currently published for
@@ -259,37 +315,28 @@ pub async fn run_capture_session(
 /// a later inventory publication.
 pub async fn run_capture_session_with_registry_spec(
     route: DeviceRoute,
-    spec: CaptureSpec,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
+    request: CaptureSessionRequest,
     registry: &ChannelRegistry,
-    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
         .ok_or(GestureError::DeviceNotFound)?;
-    run_capture_session_on(
-        shared,
-        spec,
-        sink,
-        shutdown,
-        channel_slot,
-        Some(registry),
-        device_io,
-    )
-    .await
+    run_capture_session_on(shared, request, Some(registry)).await
 }
 
 async fn run_capture_session_on(
     shared: SharedChannel,
-    spec: CaptureSpec,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
+    request: CaptureSessionRequest,
     registry: Option<&ChannelRegistry>,
-    device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    let CaptureSessionRequest {
+        spec,
+        touchpad_journal,
+        sink,
+        shutdown,
+        channel_slot,
+        device_io,
+    } = request;
     if !device_io.allows_io() {
         return Err(GestureError::Hid(BackendError::Backend(
             "host device I/O is suspended".into(),
@@ -298,7 +345,20 @@ async fn run_capture_session_on(
     }
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
-    let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
+    let mut armed = arm_controls(
+        &chan,
+        device_index,
+        &spec,
+        touchpad_journal.as_ref(),
+        &shared,
+        registry,
+    )
+    .await?;
+
+    if spec.mode == CaptureSessionMode::TouchpadRecovery {
+        debug!(index = device_index, "touchpad raw-mode recovery complete");
+        return Ok(CaptureSessionOutcome::Restored);
+    }
 
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = sink.send(direction);
@@ -311,57 +371,8 @@ async fn run_capture_session_on(
     }
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
-    let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
-    let gesture_cids = armed.gesture_cids.clone();
-    let gesture_button_set = armed.gesture_button_cids.clone();
-    let thumb_index = armed
-        .thumb
-        .as_ref()
-        .map(|thumb| thumb.wheel.feature_index());
-    let thumb_resolution = armed
-        .thumb
-        .as_ref()
-        .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
-    let dpi_set = armed.dpi_cids.clone();
-    let button_set = armed.button_cids.clone();
     let activity = Arc::new(ChannelActivity::default());
-    let listener = chan.add_msg_listener_guarded({
-        let accum = Arc::clone(&accum);
-        let activity = Arc::clone(&activity);
-        let sink = sink.clone();
-        move |raw, matched| {
-            // Every parsed inbound HID++ report proves this channel's read
-            // path is alive, including responses matched to another request.
-            activity.record();
-            if matched {
-                return;
-            }
-            let msg = v20::Message::from(raw);
-            if let Some(idx) = reprog_index
-                && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
-            {
-                // Recover the guard even if a prior holder panicked — the
-                // critical section is panic-free, so the data is consistent.
-                let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog_with_gesture_buttons(
-                    &mut acc,
-                    event,
-                    &gesture_cids,
-                    &dpi_set,
-                    &gesture_button_set,
-                    &button_set,
-                    &sink,
-                );
-                return;
-            }
-            if let Some(idx) = thumb_index
-                && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
-                && let Some(input) = thumbwheel_input(event, thumb_resolution)
-            {
-                let _ = sink.send(input);
-            }
-        }
-    });
+    let listener = add_control_listener(&chan, &armed, &accum, device_index, &sink, &activity);
 
     // Liveness watchdog: this session's channel is the sole delivery path for
     // every diverted control, and a channel whose input-report delivery dies
@@ -381,15 +392,16 @@ async fn run_capture_session_on(
         .flatten()
         .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
     log_capture_active(device_index, &armed, wireless.is_some());
-    let stop = monitor_capture(
+    let (stop, session_error) = monitor_capture(
         CaptureMonitor {
             root: &root,
-            armed: &armed,
+            armed: &mut armed,
             accum: &accum,
             device_index,
             registry,
             shared: &shared,
             activity: &activity,
+            sink: &sink,
         },
         wireless,
         shutdown,
@@ -411,7 +423,15 @@ async fn run_capture_session_on(
     }
     let outcome = finish_capture(listener, stop, armed, shared, registry).await;
     debug!(index = device_index, "control capture stopped");
-    Ok(outcome)
+    match session_error {
+        None => Ok(outcome),
+        Some(error) => Err(match outcome {
+            CaptureSessionOutcome::Restored => CaptureSessionFailure::clean(error),
+            CaptureSessionOutcome::RestorePending(pending) => {
+                CaptureSessionFailure::with_pending(error, pending)
+            }
+        }),
+    }
 }
 
 /// Restore or hand off one stopped session while its listener still owns every
@@ -423,12 +443,72 @@ async fn finish_capture<T>(
     retired: SharedChannel,
     registry: Option<&ChannelRegistry>,
 ) -> CaptureSessionOutcome {
+    let mut armed = armed;
+    armed.disarm_touchpad().await;
     let pending = armed.into_pending(&retired);
     drop_listener_after(
         listener,
         restore_after_stop(stop, pending, &retired, registry),
     )
     .await
+}
+
+fn add_control_listener(
+    channel: &Arc<HidppChannel>,
+    armed: &ArmedControls,
+    accum: &Arc<Mutex<CaptureAccum>>,
+    device_index: u8,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+    activity: &Arc<ChannelActivity>,
+) -> MessageListenerGuard {
+    let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
+    let gesture_cids = armed.gesture_cids.clone();
+    let gesture_button_set = armed.gesture_button_cids.clone();
+    let thumb_index = armed
+        .thumb
+        .as_ref()
+        .map(|thumb| thumb.wheel.feature_index());
+    let thumb_resolution = armed
+        .thumb
+        .as_ref()
+        .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
+    let dpi_set = armed.dpi_cids.clone();
+    let button_set = armed.button_cids.clone();
+    let accum = Arc::clone(accum);
+    let activity = Arc::clone(activity);
+    let sink = sink.clone();
+    channel.add_msg_listener_guarded(move |raw, matched| {
+        // Every parsed inbound HID++ report proves this channel's read path is
+        // alive, including responses matched to another request.
+        activity.record();
+        if matched {
+            return;
+        }
+        let message = v20::Message::from(raw);
+        if let Some(index) = reprog_index
+            && let Some(event) = reprog_controls::decode_event(&message, device_index, index)
+        {
+            // Recover the guard even if a prior holder panicked — the
+            // critical section is panic-free, so the data is consistent.
+            let mut accum = accum.lock().unwrap_or_else(PoisonError::into_inner);
+            handle_reprog_with_gesture_buttons(
+                &mut accum,
+                event,
+                &gesture_cids,
+                &dpi_set,
+                &gesture_button_set,
+                &button_set,
+                &sink,
+            );
+            return;
+        }
+        if let Some(index) = thumb_index
+            && let Some(event) = thumbwheel::decode_event(&message, device_index, index)
+            && let Some(input) = thumbwheel_input(event, thumb_resolution)
+        {
+            let _ = sink.send(input);
+        }
+    })
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.
@@ -483,6 +563,9 @@ struct ArmedControls {
     /// `0x2150` accessor and the information read while diverting it, present
     /// when the thumb wheel is diverted.
     thumb: Option<ArmedThumbwheel>,
+    /// `0x6100` accessor, normalizer, and raw-mode ownership when touchpad
+    /// capture is armed.
+    touchpad: Option<ArmedTouchpad>,
 }
 
 struct ArmedThumbwheel {
@@ -502,6 +585,43 @@ impl ArmedThumbwheel {
         } else {
             WheelDirection::Default
         }
+    }
+}
+
+struct ArmedTouchpad {
+    feature: hidpp::feature::touchpad_raw_xy::TouchpadRawXyFeature,
+    stream: TouchpadFrameStream,
+    raw_mode: ArmedRawMode,
+    journal: Arc<dyn TouchpadJournalStore>,
+    journal_id: String,
+}
+
+impl ArmedTouchpad {
+    fn push(
+        &mut self,
+        event: hidpp::feature::touchpad_raw_xy::TouchpadRawEvent,
+        sink: &mpsc::UnboundedSender<CapturedInput>,
+    ) {
+        let hidpp::feature::touchpad_raw_xy::TouchpadRawEvent::DualXy(report) = event else {
+            return;
+        };
+        for event in self.stream.push(report, std::time::Instant::now()) {
+            send_touchpad_event(event, sink);
+        }
+    }
+
+    async fn verify_raw_mode(&self) -> Result<(), GestureError> {
+        let actual = self
+            .feature
+            .get_raw_report_state()
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?
+            .bits();
+        let expected = self.raw_mode.expected();
+        if actual != expected {
+            return Err(GestureError::TouchpadRawModeConflict { expected, actual });
+        }
+        Ok(())
     }
 }
 
@@ -535,6 +655,23 @@ impl ArmedControls {
             reprog,
             thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
         )
+    }
+
+    async fn disarm_touchpad(&mut self) {
+        let Some(touchpad) = self.touchpad.take() else {
+            return;
+        };
+        if let Err(error) = touchpad
+            .raw_mode
+            .disarm(
+                &touchpad.feature,
+                touchpad.journal.as_ref(),
+                &touchpad.journal_id,
+            )
+            .await
+        {
+            warn!(%error, "touchpad raw-mode restore failed — journal retained for recovery");
+        }
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast. The
@@ -578,6 +715,7 @@ fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool)
         dpi_buttons = armed.dpi_cids.len(),
         buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
+        touchpad = armed.touchpad.is_some(),
         wake_rearm,
         "control capture active"
     );
@@ -586,36 +724,138 @@ fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool)
 /// Borrowed state used while monitoring one armed capture session.
 struct CaptureMonitor<'a> {
     root: &'a RootFeature,
-    armed: &'a ArmedControls,
+    armed: &'a mut ArmedControls,
     accum: &'a Arc<Mutex<CaptureAccum>>,
     device_index: u8,
     registry: Option<&'a ChannelRegistry>,
     shared: &'a SharedChannel,
     activity: &'a ChannelActivity,
+    sink: &'a mpsc::UnboundedSender<CapturedInput>,
+}
+
+impl CaptureMonitor<'_> {
+    fn stop(&self) -> CaptureStop {
+        stop_for_current_publication(self.registry, self.shared)
+    }
+
+    fn stop_with_error(&self, error: GestureError) -> (CaptureStop, Option<GestureError>) {
+        (self.stop(), Some(error))
+    }
+
+    fn ping_due(&self, liveness: &mut CaptureLiveness) -> bool {
+        liveness.ping_due(tokio::time::Instant::now(), self.activity.generation())
+    }
+
+    fn push_touchpad_event(&mut self, event: hidpp::feature::touchpad_raw_xy::TouchpadRawEvent) {
+        if let Some(touchpad) = self.armed.touchpad.as_mut() {
+            touchpad.push(event, self.sink);
+        }
+    }
+
+    fn flush_touchpad_end(&mut self) {
+        if let Some(touchpad) = self.armed.touchpad.as_mut() {
+            for event in touchpad.stream.poll_end(std::time::Instant::now()) {
+                send_touchpad_event(event, self.sink);
+            }
+        }
+    }
+
+    async fn raw_mode_error(&self) -> Option<GestureError> {
+        let touchpad = self.armed.touchpad.as_ref()?;
+        match touchpad.verify_raw_mode().await {
+            Ok(()) => None,
+            Err(error) => {
+                log_raw_mode_failure(self.device_index, &error);
+                Some(error)
+            }
+        }
+    }
+}
+
+fn log_raw_mode_failure(device_index: u8, error: &GestureError) {
+    if matches!(error, GestureError::TouchpadRawModeConflict { .. }) {
+        warn!(
+            index = device_index,
+            error = %error,
+            "touchpad raw mode changed externally — stopping capture without rearming"
+        );
+    } else {
+        warn!(
+            index = device_index,
+            error = %error,
+            "touchpad raw-mode verification failed — restarting capture"
+        );
+    }
+}
+
+async fn wait_for_capture_io(
+    context: &CaptureMonitor<'_>,
+    device_io: &mut DeviceIoGate,
+    liveness: &mut CaptureLiveness,
+) -> Option<CaptureStop> {
+    if device_io.allows_io() {
+        return None;
+    }
+    if !device_io.wait_until_allowed().await {
+        return Some(context.stop());
+    }
+    // Time asleep is not channel idleness. Give the transport a full quiet
+    // interval after visible resume and clear any pre-sleep strike.
+    liveness.record_activity(tokio::time::Instant::now(), context.activity.generation());
+    None
+}
+
+async fn finish_liveness_ping(
+    context: &CaptureMonitor<'_>,
+    liveness: &mut CaptureLiveness,
+) -> LivenessDecision {
+    let outcome = match context.root.ping(0x5a).await {
+        Err(v20::Hidpp20Error::Channel(
+            hidpp::channel::ChannelError::Timeout | hidpp::channel::ChannelError::NoResponse,
+        )) => PingOutcome::AllSilent,
+        // A pong, feature error, or unsupported response all prove that this
+        // channel still receives device replies.
+        Ok(_) | Err(v20::Hidpp20Error::Feature(_) | v20::Hidpp20Error::UnsupportedResponse) => {
+            PingOutcome::Delivered
+        }
+        Err(_) => PingOutcome::ChannelFailed,
+    };
+    liveness.finish_ping(
+        tokio::time::Instant::now(),
+        context.activity.generation(),
+        outcome,
+    )
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
 /// the device announces a reconnect. Returns only the typed reason capture
 /// stopped; restoration performs a fresh registry lookup after monitoring.
 async fn monitor_capture(
-    context: CaptureMonitor<'_>,
+    mut context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
     shutdown: oneshot::Receiver<()>,
     mut device_io: DeviceIoGate,
-) -> CaptureStop {
+) -> (CaptureStop, Option<GestureError>) {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
+    let touchpad_events = context
+        .armed
+        .touchpad
+        .as_ref()
+        .map(|touchpad| touchpad.feature.listen());
     let mut shutdown = std::pin::pin!(shutdown);
     let mut liveness =
         CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
+    let mut raw_mode_ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + TOUCHPAD_RAW_MODE_POLL,
+        TOUCHPAD_RAW_MODE_POLL,
+    );
     loop {
-        if !device_io.allows_io() {
-            if !device_io.wait_until_allowed().await {
-                return stop_for_current_publication(context.registry, context.shared);
-            }
-            // Time asleep is not channel idleness. Give the transport a full
-            // quiet interval after visible resume and clear any pre-sleep
-            // strike before considering a liveness ping.
-            liveness.record_activity(tokio::time::Instant::now(), context.activity.generation());
+        // Keep passive listeners and raw-mode ownership intact through sleep.
+        // In particular, do not restore or verify controls during DarkWake.
+        // A deliberate shutdown may time out while suspended; the durable
+        // touchpad journal lets the next launch complete restoration.
+        if let Some(stop) = wait_for_capture_io(&context, &mut device_io, &mut liveness).await {
+            return (stop, None);
         }
         let activity_generation = liveness.activity_generation();
         let idle_deadline = liveness.idle_deadline();
@@ -629,22 +869,48 @@ async fn monitor_capture(
                         context.activity.generation(),
                     ),
                     Some(false) => {}
-                    None => return stop_for_current_publication(context.registry, context.shared),
+                    None => return (context.stop(), None),
                 }
             }
-            transition = wait_for_channel_change(
-                context.registry,
-                context.shared,
-            ) => {
+            transition = wait_for_channel_change(context.registry, context.shared) => {
                 info!(index = context.device_index, "inventory replaced or removed capture channel — restarting session");
-                return transition;
+                return (transition, None);
+            }
+            event = async {
+                match touchpad_events.as_ref() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match event {
+                    Ok(event) => context.push_touchpad_event(event),
+                    Err(error) => {
+                        return context.stop_with_error(GestureError::Hidpp(format!(
+                            "touchpad event stream closed: {error}"
+                        )));
+                    }
+                }
+            }
+            () = async {
+                if context.armed.touchpad.is_some() {
+                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                context.flush_touchpad_end();
+            }
+            _ = raw_mode_ticker.tick(), if context.armed.touchpad.is_some() => {
+                if let Some(error) = context.raw_mode_error().await {
+                    return context.stop_with_error(error);
+                }
             }
             _ = &mut shutdown => {
                 // Shutdown and inventory replacement can become ready on the
                 // same turn. Prefer the typed channel transition so teardown
                 // never blindly writes through a transport already known to
                 // be obsolete.
-                return stop_for_current_publication(context.registry, context.shared);
+                return (context.stop(), None);
             }
             event = async {
                 match wake_events.as_ref() {
@@ -665,33 +931,12 @@ async fn monitor_capture(
                 liveness.record_activity(tokio::time::Instant::now(), generation);
             }
             () = tokio::time::sleep_until(idle_deadline) => {
-                if !liveness.ping_due(
-                    tokio::time::Instant::now(),
-                    context.activity.generation(),
-                ) {
+                if !context.ping_due(&mut liveness) {
                     continue;
                 }
-                let outcome = match context.root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => PingOutcome::AllSilent,
-                    // A pong, feature error, or unsupported response all prove
-                    // that this channel still receives device replies.
-                    Ok(_)
-                    | Err(
-                        v20::Hidpp20Error::Feature(_)
-                        | v20::Hidpp20Error::UnsupportedResponse,
-                    ) => PingOutcome::Delivered,
-                    Err(_) => PingOutcome::ChannelFailed,
-                };
-                if liveness.finish_ping(
-                    tokio::time::Instant::now(),
-                    context.activity.generation(),
-                    outcome,
-                ) == LivenessDecision::Restart {
+                if finish_liveness_ping(&context, &mut liveness).await == LivenessDecision::Restart {
                     warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
-                    return stop_for_current_publication(context.registry, context.shared);
+                    return (context.stop(), None);
                 }
             }
         }
@@ -711,6 +956,7 @@ async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
     spec: &CaptureSpec,
+    touchpad_journal: Option<&Arc<dyn TouchpadJournalStore>>,
     shared: &SharedChannel,
     registry: Option<&ChannelRegistry>,
 ) -> Result<ArmedControls, CaptureSessionFailure> {
@@ -718,7 +964,10 @@ async fn arm_controls(
         .await
         .map_err(|_| GestureError::DeviceUnreachable(slot))?;
     let mut armed = ArmedControls::default();
-    if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
+    if let Err(error) =
+        arm_controls_into(&device, chan, slot, spec, touchpad_journal, &mut armed).await
+    {
+        armed.disarm_touchpad().await;
         let pending = armed.into_pending(shared);
         return Err(rollback_capture_start(error, pending, shared, registry).await);
     }
@@ -727,6 +976,7 @@ async fn arm_controls(
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
         && armed.thumb.is_none()
+        && armed.touchpad.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -741,8 +991,13 @@ async fn arm_controls_into(
     chan: &Arc<HidppChannel>,
     slot: u8,
     spec: &CaptureSpec,
+    touchpad_journal: Option<&Arc<dyn TouchpadJournalStore>>,
     armed: &mut ArmedControls,
 ) -> Result<(), GestureError> {
+    if spec.mode != CaptureSessionMode::Continuous {
+        return arm_touchpad(device, chan, slot, spec, touchpad_journal, armed).await;
+    }
+
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -834,7 +1089,83 @@ async fn arm_controls_into(
             return Err(GestureError::Hidpp(format!("{error:?}")));
         }
     }
+
+    arm_touchpad(device, chan, slot, spec, touchpad_journal, armed).await?;
     Ok(())
+}
+
+async fn arm_touchpad(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    spec: &CaptureSpec,
+    journal: Option<&Arc<dyn TouchpadJournalStore>>,
+    armed: &mut ArmedControls,
+) -> Result<(), GestureError> {
+    let (Some(journal_id), Some(journal)) = (&spec.touchpad_journal_id, journal) else {
+        if spec.capture_touchpad {
+            warn!(
+                "touchpad capture requested without durable device identity/journal — not arming"
+            );
+        }
+        return Ok(());
+    };
+    let Some(info) = device
+        .root()
+        .get_feature(hidpp::feature::touchpad_raw_xy::TouchpadRawXyFeature::ID)
+        .await
+        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?
+    else {
+        return Ok(());
+    };
+    let feature = hidpp::feature::touchpad_raw_xy::TouchpadRawXyFeature::new(
+        Arc::clone(chan),
+        slot,
+        info.index,
+    );
+    ArmedRawMode::recover(&feature, journal.as_ref(), journal_id)
+        .await
+        .map_err(|error| GestureError::Hidpp(error.to_string()))?;
+    if !spec.capture_touchpad {
+        return Ok(());
+    }
+    let touchpad_info = feature
+        .get_touchpad_info()
+        .await
+        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    let stream = TouchpadFrameStream::new(touchpad_info)
+        .map_err(|error| GestureError::Hidpp(error.to_string()))?;
+    let raw_mode = ArmedRawMode::arm(&feature, journal.as_ref(), journal_id)
+        .await
+        .map_err(touchpad_capture_error)?;
+    armed.touchpad = Some(ArmedTouchpad {
+        feature,
+        stream,
+        raw_mode,
+        journal: Arc::clone(journal),
+        journal_id: journal_id.clone(),
+    });
+    Ok(())
+}
+
+fn touchpad_capture_error(error: TouchpadCaptureError) -> GestureError {
+    match error {
+        TouchpadCaptureError::ExternalRawMode { actual } => GestureError::TouchpadRawModeConflict {
+            expected: OPENLOGI_RAW_REPORT_FLAGS.bits(),
+            actual,
+        },
+        error => GestureError::Hidpp(error.to_string()),
+    }
+}
+
+fn send_touchpad_event(event: TouchpadStreamEvent, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    let input = match event {
+        TouchpadStreamEvent::Frame(frame) => CapturedInput::TouchpadFrame(frame),
+        TouchpadStreamEvent::End => CapturedInput::TouchpadEnd,
+        TouchpadStreamEvent::Cancel => CapturedInput::TouchpadCancel,
+        TouchpadStreamEvent::DroppedFrames(count) => CapturedInput::TouchpadDroppedFrames(count),
+    };
+    let _ = sink.send(input);
 }
 
 async fn arm_reprog_control(

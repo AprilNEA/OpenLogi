@@ -9,6 +9,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 mod device;
 #[cfg(feature = "fs")]
@@ -23,7 +24,9 @@ mod settings;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+pub use device::{
+    DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides, TouchpadGestureSettings,
+};
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
@@ -48,6 +51,9 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v8 adds default-disabled raw-touchpad gesture settings and 15 append-only
+/// touchpad trigger identifiers.
 ///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
@@ -91,7 +97,12 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
+
+/// Returned when a touchpad-only config API receives another kind of trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("{0} is not a touchpad gesture trigger")]
+pub struct TouchpadTriggerError(pub ButtonId);
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,12 +186,38 @@ impl Config {
     /// entry if needed. Replaces the whole binding (use
     /// [`Self::set_gesture_direction`] to edit one direction of a gesture
     /// binding in place).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a raw-touchpad trigger is paired with a directional or
+    /// long-press binding. Those triggers accept only [`Binding::Single`].
     pub fn set_binding(&mut self, device_key: &str, button: ButtonId, binding: Binding) {
+        assert!(
+            !button.is_touchpad_gesture() || matches!(binding, Binding::Single(_)),
+            "touchpad gesture triggers only support single-action bindings"
+        );
         self.devices
             .entry(device_key.to_string())
             .or_default()
             .bindings
             .insert(button, binding);
+    }
+
+    /// Record a one-shot action for a raw-touchpad gesture trigger.
+    ///
+    /// Unlike [`Self::set_binding`], this preserves the invariant that
+    /// touchpad gestures never carry directional or long-press binding shapes.
+    pub fn set_touchpad_binding(
+        &mut self,
+        device_key: &str,
+        trigger: ButtonId,
+        action: Action,
+    ) -> Result<(), TouchpadTriggerError> {
+        if !trigger.is_touchpad_gesture() {
+            return Err(TouchpadTriggerError(trigger));
+        }
+        self.set_binding(device_key, trigger, Binding::Single(action));
+        Ok(())
     }
 
     /// Records (or, with `action = None`, clears) the F-key `trigger` binding
@@ -233,6 +270,10 @@ impl Config {
     /// [`Self::set_gesture_mode`] and [`Self::set_gesture_direction`] so the two
     /// promote a button into gesture mode identically.
     fn ensure_gesture_binding(&mut self, device_key: &str, button: ButtonId) -> &mut Binding {
+        assert!(
+            !button.is_touchpad_gesture(),
+            "touchpad gesture triggers cannot carry directional bindings"
+        );
         let entry = self
             .devices
             .entry(device_key.to_string())
@@ -693,6 +734,23 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .action_ring
+            .enabled = enabled;
+    }
+
+    /// Whether raw-touchpad gesture capture is enabled for `device_key`.
+    #[must_use]
+    pub fn touchpad_gestures_enabled(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|device| device.touchpad_gestures.enabled)
+    }
+
+    /// Enable or disable raw-touchpad gesture capture for `device_key`.
+    pub fn set_touchpad_gestures_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .touchpad_gestures
             .enabled = enabled;
     }
 

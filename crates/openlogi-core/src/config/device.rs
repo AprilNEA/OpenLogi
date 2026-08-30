@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
@@ -13,6 +14,21 @@ use super::settings::{
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::Dpi;
+
+/// Per-device raw-touchpad gesture capture settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchpadGestureSettings {
+    /// Whether OpenLogi may enable HID++ raw reporting for gesture recognition.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+}
+
+impl TouchpadGestureSettings {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -126,18 +142,20 @@ impl LinkOverrides {
 
 /// Settings scoped to a single physical device.
 ///
-/// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
+/// Deserialization goes through `RawDeviceConfig` (`#[serde(try_from)]`) so
 /// pre-v2 files — which split bindings across `button_bindings` +
 /// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
 /// `bindings` is ever serialized, so a migrated file is rewritten to the v2
 /// shape on its next save.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "RawDeviceConfig")]
+#[serde(try_from = "RawDeviceConfig")]
 pub struct DeviceConfig {
     /// Whether OpenLogi manages this device at all. `false` leaves the device
-    /// fully native: no capture session (no HID++ diversion of any control)
-    /// and no volatile-settings re-apply on reconnect. Defaults to `true` and
-    /// is only serialized when disabled.
+    /// fully native: no continuous capture session or HID++ diversion of any
+    /// control and no volatile-settings re-apply on reconnect. A one-shot
+    /// compare-and-restore may still resolve an OpenLogi raw-touchpad journal
+    /// left by an interrupted earlier session. Defaults to `true` and is only
+    /// serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     /// User-assigned name for this physical device. The persisted
@@ -195,6 +213,10 @@ pub struct DeviceConfig {
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    /// Raw-touchpad gesture capture. Absent settings remain disabled so merely
+    /// discovering HID++ `0x6100` never changes device state.
+    #[serde(default, skip_serializing_if = "TouchpadGestureSettings::is_default")]
+    pub touchpad_gestures: TouchpadGestureSettings,
     /// Host-rendered Actions Ring settings and complete per-application layouts.
     #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
     pub action_ring: ActionRingConfig,
@@ -356,6 +378,7 @@ impl Default for DeviceConfig {
             bindings: BTreeMap::new(),
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
+            touchpad_gestures: TouchpadGestureSettings::default(),
             action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
             dpi: None,
@@ -463,6 +486,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
+    touchpad_gestures: TouchpadGestureSettings,
+    #[serde(default)]
     action_ring: ActionRingConfig,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
     dpi_presets: Vec<Dpi>,
@@ -496,8 +521,18 @@ struct RawDeviceConfig {
     custom_name: Option<String>,
 }
 
-impl From<RawDeviceConfig> for DeviceConfig {
-    fn from(raw: RawDeviceConfig) -> Self {
+#[derive(Debug, Error)]
+enum DeviceConfigError {
+    #[error("touchpad trigger {0} must have a single-action binding")]
+    InvalidTouchpadBinding(ButtonId),
+    #[error("touchpad trigger {0} cannot store a disabled directional gesture")]
+    InvalidDisabledTouchpadGesture(ButtonId),
+}
+
+impl TryFrom<RawDeviceConfig> for DeviceConfig {
+    type Error = DeviceConfigError;
+
+    fn try_from(raw: RawDeviceConfig) -> Result<Self, Self::Error> {
         let mut bindings = raw.bindings; // the v2 map wins on every key.
 
         // Re-home the legacy flat gesture map under `GestureButton`. This MUST
@@ -527,7 +562,20 @@ impl From<RawDeviceConfig> for DeviceConfig {
             bindings.entry(button).or_insert(Binding::Single(action));
         }
 
-        DeviceConfig {
+        if let Some((&button, _)) = bindings.iter().find(|(button, binding)| {
+            button.is_touchpad_gesture() && !matches!(binding, Binding::Single(_))
+        }) {
+            return Err(DeviceConfigError::InvalidTouchpadBinding(button));
+        }
+        if let Some((&button, _)) = raw
+            .disabled_gestures
+            .iter()
+            .find(|(button, _)| button.is_touchpad_gesture())
+        {
+            return Err(DeviceConfigError::InvalidDisabledTouchpadGesture(button));
+        }
+
+        Ok(DeviceConfig {
             enabled: raw.enabled,
             custom_name: raw.custom_name,
             gesture_owner: raw.gesture_owner,
@@ -536,6 +584,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             bindings,
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
+            touchpad_gestures: raw.touchpad_gestures,
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
@@ -550,7 +599,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
-        }
+        })
     }
 }
 
@@ -574,5 +623,22 @@ mod tests {
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
         Ok(())
+    }
+
+    #[test]
+    fn touchpad_trigger_rejects_directional_binding() {
+        let error = toml::from_str::<DeviceConfig>(
+            r#"[bindings.TouchpadThreeFingerSwipeUp]
+Up = "MissionControl"
+"#,
+        )
+        .expect_err("touchpad triggers are one-shot actions");
+
+        assert!(
+            error
+                .to_string()
+                .contains("3-Finger Swipe Up must have a single-action binding"),
+            "{error}"
+        );
     }
 }

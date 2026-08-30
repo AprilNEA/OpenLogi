@@ -61,6 +61,34 @@ pub fn button_bindings_for(
     bindings
 }
 
+/// Effective one-shot actions for all 15 raw-touchpad gesture triggers, with
+/// `app_bundle`'s per-app overlay applied and missing entries seeded from the
+/// canonical defaults.
+///
+/// Touchpad trigger bindings are shape-checked at config deserialization and
+/// by the dedicated setter, so this projection never collapses directional or
+/// long-press state into an action.
+#[must_use]
+pub fn touchpad_bindings_for(
+    config: &Config,
+    config_key: &str,
+    app_bundle: Option<&str>,
+) -> BTreeMap<ButtonId, Action> {
+    let stored = config.effective_bindings(config_key, app_bundle);
+    ButtonId::touchpad_gestures()
+        .map(|trigger| {
+            let action = match stored.get(&trigger) {
+                Some(Binding::Single(action)) => action.clone(),
+                Some(Binding::Gesture(_) | Binding::LongPress(_)) => {
+                    unreachable!("validated touchpad trigger carried a non-single binding")
+                }
+                None => default_binding(trigger),
+            };
+            (trigger, action)
+        })
+        .collect()
+}
+
 /// Per-direction maps for every HID++ gesture source (the dedicated gesture
 /// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
@@ -201,6 +229,35 @@ mod tests {
         assert_eq!(
             projected.get(&ButtonId::Thumbwheel),
             Some(&Action::AppExpose)
+        );
+    }
+
+    #[test]
+    fn touchpad_projection_seeds_defaults_and_applies_per_app_overrides() {
+        let mut cfg = Config::default();
+        cfg.set_touchpad_binding("casa", ButtonId::TouchpadThreeFingerSwipeUp, Action::Copy)
+            .expect("touchpad trigger");
+        cfg.set_per_app_binding(
+            "casa",
+            "com.example.Editor",
+            ButtonId::TouchpadThreeFingerSwipeUp,
+            Some(Action::Paste),
+        );
+
+        let global = touchpad_bindings_for(&cfg, "casa", None);
+        assert_eq!(global.len(), ButtonId::touchpad_gestures().count());
+        assert_eq!(
+            global.get(&ButtonId::TouchpadThreeFingerSwipeUp),
+            Some(&Action::Copy)
+        );
+        assert_eq!(
+            global.get(&ButtonId::TouchpadTwoFingerPinchOut),
+            Some(&Action::ZoomIn)
+        );
+        let app = touchpad_bindings_for(&cfg, "casa", Some("com.example.Editor"));
+        assert_eq!(
+            app.get(&ButtonId::TouchpadThreeFingerSwipeUp),
+            Some(&Action::Paste)
         );
     }
 

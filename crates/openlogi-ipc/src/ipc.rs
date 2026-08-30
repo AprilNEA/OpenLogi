@@ -61,7 +61,9 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: `Capabilities::touchpad_raw_xy`, Casa Touch gesture triggers and zoom
+///      actions, plus the Agent-owned raw-touchpad diagnostic monitor.
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -368,6 +370,71 @@ pub enum MonitorEvent {
     CaptureInterrupted,
 }
 
+/// One normalized contact in an Agent-owned raw-touchpad diagnostic trace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchpadMonitorContact {
+    /// Controller-assigned contact identifier.
+    pub id: u8,
+    /// Horizontal position from the left edge, in micrometres.
+    pub x_um: u32,
+    /// Vertical position from the top edge, in micrometres.
+    pub y_um: u32,
+}
+
+/// One event from the existing Agent-owned `0x6100` capture session.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TouchpadMonitorEvent {
+    /// One complete, strictly assembled logical frame.
+    Frame {
+        /// Monotonic device time, in microseconds.
+        timestamp_us: u64,
+        /// Whether the physical switch beneath the surface is pressed.
+        button: bool,
+        /// Valid contacts in stable controller-ID order.
+        contacts: Vec<TouchpadMonitorContact>,
+    },
+    /// The active contact set ended.
+    End,
+    /// Unsupported contact count or malformed data cancelled the active stroke.
+    Cancel,
+    /// Invalid or incomplete logical frames dropped since the prior event.
+    DroppedFrames { count: u64 },
+}
+
+/// A touchpad event tagged with the stable device whose existing capture
+/// session produced it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchpadMonitorRecord {
+    /// Persistent device/config identity, never a transient receiver route.
+    pub device_key: String,
+    /// Normalized capture event.
+    pub event: TouchpadMonitorEvent,
+}
+
+/// One active external takeover of a touchpad's raw-report mode.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchpadRawModeConflict {
+    /// Persistent device/config identity.
+    pub device_key: String,
+    /// Raw-report flags the live capture session owned or observed at arming.
+    pub expected: u8,
+    /// Different flags read from the device at runtime.
+    pub actual: u8,
+}
+
+/// One draining poll of the Agent-owned touchpad diagnostic monitor.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchpadMonitorBatch {
+    /// Events buffered since the previous poll.
+    pub events: Vec<TouchpadMonitorRecord>,
+    /// Oldest events discarded because the bounded buffer filled.
+    pub dropped_events: u64,
+    /// Current conflicts that have blocked capture until its plan changes.
+    pub conflicts: Vec<TouchpadRawModeConflict>,
+}
+
 /// Non-executable presentation data for one populated Actions Ring slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionRingPresentation {
@@ -425,13 +492,16 @@ pub enum ActionRingCommandError {
 /// Variants are append-only because this enum crosses bincode IPC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientKind {
-    /// The desktop app. The only kind whose declaration arms a dormant agent.
+    /// The desktop app. Its declaration arms a dormant agent.
     Gui,
     /// The `openlogi` CLI reading a snapshot; served without arming.
     Cli,
     /// The Actions Ring overlay helper; served without arming — one that
     /// connects on its own is an orphan of a previous run.
     Overlay,
+    /// An explicit Agent-owned hardware diagnostic. Arms a dormant agent so
+    /// its normal watcher/capture fleet exists for the diagnostic to observe.
+    Diagnostic,
 }
 
 #[tarpc::service]
@@ -557,7 +627,13 @@ pub trait Agent {
     async fn observe_action_ring(since: Generation) -> RingObservation;
     /// Declare what kind of client this connection is. Informational for an
     /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
-    /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
-    /// it speaks only [`Agent::protocol_version`] — and so never arms.
+    /// arms only on [`ClientKind::Gui`] or [`ClientKind::Diagnostic`]. The
+    /// takeover probe never declares — it speaks only
+    /// [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Drain normalized raw-touchpad events from the Agent's existing capture
+    /// session for one resolved stable device. The first poll enables
+    /// buffering and polling expiry disables it automatically; this RPC never
+    /// opens a second HID channel.
+    async fn poll_touchpad_monitor(device_key: String) -> TouchpadMonitorBatch;
 }

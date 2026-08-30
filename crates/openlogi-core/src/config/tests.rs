@@ -585,6 +585,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            touchpad_raw_xy: false,
         },
         light_capabilities: None,
         driver_id: None,
@@ -610,6 +611,40 @@ fn device_identity_roundtrips_and_is_iterable() {
         parsed.known_identities().collect::<Vec<_>>(),
         vec![("2b034", &mouse)]
     );
+}
+
+#[test]
+fn touchpad_gesture_settings_default_off_and_round_trip_when_enabled() {
+    let mut cfg = Config::default();
+    assert!(!cfg.touchpad_gestures_enabled("casa"));
+
+    cfg.set_touchpad_gestures_enabled("casa", true);
+    cfg.set_touchpad_binding(
+        "casa",
+        ButtonId::TouchpadThreeFingerSwipeUp,
+        Action::MissionControl,
+    )
+    .expect("touchpad trigger");
+
+    let parsed = write_and_read(&cfg);
+    assert!(parsed.touchpad_gestures_enabled("casa"));
+    assert_eq!(
+        parsed
+            .bindings_for("casa")
+            .get(&ButtonId::TouchpadThreeFingerSwipeUp),
+        Some(&Binding::Single(Action::MissionControl))
+    );
+}
+
+#[test]
+fn touchpad_binding_api_rejects_non_touchpad_trigger() {
+    let mut cfg = Config::default();
+    let error = cfg
+        .set_touchpad_binding("casa", ButtonId::Back, Action::BrowserBack)
+        .expect_err("mouse trigger must be rejected");
+
+    assert_eq!(error, TouchpadTriggerError(ButtonId::Back));
+    assert!(cfg.bindings_for("casa").is_empty());
 }
 
 #[test]
@@ -1299,7 +1334,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
     let path = dir.path().join("config.toml");
     fs::write(
         &path,
-        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivty = 14\n",
+        "schema_version = 7\n[app_settings]\nthumbwheel_sensitivty = 14\n",
     )
     .expect("write typo");
     assert_matches!(
@@ -1309,7 +1344,7 @@ fn current_schema_rejects_unknown_and_obsolete_fields() {
 
     fs::write(
         &path,
-        r#"schema_version = 6
+        r#"schema_version = 7
 [devices.mouse.identity]
 display_name = "Mouse"
 kind = "mouse"
@@ -1324,7 +1359,7 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 
     fs::write(
         &path,
-        "schema_version = 6\n[devices.mouse]\ngesture_owner = \"Off\"\n",
+        "schema_version = 7\n[devices.mouse]\ngesture_owner = \"Off\"\n",
     )
     .expect("write obsolete field");
     assert_matches!(
@@ -1336,15 +1371,15 @@ capabilities = { buttons = true, pointer = true, lighting = false, scroll_invers
 #[test]
 fn persisted_numeric_contracts_reject_unsafe_values() {
     for body in [
-        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivity = 0\n",
-        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivity = 101\n",
-        "schema_version = 6\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
-        "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = 0\n",
-        "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = 101\n",
-        "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = -2147483648\n",
-        "schema_version = 6\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
-        "schema_version = 6\n[devices.mouse]\ndpi = 65536\n",
-        "schema_version = 6\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
+        "schema_version = 7\n[app_settings]\nthumbwheel_sensitivity = 0\n",
+        "schema_version = 7\n[app_settings]\nthumbwheel_sensitivity = 101\n",
+        "schema_version = 7\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
+        "schema_version = 7\n[app_settings]\nvertical_scroll_sensitivity = 0\n",
+        "schema_version = 7\n[app_settings]\nvertical_scroll_sensitivity = 101\n",
+        "schema_version = 7\n[app_settings]\nvertical_scroll_sensitivity = -2147483648\n",
+        "schema_version = 7\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
+        "schema_version = 7\n[devices.mouse]\ndpi = 65536\n",
+        "schema_version = 7\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
     ] {
         assert!(toml::from_str::<Config>(body).is_err(), "accepted: {body}");
     }

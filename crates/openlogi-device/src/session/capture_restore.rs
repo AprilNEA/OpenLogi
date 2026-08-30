@@ -32,6 +32,14 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// Another process changed or owns an incompatible raw-touchpad mode.
+    #[error("touchpad raw mode conflict: expected {expected:#04x}, observed {actual:#04x}")]
+    TouchpadRawModeConflict {
+        /// Mode the existing capture session was listening under.
+        expected: u8,
+        /// Different mode observed from the device.
+        actual: u8,
+    },
 }
 
 /// One `0x1b04` control whose original reporting state can restore a failed

@@ -187,6 +187,10 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Increase the current application's zoom level.
+    ZoomIn,
+    /// Decrease the current application's zoom level.
+    ZoomOut,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -285,6 +289,9 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" Scroll ScrollRight,
+            // Zoom
+            ZoomIn "Zoom In" Browser Search,
+            ZoomOut "Zoom Out" Browser Search,
         }
     };
 }

@@ -53,7 +53,7 @@ fn decodes_dual_xy_event() {
     payload[5] = 0x45; // Y1[7:0]
     payload[6] = 0x10; // z1
     payload[7] = 0x20; // area1
-    payload[8] = 0x30 | 0x04; // FID1=3, BTN set (bit2), EOF clear
+    payload[8] = 0x30 | 0x06; // FID1=3, BTN + spurious set, EOF clear
     // touch 2: CPT=2, X=0x0210; CTS=0, Y=0x0305; z=0x11, area=0x22.
     payload[9] = 0x80 | 0x02; // CPT2(2) | X2[13:8]=0x02
     payload[10] = 0x10; // X2[7:0]
@@ -81,6 +81,7 @@ fn decodes_dual_xy_event() {
     assert_eq!(frame.touch2.finger_id, 5);
 
     assert!(frame.button);
+    assert!(frame.spurious);
     assert!(!frame.end_of_frame);
     assert_eq!(frame.finger_count, 3);
 }

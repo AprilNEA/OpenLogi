@@ -68,7 +68,6 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
     }
 
     /// Hardware capture identity that decides whether rearming is required.
-    #[cfg(test)]
     pub(super) fn target(&self) -> &Target {
         &self.target
     }

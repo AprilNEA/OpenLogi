@@ -2,6 +2,23 @@ use super::*;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::DeviceRoute;
+use openlogi_hid::session::gesture::{RawModeJournal, TouchpadJournalError, TouchpadJournalStore};
+
+struct StubJournal(Option<RawModeJournal>);
+
+impl TouchpadJournalStore for StubJournal {
+    fn load(&self, _: &str) -> Result<Option<RawModeJournal>, TouchpadJournalError> {
+        Ok(self.0)
+    }
+
+    fn save(&self, _: &str, _: RawModeJournal) -> Result<(), TouchpadJournalError> {
+        Ok(())
+    }
+
+    fn clear(&self, _: &str) -> Result<(), TouchpadJournalError> {
+        Ok(())
+    }
+}
 
 fn route() -> DeviceRoute {
     DeviceRoute::Direct {
@@ -140,6 +157,7 @@ async fn input_accepted_during_restoration_precedes_session_done() {
             physical_key: key.clone(),
             session: id.clone(),
             pending_restore: None,
+            error: None,
         },
     ));
     let (restored_tx, restored_rx) = oneshot::channel();
@@ -171,6 +189,40 @@ async fn input_accepted_during_restoration_precedes_session_done() {
         Some(SessionEvent::Done(done)) => assert_eq!(done.session, id),
         _ => panic!("Done must follow the last accepted input"),
     }
+}
+
+#[test]
+fn shutdown_requests_every_live_session_stop() {
+    let first_plan = plan();
+    let first_key = first_plan.target.physical_key.clone();
+    let (first_stop, mut first_stopped) = oneshot::channel();
+    let first = CaptureSession::active(
+        session_id(7),
+        first_plan.target,
+        first_plan.dispatch,
+        first_stop,
+    );
+    let mut second_plan = plan();
+    second_plan.target.physical_key =
+        PhysicalDeviceKey::parse("unit:00000002").expect("fixture should be a physical key");
+    let second_key = second_plan.target.physical_key.clone();
+    let (second_stop, mut second_stopped) = oneshot::channel();
+    let second = CaptureSession::active(
+        session_id(8),
+        second_plan.target,
+        second_plan.dispatch,
+        second_stop,
+    );
+    let mut sessions = HashMap::from([(first_key, first), (second_key, second)]);
+    let mut cancelled = Vec::new();
+
+    request_session_stops(&mut sessions, |session| cancelled.push(session.clone()));
+
+    cancelled.sort_by_key(HidppSessionId::epoch);
+    assert_eq!(cancelled, vec![session_id(7), session_id(8)]);
+    assert_eq!(first_stopped.try_recv(), Ok(()));
+    assert_eq!(second_stopped.try_recv(), Ok(()));
+    assert!(sessions.values().all(|session| !session.is_active()));
 }
 
 #[test]
@@ -209,10 +261,10 @@ async fn exclusive_request_retires_capture_without_rejecting_owned_input() {
     .await
     .expect("pairing should announce its exclusive request");
 
-    let (plans, _) = tokio::sync::watch::channel(Arc::new(vec![plan()]));
-    let plans = plans.subscribe();
+    let plans = Arc::new(vec![plan()]);
     let requests = access.subscribe_requests();
-    assert!(wanted_sessions(*requests.borrow(), &plans).is_empty());
+    let monitor = Arc::new(crate::touchpad_monitor::TouchpadMonitor::default());
+    assert!(wanted_sessions(*requests.borrow(), &plans, &monitor, None).is_empty());
 
     let mut session = live_session_with_epoch(7);
     assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
@@ -553,4 +605,145 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         "an already-diverted wheel needs a state reset, not a hardware restart"
     );
     assert!(session.is_active());
+}
+
+#[test]
+fn diagnostics_temporarily_arm_only_raw_touchpad_plans() {
+    let touchpad = crate::capture_plan::plan_for_device_with_touchpad(
+        &openlogi_core::config::Config::default(),
+        physical_key(),
+        "touchpad-a",
+        route(),
+        None,
+        crate::capture_plan::CapturePlanOptions {
+            touchpad_journal_id: Some("unit:01020304".into()),
+            rearm_generation: 0,
+            os_mouse_hook_available: true,
+        },
+    );
+    let mouse = crate::capture_plan::plan_for_device(
+        &openlogi_core::config::Config::default(),
+        physical_key(),
+        "mouse-a",
+        route(),
+        None,
+        0,
+        true,
+    );
+    let monitor = Arc::new(crate::touchpad_monitor::TouchpadMonitor::default());
+    let journal = StubJournal(None);
+
+    assert!(!touchpad.target.spec.capture_touchpad);
+    monitor.poll("touchpad-a");
+    assert!(
+        effective_plan(&touchpad, &monitor, Some(&journal))
+            .expect("diagnostic touchpad plan")
+            .target
+            .spec
+            .capture_touchpad
+    );
+    assert!(
+        !effective_plan(&mouse, &monitor, Some(&journal))
+            .expect("ordinary mouse plan")
+            .target
+            .spec
+            .capture_touchpad
+    );
+}
+
+#[test]
+fn recovery_session_is_wanted_only_while_its_journal_exists() {
+    let plan = crate::capture_plan::touchpad_recovery_plan(
+        physical_key(),
+        "touchpad-a",
+        route(),
+        "unit:01020304".to_string(),
+        0,
+    );
+    let plans = Arc::new(vec![plan]);
+    let monitor = Arc::new(crate::touchpad_monitor::TouchpadMonitor::default());
+    let missing = StubJournal(None);
+    let existing = StubJournal(Some(RawModeJournal {
+        original: 0,
+        requested: 5,
+        readback: Some(5),
+        armed: true,
+    }));
+
+    assert!(
+        wanted_sessions(
+            ReceiverRequestState::default(),
+            &plans,
+            &monitor,
+            Some(&missing),
+        )
+        .is_empty()
+    );
+    let wanted = wanted_sessions(
+        ReceiverRequestState::default(),
+        &plans,
+        &monitor,
+        Some(&existing),
+    );
+    assert_eq!(
+        wanted.first().map(|plan| plan.target.spec.mode),
+        Some(CaptureSessionMode::TouchpadRecovery)
+    );
+}
+
+#[test]
+fn managed_touchpad_session_stays_wanted_without_a_journal_record() {
+    let plan = crate::capture_plan::plan_for_device_with_touchpad(
+        &openlogi_core::config::Config::default(),
+        physical_key(),
+        "touchpad-a",
+        route(),
+        None,
+        crate::capture_plan::CapturePlanOptions {
+            touchpad_journal_id: Some("unit:01020304".to_string()),
+            rearm_generation: 0,
+            os_mouse_hook_available: true,
+        },
+    );
+    let plans = Arc::new(vec![plan]);
+    let monitor = Arc::new(crate::touchpad_monitor::TouchpadMonitor::default());
+
+    let wanted = wanted_sessions(ReceiverRequestState::default(), &plans, &monitor, None);
+
+    assert_eq!(
+        wanted.first().map(|plan| plan.target.spec.mode),
+        Some(CaptureSessionMode::Continuous)
+    );
+}
+
+#[test]
+fn diagnostic_can_temporarily_capture_a_disabled_touchpad() {
+    let plan = crate::capture_plan::touchpad_recovery_plan(
+        physical_key(),
+        "touchpad-a",
+        route(),
+        "unit:01020304".to_string(),
+        0,
+    );
+    let plans = Arc::new(vec![plan]);
+    let monitor = Arc::new(crate::touchpad_monitor::TouchpadMonitor::default());
+    monitor.poll("touchpad-a");
+    let journal = StubJournal(None);
+
+    let wanted = wanted_sessions(
+        ReceiverRequestState::default(),
+        &plans,
+        &monitor,
+        Some(&journal),
+    );
+
+    assert_eq!(
+        wanted.first().map(|plan| plan.target.spec.mode),
+        Some(CaptureSessionMode::TouchpadOnly)
+    );
+    assert!(
+        wanted
+            .first()
+            .is_some_and(|plan| plan.target.spec.capture_touchpad)
+    );
 }
