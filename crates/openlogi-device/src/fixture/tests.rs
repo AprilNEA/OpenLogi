@@ -41,7 +41,7 @@ fn canonical_device_profile_is_valid_synthetic_and_privacy_safe() {
     assert_eq!(profile.settings.len(), 5);
     assert_eq!(
         profile.inventories[0].receiver.unique_id.as_deref(),
-        Some("MOCK-BOLT-01")
+        Some("OL-BOLT-UID-0001")
     );
     assert!(
         profile
