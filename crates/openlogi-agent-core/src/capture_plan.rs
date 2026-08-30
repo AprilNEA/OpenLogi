@@ -16,7 +16,7 @@ use openlogi_core::bindings::{
     button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, touchpad_bindings_for,
 };
 use openlogi_core::config::{Config, ThumbwheelSensitivity, TouchpadScrollSensitivity};
-use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{
     CaptureSessionMode, CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
@@ -222,6 +222,10 @@ pub fn plan_for_device_with_touchpad(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    // Link-scoped scroll inversion resolves against the route this session
+    // serves; `route` moves into the capture target below, so derive the key
+    // before the struct literal.
+    let route_key = DeviceStableId::from_parts(Some(&route), 0, None, [0; 4]).route_key();
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -254,7 +258,7 @@ pub fn plan_for_device_with_touchpad(
             touchpad_scroll_inverted: config
                 .devices
                 .get(config_key)
-                .is_some_and(|device| device.invert_scroll),
+                .is_some_and(|device| device.effective_invert_scroll(&route_key)),
         },
     }
 }

@@ -672,7 +672,7 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
 
 /// Synthesise one frame of a touchpad scroll after honouring the user's
 /// natural-scrolling preference (see [`super::post_touchpad_scroll`]).
-pub(super) fn post_touchpad_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
+pub(super) fn post_touchpad_scroll(delta: ScrollDelta) {
     let delta = orient_by_scroll_preference(delta);
     let Ok(mut quantizer) = TOUCHPAD_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS touchpad scroll quantizer mutex poisoned");
@@ -680,10 +680,10 @@ pub(super) fn post_touchpad_scroll(delta: ScrollDelta, phase: Option<SmoothScrol
     };
     let delta = quantizer.quantize(delta, 1.0);
     drop(quantizer);
-    if phase.is_none() && delta == QuantizedScroll::default() {
+    if delta == QuantizedScroll::default() {
         return;
     }
-    post_continuous_scroll(delta, phase);
+    post_continuous_scroll(delta, None);
 }
 
 fn post_continuous_scroll(delta: QuantizedScroll, phase: Option<SmoothScrollPhase>) {

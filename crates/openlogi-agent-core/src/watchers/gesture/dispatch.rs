@@ -10,7 +10,6 @@ use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, defaul
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::touchpad::{GestureRecognition, TouchFrame, TouchpadGestureRecognizer};
 use openlogi_hid::CapturedInput;
-use openlogi_inject::SmoothScrollPhase;
 use tracing::debug;
 
 use self::momentum::TouchpadMomentum;
@@ -105,21 +104,20 @@ enum TouchpadOutput {
     /// A committed gesture trigger with its resolved action.
     Action { trigger: ButtonId, action: Action },
     /// One synthesized two-finger scroll frame: the centroid's travel in
-    /// micrometres plus its position in the scroll gesture's phase stream.
-    Scroll {
-        dx_um: i64,
-        dy_um: i64,
-        phase: SmoothScrollPhase,
-    },
-    /// The scroll stream closed. The zero-delta phase event is posted by the
-    /// dispatcher; `exit_velocity` (centroid micrometres per second, tracked
-    /// as an exponential average over the stroke) seeds momentum on a clean
-    /// end and is absent on a cancellation.
+    /// micrometres. Wheel-class output — no gesture phase stream to belong to.
+    Scroll { dx_um: i64, dy_um: i64 },
+    /// The scroll stream closed. Nothing posts for a wheel-class stream, so
+    /// this only carries the exit velocity (centroid micrometres per second,
+    /// an exponential average over the stroke) that seeds momentum on a clean
+    /// end; a cancellation carries none.
     ScrollEnd {
-        phase: SmoothScrollPhase,
         exit_velocity_um_per_s: Option<(f64, f64)>,
     },
 }
+
+/// Time constant of the exit-velocity filter's release phase: how long a
+/// slowdown before lift-off still contributes to the glide.
+const VELOCITY_RELEASE_TAU_S: f64 = 0.2;
 
 #[derive(Default)]
 struct TouchpadRuntime {
@@ -130,9 +128,9 @@ struct TouchpadRuntime {
     /// delta knows to continue rather than begin one.
     scroll_streaming: bool,
     /// Smoothed centroid velocity over the stroke, micrometres per second:
-    /// fast-attack, slow-release (α = 0.01 per frame), the filter the
-    /// Options+ agent feeds its inertia with — a brief slowdown before
-    /// lift-off must not kill a glide.
+    /// fast-attack, slow-release with a ~200 ms time constant — a brief
+    /// slowdown before lift-off must not kill a glide, but a deliberate
+    /// stop-and-hold must.
     scroll_velocity_um_per_s: (f64, f64),
     /// Timestamp of the last frame seen this stroke, the dt baseline for the
     /// velocity filter — recorded on every frame, so the first streamed
@@ -172,18 +170,9 @@ impl TouchpadRuntime {
             GestureRecognition::Scroll { dx_um, dy_um } => {
                 // Scrolling replaces the firmware translation the capture
                 // switched off, so it flows regardless of action bindings.
-                let phase = if self.scroll_streaming {
-                    SmoothScrollPhase::Changed
-                } else {
-                    SmoothScrollPhase::Began
-                };
                 self.scroll_streaming = true;
                 self.track_scroll_velocity(dt_us, dx_um, dy_um);
-                TouchpadOutput::Scroll {
-                    dx_um,
-                    dy_um,
-                    phase,
-                }
+                TouchpadOutput::Scroll { dx_um, dy_um }
             }
             GestureRecognition::Pending | GestureRecognition::Gesture(_) => TouchpadOutput::Idle,
         }
@@ -195,7 +184,7 @@ impl TouchpadRuntime {
             .end()
             .filter(|_| self.frozen_actions_enabled && actions_enabled)
             .and_then(|trigger| self.action(trigger));
-        let terminal = self.close_scroll_stream(SmoothScrollPhase::Ended);
+        let terminal = self.close_scroll_stream(true);
         self.frozen_bindings = None;
         self.frozen_actions_enabled = false;
         terminal.unwrap_or_else(|| {
@@ -206,7 +195,7 @@ impl TouchpadRuntime {
     }
 
     fn cancel(&mut self) -> TouchpadOutput {
-        let terminal = self.close_scroll_stream(SmoothScrollPhase::Cancelled);
+        let terminal = self.close_scroll_stream(false);
         self.recognizer.cancel();
         self.frozen_bindings = None;
         self.frozen_actions_enabled = false;
@@ -217,15 +206,14 @@ impl TouchpadRuntime {
     /// tap limits, so a scrolled stroke can never also resolve a tap and the
     /// two outcomes never compete. A cancellation discards the velocity —
     /// momentum must not grow out of a stroke the stream rejected.
-    fn close_scroll_stream(&mut self, phase: SmoothScrollPhase) -> Option<TouchpadOutput> {
+    fn close_scroll_stream(&mut self, ended: bool) -> Option<TouchpadOutput> {
         let velocity = self.scroll_velocity_um_per_s;
         self.scroll_velocity_um_per_s = (0.0, 0.0);
         self.last_frame_us = None;
         self.scroll_streaming.then(|| {
             self.scroll_streaming = false;
             TouchpadOutput::ScrollEnd {
-                phase,
-                exit_velocity_um_per_s: (phase == SmoothScrollPhase::Ended).then_some(velocity),
+                exit_velocity_um_per_s: ended.then_some(velocity),
             }
         })
     }
@@ -236,24 +224,26 @@ impl TouchpadRuntime {
         reason = "per-frame deltas stay far below 2^53 micrometres"
     )]
     fn track_scroll_velocity(&mut self, dt_us: f64, dx: i64, dy: i64) {
-        const RELEASE: f64 = 0.99;
-        const ATTACK: f64 = 0.01;
         if !dt_us.is_finite() || dt_us <= 0.0 {
             return;
         }
         let seconds = dt_us / 1_000_000.0;
         let raw = (dx as f64 / seconds, dy as f64 / seconds);
+        // Release weight normalized by the actual frame gap: a fixed
+        // per-frame factor made the memory span cadence-dependent — a ~1 s
+        // hold before lift still glided at 130 Hz. τ ≈ 200 ms.
+        let release = (-seconds / VELOCITY_RELEASE_TAU_S).exp();
+        let attack = 1.0 - release;
         let smoothed = &mut self.scroll_velocity_um_per_s;
-        smoothed.0 = if raw.0.abs() > smoothed.0.abs() {
-            raw.0
-        } else {
-            smoothed.0 * RELEASE + raw.0 * ATTACK
-        };
-        smoothed.1 = if raw.1.abs() > smoothed.1.abs() {
-            raw.1
-        } else {
-            smoothed.1 * RELEASE + raw.1 * ATTACK
-        };
+        for (smoothed, raw) in [(&mut smoothed.0, raw.0), (&mut smoothed.1, raw.1)] {
+            // A same-axis reversal is new intent, not noise — adopt it at
+            // once instead of averaging against the stale direction.
+            if *smoothed * raw < 0.0 || raw.abs() > smoothed.abs() {
+                *smoothed = raw;
+            } else {
+                *smoothed = *smoothed * release + raw * attack;
+            }
+        }
     }
 
     fn action(&self, trigger: ButtonId) -> Option<(ButtonId, Action)> {
@@ -333,14 +323,9 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
-        if let Some(outcome) = self.touchpads.cancel_session(session) {
-            Self::route_touchpad_output(
-                &self.outputs,
-                TouchpadScrollTuning::NEUTRAL,
-                session.device_key(),
-                outcome,
-            );
-        }
+        // The cancelled touchpad outcome carries only a dead terminal and no
+        // momentum; nothing about it routes.
+        self.touchpads.cancel_session(session);
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -519,6 +504,9 @@ impl InputDispatcher {
         };
         Self::route_touchpad_output(&self.outputs, tuning, key, outcome);
         if let Some(exit_velocity) = exit_velocity {
+            // Replacing the handle does not stop the old tail (dropping it
+            // never does) — without this, two glides stack their deltas.
+            self.stop_momentum();
             self.momentum = TouchpadMomentum::start(tuning, exit_velocity);
         }
     }
@@ -530,21 +518,17 @@ impl InputDispatcher {
         outcome: TouchpadOutput,
     ) {
         match outcome {
-            TouchpadOutput::Idle => {}
             TouchpadOutput::Action { trigger, action } => {
                 debug!(key, %trigger, action = %action.label(), "touchpad gesture → action");
                 outputs.actions.dispatch(&action, Some(key));
             }
-            TouchpadOutput::Scroll {
-                dx_um,
-                dy_um,
-                phase,
-            } => super::post_touchpad_scroll(tuning, dx_um, dy_um, phase),
-            TouchpadOutput::ScrollEnd { phase, .. } => {
-                // Zero distance: the phase transition itself closes the
-                // gesture stream; momentum, if any, is the caller's call.
-                super::post_touchpad_scroll(tuning, 0, 0, phase);
+            TouchpadOutput::Scroll { dx_um, dy_um } => {
+                super::post_touchpad_scroll(tuning, dx_um, dy_um);
             }
+            // Wheel-class streams end by simply stopping — the terminal only
+            // hands the exit velocity back for the momentum decision. Idle
+            // likewise posts nothing.
+            TouchpadOutput::Idle | TouchpadOutput::ScrollEnd { .. } => {}
         }
     }
 }

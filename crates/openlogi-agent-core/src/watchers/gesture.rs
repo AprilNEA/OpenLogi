@@ -36,7 +36,6 @@ use openlogi_hid::{
     FileTouchpadJournalStore, GestureError, PendingCaptureRestore,
     run_capture_session_with_registry_spec,
 };
-use openlogi_inject::SmoothScrollPhase;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -103,9 +102,9 @@ impl GestureOutputs {
 /// rubber-band them at document boundaries and keep the page stretched while
 /// later deltas feed the overscroll. Wheel-class deltas clamp, exactly the
 /// native feel this device has without capture.
-fn post_touchpad_scroll(tuning: TouchpadScrollTuning, dx: i64, dy: i64, _phase: SmoothScrollPhase) {
+fn post_touchpad_scroll(tuning: TouchpadScrollTuning, dx: i64, dy: i64) {
     // Wheel-class on purpose — see the doc comment above.
-    openlogi_inject::post_touchpad_scroll(tuning.content_delta(dx, dy), None);
+    openlogi_inject::post_touchpad_scroll(tuning.content_delta(dx, dy));
 }
 
 /// Effective tuning of one device's synthesized two-finger scrolling.
@@ -116,13 +115,6 @@ pub(super) struct TouchpadScrollTuning {
 }
 
 impl TouchpadScrollTuning {
-    /// Terminal frames carry zero deltas, so a neutral tuning posts them
-    /// identically to the tuned stream they close.
-    pub(super) const NEUTRAL: Self = Self {
-        sensitivity: TouchpadScrollSensitivity::DEFAULT,
-        inverted: false,
-    };
-
     /// Project the plan's per-device settings.
     pub(super) fn from_plan(plan: &DispatchPlan) -> Self {
         Self {

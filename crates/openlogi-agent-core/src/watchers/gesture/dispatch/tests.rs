@@ -203,16 +203,14 @@ fn touchpad_scroll_streams_phases_and_terminates_on_end() {
         runtime.update(&resting(5_000), &bindings, true),
         TouchpadOutput::Scroll {
             dx_um: 3_000,
-            dy_um: 0,
-            phase: SmoothScrollPhase::Began
+            dy_um: 0
         }
     );
     assert_eq!(
         runtime.update(&resting(7_000), &bindings, true),
         TouchpadOutput::Scroll {
             dx_um: 2_000,
-            dy_um: 0,
-            phase: SmoothScrollPhase::Changed
+            dy_um: 0
         }
     );
     // The stroke ends without a tap: only the scroll terminator routes,
@@ -220,7 +218,6 @@ fn touchpad_scroll_streams_phases_and_terminates_on_end() {
     assert_eq!(
         runtime.end(true),
         TouchpadOutput::ScrollEnd {
-            phase: SmoothScrollPhase::Ended,
             exit_velocity_um_per_s: Some((0.0, 0.0)),
         }
     );
@@ -262,13 +259,11 @@ fn touchpad_scroll_survives_disabled_actions_and_cancels_cleanly() {
         TouchpadOutput::Scroll {
             dx_um: 3_000,
             dy_um: 0,
-            phase: SmoothScrollPhase::Began
         }
     );
     assert_eq!(
         runtime.cancel(),
         TouchpadOutput::ScrollEnd {
-            phase: SmoothScrollPhase::Cancelled,
             exit_velocity_um_per_s: None,
         }
     );
@@ -374,5 +369,96 @@ fn touchpad_scroll_exit_velocity_tracks_frames_and_releases_slowly() {
     assert!(
         vx > 100_000.0,
         "a single slow frame must not collapse the exit velocity, got {vx}"
+    );
+}
+
+#[test]
+fn a_same_axis_reversal_re_aims_the_exit_velocity() {
+    use openlogi_core::touchpad::TouchContact;
+
+    let travelling = |timestamp_us: u64, travelled: i32| {
+        TouchFrame::new(
+            timestamp_us,
+            false,
+            vec![
+                TouchContact {
+                    id: 1,
+                    x_um: u32::try_from(50_000_i32 + travelled).expect("positive"),
+                    y_um: 50_000,
+                },
+                TouchContact {
+                    id: 2,
+                    x_um: u32::try_from(60_000_i32 + travelled).expect("positive"),
+                    y_um: 50_000,
+                },
+            ],
+        )
+        .expect("valid frame")
+    };
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerTap, Action::Copy)]);
+    let mut runtime = TouchpadRuntime::default();
+
+    // Right at 120 mm/s, then an immediate leftward flick at 80 mm/s: the
+    // glide must follow the new direction, not average against the stale one.
+    runtime.update(&travelling(0, 0), &bindings, true);
+    runtime.update(&travelling(25_000, 3_000), &bindings, true);
+    runtime.update(&travelling(50_000, 6_000), &bindings, true);
+    runtime.update(&travelling(75_000, 4_000), &bindings, true);
+    let TouchpadOutput::ScrollEnd {
+        exit_velocity_um_per_s: Some((vx, _)),
+    } = runtime.end(true)
+    else {
+        panic!("streamed stroke");
+    };
+    assert!(
+        vx < -60_000.0,
+        "the reversal must re-aim the exit velocity, got {vx} µm/s"
+    );
+}
+
+#[test]
+fn a_deliberate_hold_before_lift_kills_the_glide() {
+    use openlogi_core::touchpad::TouchContact;
+
+    let travelling = |timestamp_us: u64, travelled: i32| {
+        TouchFrame::new(
+            timestamp_us,
+            false,
+            vec![
+                TouchContact {
+                    id: 1,
+                    x_um: u32::try_from(50_000_i32 + travelled).expect("positive"),
+                    y_um: 50_000,
+                },
+                TouchContact {
+                    id: 2,
+                    x_um: u32::try_from(60_000_i32 + travelled).expect("positive"),
+                    y_um: 50_000,
+                },
+            ],
+        )
+        .expect("valid frame")
+    };
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerTap, Action::Copy)]);
+    let mut runtime = TouchpadRuntime::default();
+
+    // A fast scroll, then the fingers sit still for a full second before
+    // lifting: with the dt-normalized release (τ = 200 ms) the memory of the
+    // fast phase has fully decayed — no glide out of a deliberate stop.
+    runtime.update(&travelling(0, 0), &bindings, true);
+    runtime.update(&travelling(25_000, 3_000), &bindings, true);
+    runtime.update(&travelling(50_000, 6_000), &bindings, true);
+    for step in 1..=50 {
+        runtime.update(&travelling(50_000 + step * 20_000, 6_000), &bindings, true);
+    }
+    let TouchpadOutput::ScrollEnd {
+        exit_velocity_um_per_s: Some((vx, _)),
+    } = runtime.end(true)
+    else {
+        panic!("streamed stroke");
+    };
+    assert!(
+        vx.abs() < 5_000.0,
+        "a held stop must not glide, got {vx} µm/s"
     );
 }
