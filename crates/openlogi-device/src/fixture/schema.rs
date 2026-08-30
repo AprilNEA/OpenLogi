@@ -137,7 +137,12 @@ impl ProfileSupport {
 
 /// Initial behavior of one typed setting read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "support", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "support",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ProfileSetting<T> {
     /// The feature is absent and reads/writes return the typed unsupported error.
     Unsupported,
@@ -146,20 +151,22 @@ pub enum ProfileSetting<T> {
         /// Initial semantic read result.
         T,
     ),
+    /// The feature is present, but no semantic value is currently available.
+    Unavailable,
 }
 
 impl<T> ProfileSetting<T> {
-    /// Whether this behavior has a supported value.
+    /// Whether the feature is present, independently of value availability.
     #[must_use]
-    pub const fn is_supported(&self) -> bool {
-        matches!(self, Self::Supported(_))
+    pub const fn supports_feature(&self) -> bool {
+        !matches!(self, Self::Unsupported)
     }
 
     /// Borrow the supported value, if present.
     #[must_use]
     pub const fn value(&self) -> Option<&T> {
         match self {
-            Self::Unsupported => None,
+            Self::Unsupported | Self::Unavailable => None,
             Self::Supported(value) => Some(value),
         }
     }
@@ -168,7 +175,7 @@ impl<T> ProfileSetting<T> {
     #[must_use]
     pub const fn value_mut(&mut self) -> Option<&mut T> {
         match self {
-            Self::Unsupported => None,
+            Self::Unsupported | Self::Unavailable => None,
             Self::Supported(value) => Some(value),
         }
     }
@@ -471,7 +478,7 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(backlight) = settings.backlight.value() {
         validate_backlight(&settings.route, *backlight)?;
     }
-    if settings.backlight.is_supported() && settings.lighting.is_supported() {
+    if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
             format!(
@@ -546,10 +553,10 @@ fn validate_setting_support(
     facts: &ProfileRouteFacts,
 ) -> Result<(), FixtureError> {
     if facts.standalone {
-        if settings.dpi.is_supported()
-            || settings.smartshift.is_supported()
-            || settings.wheel.is_supported()
-            || settings.backlight.is_supported()
+        if settings.dpi.supports_feature()
+            || settings.smartshift.supports_feature()
+            || settings.wheel.supports_feature()
+            || settings.backlight.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -585,13 +592,13 @@ fn validate_setting_support(
             validate_capability_support(
                 settings,
                 "DPI",
-                settings.dpi.is_supported(),
+                settings.dpi.supports_feature(),
                 capabilities.pointer,
             )?;
             validate_capability_support(
                 settings,
                 "wheel",
-                settings.wheel.is_supported(),
+                settings.wheel.supports_feature(),
                 capabilities.hires_wheel,
             )?;
             validate_capability_support(

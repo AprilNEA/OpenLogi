@@ -52,10 +52,12 @@ use openlogi_core::device::{
     PairedDevice, StandaloneDevice,
 };
 use openlogi_core::single_instance::{self, InstanceError};
-use openlogi_device::fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings};
+use openlogi_device::fixture::{
+    DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting,
+};
 use openlogi_hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftStatus,
-    WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -578,6 +580,34 @@ impl State {
     }
 }
 
+fn profile_value<'a, T>(
+    setting: &'a ProfileSetting<T>,
+    route: &DeviceRoute,
+    feature_hex: u16,
+) -> Result<&'a T, WriteError> {
+    match setting {
+        ProfileSetting::Unsupported => Err(WriteError::FeatureUnsupported { feature_hex }),
+        ProfileSetting::Supported(value) => Ok(value),
+        ProfileSetting::Unavailable => Err(WriteError::DeviceUnreachable {
+            index: route.device_index(),
+        }),
+    }
+}
+
+fn profile_value_mut<'a, T>(
+    setting: &'a mut ProfileSetting<T>,
+    route: &DeviceRoute,
+    feature_hex: u16,
+) -> Result<&'a mut T, WriteError> {
+    match setting {
+        ProfileSetting::Unsupported => Err(WriteError::FeatureUnsupported { feature_hex }),
+        ProfileSetting::Supported(value) => Ok(value),
+        ProfileSetting::Unavailable => Err(WriteError::DeviceUnreachable {
+            index: route.device_index(),
+        }),
+    }
+}
+
 fn standalone_route(device: &StandaloneDevice) -> DeviceRoute {
     DeviceRoute::RawHid {
         vendor_id: device.address.vendor_id,
@@ -745,12 +775,7 @@ impl Agent for MockAgent {
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
         let settings = state.settings_for_mut(&route)?;
-        let dpi_state = settings
-            .dpi
-            .value_mut()
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: 0x2201,
-            })?;
+        let dpi_state = profile_value_mut(&mut settings.dpi, &route, 0x2201)?;
         dpi_state.current = dpi_state.capabilities.nearest(dpi);
         info!(%route, dpi = %dpi_state.current, "set_dpi");
         Ok(())
@@ -780,12 +805,7 @@ impl Agent for MockAgent {
     ) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
         let settings = state.settings_for_mut(&route)?;
-        let smartshift = settings
-            .smartshift
-            .value_mut()
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: 0x2110,
-            })?;
+        let smartshift = profile_value_mut(&mut settings.smartshift, &route, 0x2110)?;
         *smartshift = status;
         info!(%route, ?status, "set_smartshift");
         Ok(())
@@ -793,14 +813,7 @@ impl Agent for MockAgent {
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
         let state = self.state.lock().await;
-        state
-            .settings_for(&route)?
-            .dpi
-            .value()
-            .cloned()
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: 0x2201,
-            })
+        profile_value(&state.settings_for(&route)?.dpi, &route, 0x2201).cloned()
     }
 
     async fn read_smartshift(
@@ -809,14 +822,25 @@ impl Agent for MockAgent {
         route: DeviceRoute,
     ) -> Result<SmartShiftStatus, WriteError> {
         let state = self.state.lock().await;
-        state
-            .settings_for(&route)?
-            .smartshift
-            .value()
-            .copied()
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: 0x2110,
-            })
+        profile_value(&state.settings_for(&route)?.smartshift, &route, 0x2110).copied()
+    }
+
+    async fn read_wheel(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ScrollWheelMode, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.wheel, &route, 0x2121).copied()
+    }
+
+    async fn read_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<BacklightState, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
