@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "openlogi-canonical-synthetic-profile",
-  "name": "OpenLogi canonical synthetic devices",
+  "name": "OpenLogi canonical synthetic fixture",
   "inventories": [
     {
       "receiver": {

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "openlogi-canonical-synthetic-fixture",
+  "id": "openlogi-canonical-synthetic-001",
   "profile_id": "openlogi-canonical-synthetic-profile",
   "cases": [],
   "identity_ledger": [

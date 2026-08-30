@@ -218,6 +218,42 @@ fn verifier_rejects_case_channel_relationship_and_unsupported_identity_traffic()
     assert!(error.to_string().contains("unsupported identity-bearing"));
 }
 
+#[test]
+fn detailed_verifier_classifies_schema_relationship_privacy_and_replay_failures() {
+    let mut schema = canonical_manifest();
+    schema.schema_version += 1;
+    let error = schema
+        .verify_detailed(&canonical_profile(), &[])
+        .expect_err("unsupported manifest schema must fail");
+    assert_eq!(error.stage(), FixtureVerificationStage::Schema);
+
+    let mut relationship = canonical_manifest();
+    relationship.profile_id = "other-profile".to_string();
+    let error = relationship
+        .verify_detailed(&canonical_profile(), &[])
+        .expect_err("profile relationship mismatch must fail");
+    assert_eq!(error.stage(), FixtureVerificationStage::Relationship);
+
+    let mut privacy = canonical_profile();
+    privacy.inventories[0].receiver.unique_id = Some("REAL-RECEIVER-ID".to_string());
+    for settings in &mut privacy.settings {
+        if let DeviceRoute::Bolt { receiver_uid, .. } = &mut settings.route {
+            *receiver_uid = "REAL-RECEIVER-ID".to_string();
+        }
+    }
+    let error = canonical_manifest()
+        .verify_detailed(&privacy, &[])
+        .expect_err("non-synthetic identity must fail");
+    assert_eq!(error.stage(), FixtureVerificationStage::Privacy);
+
+    let (manifest, profile, mut cassette) = case_fixture();
+    cassette.exchanges[0].request.pop();
+    let error = manifest
+        .verify_detailed(&profile, &[cassette])
+        .expect_err("malformed cassette report must fail");
+    assert_eq!(error.stage(), FixtureVerificationStage::Replay);
+}
+
 fn canonical_manifest() -> FixtureManifest {
     serde_json::from_str(CANONICAL_FIXTURE_MANIFEST_JSON).expect("canonical manifest parses")
 }

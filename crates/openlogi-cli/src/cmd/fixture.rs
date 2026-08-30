@@ -7,6 +7,7 @@ mod output;
 pub(crate) mod record_case;
 pub(crate) mod record_profile;
 mod target_selection;
+pub(crate) mod verify;
 
 /// Commands that create or inspect mock-device fixtures.
 #[derive(Debug, Subcommand)]
@@ -14,12 +15,15 @@ pub enum FixtureCmd {
     /// Capture privacy-safe fixture data through a read-only owner.
     #[command(subcommand)]
     Record(FixtureRecordCmd),
+    /// Strictly verify one complete on-disk fixture directory.
+    Verify(verify::VerifyArgs),
 }
 
 impl FixtureCmd {
     pub async fn run(self) -> Result<()> {
         match self {
             Self::Record(command) => command.run().await,
+            Self::Verify(args) => verify::run(&args),
         }
     }
 }

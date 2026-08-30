@@ -53,6 +53,7 @@ mod tests {
     use cmd::diag::wheel::ResolutionArg;
     use cmd::fixture::record_case::FixtureOperation;
     use cmd::fixture::record_profile::RecordProfileArgs;
+    use cmd::fixture::verify::VerifyArgs;
     use cmd::fixture::{FixtureCmd, FixtureRecordCmd};
 
     /// Clap's own structural validation (arg ID collisions, invalid
@@ -451,5 +452,31 @@ mod tests {
             }
             Cli::try_parse_from(args).expect_err("profile capture must reject non-Agent paths");
         }
+    }
+
+    #[test]
+    fn fixture_verify_accepts_exactly_one_corpus_directory() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "verify",
+            "fixtures/devices/mx-master-3s-001",
+        ])
+        .expect("fixture verify parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Fixture(FixtureCmd::Verify(VerifyArgs { directory })) => {
+                assert_eq!(
+                    directory,
+                    std::path::PathBuf::from("fixtures/devices/mx-master-3s-001")
+                );
+            }
+            other => panic!("expected Fixture(Verify), got {other:?}"),
+        }
+
+        Cli::try_parse_from(["openlogi", "fixture", "verify"])
+            .expect_err("fixture directory must be required");
+        Cli::try_parse_from(["openlogi", "fixture", "verify", "one", "two"])
+            .expect_err("only one fixture directory may be verified at a time");
     }
 }

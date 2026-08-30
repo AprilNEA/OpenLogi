@@ -19,14 +19,14 @@ mod verify;
 /// The JSON stays embedded by this owning crate so packaged consumers do not
 /// depend on a workspace-relative source path.
 pub const CANONICAL_DEVICE_PROFILE_JSON: &str =
-    include_str!("../fixtures/canonical-device-profile.json");
+    include_str!("../tests/fixtures/devices/openlogi-canonical-synthetic-001/profile.json");
 
 /// Canonical profile-only manifest and identity ledger.
 ///
 /// It declares no cassette cases because the repository does not yet contain
 /// canonical captured traffic or hardware provenance.
 pub const CANONICAL_FIXTURE_MANIFEST_JSON: &str =
-    include_str!("../fixtures/canonical-fixture-manifest.json");
+    include_str!("../tests/fixtures/devices/openlogi-canonical-synthetic-001/manifest.json");
 
 pub use backend::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
@@ -55,6 +55,7 @@ pub use schema::{
     CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION, FixtureError, HidCassette,
     ProfileDeviceSettings, ProfileSetting, ProfileSupport, ReportSupport, RequestMatch,
 };
+pub use verify::{FixtureVerificationError, FixtureVerificationStage};
 
 #[cfg(test)]
 mod identity_tests;
