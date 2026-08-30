@@ -16,6 +16,8 @@ use openlogi_device::{BacklightState, DeviceRoute, DpiInfo, HidBackend, SmartShi
 use openlogi_hid::recording::{HidCassetteAudit, NativeRecorder, NativeRecording};
 use openlogi_ipc::client::{self, ConnectError};
 
+use super::target_selection::{self, FixtureTarget};
+
 mod audit;
 mod replay;
 
@@ -168,6 +170,16 @@ struct TargetCandidate {
     receiver_product_id: u16,
 }
 
+impl FixtureTarget for TargetCandidate {
+    fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
+
+    fn display_name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SanitizedCandidate {
     cassette: HidCassette,
@@ -187,7 +199,7 @@ pub async fn run(args: RecordCaseArgs) -> Result<()> {
         .await
         .map_err(|_| anyhow!("failed to enumerate HID++ devices for direct fixture capture"))?;
     let candidates = online_targets(&inventories);
-    let target = select_target(&candidates, args.device.as_deref())?;
+    let target = target_selection::select_target(&candidates, args.device.as_deref())?;
 
     let (recording, observation) = capture(args.operation, &target.route, args.capacity).await?;
     let candidates = audit::sanitize_recording(recording, &args.name, &args.channel)?;
@@ -267,72 +279,6 @@ fn online_targets(inventories: &[DeviceInventory]) -> Vec<TargetCandidate> {
         .collect()
 }
 
-fn select_target(candidates: &[TargetCandidate], query: Option<&str>) -> Result<TargetCandidate> {
-    if candidates.is_empty() {
-        bail!("no online, addressable HID++ route candidate was found");
-    }
-
-    let mut matches = match query {
-        Some(query) => candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.name.eq_ignore_ascii_case(query) || candidate.route.to_string() == query
-            })
-            .cloned()
-            .collect::<Vec<_>>(),
-        None if candidates.len() == 1 => candidates.to_owned(),
-        None => Vec::new(),
-    };
-
-    if matches.len() != 1 {
-        let message = match (query, matches.len()) {
-            (Some(_), 0) => "no candidate exactly matched --device",
-            (Some(_), _) => "--device matched more than one candidate",
-            (None, _) => "more than one online HID++ candidate is available; pass --device",
-        };
-        return Err(selection_error(message, candidates));
-    }
-
-    let selected = matches.remove(0);
-    if candidates
-        .iter()
-        .filter(|candidate| candidate.route == selected.route)
-        .count()
-        != 1
-    {
-        return Err(selection_error(
-            "the selected route is duplicated and cannot identify one target",
-            candidates,
-        ));
-    }
-    Ok(selected)
-}
-
-fn selection_error(message: &str, candidates: &[TargetCandidate]) -> anyhow::Error {
-    let mut list = String::new();
-    for candidate in candidates {
-        let _ = write!(
-            list,
-            "\n  - {:?} ({})",
-            candidate.name,
-            safe_route_label(&candidate.route)
-        );
-    }
-    anyhow!("{message}. Online candidates:{list}")
-}
-
-fn safe_route_label(route: &DeviceRoute) -> String {
-    match route {
-        DeviceRoute::Bolt { slot, .. } => format!("Bolt receiver slot {slot}"),
-        DeviceRoute::Unifying { slot, .. } => format!("Unifying receiver slot {slot}"),
-        DeviceRoute::Direct {
-            vendor_id,
-            product_id,
-        } => format!("direct {vendor_id:04x}:{product_id:04x}"),
-        DeviceRoute::RawHid { .. } => "unsupported raw HID route".to_string(),
-    }
-}
-
 async fn capture(
     operation: FixtureOperation,
     route: &DeviceRoute,
@@ -404,33 +350,34 @@ mod tests {
     fn target_selection_requires_one_exact_unambiguous_candidate() {
         let only = direct("MX Master 3S", 0xb034);
         assert_eq!(
-            select_target(std::slice::from_ref(&only), None)
+            target_selection::select_target(std::slice::from_ref(&only), None)
                 .expect("one candidate is selected")
                 .route,
             only.route
         );
 
         let choices = vec![only.clone(), direct("MX Keys S", 0xb35b)];
-        select_target(&choices, None).expect_err("multiple candidates require --device");
+        target_selection::select_target(&choices, None)
+            .expect_err("multiple candidates require --device");
         assert_eq!(
-            select_target(&choices, Some("mx master 3s"))
+            target_selection::select_target(&choices, Some("mx master 3s"))
                 .expect("case-insensitive exact name matches")
                 .route,
             only.route
         );
         assert!(
-            select_target(&choices, Some("Master"))
+            target_selection::select_target(&choices, Some("Master"))
                 .expect_err("substrings must not select a target")
                 .to_string()
                 .contains("no candidate exactly matched")
         );
         assert_eq!(
-            select_target(&choices, Some("direct 046d:b35b"))
+            target_selection::select_target(&choices, Some("direct 046d:b35b"))
                 .expect("exact rendered route matches")
                 .name,
             "MX Keys S"
         );
-        select_target(&choices, Some("DIRECT 046D:B35B"))
+        target_selection::select_target(&choices, Some("DIRECT 046D:B35B"))
             .expect_err("rendered routes require an exact match");
     }
 
@@ -479,11 +426,11 @@ mod tests {
     #[test]
     fn duplicate_names_and_routes_fail_closed_without_printing_receiver_identity() {
         let duplicate_names = vec![direct("Same", 0xb034), direct("Same", 0xb35b)];
-        select_target(&duplicate_names, Some("same"))
+        target_selection::select_target(&duplicate_names, Some("same"))
             .expect_err("duplicate exact names are ambiguous");
 
         let duplicate_routes = vec![direct("First", 0xb034), direct("Second", 0xb034)];
-        let error = select_target(&duplicate_routes, Some("First"))
+        let error = target_selection::select_target(&duplicate_routes, Some("First"))
             .expect_err("one display name cannot make a duplicate route safe")
             .to_string();
         assert!(error.contains("selected route is duplicated"));
@@ -493,7 +440,7 @@ mod tests {
             bolt("Mouse", receiver_uid, 1),
             bolt("Keyboard", "OTHER-IDENTITY", 2),
         ];
-        let error = select_target(&receivers, None)
+        let error = target_selection::select_target(&receivers, None)
             .expect_err("ambiguous receiver choices fail")
             .to_string();
         assert!(!error.contains(receiver_uid));
