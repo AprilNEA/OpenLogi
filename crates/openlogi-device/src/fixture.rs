@@ -19,7 +19,7 @@ pub use channel::{
 };
 pub use schema::{
     CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION, FixtureError, HidCassette,
-    ReportSupport, RequestMatch,
+    ProfileDeviceSettings, ProfileSetting, ProfileSupport, ReportSupport, RequestMatch,
 };
 
 #[cfg(test)]

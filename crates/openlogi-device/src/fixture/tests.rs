@@ -3,11 +3,15 @@ use std::sync::Arc;
 use futures_lite::StreamExt as _;
 use hidpp::channel::RawHidChannel;
 use openlogi_core::device::{
-    Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    PairedDevice, ReceiverInfo,
 };
 
 use crate::backend::{HidBackend, RawWriter};
-use crate::{DeviceRoute, Dpi, Enumerator, HotplugEvent, NodeId, NodeInfo, get_dpi};
+use crate::{
+    BacklightMode, BacklightState, BacklightStatus, DeviceRoute, Dpi, DpiCapabilities, DpiInfo,
+    Enumerator, HotplugEvent, NodeId, NodeInfo, get_dpi,
+};
 
 use super::*;
 
@@ -63,6 +67,14 @@ fn schemas_reject_unknown_fields_and_arbitrary_masks() {
         .insert("unexpected".to_string(), serde_json::Value::Bool(true));
     reject_profile(unknown_device, "inventories.0.paired.0.unexpected");
 
+    let mut unknown_setting =
+        serde_json::to_value(&fixture.profile).expect("profile serializes again");
+    unknown_setting["settings"][0]["dpi"]
+        .as_object_mut()
+        .expect("DPI behavior is an object")
+        .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+    reject_profile(unknown_setting, "settings.0.dpi.unexpected");
+
     let mut cassette = serde_json::to_value(&fixture.cassette).expect("cassette serializes");
     assert_eq!(
         cassette["exchanges"][0]["request"],
@@ -107,6 +119,88 @@ fn validators_reject_unknown_versions_and_duplicate_slots() {
         .validate()
         .expect_err("duplicate receiver slots are ambiguous");
     assert!(error.to_string().contains("repeats slot 1"));
+}
+
+#[test]
+fn profile_validator_rejects_route_and_setting_inconsistencies() {
+    let mut missing_route = direct_probe_fixture().profile;
+    missing_route.settings[0].route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xffff,
+    };
+    let error = missing_route
+        .validate()
+        .expect_err("setting routes must name an inventory device");
+    assert!(error.to_string().contains("does not exist"));
+
+    let mut duplicate = direct_probe_fixture().profile;
+    duplicate.settings.push(duplicate.settings[0].clone());
+    let error = duplicate
+        .validate()
+        .expect_err("setting routes must be unique");
+    assert!(error.to_string().contains("repeats settings for route"));
+
+    let mut unsupported_current = direct_probe_fixture().profile;
+    unsupported_current.settings[0].dpi = ProfileSetting::Supported(DpiInfo {
+        current: Dpi::new(900),
+        capabilities: DpiCapabilities::new(vec![400, 800]).expect("valid DPI capabilities"),
+    });
+    let error = unsupported_current
+        .validate()
+        .expect_err("current DPI must be one of the supported values");
+    assert!(
+        error
+            .to_string()
+            .contains("current DPI 900 is not supported")
+    );
+
+    let mut inconsistent_capability = direct_probe_fixture().profile;
+    inconsistent_capability.settings[0].lighting = ProfileSupport::Supported;
+    let error = inconsistent_capability
+        .validate()
+        .expect_err("setting support must agree with inventory capabilities");
+    assert!(
+        error
+            .to_string()
+            .contains("lighting support does not match")
+    );
+
+    let mut invalid_backlight = direct_probe_fixture().profile;
+    invalid_backlight.settings[0].backlight = ProfileSetting::Supported(BacklightState {
+        enabled: true,
+        mode: BacklightMode::PermanentManual,
+        status: BacklightStatus::PermanentManual,
+        current_level: 4,
+        nb_levels: 4,
+    });
+    let error = invalid_backlight
+        .validate()
+        .expect_err("backlight level must fit its declared range");
+    assert!(error.to_string().contains("backlight level 4 exceeds"));
+}
+
+#[test]
+fn profile_validator_rejects_duplicate_identities_and_invalid_ranges() {
+    let mut duplicate_identity = receiver_dpi_fixture().profile;
+    let mut duplicate_receiver = duplicate_identity.inventories[0].clone();
+    duplicate_receiver.paired[0].model_info = None;
+    duplicate_identity.inventories.push(duplicate_receiver);
+    let error = duplicate_identity
+        .validate()
+        .expect_err("receiver identities must be unique across inventories");
+    assert!(error.to_string().contains("receiver identity"));
+    assert!(error.to_string().contains("is repeated"));
+
+    let mut invalid_battery = direct_probe_fixture().profile;
+    invalid_battery.inventories[0].paired[0].battery = Some(BatteryInfo {
+        percentage: 101,
+        level: BatteryLevel::Full,
+        status: BatteryStatus::Full,
+    });
+    let error = invalid_battery
+        .validate()
+        .expect_err("battery percentages must stay in the semantic range");
+    assert!(error.to_string().contains("battery percentage above 100"));
 }
 
 #[tokio::test]
@@ -369,6 +463,10 @@ fn direct_probe_fixture() -> SyntheticFixture {
     let node_id = NodeId::from("synthetic-direct-node".to_string());
     let product_id = 0xb35b;
     let name = "Synthetic Direct Mouse";
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id,
+    };
     let profile = DeviceProfile {
         schema_version: FIXTURE_SCHEMA_VERSION,
         id: "direct-mouse-001".to_string(),
@@ -394,6 +492,8 @@ fn direct_probe_fixture() -> SyntheticFixture {
                 }),
             }],
         }],
+        standalone: Vec::new(),
+        settings: vec![dpi_settings(route.clone(), 800, vec![400, 800, 1600])],
     };
     let exchanges = vec![
         h20(
@@ -425,10 +525,7 @@ fn direct_probe_fixture() -> SyntheticFixture {
             Vec::new(),
         ),
         cassette: cassette("direct-probe", DIRECT_CHANNEL, exchanges),
-        route: DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id,
-        },
+        route,
         node_id,
         channel: DIRECT_CHANNEL,
     }
@@ -441,6 +538,10 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
     let mut unique_id_response = vec![0u8; 20];
     unique_id_response[..4].copy_from_slice(&[0x11, 0xff, 0x83, 0xfb]);
     unique_id_response[4..].copy_from_slice(RECEIVER_UID.as_bytes());
+    let route = DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: 1,
+    };
     let profile = DeviceProfile {
         schema_version: FIXTURE_SCHEMA_VERSION,
         id: "receiver-mouse-001".to_string(),
@@ -466,6 +567,8 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
                 }),
             }],
         }],
+        standalone: Vec::new(),
+        settings: vec![dpi_settings(route.clone(), 800, vec![400, 800, 1600])],
     };
     let exchanges = vec![
         CassetteExchange {
@@ -498,12 +601,25 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
             }],
         ),
         cassette: cassette("receiver-dpi-read", RECEIVER_CHANNEL, exchanges),
-        route: DeviceRoute::Bolt {
-            receiver_uid: RECEIVER_UID.to_string(),
-            slot: 1,
-        },
+        route,
         node_id,
         channel: RECEIVER_CHANNEL,
+    }
+}
+
+fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> ProfileDeviceSettings {
+    ProfileDeviceSettings {
+        route,
+        dpi: ProfileSetting::Supported(DpiInfo {
+            current: Dpi::new(current),
+            capabilities: DpiCapabilities::new(supported)
+                .expect("synthetic DPI capabilities are valid"),
+        }),
+        smartshift: ProfileSetting::Unsupported,
+        wheel: ProfileSetting::Unsupported,
+        backlight: ProfileSetting::Unsupported,
+        lighting: ProfileSupport::Unsupported,
+        light: ProfileSupport::Unsupported,
     }
 }
 

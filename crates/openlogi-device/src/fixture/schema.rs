@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
+
+use crate::{BacklightState, BacklightStatus, ScrollWheelMode};
 
 /// Schema version supported by the initial profile and cassette formats.
 pub const FIXTURE_SCHEMA_VERSION: u32 = 1;
@@ -73,6 +76,10 @@ pub struct DeviceProfile {
     pub name: String,
     /// Expected semantic device inventories.
     pub inventories: Vec<DeviceInventory>,
+    /// Standalone raw-HID devices exposed beside the HID++ inventories.
+    pub standalone: Vec<StandaloneDevice>,
+    /// Initial setting reads and operation support, keyed by device route.
+    pub settings: Vec<ProfileDeviceSettings>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +88,8 @@ struct DeviceProfileFields {
     id: String,
     name: String,
     inventories: Vec<DeviceInventory>,
+    standalone: Vec<StandaloneDevice>,
+    settings: Vec<ProfileDeviceSettings>,
 }
 
 impl<'de> Deserialize<'de> for DeviceProfile {
@@ -102,39 +111,516 @@ impl<'de> Deserialize<'de> for DeviceProfile {
             id: fields.id,
             name: fields.name,
             inventories: fields.inventories,
+            standalone: fields.standalone,
+            settings: fields.settings,
         })
     }
 }
 
+/// Whether a write-only profile operation is accepted by a route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSupport {
+    /// The route accepts this operation family.
+    Supported,
+    /// The route reports the operation family as unsupported.
+    Unsupported,
+}
+
+impl ProfileSupport {
+    /// Whether this behavior accepts the operation.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+/// Initial behavior of one typed setting read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "support", content = "value", rename_all = "snake_case")]
+pub enum ProfileSetting<T> {
+    /// The feature is absent and reads/writes return the typed unsupported error.
+    Unsupported,
+    /// The feature is present with this initial value.
+    Supported(
+        /// Initial semantic read result.
+        T,
+    ),
+}
+
+impl<T> ProfileSetting<T> {
+    /// Whether this behavior has a supported value.
+    #[must_use]
+    pub const fn is_supported(&self) -> bool {
+        matches!(self, Self::Supported(_))
+    }
+
+    /// Borrow the supported value, if present.
+    #[must_use]
+    pub const fn value(&self) -> Option<&T> {
+        match self {
+            Self::Unsupported => None,
+            Self::Supported(value) => Some(value),
+        }
+    }
+
+    /// Mutably borrow the supported value, if present.
+    #[must_use]
+    pub const fn value_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Self::Unsupported => None,
+            Self::Supported(value) => Some(value),
+        }
+    }
+}
+
+/// Route-keyed setting behavior used by semantic mocks and tests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileDeviceSettings {
+    /// Device whose operations these behaviors describe.
+    pub route: DeviceRoute,
+    /// Adjustable-DPI read state.
+    pub dpi: ProfileSetting<DpiInfo>,
+    /// SmartShift read state.
+    pub smartshift: ProfileSetting<SmartShiftStatus>,
+    /// HiResWheel read state.
+    pub wheel: ProfileSetting<ScrollWheelMode>,
+    /// Keyboard-backlight read state.
+    pub backlight: ProfileSetting<BacklightState>,
+    /// RGB keyboard-lighting write support.
+    pub lighting: ProfileSupport,
+    /// Standalone-light command support.
+    pub light: ProfileSupport,
+}
+
+struct ProfileRouteFacts {
+    route: DeviceRoute,
+    capabilities: Option<Capabilities>,
+    standalone: bool,
+    light_capabilities: Option<LightCapabilities>,
+}
+
+#[derive(Default)]
+struct ProfileValidation {
+    receiver_identities: HashSet<String>,
+    direct_identities: HashSet<(u16, u16)>,
+    standalone_identities: HashSet<String>,
+    unit_ids: HashSet<[u8; 4]>,
+    routes: Vec<ProfileRouteFacts>,
+}
+
 impl DeviceProfile {
-    /// Validate the schema version and minimal semantic invariants.
+    /// Validate the schema version, identities, routes, values, and capability consistency.
     pub fn validate(&self) -> Result<(), FixtureError> {
         validate_version("device profile", self.schema_version)?;
         validate_name("device profile", "id", &self.id)?;
         validate_name("device profile", "name", &self.name)?;
-        if self.inventories.is_empty() {
+        if self.inventories.is_empty() && self.standalone.is_empty() {
             return Err(FixtureError::invalid(
                 "device profile",
-                "inventories must not be empty",
+                "at least one inventory or standalone device is required",
             ));
         }
+
+        let mut validation = ProfileValidation::default();
         for inventory in &self.inventories {
-            let mut slots = HashSet::new();
-            for device in &inventory.paired {
-                if !slots.insert(device.slot) {
-                    return Err(FixtureError::invalid(
-                        "device profile",
-                        format!(
-                            "receiver {:04x}:{:04x} repeats slot {}",
-                            inventory.receiver.vendor_id,
-                            inventory.receiver.product_id,
-                            device.slot
-                        ),
-                    ));
-                }
+            validation.add_inventory(inventory)?;
+        }
+        for device in &self.standalone {
+            validation.add_standalone(device)?;
+        }
+        validate_setting_routes(&self.settings, &validation.routes)
+    }
+}
+
+impl ProfileValidation {
+    fn add_inventory(&mut self, inventory: &DeviceInventory) -> Result<(), FixtureError> {
+        validate_name(
+            "device profile",
+            "inventory receiver name",
+            &inventory.receiver.name,
+        )?;
+        self.validate_paired_devices(inventory)?;
+        self.validate_inventory_identity(inventory)?;
+        for device in &inventory.paired {
+            let Some(route) = DeviceRoute::device_route_for(inventory, device.slot) else {
+                return Err(FixtureError::invalid(
+                    "device profile",
+                    format!(
+                        "slot {} on {} has no addressable route",
+                        device.slot, inventory.receiver.name
+                    ),
+                ));
+            };
+            self.push_route(ProfileRouteFacts {
+                route,
+                capabilities: device.capabilities,
+                standalone: false,
+                light_capabilities: None,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_paired_devices(&mut self, inventory: &DeviceInventory) -> Result<(), FixtureError> {
+        let mut slots = HashSet::new();
+        for device in &inventory.paired {
+            if !slots.insert(device.slot) {
+                return Err(FixtureError::invalid(
+                    "device profile",
+                    format!(
+                        "receiver {:04x}:{:04x} repeats slot {}",
+                        inventory.receiver.vendor_id, inventory.receiver.product_id, device.slot
+                    ),
+                ));
+            }
+            validate_battery(
+                device.battery.as_ref(),
+                &inventory.receiver.name,
+                device.slot,
+            )?;
+            if let Some(model) = &device.model_info {
+                let owner = format!("slot {} on {}", device.slot, inventory.receiver.name);
+                validate_unit_id(&mut self.unit_ids, model.unit_id, &owner)?;
             }
         }
         Ok(())
+    }
+
+    fn validate_inventory_identity(
+        &mut self,
+        inventory: &DeviceInventory,
+    ) -> Result<(), FixtureError> {
+        if let Some(receiver_uid) = inventory.receiver.unique_id.as_deref() {
+            validate_name("device profile", "receiver unique_id", receiver_uid)?;
+            if !self
+                .receiver_identities
+                .insert(receiver_uid.to_ascii_lowercase())
+            {
+                return Err(FixtureError::invalid(
+                    "device profile",
+                    format!("receiver identity {receiver_uid} is repeated"),
+                ));
+            }
+            if let Some(device) = inventory
+                .paired
+                .iter()
+                .find(|device| !(1..=6).contains(&device.slot))
+            {
+                return Err(FixtureError::invalid(
+                    "device profile",
+                    format!(
+                        "receiver {receiver_uid} has invalid pairing slot {}",
+                        device.slot
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+
+        if inventory.paired.len() != 1 || inventory.paired[0].slot != crate::DIRECT_DEVICE_INDEX {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!(
+                    "direct inventory {:04x}:{:04x} must contain exactly one device at index 0xff",
+                    inventory.receiver.vendor_id, inventory.receiver.product_id
+                ),
+            ));
+        }
+        let identity = (inventory.receiver.vendor_id, inventory.receiver.product_id);
+        if !self.direct_identities.insert(identity) {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!(
+                    "direct identity {:04x}:{:04x} is repeated",
+                    identity.0, identity.1
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_standalone(&mut self, device: &StandaloneDevice) -> Result<(), FixtureError> {
+        validate_name(
+            "device profile",
+            "standalone display_name",
+            &device.display_name,
+        )?;
+        validate_name("device profile", "standalone driver_id", &device.driver_id)?;
+        validate_name(
+            "device profile",
+            "standalone address identity",
+            &device.address.identity,
+        )?;
+        if !self
+            .standalone_identities
+            .insert(device.address.identity.clone())
+        {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!(
+                    "standalone identity {} is repeated",
+                    device.address.identity
+                ),
+            ));
+        }
+        let owner = format!("standalone device {}", device.display_name);
+        validate_unit_id(&mut self.unit_ids, device.unit_id, &owner)?;
+        self.push_route(ProfileRouteFacts {
+            route: DeviceRoute::RawHid {
+                vendor_id: device.address.vendor_id,
+                product_id: device.address.product_id,
+                usage_page: device.address.usage_page,
+                usage_id: device.address.usage_id,
+                identity: device.address.identity.clone(),
+            },
+            capabilities: device.capabilities,
+            standalone: true,
+            light_capabilities: device.light_capabilities,
+        })
+    }
+
+    fn push_route(&mut self, facts: ProfileRouteFacts) -> Result<(), FixtureError> {
+        if self.routes.iter().any(|known| known.route == facts.route) {
+            Err(FixtureError::invalid(
+                "device profile",
+                format!("device route {} is repeated", facts.route),
+            ))
+        } else {
+            self.routes.push(facts);
+            Ok(())
+        }
+    }
+}
+
+fn validate_setting_routes(
+    settings: &[ProfileDeviceSettings],
+    routes: &[ProfileRouteFacts],
+) -> Result<(), FixtureError> {
+    let mut setting_routes = Vec::new();
+    for settings in settings {
+        if setting_routes.contains(&&settings.route) {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!("repeats settings for route {}", settings.route),
+            ));
+        }
+        setting_routes.push(&settings.route);
+        let Some(facts) = routes.iter().find(|facts| facts.route == settings.route) else {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!("settings route {} does not exist", settings.route),
+            ));
+        };
+        validate_settings(settings, facts)?;
+    }
+    for facts in routes {
+        if !setting_routes.contains(&&facts.route) {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!("route {} has no settings behavior", facts.route),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unit_id(
+    unit_ids: &mut HashSet<[u8; 4]>,
+    unit_id: [u8; 4],
+    owner: &str,
+) -> Result<(), FixtureError> {
+    if unit_id != [0; 4] && !unit_ids.insert(unit_id) {
+        Err(FixtureError::invalid(
+            "device profile",
+            format!("{owner} repeats unit identity {unit_id:02x?}"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_battery(
+    battery: Option<&openlogi_core::device::BatteryInfo>,
+    receiver: &str,
+    slot: u8,
+) -> Result<(), FixtureError> {
+    if battery.is_some_and(|battery| battery.percentage > 100) {
+        Err(FixtureError::invalid(
+            "device profile",
+            format!("slot {slot} on {receiver} has battery percentage above 100"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_settings(
+    settings: &ProfileDeviceSettings,
+    facts: &ProfileRouteFacts,
+) -> Result<(), FixtureError> {
+    validate_setting_values(settings)?;
+    validate_setting_support(settings, facts)
+}
+
+fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), FixtureError> {
+    if let Some(dpi) = settings.dpi.value() {
+        validate_dpi(&settings.route, dpi)?;
+    }
+    if let Some(backlight) = settings.backlight.value() {
+        validate_backlight(&settings.route, *backlight)?;
+    }
+    if settings.backlight.is_supported() && settings.lighting.is_supported() {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {} cannot expose RGB lighting and backlight together",
+                settings.route
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dpi(route: &DeviceRoute, dpi: &DpiInfo) -> Result<(), FixtureError> {
+    let values = dpi.capabilities.values();
+    if values.is_empty() {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has an empty DPI capability list"),
+        ));
+    }
+    if values.iter().any(|dpi| dpi.into_inner() == 0) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has a zero DPI capability"),
+        ));
+    }
+    if values
+        .array_windows::<2>()
+        .any(|[left, right]| left >= right)
+    {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} DPI capabilities must be sorted and unique"),
+        ));
+    }
+    if !dpi.capabilities.contains(dpi.current) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} current DPI {} is not supported", dpi.current),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_backlight(route: &DeviceRoute, backlight: BacklightState) -> Result<(), FixtureError> {
+    if backlight.nb_levels == 0 {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} backlight has no levels"),
+        ));
+    }
+    if backlight.current_level >= backlight.nb_levels {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {route} backlight level {} exceeds its {} levels",
+                backlight.current_level, backlight.nb_levels
+            ),
+        ));
+    }
+    let software_disabled = backlight.status == BacklightStatus::DisabledBySoftware;
+    if backlight.enabled == software_disabled {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} backlight enabled state contradicts its status"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_setting_support(
+    settings: &ProfileDeviceSettings,
+    facts: &ProfileRouteFacts,
+) -> Result<(), FixtureError> {
+    if facts.standalone {
+        if settings.dpi.is_supported()
+            || settings.smartshift.is_supported()
+            || settings.wheel.is_supported()
+            || settings.backlight.is_supported()
+            || settings.lighting.is_supported()
+        {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!(
+                    "standalone route {} declares a HID++ setting",
+                    settings.route
+                ),
+            ));
+        }
+        let light_supported = facts.light_capabilities.is_some_and(|capabilities| {
+            capabilities.power
+                || capabilities.brightness.is_some()
+                || capabilities.temperature.is_some()
+        });
+        if settings.light.is_supported() != light_supported {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!(
+                    "route {} light support does not match its capabilities",
+                    settings.route
+                ),
+            ));
+        }
+    } else {
+        if settings.light.is_supported() {
+            return Err(FixtureError::invalid(
+                "device profile",
+                format!("HID++ route {} declares raw-light support", settings.route),
+            ));
+        }
+        if let Some(capabilities) = facts.capabilities {
+            validate_capability_support(
+                settings,
+                "DPI",
+                settings.dpi.is_supported(),
+                capabilities.pointer,
+            )?;
+            validate_capability_support(
+                settings,
+                "wheel",
+                settings.wheel.is_supported(),
+                capabilities.hires_wheel,
+            )?;
+            validate_capability_support(
+                settings,
+                "lighting",
+                settings.lighting.is_supported(),
+                capabilities.lighting,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_support(
+    settings: &ProfileDeviceSettings,
+    family: &str,
+    declared: bool,
+    advertised: bool,
+) -> Result<(), FixtureError> {
+    if declared == advertised {
+        Ok(())
+    } else {
+        Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {} {family} support does not match inventory capabilities",
+                settings.route
+            ),
+        ))
     }
 }
 
