@@ -31,12 +31,16 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{
+    ButtonId, GestureDirection, HOLD_STALE, StreamRelease, SwipeAccumulator,
+};
+use openlogi_core::hid::Dpi;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::write::cached_sensor_dpi;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
@@ -91,6 +95,52 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// A hold-mode control (`Pan` / `Zoom`) began.
+    ///
+    /// Dedicated rather than [`Self::ButtonDown`]: the button runtime must
+    /// not treat this as a one-shot press, and a control already down when
+    /// the session starts never emits this. Motion uses [`Self::HoldMotion`];
+    /// the matching [`Self::HoldEnd`] carries whether travel cleared the
+    /// physical deadzone.
+    HoldBegin(ButtonId),
+    /// Raw-XY delta for an in-progress hold-mode stream. A torn-down hold
+    /// stays terminal: late motion never re-opens one.
+    HoldMotion {
+        /// The button whose hold owns this motion.
+        button: ButtonId,
+        /// Horizontal raw-XY delta.
+        dx: i16,
+        /// Vertical raw-XY delta.
+        dy: i16,
+    },
+    /// The hold-mode stream ended. See [`HoldRelease`] for why, which is not
+    /// the same question as how far it traveled.
+    HoldEnd {
+        /// The button whose hold ended.
+        button: ButtonId,
+        /// Whether the user let go, and if so what they did while holding.
+        release: HoldRelease,
+    },
+}
+
+/// Why a hold-mode stream ended.
+///
+/// Click-versus-drag is only a meaningful question when the user actually let
+/// go. Capture also closes streams out from under a control that is still
+/// down — a reconnect re-arms the diverts, teardown drops them, the stale
+/// bound gives up on a lost button-up — and none of those are a click,
+/// however little the hold traveled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldRelease {
+    /// The user released the control.
+    Released {
+        /// Whether travel cleared the physical click/drag deadzone. `false`
+        /// is a click without a drag.
+        traveled: bool,
+    },
+    /// Capture closed the stream while the control was still held. The
+    /// injector must close its session; nothing else may fire.
+    Interrupted,
 }
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
@@ -114,23 +164,50 @@ enum HoldState {
         /// A second armed source is held alongside the holder. Overlap motion
         /// could belong to either control — dropped until the overlap ends.
         overlap: bool,
-        /// The hold's next raw-XY sample must be dropped: the haptic panel's
-        /// first sample after contact is an absolute position jump, not a
-        /// delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
+        /// The hold's next raw-XY sample must be dropped. See
+        /// [`skip_first_sample`] for the two firmware artifacts this covers.
         skip_first_raw_xy: bool,
+        /// Discrete swipe vs hold-mode stream. Hold-mode travel never goes
+        /// through the swipe classifier.
+        kind: HoldKind,
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+/// Whether a hold classifies a discrete swipe or streams raw-XY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldKind {
+    /// Gesture-mode swipe: commit a direction or click.
+    Swipe,
+    /// Hold-mode Pan/Zoom: stream deltas, never a `Gesture(..., Click)`.
+    Stream,
+}
+
+/// Begin a hold for `cid`. `kind` chooses the accumulator mode; stream holds
+/// require `dpi` so the deadzone is physical.
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    kind: HoldKind,
+    dpi: Option<Dpi>,
+) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin();
+    match (kind, dpi) {
+        (HoldKind::Stream, Some(dpi)) => swipe.begin_stream(dpi),
+        (HoldKind::Stream, None) => {
+            warn!(cid, %button, "hold-mode stream armed without DPI — dropping the press");
+            return HoldState::Idle;
+        }
+        (HoldKind::Swipe, _) => swipe.begin(),
+    }
     HoldState::Holding {
         cid,
         button,
         swipe,
         overlap,
         skip_first_raw_xy,
+        kind,
     }
 }
 
@@ -149,6 +226,69 @@ struct CaptureAccum {
     dpi_down: bool,
     /// Diverted standard-button CIDs held in the last event.
     buttons_down: Vec<u16>,
+    /// Hold-mode CIDs held in the last event. Seeded across reconnect so an
+    /// already-down control is not a press.
+    hold_downs: Vec<u16>,
+}
+
+impl CaptureAccum {
+    /// Close any open hold-mode stream, returning the terminal end that must
+    /// reach the injector before this accum is wiped (reconnect, teardown).
+    ///
+    /// Always [`HoldRelease::Interrupted`]: the control is still down as far
+    /// as anyone here knows, so however far this hold traveled, the user has
+    /// not clicked anything.
+    #[must_use]
+    fn take_terminal_stream_end(&mut self) -> Option<CapturedInput> {
+        match std::mem::take(&mut self.hold) {
+            HoldState::Holding {
+                button,
+                mut swipe,
+                kind: HoldKind::Stream,
+                ..
+            } => {
+                let _ = swipe.end_stream();
+                Some(CapturedInput::HoldEnd {
+                    button,
+                    release: HoldRelease::Interrupted,
+                })
+            }
+            HoldState::Holding { mut swipe, .. } => {
+                let _ = swipe.end();
+                None
+            }
+            HoldState::Idle => None,
+        }
+    }
+
+    /// Expire a hold-mode stream that never saw its release.
+    ///
+    /// The bound is on quiet time, not on how long the control has been down.
+    /// A hold-mode pan is meant to run for as long as the user keeps panning,
+    /// and measuring from the press ended every gesture mid-motion after
+    /// [`HOLD_STALE`]. What actually indicates a lost button-up is silence:
+    /// the firmware streams raw XY only while the control is down, so when
+    /// the release goes missing, so does the motion.
+    ///
+    /// A control held perfectly still for [`HOLD_STALE`] is therefore read as
+    /// abandoned, and re-arms on its next press. The sensor resolves 0.03mm
+    /// at 950 DPI, so a hand resting on the mouse rarely goes that quiet.
+    #[must_use]
+    fn expire_stale_stream(&mut self, now: std::time::Instant) -> Option<CapturedInput> {
+        let HoldState::Holding {
+            swipe,
+            kind: HoldKind::Stream,
+            ..
+        } = &self.hold
+        else {
+            return None;
+        };
+        let last_activity = swipe.last_activity()?;
+        if now.saturating_duration_since(last_activity) < HOLD_STALE {
+            return None;
+        }
+        self.take_terminal_stream_end()
+    }
 }
 
 #[cfg(test)]
@@ -159,6 +299,25 @@ impl CaptureAccum {
         if let HoldState::Holding { swipe, .. } = &mut self.hold {
             swipe.backdate_hold_for_test();
         }
+    }
+
+    /// Silence the current hold-mode stream for longer than [`HOLD_STALE`].
+    fn backdate_hold_past_stale_for_test(&mut self) {
+        if let HoldState::Holding { swipe, .. } = &mut self.hold {
+            swipe.backdate_hold_past_stale_for_test();
+        }
+    }
+
+    /// Age only the press behind the current hold-mode stream past
+    /// [`HOLD_STALE`], leaving its samples current.
+    fn backdate_press_past_stale_for_test(&mut self) {
+        if let HoldState::Holding { swipe, .. } = &mut self.hold {
+            swipe.backdate_press_past_stale_for_test();
+        }
+    }
+
+    fn seed_hold_already_down_for_test(&mut self, cids: &[u16]) {
+        self.hold_downs = cids.to_vec();
     }
 }
 
@@ -212,6 +371,20 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Hold-mode (`Pan` / `Zoom`) CIDs diverted with raw-XY, the same
+    /// reporting mode [`Self::divert_gesture_buttons`] uses. A control whose
+    /// firmware cannot stream raw-XY is not armed.
+    pub divert_hold_buttons: Vec<(u16, ButtonId)>,
+    /// Sensor DPI used to size the hold-mode click/drag deadzone. The plan
+    /// always supplies one (live read, config, or a named factory default).
+    pub sensor_dpi: Option<Dpi>,
+    /// How many hold-mode bindings the plan asked to arm. Compared with
+    /// [`ArmedControls`]'s hold list so a silent skip is visible in the
+    /// `control capture active` log.
+    pub hold_requested: usize,
+    /// Whether synthesised pan/zoom can be delivered. The only remaining
+    /// reason to leave `divert_hold_buttons` empty when holds are bound.
+    pub injection_available: bool,
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
@@ -306,9 +479,7 @@ async fn run_capture_session_on(
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
-    if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(shared.clone());
-    }
+    publish_session_channel(&channel_slot, &shared);
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
@@ -324,6 +495,9 @@ async fn run_capture_session_on(
         .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
+    let hold_button_set = armed.hold_button_cids.clone();
+    let planned_dpi = spec.sensor_dpi;
+    let route = shared.route().clone();
     let activity = Arc::new(ChannelActivity::default());
     let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
@@ -343,13 +517,17 @@ async fn run_capture_session_on(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog_with_gesture_buttons(
+                handle_reprog_sets(
                     &mut acc,
                     event,
-                    &gesture_cids,
-                    &dpi_set,
-                    &gesture_button_set,
-                    &button_set,
+                    &ReprogSets {
+                        gesture_cids: &gesture_cids,
+                        dpi_cids: &dpi_set,
+                        gesture_button_cids: &gesture_button_set,
+                        button_cids: &button_set,
+                        hold_button_cids: &hold_button_set,
+                        sensor_dpi: live_hold_dpi(&route, planned_dpi),
+                    },
                     &sink,
                 );
                 return;
@@ -380,7 +558,7 @@ async fn run_capture_session_on(
         .ok()
         .flatten()
         .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
-    log_capture_active(device_index, &armed, wireless.is_some());
+    log_capture_active(device_index, &armed, &spec, wireless.is_some());
     let stop = monitor_capture(
         CaptureMonitor {
             root: &root,
@@ -390,28 +568,40 @@ async fn run_capture_session_on(
             registry,
             shared: &shared,
             activity: &activity,
+            sink: &sink,
         },
         wireless,
         shutdown,
         device_io,
     )
     .await;
+    emit_taken_stream_end(&accum, &sink);
 
     // The slot is one last-writer-wins cell shared by every session, so a
     // sibling may have published its own channel after ours. Clear it only
     // while it still holds *this* session's channel — evicting the sibling's
     // would silently demote its DPI/SmartShift writes to the fresh-open slow
     // path.
-    if let Ok(mut slot) = channel_slot.write()
-        && slot
-            .as_ref()
-            .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
-    {
-        *slot = None;
-    }
+    clear_session_channel_if_ours(&channel_slot, &chan);
     let outcome = finish_capture(listener, stop, armed, shared, registry).await;
     debug!(index = device_index, "control capture stopped");
     Ok(outcome)
+}
+
+fn publish_session_channel(channel_slot: &CaptureChannel, shared: &SharedChannel) {
+    if let Ok(mut slot) = channel_slot.write() {
+        *slot = Some(shared.clone());
+    }
+}
+
+fn clear_session_channel_if_ours(channel_slot: &CaptureChannel, chan: &Arc<HidppChannel>) {
+    if let Ok(mut slot) = channel_slot.write()
+        && slot
+            .as_ref()
+            .is_some_and(|shared| Arc::ptr_eq(shared.channel(), chan))
+    {
+        *slot = None;
+    }
 }
 
 /// Restore or hand off one stopped session while its listener still owns every
@@ -473,6 +663,8 @@ struct ArmedControls {
     gesture_cids: Vec<u16>,
     /// Raw-XY-capable standard-button CIDs diverted as gesture sources.
     gesture_button_cids: Vec<(u16, ButtonId)>,
+    /// Hold-mode CIDs diverted with raw-XY.
+    hold_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
@@ -551,6 +743,10 @@ impl ArmedControls {
                     || self
                         .gesture_button_cids
                         .iter()
+                        .any(|&(cid, _)| cid == reporting.cid)
+                    || self
+                        .hold_button_cids
+                        .iter()
                         .any(|&(cid, _)| cid == reporting.cid);
                 let change = divert_change(reporting.original, raw_xy);
                 if let Err(error) = rc.set_cid_reporting_full(reporting.cid, change).await {
@@ -570,17 +766,35 @@ impl ArmedControls {
     }
 }
 
-fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool) {
+fn log_capture_active(
+    device_index: u8,
+    armed: &ArmedControls,
+    spec: &CaptureSpec,
+    wake_rearm: bool,
+) {
     info!(
         index = device_index,
         gesture_sources = armed.gesture_cids.len(),
         gesture_buttons = armed.gesture_button_cids.len(),
+        hold_buttons = armed.hold_button_cids.len(),
+        hold_requested = spec.hold_requested,
+        injection_available = spec.injection_available,
+        sensor_dpi = ?spec.sensor_dpi,
         dpi_buttons = armed.dpi_cids.len(),
         buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
         wake_rearm,
         "control capture active"
     );
+    if spec.hold_requested > 0 && armed.hold_button_cids.is_empty() {
+        warn!(
+            index = device_index,
+            injection_available = spec.injection_available,
+            sensor_dpi = ?spec.sensor_dpi,
+            hold_requested = spec.hold_requested,
+            "hold mode not armed"
+        );
+    }
 }
 
 /// Borrowed state used while monitoring one armed capture session.
@@ -592,6 +806,55 @@ struct CaptureMonitor<'a> {
     registry: Option<&'a ChannelRegistry>,
     shared: &'a SharedChannel,
     activity: &'a ChannelActivity,
+    sink: &'a mpsc::UnboundedSender<CapturedInput>,
+}
+
+impl CaptureMonitor<'_> {
+    fn emit_expired_stream(&self) {
+        emit_expired_stream(self.accum, self.sink);
+    }
+
+    fn emit_terminal_stream_end(&self) {
+        emit_taken_stream_end(self.accum, self.sink);
+    }
+
+    fn stream_timer_deadline(&self, idle_deadline: tokio::time::Instant) -> tokio::time::Instant {
+        let stream_open = matches!(
+            self.accum
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .hold,
+            HoldState::Holding {
+                kind: HoldKind::Stream,
+                ..
+            }
+        );
+        if stream_open {
+            idle_deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        } else {
+            idle_deadline
+        }
+    }
+}
+
+fn emit_taken_stream_end(accum: &Mutex<CaptureAccum>, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    if let Some(end) = accum
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take_terminal_stream_end()
+    {
+        let _ = sink.send(end);
+    }
+}
+
+fn emit_expired_stream(accum: &Mutex<CaptureAccum>, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    if let Some(end) = accum
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .expire_stale_stream(std::time::Instant::now())
+    {
+        let _ = sink.send(end);
+    }
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
@@ -617,8 +880,9 @@ async fn monitor_capture(
             // strike before considering a liveness ping.
             liveness.record_activity(tokio::time::Instant::now(), context.activity.generation());
         }
+        context.emit_expired_stream();
         let activity_generation = liveness.activity_generation();
-        let idle_deadline = liveness.idle_deadline();
+        let timer_deadline = context.stream_timer_deadline(liveness.idle_deadline());
         tokio::select! {
             biased;
 
@@ -657,14 +921,13 @@ async fn monitor_capture(
                     continue;
                 };
                 info!(?broadcast, "device reconnected — re-arming control capture");
-                *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
-                    CaptureAccum::default();
+                context.emit_terminal_stream_end();
                 context.armed.rearm(&device_io).await;
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
             }
-            () = tokio::time::sleep_until(idle_deadline) => {
+            () = tokio::time::sleep_until(timer_deadline) => {
                 if !liveness.ping_due(
                     tokio::time::Instant::now(),
                     context.activity.generation(),
@@ -724,6 +987,7 @@ async fn arm_controls(
     }
     if armed.gesture_cids.is_empty()
         && armed.gesture_button_cids.is_empty()
+        && armed.hold_button_cids.is_empty()
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
         && armed.thumb.is_none()
@@ -772,6 +1036,7 @@ async fn arm_controls_into(
                 armed.gesture_button_cids.push((cid, button));
             }
         }
+        arm_hold_buttons(&rc, &controls, spec, armed).await?;
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 arm_reprog_control(&rc, cid, false, &mut armed.reporting).await?;
@@ -787,6 +1052,10 @@ async fn arm_controls_into(
                     .gesture_button_cids
                     .iter()
                     .any(|&(gesture_cid, _)| gesture_cid == cid)
+                || armed
+                    .hold_button_cids
+                    .iter()
+                    .any(|&(hold_cid, _)| hold_cid == cid)
             {
                 continue;
             }
@@ -832,6 +1101,37 @@ async fn arm_controls_into(
             && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             return Err(GestureError::Hidpp(format!("{error:?}")));
+        }
+    }
+    Ok(())
+}
+
+async fn arm_hold_buttons(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    spec: &CaptureSpec,
+    armed: &mut ArmedControls,
+) -> Result<(), GestureError> {
+    for &(cid, button) in &spec.divert_hold_buttons {
+        if let Some(control) = controls.iter().find(|c| c.cid == cid) {
+            if control.is_divertable() && control.supports_raw_xy() {
+                arm_reprog_control(rc, cid, true, &mut armed.reporting).await?;
+                armed.hold_button_cids.push((cid, button));
+            } else {
+                warn!(
+                    cid = format_args!("{cid:#06x}"),
+                    %button,
+                    divertable = control.is_divertable(),
+                    raw_xy = control.supports_raw_xy(),
+                    "hold-mode control cannot stream raw-XY — not armed"
+                );
+            }
+        } else {
+            warn!(
+                cid = format_args!("{cid:#06x}"),
+                %button,
+                "hold-mode control is not on this device — not armed"
+            );
         }
     }
     Ok(())
@@ -903,9 +1203,26 @@ pub(crate) async fn enumerate_controls(
     Ok(controls)
 }
 
+/// Prefer the process-wide sensor cache so a DPI-cycle write updates the
+/// deadzone on the next press without waiting for the capture session to rearm.
+fn live_hold_dpi(route: &DeviceRoute, planned: Option<Dpi>) -> Option<Dpi> {
+    cached_sensor_dpi(route).or(planned)
+}
+
+/// CID sets a capture listener attributes `0x1b04` events against.
+struct ReprogSets<'a> {
+    gesture_cids: &'a [u16],
+    dpi_cids: &'a [u16],
+    gesture_button_cids: &'a [(u16, ButtonId)],
+    button_cids: &'a [(u16, ButtonId)],
+    hold_button_cids: &'a [(u16, ButtonId)],
+    sensor_dpi: Option<Dpi>,
+}
+
 /// Update `acc` and emit on a decoded `0x1b04` event: preserve physical button
 /// edges, and commit a gesture swipe the instant it crosses the threshold
 /// (mid-swipe, like Options+) rather than on release.
+#[cfg(test)]
 fn handle_reprog_with_gesture_buttons(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
@@ -915,109 +1232,228 @@ fn handle_reprog_with_gesture_buttons(
     button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
+    handle_reprog_sets(
+        acc,
+        event,
+        &ReprogSets {
+            gesture_cids,
+            dpi_cids,
+            gesture_button_cids,
+            button_cids,
+            hold_button_cids: &[],
+            sensor_dpi: None,
+        },
+        sink,
+    );
+}
+
+fn handle_reprog_sets(
+    acc: &mut CaptureAccum,
+    event: RawControlEvent,
+    sets: &ReprogSets<'_>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    if let Some(end) = acc.expire_stale_stream(std::time::Instant::now()) {
+        let _ = sink.send(end);
+    }
     match event {
         RawControlEvent::DivertedButtons(cids) => {
-            // The swipe accumulator belongs to the raw-XY gesture diverts.
-            // When a gesture-source control is instead diverted as a plain
-            // button (a single binding, not gesture mode), its press must flow
-            // through the `button_cids` loop only — not also emit a click.
-            let held: Vec<(u16, ButtonId)> = gesture_cids
-                .iter()
-                .filter(|cid| cids.contains(cid))
-                .filter_map(|&cid| gesture_source_button(cid).map(|b| (cid, b)))
-                .chain(
-                    gesture_button_cids
-                        .iter()
-                        .copied()
-                        .filter(|(cid, _)| cids.contains(cid)),
-                )
-                .collect();
-            acc.hold = match std::mem::take(&mut acc.hold) {
-                // The holder is still down. While a second armed source is
-                // held alongside it, unattributed raw-XY motion is dropped
-                // (see [`HoldState::Holding::overlap`]).
-                HoldState::Holding {
-                    cid,
-                    button,
-                    swipe,
-                    skip_first_raw_xy,
-                    ..
-                } if cids.contains(&cid) => HoldState::Holding {
-                    cid,
-                    button,
-                    swipe,
-                    overlap: held.len() > 1,
-                    skip_first_raw_xy,
-                },
-                previous => {
-                    // No holder, or the holder released: a released hold that
-                    // never committed a direction is a plain click...
-                    if let HoldState::Holding {
-                        button, mut swipe, ..
-                    } = previous
-                        && swipe.end()
-                    {
-                        debug!(%button, "gesture click");
-                        let _ = sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
-                    }
-                    // ...and the first still-held source begins (or takes
-                    // over) the hold. A source not down in the previous event
-                    // is a fresh touch, so the panel's contact-jump discard
-                    // applies; one that was already held has had its jump
-                    // dropped during the overlap.
-                    match held.first() {
-                        Some(&(cid, button)) => begin_hold(
-                            cid,
-                            button,
-                            held.len() > 1,
-                            cid == reprog_controls::HAPTIC_PANEL_CID
-                                && !acc.gestures_down.contains(&cid),
-                        ),
-                        None => HoldState::Idle,
-                    }
-                }
-            };
-            // Gesture semantics stay separate from the physical lifecycle:
-            // click/swipe remains one completed action, while every armed
-            // source also contributes one rising and one falling edge to the
-            // shared button runtime.
-            for &cid in &acc.gestures_down {
-                if !held.iter().any(|(held_cid, _)| *held_cid == cid)
-                    && let Some(button) = captured_gesture_button(cid, gesture_button_cids)
-                {
-                    let _ = sink.send(CapturedInput::ButtonUp(button));
-                }
-            }
-            for &(cid, button) in &held {
-                if !acc.gestures_down.contains(&cid) {
-                    let _ = sink.send(CapturedInput::ButtonDown(button));
-                }
-            }
-            acc.gestures_down = held.into_iter().map(|(cid, _)| cid).collect();
-
-            let dpi_down = dpi_cids.iter().any(|cid| cids.contains(cid));
-            if dpi_down && !acc.dpi_down {
-                let _ = sink.send(CapturedInput::ButtonDown(ButtonId::DpiToggle));
-            } else if !dpi_down && acc.dpi_down {
-                let _ = sink.send(CapturedInput::ButtonUp(ButtonId::DpiToggle));
-            }
-            acc.dpi_down = dpi_down;
-
-            for &(cid, button) in button_cids {
-                let down = cids.contains(&cid);
-                let was_down = acc.buttons_down.contains(&cid);
-                if down && !was_down {
-                    let _ = sink.send(CapturedInput::ButtonDown(button));
-                    acc.buttons_down.push(cid);
-                } else if !down && was_down {
-                    let _ = sink.send(CapturedInput::ButtonUp(button));
-                    acc.buttons_down.retain(|&c| c != cid);
-                }
-            }
+            handle_diverted_buttons(acc, cids, sets, sink);
         }
         RawControlEvent::RawXy { dx, dy } => {
             handle_raw_xy(acc, dx, dy, sink);
         }
+    }
+}
+
+fn handle_diverted_buttons(
+    acc: &mut CaptureAccum,
+    cids: [u16; 4],
+    sets: &ReprogSets<'_>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    // The swipe accumulator belongs to the raw-XY gesture diverts.
+    // When a gesture-source control is instead diverted as a plain
+    // button (a single binding, not gesture mode), its press must flow
+    // through the `button_cids` loop only — not also emit a click.
+    let swipe_held: Vec<(u16, ButtonId)> = sets
+        .gesture_cids
+        .iter()
+        .filter(|cid| cids.contains(cid))
+        .filter_map(|&cid| gesture_source_button(cid).map(|b| (cid, b)))
+        .chain(
+            sets.gesture_button_cids
+                .iter()
+                .copied()
+                .filter(|(cid, _)| cids.contains(cid)),
+        )
+        .collect();
+    let hold_held: Vec<(u16, ButtonId)> = sets
+        .hold_button_cids
+        .iter()
+        .copied()
+        .filter(|(cid, _)| cids.contains(cid))
+        .collect();
+    let motion: Vec<(u16, ButtonId, HoldKind)> = swipe_held
+        .iter()
+        .copied()
+        .map(|(cid, button)| (cid, button, HoldKind::Swipe))
+        .chain(
+            hold_held
+                .iter()
+                .copied()
+                .map(|(cid, button)| (cid, button, HoldKind::Stream)),
+        )
+        .collect();
+    acc.hold = transition_hold(acc, cids, &motion, sets.sensor_dpi, sink);
+    // Gesture semantics stay separate from the physical lifecycle:
+    // click/swipe remains one completed action, while every armed
+    // source also contributes one rising and one falling edge to the
+    // shared button runtime. Hold-mode CIDs use HoldBegin/HoldEnd
+    // instead of ButtonDown/ButtonUp.
+    for &cid in &acc.gestures_down {
+        if !swipe_held.iter().any(|(held_cid, _)| *held_cid == cid)
+            && let Some(button) = captured_gesture_button(cid, sets.gesture_button_cids)
+        {
+            let _ = sink.send(CapturedInput::ButtonUp(button));
+        }
+    }
+    for &(cid, button) in &swipe_held {
+        if !acc.gestures_down.contains(&cid) {
+            let _ = sink.send(CapturedInput::ButtonDown(button));
+        }
+    }
+    acc.gestures_down = swipe_held.into_iter().map(|(cid, _)| cid).collect();
+    acc.hold_downs = hold_held.into_iter().map(|(cid, _)| cid).collect();
+
+    let dpi_down = sets.dpi_cids.iter().any(|cid| cids.contains(cid));
+    if dpi_down && !acc.dpi_down {
+        let _ = sink.send(CapturedInput::ButtonDown(ButtonId::DpiToggle));
+    } else if !dpi_down && acc.dpi_down {
+        let _ = sink.send(CapturedInput::ButtonUp(ButtonId::DpiToggle));
+    }
+    acc.dpi_down = dpi_down;
+
+    for &(cid, button) in sets.button_cids {
+        let down = cids.contains(&cid);
+        let was_down = acc.buttons_down.contains(&cid);
+        if down && !was_down {
+            let _ = sink.send(CapturedInput::ButtonDown(button));
+            acc.buttons_down.push(cid);
+        } else if !down && was_down {
+            let _ = sink.send(CapturedInput::ButtonUp(button));
+            acc.buttons_down.retain(|&c| c != cid);
+        }
+    }
+}
+
+fn transition_hold(
+    acc: &mut CaptureAccum,
+    cids: [u16; 4],
+    motion: &[(u16, ButtonId, HoldKind)],
+    sensor_dpi: Option<Dpi>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) -> HoldState {
+    match std::mem::take(&mut acc.hold) {
+        // The holder is still down. While a second armed source is
+        // held alongside it, unattributed raw-XY motion is dropped
+        // (see [`HoldState::Holding::overlap`]).
+        HoldState::Holding {
+            cid,
+            button,
+            swipe,
+            skip_first_raw_xy,
+            kind,
+            ..
+        } if cids.contains(&cid) => HoldState::Holding {
+            cid,
+            button,
+            swipe,
+            overlap: motion.len() > 1,
+            skip_first_raw_xy,
+            kind,
+        },
+        previous => {
+            let from_idle = matches!(previous, HoldState::Idle);
+            match previous {
+                HoldState::Holding {
+                    button,
+                    mut swipe,
+                    kind: HoldKind::Stream,
+                    ..
+                } => {
+                    let traveled = matches!(swipe.end_stream(), StreamRelease::Drag);
+                    debug!(%button, traveled, "hold-mode stream ended");
+                    let _ = sink.send(CapturedInput::HoldEnd {
+                        button,
+                        release: HoldRelease::Released { traveled },
+                    });
+                }
+                HoldState::Holding {
+                    button, mut swipe, ..
+                } => {
+                    if swipe.end() {
+                        debug!(%button, "gesture click");
+                        let _ = sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                    }
+                }
+                HoldState::Idle => {}
+            }
+            // A source already down when the session became Idle (reconnect
+            // or a seeded start) is not a press. Takeover from a live
+            // holder still begins, even if the next source was overlapping.
+            match motion.first() {
+                Some(&(cid, button, kind)) if !from_idle || !already_down(acc, cid, kind) => {
+                    let next = begin_hold(
+                        cid,
+                        button,
+                        motion.len() > 1,
+                        skip_first_sample(acc, cid, kind),
+                        kind,
+                        sensor_dpi,
+                    );
+                    if matches!(
+                        next,
+                        HoldState::Holding {
+                            kind: HoldKind::Stream,
+                            ..
+                        }
+                    ) {
+                        let _ = sink.send(CapturedInput::HoldBegin(button));
+                    }
+                    next
+                }
+                _ => HoldState::Idle,
+            }
+        }
+    }
+}
+
+/// Whether a hold's first raw-XY sample is a firmware artifact rather than
+/// travel the user made, and so must be dropped.
+///
+/// Two unrelated artifacts land here. The haptic panel's first sample after
+/// contact is an absolute position, not a delta, so summing it commits a
+/// bogus direction instantly.
+///
+/// And a hold-mode control only streams diverted raw XY while it is down, so
+/// the first report after the divert engages carries whatever the sensor
+/// banked before the press. Measured on an MX Master 3S at 950 DPI: 1694 x
+/// 1619 counts arriving 10 ms after button-down, 63 mm of travel, an implied
+/// 6 m/s of hand speed where real panning in the same session never passed
+/// 1.3 m/s. Passed through it scrolled the view most of a screen the instant
+/// pan opened, and it cleared the click/drag deadzone on a press that never
+/// moved.
+fn skip_first_sample(acc: &CaptureAccum, cid: u16, kind: HoldKind) -> bool {
+    let haptic_contact_jump =
+        cid == reprog_controls::HAPTIC_PANEL_CID && !acc.gestures_down.contains(&cid);
+    haptic_contact_jump || matches!(kind, HoldKind::Stream)
+}
+
+fn already_down(acc: &CaptureAccum, cid: u16, kind: HoldKind) -> bool {
+    match kind {
+        HoldKind::Swipe => acc.gestures_down.contains(&cid),
+        HoldKind::Stream => acc.hold_downs.contains(&cid),
     }
 }
 
@@ -1034,6 +1470,7 @@ fn handle_raw_xy(
         swipe,
         overlap,
         skip_first_raw_xy,
+        kind,
         ..
     } = &mut acc.hold
     else {
@@ -1044,18 +1481,33 @@ fn handle_raw_xy(
     if *overlap {
         return;
     }
-    // The haptic panel's first sample after contact is a position jump;
-    // summing it would commit a bogus direction instantly.
+    // Neither a contact jump nor a pre-press backlog is travel the user made
+    // during this hold; see [`skip_first_sample`].
     if *skip_first_raw_xy {
         *skip_first_raw_xy = false;
         return;
     }
-    // Commit the instant a clean direction emerges (mid-swipe, once per hold);
-    // the accumulator gates on hold duration internally and drops travel that
-    // arrives outside a hold.
-    if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
-        debug!(?direction, %button, "gesture committed");
-        let _ = sink.send(CapturedInput::Gesture(*button, direction));
+    match *kind {
+        HoldKind::Stream => {
+            if swipe
+                .accumulate_stream(i32::from(dx), i32::from(dy))
+                .is_some()
+            {
+                let _ = sink.send(CapturedInput::HoldMotion {
+                    button: *button,
+                    dx,
+                    dy,
+                });
+            }
+        }
+        HoldKind::Swipe => {
+            // Commit the instant a clean direction emerges (mid-swipe, once
+            // per hold); the accumulator gates on hold duration internally.
+            if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
+                debug!(?direction, %button, "gesture committed");
+                let _ = sink.send(CapturedInput::Gesture(*button, direction));
+            }
+        }
     }
 }
 

@@ -16,6 +16,9 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
+use super::gesture::{
+    GesturePhase, PanFrame, WheelDetentBank, ZoomFrame, wheel_ticks_from_screen_pixels,
+};
 use super::{HeldKey, KeyPhase, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
@@ -23,6 +26,10 @@ const WHEEL_DELTA_F64: f64 = 120.0;
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static PAN_SCROLL: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static ZOOM_DETENTS: LazyLock<Mutex<WheelDetentBank>> =
+    LazyLock::new(|| Mutex::new(WheelDetentBank::default()));
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -268,6 +275,67 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     }
 }
 
+/// Windows has no scroll-phase or pixel-unit fields. `MOUSEEVENTF_WHEEL` /
+/// `HWHEEL` is the existing degradation; 10 screen pixels = 1 tick.
+pub(super) fn post_pan_frame(frame: PanFrame) {
+    if matches!(frame.phase, GesturePhase::Began | GesturePhase::Ended)
+        && frame.dx == 0
+        && frame.dy == 0
+    {
+        return;
+    }
+    let (tick_x, tick_y) = wheel_ticks_from_screen_pixels(frame.dx, frame.dy);
+    let Ok(mut quantizer) = PAN_SCROLL.lock() else {
+        tracing::warn!("Windows pan quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(ScrollDelta::wheel_ticks(tick_x, tick_y), WHEEL_DELTA_F64);
+    drop(quantizer);
+
+    let mut inputs = Vec::with_capacity(2);
+    if delta.y != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
+    }
+    if delta.x != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, delta.x));
+    }
+    if !inputs.is_empty() {
+        send_inputs(&inputs);
+    }
+}
+
+/// Continuous pinch degrades to Ctrl+wheel detents, same contract as Linux.
+pub(super) fn post_zoom_frame(frame: ZoomFrame) {
+    match frame.phase {
+        GesturePhase::Began => {
+            send_inputs(&[key_input(VK_CONTROL, false)]);
+            emit_zoom_detents(frame.amount);
+        }
+        GesturePhase::Changed => emit_zoom_detents(frame.amount),
+        GesturePhase::Ended => {
+            if let Ok(mut bank) = ZOOM_DETENTS.lock() {
+                bank.reset();
+            }
+            send_inputs(&[key_input(VK_CONTROL, true)]);
+        }
+    }
+}
+
+fn emit_zoom_detents(amount: f32) {
+    let Ok(mut bank) = ZOOM_DETENTS.lock() else {
+        tracing::warn!("Windows zoom detent mutex poisoned");
+        return;
+    };
+    let detents = bank.ingest(amount);
+    drop(bank);
+    if detents != 0 {
+        send_inputs(&[mouse_input(
+            MOUSEEVENTF_WHEEL,
+            detents.saturating_mul(WHEEL_DELTA),
+        )]);
+    }
+}
+
 fn post_custom_shortcut(combo: &KeyCombo) {
     let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
         tracing::warn!(
@@ -443,3 +511,9 @@ mod tests {
         }
     }
 }
+
+/// Smart zoom has no native equivalent here, so a click on a Zoom-bound
+/// button does nothing. Upstream PR #1119 draws the same platform line for
+/// the standalone action: the gesture is a macOS one, and Ctrl+wheel cannot
+/// express "toggle to a sensible zoom level and back".
+pub(super) fn post_smart_zoom() {}

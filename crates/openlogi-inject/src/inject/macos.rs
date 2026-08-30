@@ -15,6 +15,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
+use super::gesture::{PanFrame, ZoomFrame, scroll_pixels_from_screen_pan};
 use super::{
     HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
 };
@@ -718,6 +719,436 @@ fn set_continuous_axis(
     event.set_integer_value_field(point_field, points);
     event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
     event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
+}
+
+/// Mach absolute time in nanoseconds — the clock `CGEventTimestamp` documents
+/// as "nanoseconds since startup".
+#[expect(
+    unsafe_code,
+    reason = "clock_gettime_nsec_np is a libSystem clock read with no pointer exchange"
+)]
+fn current_mach_timestamp_ns() -> u64 {
+    const CLOCK_UPTIME_RAW: i32 = 8;
+    unsafe extern "C" {
+        fn clock_gettime_nsec_np(clock_id: i32) -> u64;
+    }
+    // SAFETY: `clock_gettime_nsec_np` is a libSystem function; it takes a
+    // clock id and returns nanoseconds. No pointer is exchanged.
+    unsafe { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
+}
+
+fn finish_objc_gesture_event(ev: &objc2_core_graphics::CGEvent) {
+    use objc2_core_graphics::{CGEvent as ObjcCGEvent, CGEventField};
+
+    ObjcCGEvent::set_integer_value_field(
+        Some(ev),
+        CGEventField::EventSourceUserData,
+        super::SYNTHETIC_EVENT_USER_DATA,
+    );
+    // Stamp a current Mach-based timestamp so the associated IOHID queue
+    // timestamp is populated. Upstream PR #1119 documents why: without it
+    // Safari accepts a zoom-in but refuses the later gesture that toggles
+    // back out.
+    ObjcCGEvent::set_timestamp(Some(ev), current_mach_timestamp_ns());
+}
+
+pub(super) fn post_pan_frame(frame: PanFrame) {
+    use objc2_core_graphics::{
+        CGEvent as ObjcCGEvent, CGEventField, CGEventSource as ObjcSource,
+        CGEventSourceStateID as ObjcSourceState, CGEventTapLocation as ObjcTap, CGScrollEventUnit,
+    };
+
+    let (sx, sy) = scroll_pixels_from_screen_pan(frame.dx, frame.dy);
+    let Some(src) = ObjcSource::new(ObjcSourceState::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for pan");
+        return;
+    };
+    let Some(ev) =
+        ObjcCGEvent::new_scroll_wheel_event2(Some(&src), CGScrollEventUnit::Pixel, 2, sy, sx, 0)
+    else {
+        tracing::warn!("CGEvent::new_scroll_wheel_event2 failed for pan");
+        return;
+    };
+    set_objc_continuous_scroll_fields(&ev, sx, sy);
+    ObjcCGEvent::set_integer_value_field(
+        Some(&ev),
+        CGEventField::ScrollWheelEventScrollPhase,
+        frame.phase.cg_phase_bits(),
+    );
+    ObjcCGEvent::set_integer_value_field(Some(&ev), CGEventField::ScrollWheelEventMomentumPhase, 0);
+    finish_objc_gesture_event(&ev);
+    ObjcCGEvent::post(ObjcTap::HIDEventTap, Some(&ev));
+}
+
+fn set_objc_continuous_scroll_fields(event: &objc2_core_graphics::CGEvent, sx: i32, sy: i32) {
+    use objc2_core_graphics::{CGEvent as ObjcCGEvent, CGEventField};
+
+    const POINTS_PER_LINE: i64 = 10;
+    const FIXED_POINT_SCALE: i64 = 1 << 16;
+
+    ObjcCGEvent::set_integer_value_field(
+        Some(event),
+        CGEventField::ScrollWheelEventIsContinuous,
+        1,
+    );
+    set_objc_continuous_axis(
+        event,
+        sy,
+        CGEventField::ScrollWheelEventDeltaAxis1,
+        CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
+        CGEventField::ScrollWheelEventPointDeltaAxis1,
+        POINTS_PER_LINE,
+        FIXED_POINT_SCALE,
+    );
+    set_objc_continuous_axis(
+        event,
+        sx,
+        CGEventField::ScrollWheelEventDeltaAxis2,
+        CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
+        CGEventField::ScrollWheelEventPointDeltaAxis2,
+        POINTS_PER_LINE,
+        FIXED_POINT_SCALE,
+    );
+}
+
+fn set_objc_continuous_axis(
+    event: &objc2_core_graphics::CGEvent,
+    points: i32,
+    line_field: objc2_core_graphics::CGEventField,
+    fixed_field: objc2_core_graphics::CGEventField,
+    point_field: objc2_core_graphics::CGEventField,
+    points_per_line: i64,
+    fixed_point_scale: i64,
+) {
+    use objc2_core_graphics::CGEvent as ObjcCGEvent;
+
+    let points = i64::from(points);
+    // CoreGraphics recomputes line / fixedPt / pointDelta siblings on each
+    // write. A line-delta of 0 (any |points| < 10) zeros the others, so the
+    // pixel value must be written after the line field or it does not
+    // survive. Real two-finger type-22 events keep that pixel in pointDelta
+    // and leave fixedPt at 0 for these sub-line frames — writing the line
+    // field after fixedPt is what clears the constructor's leftover 16.16.
+    ObjcCGEvent::set_integer_value_field(
+        Some(event),
+        fixed_field,
+        points * fixed_point_scale / points_per_line,
+    );
+    ObjcCGEvent::set_integer_value_field(Some(event), line_field, points / points_per_line);
+    ObjcCGEvent::set_integer_value_field(Some(event), point_field, points);
+}
+
+/// Private CGEvent fields from WebKit's CoreGraphicsTestSPI. Not in the
+/// public `CGEventField` enum.
+const GESTURE_HID_TYPE: objc2_core_graphics::CGEventField = objc2_core_graphics::CGEventField(110);
+const GESTURE_ZOOM_VALUE: objc2_core_graphics::CGEventField =
+    objc2_core_graphics::CGEventField(113);
+const GESTURE_PHASE: objc2_core_graphics::CGEventField = objc2_core_graphics::CGEventField(132);
+/// `kIOHIDEventTypeZoom` in IOHIDEventTypes.h (NULL=0 … Zoom=8).
+const HID_EVENT_TYPE_ZOOM: i64 = 8;
+
+/// `kIOHIDEventTypeZoomToggle` in IOHIDEventTypes.h. AppKit surfaces a
+/// gesture carrying it as `NSEventTypeSmartMagnify`.
+const HID_EVENT_TYPE_ZOOM_TOGGLE: i64 = 22;
+/// Private payload markers that real trackpad and Logitech smart-zoom events
+/// both carry, and that receiving applications check for.
+const GESTURE_PAYLOAD_KIND: objc2_core_graphics::CGEventField =
+    objc2_core_graphics::CGEventField(59);
+const GESTURE_PAYLOAD_KIND_VALUE: i64 = 0x2000_0100;
+const GESTURE_PAYLOAD_FLAGS: objc2_core_graphics::CGEventField =
+    objc2_core_graphics::CGEventField(102);
+const GESTURE_PAYLOAD_FLAGS_VALUE: i64 = 0x3f;
+
+/// HID-layer gesture type (`NSEventTypeGesture`).
+///
+/// Real trackpad pinches arrive as this, never as `NSEventTypeMagnify` (30).
+/// AppKit is what promotes type 29 + field 110 = Zoom into a magnify NSEvent.
+/// Posting 30 at this layer is not a pinch — measured against a real trackpad
+/// stream, type 30 never appeared.
+fn zoom_cg_event_type() -> objc2_core_graphics::CGEventType {
+    use objc2_app_kit::NSEventType;
+    use objc2_core_graphics::CGEventType;
+
+    CGEventType(u32::try_from(NSEventType::Gesture.0).unwrap_or(29))
+}
+
+fn fill_zoom_event(ev: &objc2_core_graphics::CGEvent, frame: ZoomFrame) {
+    use objc2_core_graphics::CGEvent as ObjcCGEvent;
+
+    ObjcCGEvent::set_type(Some(ev), zoom_cg_event_type());
+    ObjcCGEvent::set_integer_value_field(Some(ev), GESTURE_HID_TYPE, HID_EVENT_TYPE_ZOOM);
+    ObjcCGEvent::set_integer_value_field(Some(ev), GESTURE_PHASE, frame.phase.cg_phase_bits());
+    ObjcCGEvent::set_double_value_field(Some(ev), GESTURE_ZOOM_VALUE, f64::from(frame.amount));
+    finish_objc_gesture_event(ev);
+}
+
+pub(super) fn post_zoom_frame(frame: ZoomFrame) {
+    use objc2_core_graphics::{
+        CGEvent as ObjcCGEvent, CGEventSource as ObjcSource,
+        CGEventSourceStateID as ObjcSourceState, CGEventTapLocation as ObjcTap,
+    };
+
+    let Some(src) = ObjcSource::new(ObjcSourceState::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for zoom");
+        return;
+    };
+    let Some(ev) = ObjcCGEvent::new(Some(&src)) else {
+        tracing::warn!("CGEvent::new failed for zoom");
+        return;
+    };
+    fill_zoom_event(&ev, frame);
+    ObjcCGEvent::post(ObjcTap::HIDEventTap, Some(&ev));
+}
+
+/// Post one native smart-zoom toggle at the pointer: zoom in, then press
+/// again to return.
+///
+/// The event synthesis — the `ZoomToggle` subtype and the two private payload
+/// markers above — is Kyle Foley's work from upstream PR #1119
+/// (<https://github.com/AprilNEA/OpenLogi/pull/1119>), reused here with
+/// thanks. It is driven from somewhere different: #1119 offers smart zoom as
+/// its own bindable action, while this is what a Zoom-bound button does when
+/// it is clicked instead of dragged.
+///
+/// Unlike the continuous pinch, the source is the combined session state
+/// rather than HID, which is what real smart-zoom events carry.
+pub(super) fn post_smart_zoom() {
+    use objc2_core_graphics::{
+        CGEvent as ObjcCGEvent, CGEventSource as ObjcSource,
+        CGEventSourceStateID as ObjcSourceState, CGEventTapLocation as ObjcTap,
+    };
+
+    let Some(src) = ObjcSource::new(ObjcSourceState::CombinedSessionState) else {
+        tracing::warn!("CGEventSource::new failed for smart zoom");
+        return;
+    };
+    let Some(ev) = ObjcCGEvent::new(Some(&src)) else {
+        tracing::warn!("CGEvent::new failed for smart zoom");
+        return;
+    };
+    fill_smart_zoom_event(&ev);
+    ObjcCGEvent::post(ObjcTap::HIDEventTap, Some(&ev));
+}
+
+fn fill_smart_zoom_event(ev: &objc2_core_graphics::CGEvent) {
+    use objc2_core_graphics::CGEvent as ObjcCGEvent;
+
+    ObjcCGEvent::set_type(Some(ev), zoom_cg_event_type());
+    ObjcCGEvent::set_integer_value_field(Some(ev), GESTURE_HID_TYPE, HID_EVENT_TYPE_ZOOM_TOGGLE);
+    ObjcCGEvent::set_integer_value_field(
+        Some(ev),
+        GESTURE_PAYLOAD_KIND,
+        GESTURE_PAYLOAD_KIND_VALUE,
+    );
+    ObjcCGEvent::set_integer_value_field(
+        Some(ev),
+        GESTURE_PAYLOAD_FLAGS,
+        GESTURE_PAYLOAD_FLAGS_VALUE,
+    );
+    finish_objc_gesture_event(ev);
+}
+
+#[cfg(test)]
+mod zoom_event_tests {
+    use objc2_app_kit::NSEventType;
+    use objc2_core_graphics::{
+        CGEvent as ObjcCGEvent, CGEventField, CGEventSource as ObjcSource,
+        CGEventSourceStateID as ObjcSourceState,
+    };
+
+    use super::{
+        GESTURE_HID_TYPE, GESTURE_PAYLOAD_FLAGS, GESTURE_PAYLOAD_FLAGS_VALUE, GESTURE_PAYLOAD_KIND,
+        GESTURE_PAYLOAD_KIND_VALUE, GESTURE_PHASE, GESTURE_ZOOM_VALUE, HID_EVENT_TYPE_ZOOM,
+        HID_EVENT_TYPE_ZOOM_TOGGLE, fill_smart_zoom_event, fill_zoom_event, zoom_cg_event_type,
+    };
+    use crate::inject::gesture::{GesturePhase, ZoomFrame};
+
+    /// Magnitude from the real trackpad capture (event #17). Independent of
+    /// our writer — 1002733568 is what the probe read on fields 115/117/164.
+    const CAPTURE_F32_BITS: u32 = 1_002_733_568;
+    const CAPTURE_ZOOM_IN: f32 = f32::from_bits(CAPTURE_F32_BITS);
+
+    fn filled(frame: ZoomFrame) -> impl core::ops::Deref<Target = objc2_core_graphics::CGEvent> {
+        let src = ObjcSource::new(ObjcSourceState::HIDSystemState).expect("CGEventSource");
+        let ev = ObjcCGEvent::new(Some(&src)).expect("CGEvent");
+        fill_zoom_event(&ev, frame);
+        ev
+    }
+
+    #[test]
+    fn nsevent_gesture_is_29_and_magnify_is_30() {
+        // NSEvent.h, measured against a real trackpad: every pinch was type 29.
+        assert_eq!(
+            u32::try_from(NSEventType::Gesture.0).expect("Gesture fits u32"),
+            29
+        );
+        assert_eq!(
+            u32::try_from(NSEventType::Magnify.0).expect("Magnify fits u32"),
+            30
+        );
+    }
+
+    #[test]
+    fn zoom_frame_uses_hid_gesture_not_appkit_magnify() {
+        assert_eq!(zoom_cg_event_type().0, 29);
+        assert_ne!(zoom_cg_event_type().0, 30);
+        let ev = filled(ZoomFrame {
+            phase: GesturePhase::Changed,
+            amount: CAPTURE_ZOOM_IN,
+        });
+        assert_eq!(ObjcCGEvent::r#type(Some(&ev)).0, 29);
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), GESTURE_HID_TYPE),
+            HID_EVENT_TYPE_ZOOM
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), GESTURE_PHASE),
+            2
+        );
+        let mag = ObjcCGEvent::double_value_field(Some(&ev), GESTURE_ZOOM_VALUE);
+        assert_eq!(mag.to_bits(), f64::from(CAPTURE_ZOOM_IN).to_bits());
+        // Writing 113 alone populates these; they are one storage word.
+        assert_eq!(
+            ObjcCGEvent::double_value_field(Some(&ev), CGEventField(114)).to_bits(),
+            mag.to_bits()
+        );
+        assert_eq!(
+            ObjcCGEvent::double_value_field(Some(&ev), CGEventField(116)).to_bits(),
+            mag.to_bits()
+        );
+        assert_eq!(
+            ObjcCGEvent::double_value_field(Some(&ev), CGEventField(118)).to_bits(),
+            mag.to_bits()
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), CGEventField(115)),
+            i64::from(CAPTURE_F32_BITS)
+        );
+    }
+
+    #[test]
+    fn zoom_event_phase_bits_match_cg_gesture_phase() {
+        for (phase, bits) in [
+            (GesturePhase::Began, 1),
+            (GesturePhase::Changed, 2),
+            (GesturePhase::Ended, 4),
+        ] {
+            let ev = filled(ZoomFrame { phase, amount: 0.0 });
+            assert_eq!(
+                ObjcCGEvent::integer_value_field(Some(&ev), GESTURE_PHASE),
+                bits,
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_zoom_is_a_zoom_toggle_gesture_at_the_pointer() {
+        let src = ObjcSource::new(ObjcSourceState::CombinedSessionState).expect("CGEventSource");
+        let ev = ObjcCGEvent::new(Some(&src)).expect("CGEvent");
+        let pointer = ObjcCGEvent::location(Some(&ev));
+
+        fill_smart_zoom_event(&ev);
+
+        assert_eq!(ObjcCGEvent::r#type(Some(&ev)).0, zoom_cg_event_type().0);
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), GESTURE_HID_TYPE),
+            HID_EVENT_TYPE_ZOOM_TOGGLE,
+            "a discrete toggle is not the continuous Zoom subtype"
+        );
+        assert_ne!(
+            HID_EVENT_TYPE_ZOOM_TOGGLE, HID_EVENT_TYPE_ZOOM,
+            "the two zoom gestures must stay distinguishable"
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), GESTURE_PAYLOAD_KIND),
+            GESTURE_PAYLOAD_KIND_VALUE
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), GESTURE_PAYLOAD_FLAGS),
+            GESTURE_PAYLOAD_FLAGS_VALUE
+        );
+        assert_ne!(
+            ObjcCGEvent::timestamp(Some(&ev)),
+            0,
+            "an unstamped gesture leaves Safari latched after the first toggle"
+        );
+        assert_eq!(
+            ObjcCGEvent::location(Some(&ev)),
+            pointer,
+            "smart zoom acts where the pointer already is"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pan_event_tests {
+    use objc2_core_graphics::{
+        CGEvent as ObjcCGEvent, CGEventField, CGEventSource as ObjcSource,
+        CGEventSourceStateID as ObjcSourceState, CGScrollEventUnit,
+    };
+
+    use super::set_objc_continuous_scroll_fields;
+
+    /// Real two-finger Began frame (capture event #12): `pointDelta=(-2, 0)`,
+    /// `fixedPt` and line delta both zero.
+    const CAPTURE_BEGAN_POINT_Y: i32 = -2;
+    const CAPTURE_BEGAN_POINT_X: i32 = 0;
+
+    #[test]
+    fn continuous_pan_keeps_pixel_delta_in_point_delta() {
+        let src = ObjcSource::new(ObjcSourceState::HIDSystemState).expect("CGEventSource");
+        let ev = ObjcCGEvent::new_scroll_wheel_event2(
+            Some(&src),
+            CGScrollEventUnit::Pixel,
+            2,
+            CAPTURE_BEGAN_POINT_Y,
+            CAPTURE_BEGAN_POINT_X,
+            0,
+        )
+        .expect("CGEventCreateScrollWheelEvent2");
+        set_objc_continuous_scroll_fields(&ev, CAPTURE_BEGAN_POINT_X, CAPTURE_BEGAN_POINT_Y);
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(
+                Some(&ev),
+                CGEventField::ScrollWheelEventPointDeltaAxis1
+            ),
+            i64::from(CAPTURE_BEGAN_POINT_Y)
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(
+                Some(&ev),
+                CGEventField::ScrollWheelEventPointDeltaAxis2
+            ),
+            i64::from(CAPTURE_BEGAN_POINT_X)
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(
+                Some(&ev),
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis1
+            ),
+            0
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(
+                Some(&ev),
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis2
+            ),
+            0
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), CGEventField::ScrollWheelEventDeltaAxis1),
+            0
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), CGEventField::ScrollWheelEventDeltaAxis2),
+            0
+        );
+        assert_eq!(
+            ObjcCGEvent::integer_value_field(Some(&ev), CGEventField::ScrollWheelEventIsContinuous),
+            1
+        );
+    }
 }
 
 /// Raw FFI surface for the AXUIElement/CF calls used by [`ax_browser_navigate`]

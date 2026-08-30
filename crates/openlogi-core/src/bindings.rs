@@ -96,6 +96,26 @@ pub fn hidpp_gesture_maps_for(
         .collect()
 }
 
+/// Buttons whose effective binding is a hold-mode [`Action`] (`Pan` / `Zoom`).
+///
+/// The HID++ capture session owns these while they are armed. The OS-hook map
+/// must omit them so a session restart cannot start a second dispatch path
+/// with no matching button-up.
+#[must_use]
+pub fn hold_mode_bindings_for(
+    config: &Config,
+    config_key: Option<&str>,
+    app_bundle: Option<&str>,
+) -> BTreeMap<ButtonId, Action> {
+    button_bindings_for(config, config_key, app_bundle)
+        .into_iter()
+        .filter_map(|(button, binding)| match binding {
+            Binding::Single(action) if action.is_hold_mode() => Some((button, action)),
+            Binding::Single(_) | Binding::Gesture(_) | Binding::LongPress(_) => None,
+        })
+        .collect()
+}
+
 /// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
 /// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
 /// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
@@ -343,5 +363,24 @@ mod tests {
             hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
+    }
+
+    #[test]
+    fn hold_mode_bindings_collect_only_single_pan_and_zoom() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+        cfg.set_binding("2b042", ButtonId::Forward, Binding::Single(Action::Zoom));
+        cfg.set_binding(
+            "2b042",
+            ButtonId::MiddleClick,
+            Binding::Single(Action::Copy),
+        );
+        cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
+
+        let hold = hold_mode_bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(hold.get(&ButtonId::Back), Some(&Action::Pan));
+        assert_eq!(hold.get(&ButtonId::Forward), Some(&Action::Zoom));
+        assert!(!hold.contains_key(&ButtonId::MiddleClick));
+        assert!(!hold.contains_key(&ButtonId::GestureButton));
     }
 }

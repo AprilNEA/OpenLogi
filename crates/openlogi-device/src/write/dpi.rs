@@ -15,6 +15,7 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
+use super::sensor_dpi::remember_sensor_dpi;
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
 // DpiCapabilities and DpiInfo are pure IPC wire data with no HID++ I/O, so
@@ -189,10 +190,12 @@ pub(super) fn expand_dpi_ranges(ranges: &[DpiRange]) -> Vec<u16> {
 /// surface that wants to display the current value without writing.
 pub async fn get_dpi(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<Dpi, WriteError> {
     let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
+    let dpi = with_route(backend, route, move |channel| async move {
         get_dpi_on_channel(&channel, index).await
     })
-    .await
+    .await?;
+    remember_sensor_dpi(route, dpi);
+    Ok(dpi)
 }
 
 async fn get_dpi_on_channel(
@@ -207,6 +210,13 @@ async fn get_dpi_on_channel(
         .current_dpi()
         .await
         .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadDpi, feature.id()))
+}
+
+/// Read the current sensor DPI on an already-open [`SharedChannel`].
+pub async fn get_dpi_on(shared: &SharedChannel) -> Result<Dpi, WriteError> {
+    let dpi = get_dpi_on_channel(shared.channel(), shared.device_index()).await?;
+    remember_sensor_dpi(shared.route(), dpi);
+    Ok(dpi)
 }
 
 /// Classify a HID++ error from the DPI functions of `feature_hex`. A device
@@ -230,10 +240,12 @@ pub async fn get_dpi_info(
     route: &DeviceRoute,
 ) -> Result<DpiInfo, WriteError> {
     let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
+    let info = with_route(backend, route, move |channel| async move {
         get_dpi_info_on_channel(&channel, index).await
     })
-    .await
+    .await?;
+    remember_sensor_dpi(route, info.current);
+    Ok(info)
 }
 
 pub(super) async fn get_dpi_info_on_channel(
@@ -275,10 +287,12 @@ pub async fn set_dpi(
     dpi: Dpi,
 ) -> Result<(), WriteError> {
     let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
+    let cached = with_route(backend, route, move |channel| async move {
         set_dpi_on_channel(&channel, index, dpi).await
     })
-    .await
+    .await?;
+    remember_sensor_dpi(route, cached);
+    Ok(())
 }
 
 /// The DPI write itself, on an already-open channel at HID++ `index`. Shared by
@@ -288,7 +302,7 @@ pub(super) async fn set_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
     dpi: Dpi,
-) -> Result<(), WriteError> {
+) -> Result<Dpi, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -301,7 +315,7 @@ pub(super) async fn set_dpi_on_channel(
     // silent failure mode that's otherwise invisible — devices in low-power
     // states or with unsupported DPI ranges can ACK the write yet keep the old
     // value. We log a warning but still return Ok because the request reached
-    // the device.
+    // the device. Cache the firmware's actual reading when we have one.
     if let Ok(actual) = feature.current_dpi().await {
         if actual == dpi {
             debug!(index, %dpi, "wrote DPI (verified)");
@@ -314,19 +328,24 @@ pub(super) async fn set_dpi_on_channel(
                  likely out of the device's supported range"
             );
         }
+        Ok(actual)
     } else {
         debug!(index, %dpi, "wrote DPI (read-back skipped)");
+        Ok(dpi)
     }
-    Ok(())
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
 /// enumeration and channel setup.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteError> {
-    set_dpi_on_channel(shared.channel(), shared.device_index(), dpi).await
+    let cached = set_dpi_on_channel(shared.channel(), shared.device_index(), dpi).await?;
+    remember_sensor_dpi(shared.route(), cached);
+    Ok(())
 }
 
 /// Read current DPI and supported values on an already-open [`SharedChannel`].
 pub async fn get_dpi_info_on(shared: &SharedChannel) -> Result<DpiInfo, WriteError> {
-    get_dpi_info_on_channel(shared.channel(), shared.device_index()).await
+    let info = get_dpi_info_on_channel(shared.channel(), shared.device_index()).await?;
+    remember_sensor_dpi(shared.route(), info.current);
+    Ok(info)
 }

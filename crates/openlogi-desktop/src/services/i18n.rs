@@ -163,14 +163,24 @@ mod tests {
             "blurb key missing from zh-TW.yml"
         );
 
-        rust_i18n::set_locale("it");
-        assert_eq!(rust_i18n::t!("Settings"), "Impostazioni");
-        assert_eq!(rust_i18n::t!("Left Click"), "Click sinistro");
-        assert_eq!(rust_i18n::t!("Cancel"), "Annulla");
+        assert_italian_hold_mode_keys_are_not_window_zoom();
 
         // English is the Crowdin source locale.
         rust_i18n::set_locale("en");
         assert_eq!(rust_i18n::t!("Settings"), "Settings");
         assert_eq!(rust_i18n::t!(BLURB), BLURB);
+    }
+
+    /// Called under [`locale_file_resolves_keys`]'s locale lock. Window-menu
+    /// Zoom is "Ridimensiona"; the hold action must keep its own key.
+    fn assert_italian_hold_mode_keys_are_not_window_zoom() {
+        rust_i18n::set_locale("it");
+        assert_eq!(rust_i18n::t!("Settings"), "Impostazioni");
+        assert_eq!(rust_i18n::t!("Left Click"), "Click sinistro");
+        assert_eq!(rust_i18n::t!("Cancel"), "Annulla");
+        assert_eq!(rust_i18n::t!("Zoom"), "Ridimensiona");
+        assert_eq!(rust_i18n::t!("Pinch Zoom"), "Zoom pinch");
+        assert_ne!(rust_i18n::t!("Pinch Zoom"), rust_i18n::t!("Zoom"));
+        assert_eq!(rust_i18n::t!("Pan"), "Scorrimento");
     }
 }

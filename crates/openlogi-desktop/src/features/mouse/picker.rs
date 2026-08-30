@@ -7,7 +7,7 @@ use gpui::{
     Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category, GestureDirection};
+use openlogi_core::binding::{Action, ActionRingIcon, Category, GestureDirection};
 
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
@@ -19,11 +19,36 @@ pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 /// Commit callback invoked when an action row is clicked.
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
+/// Which bindings a catalog is allowed to offer.
+///
+/// Hold-mode actions need a press that stays down. A swipe slot, function key,
+/// or ring tap cannot keep that hold alive, so those surfaces use
+/// [`ActionCatalogKind::Instant`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActionCatalogKind {
+    /// A physical button: hold-mode pan and zoom are offered here.
+    Button,
+    /// A tap, keypress, or swipe: hold-mode actions cannot fire.
+    Instant,
+}
+
+impl ActionCatalogKind {
+    fn admits(self, action: &Action) -> bool {
+        match self {
+            Self::Button => true,
+            Self::Instant => !action.is_hold_mode(),
+        }
+    }
+}
+
 /// The action catalog grouped by [`Category`], preserving catalog order within
 /// each group and first-seen order across groups.
-pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
+pub(crate) fn grouped_catalog(kind: ActionCatalogKind) -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
     for action in Action::catalog() {
+        if !kind.admits(&action) {
+            continue;
+        }
         let category = action.category();
         if let Some(section) = sections
             .iter_mut()
@@ -104,6 +129,28 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
             "action-icons/keyboard.svg"
         }
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
+        // Same glyphs the ring registry assigns — a hand-edited binding must
+        // not show a different icon than the picker row that offered it.
+        Action::Pan | Action::Zoom => ActionRingIcon::for_action(action).asset_path(),
+    }
+}
+
+/// Host-honest picker caption for a hold-mode action.
+///
+/// macOS can deliver a phased trackpad pan and a real pinch; Linux and
+/// Windows degrade to wheel ticks and Ctrl+wheel, so those hosts must not
+/// promise rubber-band, momentum, or pinch.
+pub(crate) fn hold_mode_hint(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Pan if cfg!(target_os = "macos") => {
+            Some("Hold and drag to scroll in any direction.")
+        }
+        Action::Pan => Some("Hold and drag to scroll."),
+        Action::Zoom if cfg!(target_os = "macos") => {
+            Some("Hold and drag up or down to pinch-zoom.")
+        }
+        Action::Zoom => Some("Hold and drag to Ctrl+zoom."),
+        _ => None,
     }
 }
 
@@ -111,10 +158,11 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
 pub(crate) fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
+    kind: ActionCatalogKind,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
-    action_rows_matching(id_prefix, current, "", on_pick, pal)
+    action_rows_matching(id_prefix, current, "", kind, on_pick, pal)
 }
 
 /// Build action rows filtered by localized action or category name.
@@ -122,13 +170,14 @@ pub(crate) fn action_rows_matching(
     id_prefix: &'static str,
     current: Option<&Action>,
     query: &str,
+    kind: ActionCatalogKind,
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
     let query = query.trim().to_lowercase();
     let mut catalog_index = 0usize;
     let mut sections = Vec::new();
-    for (category, actions) in grouped_catalog() {
+    for (category, actions) in grouped_catalog(kind) {
         let category_label = rust_i18n::t!(category.label());
         let category_matches = category_label.to_lowercase().contains(&query);
         // Number the full catalog before filtering so typing in the search box
@@ -158,7 +207,11 @@ pub(crate) fn action_rows_matching(
                 .children(actions.into_iter().map(|(action_key, action)| {
                     let selected = current == Some(&action);
                     let label = tr!(action.label());
-                    let accessible_label = label.clone();
+                    let hint = hold_mode_hint(&action);
+                    let accessible_label = match hint {
+                        Some(key) => format!("{label} — {}", rust_i18n::t!(key)).into(),
+                        None => label.clone(),
+                    };
                     let icon_path = action_icon_path(&action);
                     let on_pick = on_pick.clone();
                     MenuRow::new((id_prefix, action_key))
@@ -176,7 +229,14 @@ pub(crate) fn action_rows_matching(
                                         .flex_none()
                                         .text_color(pal.text_muted),
                                 )
-                                .child(div().child(label)),
+                                .child(v_flex().min_w_0().child(div().child(label)).children(
+                                    hint.map(|key| {
+                                        div()
+                                            .text_caption()
+                                            .text_color(pal.text_muted)
+                                            .child(tr!(key))
+                                    }),
+                                )),
                         )
                         .when(selected, |row| {
                             row.child(
@@ -239,12 +299,80 @@ pub(crate) fn editor_scroll_list(
 mod tests {
     use super::*;
 
-    #[test]
-    fn gesture_action_catalog_includes_actions_ring() {
-        let actions = grouped_catalog()
+    fn catalog_actions(kind: ActionCatalogKind) -> Vec<Action> {
+        grouped_catalog(kind)
             .into_iter()
             .flat_map(|(_, actions)| actions)
-            .collect::<Vec<_>>();
-        assert!(actions.contains(&Action::ShowActionsRing));
+            .collect()
+    }
+
+    #[test]
+    fn button_catalog_offers_hold_mode() {
+        let actions = catalog_actions(ActionCatalogKind::Button);
+        assert!(actions.contains(&Action::Pan));
+        assert!(actions.contains(&Action::Zoom));
+        assert!(actions.contains(&Action::ScrollUp));
+    }
+
+    #[test]
+    fn instant_catalog_omits_hold_mode() {
+        let actions = catalog_actions(ActionCatalogKind::Instant);
+        assert!(!actions.contains(&Action::Pan));
+        assert!(!actions.contains(&Action::Zoom));
+        assert!(
+            !actions.iter().any(Action::is_hold_mode),
+            "a swipe or keypress catalog leaked a hold-mode action"
+        );
+        assert!(actions.contains(&Action::ScrollUp));
+        assert!(actions.contains(&Action::Copy));
+    }
+
+    #[test]
+    fn hold_mode_icons_match_the_ring_registry() {
+        assert_eq!(
+            action_icon_path(&Action::Pan),
+            ActionRingIcon::for_action(&Action::Pan).asset_path()
+        );
+        assert_eq!(
+            action_icon_path(&Action::Zoom),
+            ActionRingIcon::for_action(&Action::Zoom).asset_path()
+        );
+        assert_eq!(action_icon_path(&Action::Pan), "action-icons/mouse.svg");
+        assert_eq!(action_icon_path(&Action::Zoom), "action-icons/search.svg");
+    }
+
+    #[test]
+    fn hold_mode_hints_are_honest_on_this_host() {
+        assert_eq!(hold_mode_hint(&Action::ScrollUp), None);
+        assert_eq!(hold_mode_hint(&Action::Copy), None);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                hold_mode_hint(&Action::Pan),
+                Some("Hold and drag to scroll in any direction.")
+            );
+            assert_eq!(
+                hold_mode_hint(&Action::Zoom),
+                Some("Hold and drag up or down to pinch-zoom.")
+            );
+        } else {
+            assert_eq!(
+                hold_mode_hint(&Action::Pan),
+                Some("Hold and drag to scroll.")
+            );
+            assert_eq!(
+                hold_mode_hint(&Action::Zoom),
+                Some("Hold and drag to Ctrl+zoom.")
+            );
+        }
+    }
+
+    #[test]
+    fn gesture_action_catalog_includes_actions_ring() {
+        for kind in [ActionCatalogKind::Button, ActionCatalogKind::Instant] {
+            assert!(
+                catalog_actions(kind).contains(&Action::ShowActionsRing),
+                "{kind:?} picker dropped the Actions Ring"
+            );
+        }
     }
 }

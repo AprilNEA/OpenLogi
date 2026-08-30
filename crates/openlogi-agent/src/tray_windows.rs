@@ -445,11 +445,7 @@ fn quit(hwnd: HWND) {
     }
     crate::overlay::evict_on_quit();
     info!("tray Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from the window procedure on the tray thread: the status cannot travel back through an `extern \"system\"` callback, and ending the message pump would only end this thread while `main` keeps running the agent core"
-    )]
-    std::process::exit(0);
+    crate::shutdown::flush_and_exit(0);
 }
 
 /// NUL-terminated UTF-16 for win32 W-APIs.

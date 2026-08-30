@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
-use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
+use openlogi_core::bindings::{button_bindings_for, hold_mode_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
@@ -24,15 +24,17 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    KEYBOARD_KEY_CIDS, cached_sensor_dpi, get_dpi_on,
 };
+use openlogi_hook::Hook;
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    CaptureHostAbility, DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device_with,
 };
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
@@ -171,11 +173,9 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
-    /// Whether the OS mouse hook is currently installed. Back/Forward gesture
-    /// motion comes from HID++, but diversion is published only while the
-    /// broader mouse-remapping path is available so losing the hook leaves the
-    /// side buttons native.
-    os_mouse_hook_available: bool,
+    /// OS-hook and inject facts that decide HID++ diversion and hold-mode
+    /// arming. Grouped so a grant without a hook still republishes plans.
+    host_ability: HostAbility,
     /// Private producer halves for the read-only runtime projections in
     /// `shared`, keeping the orchestrator's single-writer contract structural.
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
@@ -186,6 +186,19 @@ pub struct Orchestrator {
     /// facts republishes here, so the cell cannot go stale behind a new code
     /// path — see [`ObservableState`].
     observable: Arc<ObservableState>,
+}
+
+/// Live host facts the orchestrator feeds into [`CaptureHostAbility`].
+struct HostAbility {
+    /// Whether the OS mouse hook is currently installed. Back/Forward gesture
+    /// motion comes from HID++, but diversion is published only while the
+    /// broader mouse-remapping path is available so losing the hook leaves the
+    /// side buttons native.
+    os_mouse_hook: bool,
+    /// Whether synthesised pan/zoom can be delivered. Seeded from
+    /// [`Hook::has_accessibility`] and refreshed when the hook availability
+    /// changes so a grant without a hook still republishes capture plans.
+    injection: bool,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -244,7 +257,10 @@ impl Orchestrator {
             reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
-            os_mouse_hook_available: false,
+            host_ability: HostAbility {
+                os_mouse_hook: false,
+                injection: Hook::has_accessibility(),
+            },
             capture_plans_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
@@ -288,6 +304,12 @@ impl Orchestrator {
                 // HID++ owns both edges for these controls. Keeping their
                 // projected click or gesture map in the global hook would
                 // reintroduce a second, unattributed dispatch path.
+                bindings.remove(button);
+                gestures.remove(button);
+            }
+            for button in hold_mode_bindings_for(&self.config, Some(key), app).keys() {
+                // HID++ raw-XY owns the hold. Leaving Pan/Zoom on the OS hook
+                // starts a second dispatch path with no matching button-up.
                 bindings.remove(button);
                 gestures.remove(button);
             }
@@ -372,8 +394,12 @@ impl Orchestrator {
     /// forget the other — a waking device needs both its capture session and
     /// its DPI-cycle slot.
     fn publish_device_runtime(&self) {
-        self.publish_capture_plans();
+        // Rebuild the cycle map first so `live_sensor_dpi` can see this
+        // tick's presets. Then kick HID++ reads for cache misses; those
+        // complete asynchronously and land on a later publish.
         self.rebuild_dpi_cycles(self.current_key());
+        self.refresh_missing_sensor_dpi();
+        self.publish_capture_plans();
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -442,14 +468,18 @@ impl Orchestrator {
                 let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
                 let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
                     .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
-                Some(plan_for_device(
+                Some(plan_for_device_with(
                     &self.config,
                     physical_key,
                     &dev.config_key,
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
-                    self.os_mouse_hook_available,
+                    CaptureHostAbility {
+                        os_mouse_hook_available: self.host_ability.os_mouse_hook,
+                        injection_available: self.host_ability.injection,
+                        sensor_dpi: self.live_sensor_dpi(&dev.config_key),
+                    },
                 ))
             })
             .collect()
@@ -461,11 +491,70 @@ impl Orchestrator {
     /// if the mouse-remapping hook is unavailable, side buttons remain native.
     /// Other HID++-only controls remain captured independently.
     pub fn set_os_mouse_hook_available(&mut self, available: bool) {
-        if self.os_mouse_hook_available == available {
+        let injection = Hook::has_accessibility();
+        if self.host_ability.os_mouse_hook == available && self.host_ability.injection == injection
+        {
             return;
         }
-        self.os_mouse_hook_available = available;
+        self.host_ability.os_mouse_hook = available;
+        self.host_ability.injection = injection;
         self.publish_capture_plans();
+    }
+
+    /// Publish whether synthesised pan/zoom can be delivered.
+    ///
+    /// The accessibility watcher already calls [`Self::set_os_mouse_hook_available`]
+    /// on every grant change; this setter is for tests and for a grant that
+    /// does not also change hook installation.
+    pub fn set_injection_available(&mut self, available: bool) {
+        if self.host_ability.injection == available {
+            return;
+        }
+        self.host_ability.injection = available;
+        self.publish_capture_plans();
+    }
+
+    /// Sensor DPI for `config_key`: the cached HID++ `getSensorDpi` reading
+    /// first, then the selected cycle preset. [`plan_for_device_with`] then
+    /// falls back to committed `config.dpi` and a named factory default.
+    fn live_sensor_dpi(&self, config_key: &str) -> Option<openlogi_core::hid::Dpi> {
+        if let Some(route) = self
+            .devices
+            .iter()
+            .find(|dev| dev.config_key == config_key)
+            .and_then(|dev| dev.route.as_ref())
+            && let Some(dpi) = cached_sensor_dpi(route)
+        {
+            return Some(dpi);
+        }
+        let Ok(guard) = self.shared.dpi_cycle.read() else {
+            return None;
+        };
+        let state = guard.by_key.get(config_key)?;
+        state.presets.get(state.index).copied()
+    }
+
+    /// Read `getSensorDpi` for online devices whose cache is empty. The
+    /// write path (`set_dpi_on`) already refreshes the cache, so a cycle
+    /// cannot leave hold-mode sizing on a stale reading.
+    fn refresh_missing_sensor_dpi(&self) {
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+        {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            if cached_sensor_dpi(&route).is_some() {
+                continue;
+            }
+            self.shared
+                .device(&route)
+                .detach("sensor DPI read", |channel| async move {
+                    get_dpi_on(&channel).await.map(|_| ())
+                });
+        }
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC

@@ -22,6 +22,10 @@
 //!
 //! # Inject a scroll sequence:
 //! sudo ./target/debug/examples/inject_action ScrollDown ScrollDown ScrollDown ScrollUp
+//!
+//! # Hold-mode pan (pixel scroll with phase) and zoom (pinch / Ctrl+wheel):
+//! sudo ./target/debug/examples/inject_action --delay 2 PanBegin Pan:8:6 Pan:8:6 PanEnd
+//! sudo ./target/debug/examples/inject_action --delay 2 Zoom:0.05 Zoom:0.05 ZoomEnd
 //! ```
 //!
 //! # Available actions
@@ -34,6 +38,7 @@
 //! PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume
 //! CycleDpiPresets ToggleSmartShift
 //! ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight
+//! PanBegin Pan:<dx>:<dy> PanEnd Zoom:<amount> ZoomEnd FlushGestures
 
 use std::time::Duration;
 
@@ -43,6 +48,52 @@ use serde::de::IntoDeserializer;
 use openlogi_core::binding::{Action, KeyCombo};
 #[cfg(target_os = "linux")]
 use openlogi_inject::action_device_path;
+
+enum Step {
+    Action(Action),
+    PanBegin,
+    Pan { dx: f32, dy: f32 },
+    PanEnd,
+    Zoom(f32),
+    ZoomEnd,
+    FlushGestures,
+}
+
+fn parse_step(s: &str) -> Result<Step, String> {
+    match s {
+        "PanBegin" => return Ok(Step::PanBegin),
+        "PanEnd" => return Ok(Step::PanEnd),
+        "ZoomEnd" => return Ok(Step::ZoomEnd),
+        "FlushGestures" => return Ok(Step::FlushGestures),
+        _ => {}
+    }
+    if let Some(rest) = s.strip_prefix("Pan:") {
+        let mut parts = rest.split(':');
+        let dx = parts
+            .next()
+            .ok_or_else(|| format!("Pan: expected Pan:<dx>:<dy>, got {s}"))?;
+        let dy = parts
+            .next()
+            .ok_or_else(|| format!("Pan: expected Pan:<dx>:<dy>, got {s}"))?;
+        if parts.next().is_some() {
+            return Err(format!("Pan: expected Pan:<dx>:<dy>, got {s}"));
+        }
+        let dx: f32 = dx
+            .parse()
+            .map_err(|_| format!("Pan: dx is not a number: {dx}"))?;
+        let dy: f32 = dy
+            .parse()
+            .map_err(|_| format!("Pan: dy is not a number: {dy}"))?;
+        return Ok(Step::Pan { dx, dy });
+    }
+    if let Some(rest) = s.strip_prefix("Zoom:") {
+        let amount: f32 = rest
+            .parse()
+            .map_err(|_| format!("Zoom: amount is not a number: {rest}"))?;
+        return Ok(Step::Zoom(amount));
+    }
+    parse_action(s).map(Step::Action)
+}
 
 fn parse_action(s: &str) -> Result<Action, String> {
     // `CustomShortcut` has its own CLI syntax (serde expects a table for the
@@ -67,7 +118,7 @@ fn main() {
     let mut initial_delay_secs: f64 = 2.0;
     let mut between_ms: u64 = 200;
     let mut verbose = false;
-    let mut actions: Vec<Action> = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -103,8 +154,8 @@ fn main() {
                 print_usage();
                 return;
             }
-            name => match parse_action(name) {
-                Ok(action) => actions.push(action),
+            name => match parse_step(name) {
+                Ok(step) => steps.push(step),
                 Err(e) => {
                     eprintln!("error: {e}");
                     eprintln!("Run with --help for the list of available actions.");
@@ -114,7 +165,7 @@ fn main() {
         }
     }
 
-    if actions.is_empty() {
+    if steps.is_empty() {
         eprintln!("error: no actions specified");
         print_usage();
         std::process::exit(1);
@@ -145,20 +196,52 @@ fn main() {
     let delay = Duration::from_secs_f64(initial_delay_secs);
     println!(
         "Injecting {} action(s) in {:.1}s — focus the target window now...",
-        actions.len(),
+        steps.len(),
         initial_delay_secs
     );
     std::thread::sleep(delay);
 
     let between = Duration::from_millis(between_ms);
-    for (i, action) in actions.iter().enumerate() {
-        println!("  → {}", action.label());
-        openlogi_inject::execute(action);
-        if i + 1 < actions.len() {
+    for (i, step) in steps.iter().enumerate() {
+        fire(step);
+        if i + 1 < steps.len() {
             std::thread::sleep(between);
         }
     }
     println!("Done.");
+}
+
+fn fire(step: &Step) {
+    match step {
+        Step::Action(action) => {
+            println!("  → {}", action.label());
+            openlogi_inject::execute(action);
+        }
+        Step::PanBegin => {
+            println!("  → PanBegin");
+            openlogi_inject::post_pan_begin();
+        }
+        Step::Pan { dx, dy } => {
+            println!("  → Pan({dx}, {dy})");
+            openlogi_inject::post_pan(*dx, *dy);
+        }
+        Step::PanEnd => {
+            println!("  → PanEnd");
+            openlogi_inject::post_pan_end();
+        }
+        Step::Zoom(amount) => {
+            println!("  → Zoom({amount})");
+            openlogi_inject::post_zoom_continuous(*amount);
+        }
+        Step::ZoomEnd => {
+            println!("  → ZoomEnd");
+            openlogi_inject::post_zoom_end();
+        }
+        Step::FlushGestures => {
+            println!("  → FlushGestures");
+            openlogi_inject::flush_gesture_sessions();
+        }
+    }
 }
 
 fn print_usage() {
@@ -181,14 +264,18 @@ fn print_usage() {
                   CycleDpiPresets ToggleSmartShift\n\
                   ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight\n\
                   CustomShortcut:<mod_hex>:<key_hex>\n\
+                  PanBegin Pan:<dx>:<dy> PanEnd Zoom:<amount> ZoomEnd FlushGestures\n\
          \n\
          CustomShortcut modifier bits: 0x01=Cmd/Ctrl 0x02=Shift 0x04=Ctrl 0x08=Option/Alt\n\
          CustomShortcut key_hex: macOS kVK_* code (e.g. 0x08=C, 0x09=V, 0x7E=Up)\n\
+         Pan:<dx>:<dy> is screen pixels (+x right, +y down). Zoom:<amount> zooms in when positive.\n\
          \n\
          Examples:\n\
            inject_action --delay 3 Copy\n\
            inject_action --delay 2 --between 500 VolumeUp VolumeDown PlayPause\n\
            inject_action ScrollDown ScrollDown ScrollDown\n\
-           inject_action CustomShortcut:0x01:0x08   # Ctrl+C"
+           inject_action CustomShortcut:0x01:0x08   # Ctrl+C\n\
+           inject_action --delay 2 PanBegin Pan:8:6 Pan:8:6 PanEnd\n\
+           inject_action --delay 2 Zoom:0.05 Zoom:0.05 ZoomEnd"
     );
 }

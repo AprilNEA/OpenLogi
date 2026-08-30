@@ -3,18 +3,21 @@
 use super::{
     App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
     SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
-    ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    ThumbwheelSensitivity, VerticalScrollSensitivity, ZoomSensitivity, div, h_flex, px, theme,
+    v_flex,
 };
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 
 use crate::platform::registration::ServiceStatus;
 
-/// The page's two sensitivity sliders, named so a call site cannot swap two
+/// The page's sensitivity sliders, named so a call site cannot swap two
 /// same-typed `Entity<SliderState>`s without the compiler noticing.
+#[derive(Clone)]
 pub(super) struct SensitivitySliders {
     pub(super) vertical_scroll: Entity<SliderState>,
     pub(super) thumbwheel: Entity<SliderState>,
+    pub(super) zoom: Entity<SliderState>,
 }
 
 pub(super) fn general_page(
@@ -24,6 +27,7 @@ pub(super) fn general_page(
     let SensitivitySliders {
         vertical_scroll,
         thumbwheel,
+        zoom,
     } = sliders;
     let group = SettingGroup::new()
         .item(smooth_scrolling_item())
@@ -49,6 +53,16 @@ pub(super) fn general_page(
                 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger."
             )),
         )
+        .item(
+            SettingItem::new(
+                tr!("Zoom Sensitivity"),
+                SettingField::render(move |_, _, cx| zoom_sensitivity_field(&zoom, cx)),
+            )
+            .description(tr!(
+                "Scales how far pinch zoom magnifies for a given amount of pointer travel."
+            )),
+        )
+        .item(invert_pan_item())
         .item(launch_at_login_item());
 
     // Switched off under System Settings › Login Items: nothing can start
@@ -116,6 +130,35 @@ fn smooth_scrolling_item() -> SettingItem {
     .description(tr!(
         "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
     ))
+}
+
+/// The hold-mode pan direction switch.
+fn invert_pan_item() -> SettingItem {
+    SettingItem::new(
+        tr!("Invert pan direction"),
+        SettingField::switch(
+            |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().invert_pan),
+            |enabled, cx| {
+                AppState::update(cx, move |state, cx| {
+                    state.set_invert_pan(enabled);
+                    cx.emit(StateEvent::SettingsChanged);
+                });
+            },
+        ),
+    )
+    .description(tr!(
+        "Move the view instead of the content while panning. Off matches a trackpad, where content follows your hand."
+    ))
+}
+
+fn zoom_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = ZoomSensitivity::from_rounded(slider.read(cx).value().start());
+    sensitivity_field(
+        slider,
+        value.to_string(),
+        value == ZoomSensitivity::DEFAULT,
+        cx,
+    )
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

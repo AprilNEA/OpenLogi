@@ -1,3 +1,6 @@
+use openlogi_core::binding::hold_drag_threshold_counts;
+use openlogi_core::hid::Dpi;
+
 use super::*;
 use crate::backend::NodeId;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
@@ -992,5 +995,389 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
             TRACED_RES
         ),
         None
+    );
+}
+
+const HOLD_BACK: &[(u16, ButtonId)] = &[(0x0053, ButtonId::Back)];
+const HOLD_DPI: Dpi = Dpi::new(1000);
+
+fn hold_down() -> RawControlEvent {
+    RawControlEvent::DivertedButtons([0x0053, 0, 0, 0])
+}
+
+fn handle_hold(
+    acc: &mut CaptureAccum,
+    event: RawControlEvent,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    handle_reprog_sets(
+        acc,
+        event,
+        &ReprogSets {
+            gesture_cids: &[],
+            dpi_cids: &[],
+            gesture_button_cids: &[],
+            button_cids: &[],
+            hold_button_cids: HOLD_BACK,
+            sensor_dpi: Some(HOLD_DPI),
+        },
+        sink,
+    );
+}
+
+fn drain(rx: &mut mpsc::UnboundedReceiver<CapturedInput>) -> Vec<CapturedInput> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+#[test]
+fn hold_mode_streams_raw_xy_and_never_fires_a_gesture_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(
+        &mut acc,
+        RawControlEvent::RawXy {
+            dx: 9_000,
+            dy: 9_000,
+        },
+        &tx,
+    );
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 40, dy: -15 }, &tx);
+    handle_hold(&mut acc, release(), &tx);
+
+    assert_eq!(
+        drain(&mut rx),
+        vec![
+            CapturedInput::HoldBegin(ButtonId::Back),
+            CapturedInput::HoldMotion {
+                button: ButtonId::Back,
+                dx: 40,
+                dy: -15
+            },
+            CapturedInput::HoldEnd {
+                button: ButtonId::Back,
+                release: HoldRelease::Released { traveled: false }
+            },
+        ]
+    );
+}
+
+#[test]
+fn hold_mode_no_drag_release_is_not_a_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 2, dy: 1 }, &tx);
+    handle_hold(&mut acc, release(), &tx);
+
+    let events = drain(&mut rx);
+    assert!(
+        events
+            .iter()
+            .all(|input| !matches!(input, CapturedInput::Gesture(..))),
+        "hold-mode travel must never fire Gesture(..., Click): {events:?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&CapturedInput::HoldEnd {
+            button: ButtonId::Back,
+            release: HoldRelease::Released { traveled: false }
+        })
+    );
+}
+
+#[test]
+fn hold_mode_travel_past_the_physical_deadzone_is_traveled() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let step = i16::try_from(hold_drag_threshold_counts(HOLD_DPI) + 1).expect("threshold fits i16");
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(
+        &mut acc,
+        RawControlEvent::RawXy {
+            dx: 9_000,
+            dy: 9_000,
+        },
+        &tx,
+    );
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: step, dy: 0 }, &tx);
+    handle_hold(&mut acc, release(), &tx);
+
+    assert_eq!(
+        drain(&mut rx).last(),
+        Some(&CapturedInput::HoldEnd {
+            button: ButtonId::Back,
+            release: HoldRelease::Released { traveled: true }
+        })
+    );
+}
+
+#[test]
+fn hold_mode_overlap_drops_unattributed_raw_xy() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let hold_both = &[(0x0053, ButtonId::Back), (0x0056, ButtonId::Forward)];
+    let both = RawControlEvent::DivertedButtons([0x0053, 0x0056, 0, 0]);
+    let sets = ReprogSets {
+        gesture_cids: &[],
+        dpi_cids: &[],
+        gesture_button_cids: &[],
+        button_cids: &[],
+        hold_button_cids: hold_both,
+        sensor_dpi: Some(HOLD_DPI),
+    };
+
+    handle_reprog_sets(&mut acc, hold_down(), &sets, &tx);
+    handle_reprog_sets(&mut acc, both, &sets, &tx);
+    handle_reprog_sets(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 80, dy: 80 },
+        &sets,
+        &tx,
+    );
+
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .all(|input| !matches!(input, CapturedInput::HoldMotion { .. })),
+        "overlap motion must be dropped, not attributed"
+    );
+}
+
+#[test]
+fn reconnect_emits_hold_end_before_wiping_the_stream() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 8, dy: 0 }, &tx);
+    let _ = drain(&mut rx);
+
+    let end = acc
+        .take_terminal_stream_end()
+        .expect("an open hold-mode stream must emit its end before wipe");
+    assert_eq!(
+        end,
+        CapturedInput::HoldEnd {
+            button: ButtonId::Back,
+            release: HoldRelease::Interrupted
+        },
+        "a wipe closes the stream under a control that is still down"
+    );
+
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 80, dy: 0 }, &tx);
+    assert!(
+        drain(&mut rx).is_empty(),
+        "late motion after the terminal end must not re-open the stream"
+    );
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    assert!(
+        drain(&mut rx).is_empty(),
+        "a control still down after the wipe is not a new press"
+    );
+
+    handle_hold(&mut acc, release(), &tx);
+    handle_hold(&mut acc, hold_down(), &tx);
+    assert_eq!(
+        drain(&mut rx).first(),
+        Some(&CapturedInput::HoldBegin(ButtonId::Back)),
+        "a later rising edge after a real release must still begin a hold"
+    );
+}
+
+#[test]
+fn already_down_hold_control_is_not_a_press() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    acc.seed_hold_already_down_for_test(&[0x0053]);
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 80, dy: 0 }, &tx);
+    handle_hold(&mut acc, release(), &tx);
+
+    assert!(
+        drain(&mut rx).is_empty(),
+        "a control already down when the session starts is not a press"
+    );
+}
+
+#[test]
+fn a_stale_hold_expires_without_waiting_for_release() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    let _ = drain(&mut rx);
+    acc.backdate_hold_past_stale_for_test();
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 1, dy: 0 }, &tx);
+
+    assert_eq!(
+        drain(&mut rx),
+        vec![CapturedInput::HoldEnd {
+            button: ButtonId::Back,
+            release: HoldRelease::Interrupted
+        }],
+        "a dropped release must expire the hold rather than stream forever"
+    );
+}
+
+#[test]
+fn a_hold_streaming_motion_never_expires_however_long_it_runs() {
+    // The bound was measured from the press, so a pan held past HOLD_STALE
+    // was force-ended mid-gesture: reproduced on hardware as a pan that quit
+    // 10.14 s after button-down while the user was still dragging.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 9_000, dy: 0 }, &tx);
+    // Held far longer than the bound, still streaming.
+    acc.backdate_press_past_stale_for_test();
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 500, dy: 0 }, &tx);
+    acc.backdate_press_past_stale_for_test();
+    handle_hold(&mut acc, RawControlEvent::RawXy { dx: 500, dy: 0 }, &tx);
+    handle_hold(&mut acc, release(), &tx);
+
+    let events = drain(&mut rx);
+    let ends = events
+        .iter()
+        .filter(|input| matches!(input, CapturedInput::HoldEnd { .. }))
+        .count();
+    assert_eq!(ends, 1, "one release, one end: {events:?}");
+    assert_eq!(
+        events.last(),
+        Some(&CapturedInput::HoldEnd {
+            button: ButtonId::Back,
+            release: HoldRelease::Released { traveled: true }
+        })
+    );
+}
+
+#[test]
+fn hold_deadzone_prefers_cached_sensor_dpi_over_the_armed_plan() {
+    // 50 counts is a drag at 400 DPI (threshold ≈ 39) and a click at 1000
+    // (threshold ≈ 98). The cycle write must win, or the deadzone drifts.
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0d02,
+    };
+    crate::remember_sensor_dpi(&route, Dpi::new(400));
+    let planned = Some(Dpi::new(1000));
+    assert_eq!(
+        live_hold_dpi(&route, planned),
+        Some(Dpi::new(400)),
+        "a DPI-cycle write must size the next press, not the stale plan"
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let sets = ReprogSets {
+        gesture_cids: &[],
+        dpi_cids: &[],
+        gesture_button_cids: &[],
+        button_cids: &[],
+        hold_button_cids: HOLD_BACK,
+        sensor_dpi: live_hold_dpi(&route, planned),
+    };
+    handle_reprog_sets(&mut acc, hold_down(), &sets, &tx);
+    handle_reprog_sets(
+        &mut acc,
+        RawControlEvent::RawXy {
+            dx: 9_000,
+            dy: 9_000,
+        },
+        &sets,
+        &tx,
+    );
+    handle_reprog_sets(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 50, dy: 0 },
+        &sets,
+        &tx,
+    );
+    handle_reprog_sets(&mut acc, release(), &sets, &tx);
+    assert_eq!(
+        drain(&mut rx).last(),
+        Some(&CapturedInput::HoldEnd {
+            button: ButtonId::Back,
+            release: HoldRelease::Released { traveled: true }
+        }),
+        "50 counts at the cached 400 DPI must clear 2.5 mm; the planned 1000 would not"
+    );
+}
+
+#[test]
+fn the_pre_press_backlog_never_reaches_a_hold_mode_stream() {
+    // Captured on an MX Master 3S at 950 DPI: the first report of a hold
+    // arrived 10 ms after button-down carrying 1694 x 1619 counts, which is
+    // 63 mm of travel. Delivered, it scrolled a 1080p view most of a screen
+    // and marked a press that never moved as a drag.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_hold(&mut acc, hold_down(), &tx);
+    handle_hold(
+        &mut acc,
+        RawControlEvent::RawXy {
+            dx: -1694,
+            dy: 1619,
+        },
+        &tx,
+    );
+    handle_hold(&mut acc, release(), &tx);
+
+    assert_eq!(
+        drain(&mut rx),
+        vec![
+            CapturedInput::HoldBegin(ButtonId::Back),
+            CapturedInput::HoldEnd {
+                button: ButtonId::Back,
+                release: HoldRelease::Released { traveled: false }
+            },
+        ],
+        "backlog banked before the press must neither pan nor count as travel"
+    );
+}
+
+#[test]
+fn every_press_drops_its_own_backlog_report() {
+    // The divert re-arms per press, so the drop is per hold, not once per
+    // capture session.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    for _ in 0..3 {
+        handle_hold(&mut acc, hold_down(), &tx);
+        handle_hold(
+            &mut acc,
+            RawControlEvent::RawXy {
+                dx: -1694,
+                dy: 1619,
+            },
+            &tx,
+        );
+        handle_hold(&mut acc, RawControlEvent::RawXy { dx: 4, dy: 3 }, &tx);
+        handle_hold(&mut acc, release(), &tx);
+    }
+
+    let motion: Vec<_> = drain(&mut rx)
+        .into_iter()
+        .filter(|input| matches!(input, CapturedInput::HoldMotion { .. }))
+        .collect();
+    assert_eq!(
+        motion,
+        vec![
+            CapturedInput::HoldMotion {
+                button: ButtonId::Back,
+                dx: 4,
+                dy: 3
+            };
+            3
+        ],
+        "each press must flush a fresh backlog and stream only real travel"
     );
 }

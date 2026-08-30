@@ -385,5 +385,14 @@ mod tests {
         assert!(actions.contains(&Action::MissionControl));
         assert!(!actions.contains(&Action::None));
         assert!(!actions.contains(&Action::ShowActionsRing));
+        assert!(
+            !actions.contains(&Action::Pan),
+            "a ring tap cannot run hold-mode pan"
+        );
+        assert!(
+            !actions.contains(&Action::Zoom),
+            "a ring tap cannot run hold-mode zoom"
+        );
+        assert!(!actions.iter().any(Action::is_hold_mode));
     }
 }

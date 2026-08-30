@@ -38,7 +38,11 @@ objc2-app-kit = { workspace = true, features = [
   "NSWorkspace",
   "NSRunningApplication",
 ] }
-objc2-core-graphics = { workspace = true, features = ["CGEvent"] }
+objc2-core-graphics = { workspace = true, features = [
+  "CGEvent",
+  "CGEventSource",
+  "CGEventTypes",
+] }
 objc2-foundation = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

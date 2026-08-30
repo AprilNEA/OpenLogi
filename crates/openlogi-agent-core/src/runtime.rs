@@ -250,7 +250,11 @@ impl ActionRuntime {
     }
 
     /// Reject new button input, emit terminal cancellation, and join the worker.
+    ///
+    /// Also flushes hold-mode inject sessions. The agent calls `process::exit`
+    /// after this, which skips `Drop`; this is the guaranteed terminal emit.
     pub fn shutdown(&mut self) {
+        openlogi_inject::flush_gesture_sessions();
         let _ = self.buttons.shutdown();
     }
 }

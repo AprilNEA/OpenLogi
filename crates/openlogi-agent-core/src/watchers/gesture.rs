@@ -223,10 +223,16 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
-        dispatcher.cancel_session(session.id());
-        let config_key = session.dispatch().config_key.clone();
-        session.rekey(&config_key);
+    match session.reconcile(wanted) {
+        ReconcileAction::DispatchChanged => {
+            dispatcher.cancel_session(session.id());
+            let config_key = session.dispatch().config_key.clone();
+            session.rekey(&config_key);
+        }
+        ReconcileAction::Retiring => {
+            dispatcher.lock_holds(session.id());
+        }
+        ReconcileAction::None => {}
     }
 }
 
@@ -452,7 +458,7 @@ impl GestureManagerState {
                 if let Some((session, plan)) = dispatch_context {
                     self.input_dispatcher.dispatch(session, plan, event.input);
                 } else {
-                    self.input_dispatcher.cancel_session(&event.session);
+                    self.input_dispatcher.retire_session(&event.session);
                     debug!(
                         key = key.as_str(),
                         epoch = event.session.epoch(),
@@ -482,7 +488,7 @@ impl GestureManagerState {
                         },
                     );
                 }
-                self.input_dispatcher.cancel_session(&dispatch_session);
+                self.input_dispatcher.retire_session(&dispatch_session);
                 if device_io_allowed
                     && let Some(deadline) = restart_deadline(unexpected, Instant::now())
                 {
@@ -564,24 +570,34 @@ async fn manage(
                     &capture_plans,
                 );
             }
-            result = capture_plans.changed() => match result {
-                Ok(()) => reconcile = true,
-                Err(_) => return,
-            },
-            result = receiver_requests.changed() => match result {
-                Ok(()) => reconcile = true,
-                Err(_) => return,
-            },
+            result = capture_plans.changed() => {
+                if result.is_err() {
+                    state.input_dispatcher.shutdown_holds();
+                    return;
+                }
+                reconcile = true;
+            }
+            result = receiver_requests.changed() => {
+                if result.is_err() {
+                    state.input_dispatcher.shutdown_holds();
+                    return;
+                }
+                reconcile = true;
+            }
             allowed = device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
                 Some(false) => {}
-                None => return,
+                None => {
+                    state.input_dispatcher.shutdown_holds();
+                    return;
+                }
             },
             open = wait_for_registry_change(
                 &mut registry_changes,
                 !state.pending_restores.is_empty(),
             ) => {
                 if !open {
+                    state.input_dispatcher.shutdown_holds();
                     return;
                 }
                 if device_io.allows_io() {

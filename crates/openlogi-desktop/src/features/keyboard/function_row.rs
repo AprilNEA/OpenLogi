@@ -40,8 +40,8 @@ use super::editors::{
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::mouse::picker::{
-    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
-    editor_section,
+    ActionCatalogKind, PickFn, action_icon_path, action_rows, compact_panel, divider,
+    editor_scroll_list, editor_section,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceRecord, StateEvent};
@@ -862,7 +862,14 @@ fn panel_action_rows(
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> Vec<gpui::Div> {
-    let mut children = action_rows("panel-action", current, on_pick, *pal);
+    // A keypress cannot keep a hold alive — same Instant catalog as a swipe slot.
+    let mut children = action_rows(
+        "panel-action",
+        current,
+        ActionCatalogKind::Instant,
+        on_pick,
+        *pal,
+    );
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (

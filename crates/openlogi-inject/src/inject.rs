@@ -8,13 +8,14 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::collections::HashMap;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, KeyCombo};
 use openlogi_core::scroll::ScrollDelta;
+
+mod gesture;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -147,6 +148,20 @@ impl HeldOutput {
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
     LazyLock::new(|| Mutex::new(HeldOutput::default()));
+
+/// Hold-mode pan and zoom session state, and the lock that orders their
+/// output.
+///
+/// Every `post_*` below emits while still holding this guard. Computing a
+/// frame under the lock and posting after it is released lets two threads
+/// interleave: a watcher that decided on `Began` can be descheduled while
+/// shutdown decides on `Ended`, post it first, and leave the gesture open —
+/// on Linux and Windows that is a Ctrl key held down with nothing left to
+/// release it, since `process::exit` skips [`Drop`]. Posting under the guard
+/// costs one serialised syscall per frame at HID report rate, and no platform
+/// emitter re-enters this mutex.
+static GESTURE_SESSIONS: LazyLock<Mutex<gesture::GestureSessions>> =
+    LazyLock::new(|| Mutex::new(gesture::GestureSessions::default()));
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
@@ -409,6 +424,166 @@ pub enum SmoothScrollPhase {
     Ended,
     /// The capture source ended before the animation reached its target.
     Cancelled,
+}
+
+/// Open a pixel-precise pan session (macOS scroll phase `began`).
+///
+/// A second begin while a session is already open is a no-op so the OS never
+/// sees an incoherent phase sequence. A closed session opens again here, which
+/// is how the next hold starts; only [`seal_gesture_sessions`] is terminal.
+pub fn post_pan_begin() {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(frame) = sessions.begin_pan() {
+        emit_pan(frame);
+    }
+}
+
+/// Stream one pan report inside an open session (macOS scroll phase
+/// `changed`, `kCGScrollEventUnitPixel`).
+///
+/// Screen convention: +x right, +y down. Fractional pixels are banked across
+/// calls. A late report after [`post_pan_end`] is ignored.
+pub fn post_pan(dx: f32, dy: f32) {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(frame) = sessions.pan(dx, dy) {
+        emit_pan(frame);
+    }
+}
+
+/// Close the pan session (macOS scroll phase `ended`). Idempotent.
+pub fn post_pan_end() {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(frame) = sessions.end_pan() {
+        emit_pan(frame);
+    }
+}
+
+/// Stream one increment of continuous magnification into an open pinch,
+/// opening one if needed. Positive zooms in.
+///
+/// On macOS this is a HID-layer gesture (`NSEventTypeGesture` / 29, field
+/// 110 = Zoom). AppKit promotes that to `NSEventTypeMagnify`. Phase bits are
+/// `CGGesturePhase`, not `NSEventPhase`. On Linux and Windows it degrades to
+/// Ctrl+wheel detents.
+pub fn post_zoom_continuous(amount: f32) {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(frame) = sessions.zoom_continuous(amount) {
+        emit_zoom(frame);
+    }
+}
+
+/// Close an open pinch immediately. Idempotent.
+pub fn post_zoom_end() {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(frame) = sessions.end_zoom() {
+        emit_zoom(frame);
+    }
+}
+
+/// Fire one native smart-zoom toggle at the pointer: zoom in, press again to
+/// return. This is the discrete counterpart to [`post_zoom_continuous`], and
+/// what a Zoom-bound button does when it is clicked rather than dragged.
+///
+/// macOS only. See the platform implementations for why.
+pub fn post_smart_zoom() {
+    // A click still moves the mouse a little, and any motion at all opens a
+    // pinch — the deadzone decides whether the hold was a drag, not whether
+    // inject saw travel. Close that pinch first: two live zoom gestures at
+    // once is not a state any application is asked to handle.
+    // `post_zoom_end` is idempotent.
+    post_zoom_end();
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_smart_zoom();
+        }
+        target_os = "linux" => {
+            linux::post_smart_zoom();
+        }
+        target_os = "windows" => {
+            windows::post_smart_zoom();
+        }
+        _ => {}
+    }
+}
+
+/// Close every open gesture session now — shutdown, capture interrupt.
+///
+/// The agent calls `process::exit` in places, which skips `Drop`. Call this
+/// on every teardown path; it is the only guaranteed terminal emit.
+pub fn flush_gesture_sessions() {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let frames = sessions.flush();
+    if let Some(frame) = frames.pan {
+        emit_pan(frame);
+    }
+    if let Some(frame) = frames.zoom {
+        emit_zoom(frame);
+    }
+}
+
+/// Close every open gesture session and refuse to open another for the rest
+/// of this process. The last call before `process::exit` or `exec`.
+///
+/// [`flush_gesture_sessions`] alone is not terminal: a watcher thread still
+/// streaming through teardown reopens a pinch on its next sample, because
+/// [`post_zoom_continuous`] opens one from closed by contract.
+pub fn seal_gesture_sessions() {
+    let mut sessions = GESTURE_SESSIONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let frames = sessions.seal();
+    if let Some(frame) = frames.pan {
+        emit_pan(frame);
+    }
+    if let Some(frame) = frames.zoom {
+        emit_zoom(frame);
+    }
+}
+
+fn emit_pan(frame: gesture::PanFrame) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_pan_frame(frame);
+        }
+        target_os = "linux" => {
+            linux::post_pan_frame(frame);
+        }
+        target_os = "windows" => {
+            windows::post_pan_frame(frame);
+        }
+        _ => {
+            let _ = frame;
+        }
+    }
+}
+
+fn emit_zoom(frame: gesture::ZoomFrame) {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom_frame(frame);
+        }
+        target_os = "linux" => {
+            linux::post_zoom_frame(frame);
+        }
+        target_os = "windows" => {
+            windows::post_zoom_frame(frame);
+        }
+        _ => {
+            let _ = frame;
+        }
+    }
 }
 
 /// Synthesise one frame of a finite smooth-scroll animation.

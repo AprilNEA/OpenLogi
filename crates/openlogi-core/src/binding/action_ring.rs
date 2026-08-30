@@ -109,6 +109,10 @@ pub enum RingActionError {
     /// A ring cannot recursively open itself.
     #[error("Show Actions Ring cannot be assigned inside an Actions Ring")]
     RecursiveTrigger,
+    /// Hold-mode actions need a raw-XY divert for the lifetime of a button
+    /// press; a ring slot is a one-shot activation and cannot drive that.
+    #[error("hold-mode actions cannot be placed in an Actions Ring")]
+    HoldMode,
 }
 
 /// An action that is valid inside an Actions Ring.
@@ -142,6 +146,9 @@ impl RingAction {
 }
 
 fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
+    if action.is_hold_mode() {
+        return Err(RingActionError::HoldMode);
+    }
     match action {
         Action::None => Err(RingActionError::EmptyAction),
         Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
@@ -361,6 +368,11 @@ mod tests {
         assert_eq!(
             RingAction::new(Action::ShowActionsRing),
             Err(RingActionError::RecursiveTrigger)
+        );
+        assert_eq!(RingAction::new(Action::Pan), Err(RingActionError::HoldMode));
+        assert_eq!(
+            RingAction::new(Action::Zoom),
+            Err(RingActionError::HoldMode)
         );
     }
 

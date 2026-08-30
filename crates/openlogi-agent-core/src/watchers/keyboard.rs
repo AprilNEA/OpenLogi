@@ -169,7 +169,13 @@ fn dispatch_input(
         }
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
-        | CapturedInput::ThumbwheelDirection { .. } => {}
+        | CapturedInput::ThumbwheelDirection { .. }
+        | CapturedInput::HoldBegin(_)
+        | CapturedInput::HoldMotion { .. }
+        | CapturedInput::HoldEnd { .. } => {
+            // Keyboard capture never emits a hold-mode stream. Mouse holds
+            // are driven by the gesture dispatcher.
+        }
     }
 }
 

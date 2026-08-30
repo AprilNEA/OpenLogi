@@ -1036,3 +1036,114 @@ fn equal_runtime_projection_does_not_wake_managers() {
             .expect("publication remains open")
     );
 }
+
+#[test]
+fn hook_maps_omit_hold_mode_buttons() {
+    let mut config = Config::default();
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Pan));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+
+    let maps = orch.hook_maps_for(Some("a"), None);
+    assert!(
+        !maps.bindings.contains_key(&ButtonId::Back),
+        "a hold-mode button must not stay on the OS-hook binding map"
+    );
+    assert!(
+        !maps.gestures.contains_key(&ButtonId::Back),
+        "a hold-mode button must not stay on the OS-hook gesture map"
+    );
+    assert!(
+        maps.bindings.contains_key(&ButtonId::MiddleClick),
+        "stripping hold-mode must not empty the rest of the hook map"
+    );
+}
+
+#[test]
+fn injection_is_the_only_gate_on_arming_hold_mode() {
+    let mut config = Config::default();
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Pan));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.set_injection_available(true);
+    orch.rebuild();
+
+    let hold_armed = |orch: &Orchestrator| {
+        orch.shared
+            .capture_plans
+            .borrow()
+            .first()
+            .is_some_and(|plan| {
+                plan.target
+                    .spec
+                    .divert_hold_buttons
+                    .iter()
+                    .any(|&(_, button)| button == ButtonId::Back)
+            })
+    };
+    let sensor_dpi = |orch: &Orchestrator| {
+        orch.shared
+            .capture_plans
+            .borrow()
+            .first()
+            .and_then(|plan| plan.target.spec.sensor_dpi)
+    };
+    assert!(
+        hold_armed(&orch),
+        "a missing DPI must not disable hold-mode when injection can deliver"
+    );
+    assert_eq!(
+        sensor_dpi(&orch),
+        Some(crate::capture_plan::FALLBACK_HOLD_SENSOR_DPI)
+    );
+
+    orch.config.set_dpi("a", Dpi::new(1000));
+    orch.rebuild();
+    assert!(
+        hold_armed(&orch),
+        "injection plus a committed DPI must keep the raw-XY hold armed"
+    );
+    assert_eq!(sensor_dpi(&orch), Some(Dpi::new(1000)));
+
+    orch.set_injection_available(false);
+    assert!(
+        !hold_armed(&orch),
+        "revoking injection must disarm hold-mode so the cursor is not frozen"
+    );
+}
+
+#[test]
+fn live_sensor_cache_wins_over_committed_config_dpi() {
+    let mut config = Config::default();
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Pan));
+    config.set_dpi("a", Dpi::new(400));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 6, true)];
+    let route = orch.devices[0]
+        .route
+        .clone()
+        .expect("fixture device has a route");
+    openlogi_hid::remember_sensor_dpi(&route, Dpi::new(1600));
+    orch.set_injection_available(true);
+    orch.rebuild();
+
+    let plan = orch
+        .shared
+        .capture_plans
+        .borrow()
+        .first()
+        .cloned()
+        .expect("online device publishes a plan");
+    assert_eq!(
+        plan.dispatch.sensor_dpi,
+        Some(Dpi::new(1600)),
+        "the cached reading has to reach the millimetre conversion"
+    );
+    assert_eq!(
+        plan.target.spec.sensor_dpi,
+        Some(Dpi::new(400)),
+        "the armed spec stays on the committed DPI, so a cache fill cannot \
+         retire the capture session"
+    );
+}

@@ -16,8 +16,8 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 
 use super::hotspots::MouseControlId;
 use super::picker::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
-    gesture_direction_icon,
+    ActionCatalogKind, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching,
+    editor_section, gesture_direction_icon,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -213,6 +213,7 @@ fn button_inspector(
                 Some(&action),
                 picker.search,
                 &on_pick,
+                ActionCatalogKind::Button,
                 pal,
                 cx,
             ))
@@ -266,6 +267,7 @@ fn inherited_gesture_inspector(
                 None,
                 picker.search,
                 &on_pick,
+                ActionCatalogKind::Button,
                 pal,
                 cx,
             ))
@@ -329,6 +331,7 @@ fn gesture_inspector(
                 Some(&current),
                 picker.search,
                 &on_pick,
+                ActionCatalogKind::Instant,
                 pal,
                 cx,
             ))
@@ -621,11 +624,12 @@ fn action_library(
     current: Option<&Action>,
     action_search: &Entity<InputState>,
     on_pick: &PickFn,
+    kind: ActionCatalogKind,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = action_search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_matching(id_prefix, current, &query, kind, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
