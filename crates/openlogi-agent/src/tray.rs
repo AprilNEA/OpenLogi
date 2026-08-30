@@ -37,7 +37,7 @@ use objc2_app_kit::{
     NSWorkspaceWillSleepNotification,
 };
 use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
-use objc2_foundation::{NSNotification, NSString};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -361,9 +361,17 @@ pub fn run_app_loop(
 /// emits it for maintenance DarkWake, where opening BLE HID is exactly what can
 /// promote an otherwise invisible wake into a full display wake (#656).
 fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
-    let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
+    install_activity_observer_on(signal, &center, &workspace)
+}
+
+fn install_activity_observer_on(
+    signal: DeviceIoSignal,
+    center: &NSNotificationCenter,
+    workspace: &NSWorkspace,
+) -> Retained<ActivityTarget> {
+    let target = ActivityTarget::new(signal);
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
@@ -381,31 +389,31 @@ fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget>
             &target,
             sel!(workspaceWillSleep:),
             Some(system_sleep),
-            Some(&workspace),
+            Some(workspace),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceScreensDidSleep:),
             Some(screen_sleep),
-            Some(&workspace),
+            Some(workspace),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceSessionDidResignActive:),
             Some(session_inactive),
-            Some(&workspace),
+            Some(workspace),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceScreensDidWake:),
             Some(screen_wake),
-            Some(&workspace),
+            Some(workspace),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceSessionDidBecomeActive:),
             Some(session_active),
-            Some(&workspace),
+            Some(workspace),
         );
     }
     target
@@ -505,10 +513,10 @@ mod tests {
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
         let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
-        target.finish_startup(false);
         let workspace = NSWorkspace::sharedWorkspace();
-        let center = workspace.notificationCenter();
+        let center = NSNotificationCenter::new();
+        let target = install_activity_observer_on(signal, &center, &workspace);
+        target.finish_startup(false);
 
         // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
         let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
@@ -559,7 +567,9 @@ mod tests {
     #[test]
     fn startup_stays_suspended_when_the_display_is_already_asleep() {
         let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
+        let workspace = NSWorkspace::sharedWorkspace();
+        let center = NSNotificationCenter::new();
+        let target = install_activity_observer_on(signal, &center, &workspace);
         assert!(!gate.allows_io(), "startup must fail closed");
 
         target.finish_startup(true);
@@ -568,8 +578,6 @@ mod tests {
             "an initially sleeping display must retain the suspension",
         );
 
-        let workspace = NSWorkspace::sharedWorkspace();
-        let center = workspace.notificationCenter();
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
         // SAFETY: `workspace` is live, matches the registration filter, and
