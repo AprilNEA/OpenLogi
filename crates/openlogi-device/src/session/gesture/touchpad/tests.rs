@@ -701,3 +701,30 @@ fn abnormal_device_timestamp_gap_ends_before_the_next_frame() {
         vec![TouchpadStreamEvent::End, TouchpadStreamEvent::Frame(next)]
     );
 }
+
+#[test]
+fn a_version_zero_touchpad_builds_a_stream_like_a_version_one_pad() {
+    use hidpp::feature::touchpad_raw_xy::{Origin, TouchpadInfo};
+
+    fn info(version: u8) -> TouchpadInfo {
+        let mut payload = [0_u8; 16];
+        payload[0..2].copy_from_slice(&2775_u16.to_be_bytes());
+        payload[2..4].copy_from_slice(&1786_u16.to_be_bytes());
+        payload[6] = 13;
+        payload[7] = 5;
+        payload[8] = Origin::UpperLeft as u8;
+        payload[12] = version;
+        payload[13..15].copy_from_slice(&600_u16.to_be_bytes());
+        TouchpadInfo::from_payload(&payload).expect("valid fixture payload")
+    }
+
+    // The Casa Touch reports mapping version 0 with the observed DualXY
+    // layout of version 1 — rejecting it disarms capture on the very device
+    // this feature exists for.
+    TouchpadFrameStream::new(info(0)).expect("version 0 builds a stream");
+    TouchpadFrameStream::new(info(1)).expect("version 1 builds a stream");
+    assert_eq!(
+        TouchpadFrameStream::new(info(2)).err(),
+        Some(TouchpadStreamError::UnsupportedMapping(2))
+    );
+}

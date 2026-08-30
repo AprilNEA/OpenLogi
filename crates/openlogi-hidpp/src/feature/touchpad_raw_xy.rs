@@ -88,7 +88,8 @@ pub struct TouchpadInfo {
 }
 
 impl TouchpadInfo {
-    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+    /// Decode the feature's 16-byte information payload.
+    pub fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
         Ok(Self {
             x_size: u16::from_be_bytes([payload[0], payload[1]]),
             y_size: u16::from_be_bytes([payload[2], payload[3]]),
