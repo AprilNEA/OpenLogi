@@ -4,21 +4,23 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, App, InteractiveElement, IntoElement, ParentElement, Styled, WeakEntity, div,
-    prelude::FluentBuilder as _, px, svg,
+    Anchor, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, Styled, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{
     Icon, Selectable as _, h_flex,
     popover::{Popover, PopoverState},
     scroll::ScrollableElement as _,
+    slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, default_binding};
+use openlogi_core::config::TouchpadScrollSensitivity;
 
 use crate::features::mouse::picker::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, title,
 };
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{PanelCard, Toggle, control_button};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -91,7 +93,7 @@ fn management_card(enabled: bool, pal: Palette) -> PanelCard {
                     ),
             )
             .child(div().text_caption().text_color(pal.text_muted).child(tr!(
-                "Pointer movement, clicks, two-finger scrolling, and secondary click remain native."
+                "Pointer movement, clicks, and secondary click remain native. Two-finger scrolling is re-synthesized by OpenLogi while gestures are on."
             ))),
     )
 }
@@ -249,5 +251,132 @@ fn gesture_label(trigger: ButtonId) -> gpui::SharedString {
             tr!("Swipe Right")
         }
         _ => unreachable!("touchpad panel only renders touchpad gesture triggers"),
+    }
+}
+
+/// Two-finger scroll speed for a raw-touchpad device, as a per-device slider.
+///
+/// An entity (not a plain card block) because [`SliderState`] is builder-only:
+/// the slider is re-created whenever the selected device changes and re-seated
+/// when its config value changes underneath the thumb.
+pub struct TouchpadScrollPanel {
+    slider_state: Option<Entity<SliderState>>,
+    slider_sub: Option<Subscription>,
+    slider_key: Option<String>,
+    /// Whether a drag is between its first `Change` and its `Release`. While
+    /// set, the thumb shows the dragged value, which the committed config
+    /// only catches up to on release.
+    dragging: bool,
+    _state_obs: Subscription,
+}
+
+impl TouchpadScrollPanel {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let state_obs = cx.subscribe(
+            &AppState::global(cx),
+            |_panel, _, event: &StateEvent, cx| {
+                let relevant = match event {
+                    StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                    StateEvent::DeviceConfigChanged(key) => AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .is_some_and(|record| record.device_key() == *key),
+                    _ => false,
+                };
+                if relevant {
+                    cx.notify();
+                }
+            },
+        );
+        Self {
+            slider_state: None,
+            slider_sub: None,
+            slider_key: None,
+            dragging: false,
+            _state_obs: state_obs,
+        }
+    }
+
+    fn ensure_slider(
+        &mut self,
+        key: &crate::state::DeviceKey,
+        sensitivity: TouchpadScrollSensitivity,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.slider_key.as_deref() == Some(&key.to_string())
+            && let Some(slider_state) = &self.slider_state
+        {
+            // Re-seat the thumb when the config value resolves to a different
+            // sensitivity than the thumb rests on — never during a drag,
+            // whose intermediate values the config only adopts on release.
+            if !self.dragging {
+                slider_state.update(cx, |state, cx| {
+                    let thumb = TouchpadScrollSensitivity::from_rounded(state.value().start());
+                    if thumb != sensitivity {
+                        state.set_value(f32::from(sensitivity), window, cx);
+                    }
+                });
+            }
+            return;
+        }
+
+        let slider_state = cx.new(|_| {
+            SliderState::new()
+                .max(f32::from(TouchpadScrollSensitivity::MAX))
+                .min(f32::from(TouchpadScrollSensitivity::MIN))
+                .default_value(f32::from(sensitivity))
+        });
+        let slider_sub = cx.subscribe(&slider_state, |panel, _slider, event: &SliderEvent, cx| {
+            panel.dragging = !matches!(event, SliderEvent::Release(_));
+            if let SliderEvent::Release(value) = event {
+                let sensitivity = TouchpadScrollSensitivity::from_rounded(value.start());
+                AppState::update(cx, |state, cx| {
+                    let key = state.current_record().map(DeviceRecord::device_key);
+                    state.commit_touchpad_scroll_sensitivity(sensitivity);
+                    if let Some(key) = key {
+                        cx.emit(StateEvent::DeviceConfigChanged(key));
+                    }
+                });
+            }
+            cx.notify();
+        });
+        self.slider_state = Some(slider_state);
+        self.slider_sub = Some(slider_sub);
+        self.slider_key = Some(key.to_string());
+    }
+}
+
+impl Render for TouchpadScrollPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let Some((key, sensitivity)) = AppState::try_read(cx).and_then(|state| {
+            if !state.current_touchpad_scroll_supported() {
+                return None;
+            }
+            let key = state.current_record().map(DeviceRecord::device_key)?;
+            Some((key, state.current_touchpad_scroll_sensitivity()))
+        }) else {
+            return div();
+        };
+        self.ensure_slider(&key, sensitivity, window, cx);
+        let Some(slider_state) = self.slider_state.clone() else {
+            return div();
+        };
+
+        v_flex()
+            .gap_2()
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(pal.text_primary)
+                            .child(tr!("Two-finger scroll speed")),
+                    )
+                    .child(div().text_caption().text_color(pal.text_muted).child(tr!(
+                        "Scales the two-finger scrolling OpenLogi synthesizes while gestures are enabled."
+                    ))),
+            )
+            .child(Slider::new(&slider_state).horizontal())
     }
 }

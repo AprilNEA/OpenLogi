@@ -38,6 +38,7 @@ objc2-app-kit = { workspace = true, features = [
   "NSWorkspace",
   "NSRunningApplication",
 ] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFString", "CFPreferences"] }
 objc2-core-graphics = { workspace = true, features = ["CGEvent"] }
 objc2-foundation = { workspace = true }
 

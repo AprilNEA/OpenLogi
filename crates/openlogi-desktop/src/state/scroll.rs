@@ -20,19 +20,24 @@ impl AppState {
                 .is_some_and(|device| device.effective_invert_scroll(&record.route_key))
         })
     }
-    /// Whether the active device reports native HID++ wheel inversion support.
+    /// Whether the active device's scroll direction can be inverted: through
+    /// the native HID++ wheel mode, or — for a raw-touchpad device — in the
+    /// scrolling OpenLogi synthesizes while capture is armed.
     #[must_use]
     pub fn current_scroll_inversion_supported(&self) -> bool {
         self.current_record()
             .and_then(|record| record.capabilities)
-            .is_some_and(|capabilities| capabilities.scroll_inversion)
+            .is_some_and(|capabilities| {
+                capabilities.scroll_inversion || capabilities.touchpad_raw_xy
+            })
     }
-    /// Set the active device's scroll-wheel inversion, persist it, and reload
-    /// the agent so it writes the device's native HID++ wheel inversion. No-op
-    /// when no device is selected or the active device does not report support.
+    /// Set the active device's scroll inversion, persist it, and reload the
+    /// agent: wheel devices get their native HID++ mode written, touchpads
+    /// get the synthesized two-finger scroll flipped. No-op when no device is
+    /// selected or the active device supports neither path.
     pub fn commit_invert_scroll(&mut self, invert: bool) {
         if !self.current_scroll_inversion_supported() {
-            debug!("active device does not support native scroll inversion");
+            debug!("active device does not support scroll inversion");
             return;
         }
         let Some(key) = self
@@ -46,6 +51,54 @@ impl AppState {
         self.config
             .edit(|config| config.set_invert_scroll(&key, invert));
         self.persist_and_reload("invert scroll");
+    }
+    /// Whether the active device streams raw touchpad frames, meaning OpenLogi
+    /// synthesizes its two-finger scrolling.
+    #[must_use]
+    pub fn current_touchpad_scroll_supported(&self) -> bool {
+        self.current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.touchpad_raw_xy)
+    }
+    /// The active touchpad's synthesized two-finger scroll speed.
+    #[must_use]
+    pub fn current_touchpad_scroll_sensitivity(
+        &self,
+    ) -> openlogi_core::config::TouchpadScrollSensitivity {
+        self.current_record()
+            .and_then(|record| {
+                record
+                    .persistent_config_key()
+                    .and_then(|key| self.config.devices.get(key))
+            })
+            .map_or_default(|device| {
+                device
+                    .touchpad_gestures
+                    .scroll_sensitivity
+                    .unwrap_or_default()
+            })
+    }
+    /// Persist the active touchpad's two-finger scroll speed and reload the
+    /// agent's capture plan. No-op without a selected raw-touchpad device.
+    pub fn commit_touchpad_scroll_sensitivity(
+        &mut self,
+        sensitivity: openlogi_core::config::TouchpadScrollSensitivity,
+    ) {
+        if !self.current_touchpad_scroll_supported() {
+            debug!("active device does not stream raw touchpad frames");
+            return;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — touchpad scroll speed ignored");
+            return;
+        };
+        self.config
+            .edit(|config| config.set_touchpad_scroll_sensitivity(&key, Some(sensitivity)));
+        self.persist_and_reload("touchpad scroll speed");
     }
     /// The active device's persisted wheel resolution, or `None` when OpenLogi
     /// leaves the device default untouched.
@@ -145,6 +198,17 @@ mod tests {
         /// inventory enumeration, so a test can pin `config_key` / `route_key`
         /// independently of any real HID++ probe.
         fn set_current_record_for_test(&mut self, config_key: &str, route_key: &str) {
+            self.set_current_record_with_capabilities_for_test(config_key, route_key, None);
+        }
+
+        /// Test-only: like [`Self::set_current_record_for_test`], with the
+        /// link capabilities a live probe would have measured.
+        fn set_current_record_with_capabilities_for_test(
+            &mut self,
+            config_key: &str,
+            route_key: &str,
+            capabilities: Option<Capabilities>,
+        ) {
             let record = DeviceRecord {
                 config_key: config_key.to_string(),
                 canonical_key: None,
@@ -163,7 +227,7 @@ mod tests {
                 route: None,
                 capture_id: None,
                 kind: DeviceKind::Mouse,
-                capabilities: None,
+                capabilities,
                 light_capabilities: None,
                 slot: 1,
                 online: true,
@@ -211,6 +275,60 @@ mod tests {
         let mut state = test_state(config);
         state.set_current_record_for_test("unit:6be9d300", links[0].0);
         state
+    }
+
+    #[test]
+    fn touchpad_scroll_controls_follow_the_raw_touchpad_capability() {
+        use openlogi_core::config::TouchpadScrollSensitivity;
+
+        let mut config = Config::default();
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+        let mut state = test_state(config);
+        state.set_current_record_for_test("unit:6be9d300", "receiver:82839805:slot:1");
+
+        // Without measured capabilities neither control is available, and
+        // commits are no-ops rather than persisted stray settings.
+        assert!(!state.current_scroll_inversion_supported());
+        assert!(!state.current_touchpad_scroll_supported());
+        state.commit_touchpad_scroll_sensitivity(TouchpadScrollSensitivity::MAX);
+        state.commit_invert_scroll(true);
+        assert_eq!(
+            state.current_touchpad_scroll_sensitivity(),
+            TouchpadScrollSensitivity::DEFAULT
+        );
+        assert!(!state.current_invert_scroll());
+
+        state.set_current_record_with_capabilities_for_test(
+            "unit:6be9d300",
+            "receiver:82839805:slot:1",
+            Some(Capabilities {
+                touchpad_raw_xy: true,
+                ..Capabilities::default()
+            }),
+        );
+        assert!(state.current_touchpad_scroll_supported());
+        // A pad without the HID++ wheel mode still inverts — in software.
+        assert!(state.current_scroll_inversion_supported());
+
+        state.commit_touchpad_scroll_sensitivity(TouchpadScrollSensitivity::MAX);
+        state.commit_invert_scroll(true);
+        assert_eq!(
+            state.current_touchpad_scroll_sensitivity(),
+            TouchpadScrollSensitivity::MAX
+        );
+        assert!(state.current_invert_scroll());
+        let device = state
+            .config
+            .devices
+            .get("unit:6be9d300")
+            .expect("device entry exists");
+        assert_eq!(
+            device.touchpad_gestures.scroll_sensitivity,
+            Some(TouchpadScrollSensitivity::MAX)
+        );
+        assert!(device.invert_scroll);
     }
 
     #[test]

@@ -27,6 +27,7 @@ use std::sync::{Arc, mpsc as std_mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use openlogi_core::config::TouchpadScrollSensitivity;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSessionMode, TouchpadJournalStore};
@@ -35,6 +36,7 @@ use openlogi_hid::{
     FileTouchpadJournalStore, GestureError, PendingCaptureRestore,
     run_capture_session_with_registry_spec,
 };
+use openlogi_inject::SmoothScrollPhase;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -89,6 +91,77 @@ impl GestureOutputs {
             openlogi_inject::post_scroll(delta);
         }
     }
+}
+
+/// Synthesize one frame of two-finger scrolling from a micrometre centroid
+/// delta. The capture session owns the pad's raw stream, which switches its
+/// firmware scroll translation off — OpenLogi restores the scrolling itself,
+/// the contract Options+ keeps on the same hardware.
+///
+/// Every frame is wheel-class — no scroll phase, matching what the pad's
+/// firmware emits natively. Phased frames carry drag semantics: apps
+/// rubber-band them at document boundaries and keep the page stretched while
+/// later deltas feed the overscroll. Wheel-class deltas clamp, exactly the
+/// native feel this device has without capture.
+fn post_touchpad_scroll(tuning: TouchpadScrollTuning, dx: i64, dy: i64, _phase: SmoothScrollPhase) {
+    // Wheel-class on purpose — see the doc comment above.
+    openlogi_inject::post_touchpad_scroll(tuning.content_delta(dx, dy), None);
+}
+
+/// Effective tuning of one device's synthesized two-finger scrolling.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TouchpadScrollTuning {
+    sensitivity: TouchpadScrollSensitivity,
+    inverted: bool,
+}
+
+impl TouchpadScrollTuning {
+    /// Terminal frames carry zero deltas, so a neutral tuning posts them
+    /// identically to the tuned stream they close.
+    pub(super) const NEUTRAL: Self = Self {
+        sensitivity: TouchpadScrollSensitivity::DEFAULT,
+        inverted: false,
+    };
+
+    /// Project the plan's per-device settings.
+    pub(super) fn from_plan(plan: &DispatchPlan) -> Self {
+        Self {
+            sensitivity: plan.touchpad_scroll_sensitivity,
+            inverted: plan.touchpad_scroll_inverted,
+        }
+    }
+
+    /// Convert one centroid delta into a content-following pixel scroll.
+    ///
+    /// Fingers right / down move content right / down (natural scrolling).
+    /// ScrollDelta's wheel convention is +x view-right / +y view-up, so
+    /// content-following maps the horizontal axis negated and the vertical
+    /// axis as-is; the inject layer re-orients for hosts whose wheel
+    /// convention matches content-following instead. `inverted` flips both
+    /// axes after that, mirroring the wheel contract of running opposite the
+    /// system scroll preference.
+    pub(super) fn content_delta(self, dx: i64, dy: i64) -> ScrollDelta {
+        let (dx, dy) = if self.inverted { (-dx, -dy) } else { (dx, dy) };
+        let multiplier = self.sensitivity.scroll_multiplier();
+        ScrollDelta::pixels(
+            micrometres_to_content_pixels(-dx) * multiplier,
+            micrometres_to_content_pixels(dy) * multiplier,
+        )
+    }
+}
+
+/// Two-finger scroll gain in pixels of content per micrometre of centroid
+/// travel: 25 px/mm keeps the Casa Touch's 75 mm-tall surface good for a
+/// ~1.9k px full-height stroke, the distance a Magic Trackpad covers at its
+/// default tracking feel.
+const TOUCHPAD_SCROLL_PIXELS_PER_UM: f64 = 0.025;
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "micrometre deltas from a 117 x 76 mm pad stay far below 2^53"
+)]
+fn micrometres_to_content_pixels(um: i64) -> f64 {
+    um as f64 * TOUCHPAD_SCROLL_PIXELS_PER_UM
 }
 
 /// Unique owner of the capture-manager thread and its graceful shutdown.

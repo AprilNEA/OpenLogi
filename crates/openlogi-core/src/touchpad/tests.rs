@@ -246,13 +246,119 @@ fn drifting_four_finger_pinch_beats_the_swipe_gate() {
 }
 
 #[test]
-fn common_two_finger_motion_is_left_to_native_scrolling() {
+fn two_finger_comotion_streams_scroll_deltas() {
     let mut recognizer = TouchpadGestureRecognizer::default();
     recognizer.update(&translated_frame(0, 2, 0, 0));
+    assert_eq!(
+        recognizer.update(&translated_frame(8_000, 2, 2_000, 1_500)),
+        GestureRecognition::Pending
+    );
+
+    // Activation happens past the tap travel; the first delta carries only
+    // that frame's motion, never the pre-activation travel.
+    assert_eq!(
+        recognizer.update(&translated_frame(16_000, 2, 5_000, 3_000)),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 1_500
+        }
+    );
+    assert_eq!(
+        recognizer.update(&translated_frame(24_000, 2, 7_000, 4_000)),
+        GestureRecognition::Scroll {
+            dx_um: 2_000,
+            dy_um: 1_000
+        }
+    );
+    // A scrolled stroke travelled far past the tap limits.
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn two_finger_scroll_waits_for_comotion_to_dominate_spread_change() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 40_000, 50_000), contact(2, 60_000, 50_000)],
+    ));
+
+    // The centroid passes the tap travel (3.5 mm), but the fingers also
+    // spread 4.5 mm apart: spread change dominates, so the stroke is a zoom
+    // chord in the making, not scrolling.
+    assert_eq!(
+        recognizer.update(&frame(
+            20_000,
+            vec![contact(1, 39_000, 50_000), contact(2, 68_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn a_scrolling_stroke_never_reclassifies_as_a_pinch() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 60_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        8_000,
+        vec![contact(1, 62_000, 50_000), contact(2, 72_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 0
+        }
+    );
+
+    // Spreading 20 mm apart with a still centroid would satisfy the pinch
+    // gate; the scroll claim is sticky, so the stroke only streams a zero
+    // delta and never fires a zoom.
+    assert_eq!(
+        recognizer.update(&frame(
+            24_000,
+            vec![contact(1, 55_000, 50_000), contact(2, 85_000, 50_000)],
+        )),
+        GestureRecognition::Scroll { dx_um: 0, dy_um: 0 }
+    );
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn two_finger_scroll_stops_when_one_finger_lifts() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 60_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        8_000,
+        vec![contact(1, 62_000, 50_000), contact(2, 72_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 0
+        }
+    );
 
     assert_eq!(
-        recognizer.update(&translated_frame(20_000, 2, 5_000, 0)),
-        GestureRecognition::NativeScroll
+        recognizer.update(&frame(24_000, vec![contact(1, 68_000, 50_000)],)),
+        GestureRecognition::Pending
+    );
+    assert_eq!(
+        recognizer.update(&frame(32_000, vec![contact(1, 74_000, 50_000)],)),
+        GestureRecognition::Pending
     );
     assert_eq!(recognizer.end(), None);
 }

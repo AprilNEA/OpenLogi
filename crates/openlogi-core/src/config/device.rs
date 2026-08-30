@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    ThumbwheelSensitivity, TouchpadScrollSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -22,6 +22,11 @@ pub struct TouchpadGestureSettings {
     /// Whether OpenLogi may enable HID++ raw reporting for gesture recognition.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
+    /// Speed of the two-finger scrolling OpenLogi synthesizes while capture is
+    /// armed (the firmware stops translating it once raw frames stream).
+    /// `None` keeps the out-of-the-box speed and stays out of `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_sensitivity: Option<TouchpadScrollSensitivity>,
 }
 
 impl TouchpadGestureSettings {

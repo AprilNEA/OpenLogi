@@ -87,9 +87,17 @@ pub enum GestureRecognition {
     Pending,
     /// A custom gesture committed as its binding trigger and should fire once.
     Gesture(ButtonId),
-    /// Common two-finger motion dominated spread change, so firmware-native
-    /// scrolling owns this stroke and OpenLogi must not fire an action.
-    NativeScroll,
+    /// One frame of two-finger scrolling: the centroid's travel since the
+    /// previous frame, in micrometres. Streaming raw reports switches the pad
+    /// out of its firmware scroll translation, so the host owns this stroke
+    /// and must synthesize the scroll itself; the first `Scroll` of a stroke
+    /// follows the activation travel, never includes it.
+    Scroll {
+        /// Centroid travel to the right, in micrometres.
+        dx_um: i64,
+        /// Centroid travel towards the bottom edge, in micrometres.
+        dy_um: i64,
+    },
 }
 
 /// Pure recognizer for one touchpad stream.
@@ -116,6 +124,8 @@ struct Stroke {
     start_spread_um: u64,
     max_contact_travel_um: u64,
     motion_frames: u8,
+    previous_centroid: Point,
+    scrolling: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,12 +168,18 @@ impl TouchpadGestureRecognizer {
                 if update == ContactUpdate::Rebased {
                     return GestureRecognition::Pending;
                 }
+                if let Some((dx_um, dy_um)) = stroke.scroll_delta() {
+                    return GestureRecognition::Scroll { dx_um, dy_um };
+                }
                 let recognition = stroke.classify();
                 if !matches!(recognition, GestureRecognition::Pending) {
                     self.state = match recognition {
                         GestureRecognition::Gesture(_) => StrokeState::Committed,
-                        GestureRecognition::NativeScroll => StrokeState::Cancelled,
-                        GestureRecognition::Pending => unreachable!(),
+                        GestureRecognition::Scroll { .. } | GestureRecognition::Pending => {
+                            unreachable!(
+                                "a returned scroll or pending recognition keeps the stroke tracking"
+                            )
+                        }
                     };
                 }
                 recognition
@@ -201,6 +217,8 @@ impl Stroke {
             start_spread_um: spread(&frame.contacts, centroid),
             max_contact_travel_um: 0,
             motion_frames: 0,
+            previous_centroid: centroid,
+            scrolling: false,
         }
     }
 
@@ -254,6 +272,38 @@ impl Stroke {
         self.latest.clone_from(&frame.contacts);
     }
 
+    /// Stream the centroid delta of one frame once this stroke scrolls.
+    ///
+    /// Scrolling claims the stroke when centroid travel passes the tap limit
+    /// and dominates spread change — past that point the stroke is content
+    /// motion, not a pinch or a tap. The claim is sticky: a stroke that
+    /// scrolled never re-classifies into a pinch, matching how a zoom chord
+    /// must be deliberate from the start rather than grown out of a scroll.
+    fn scroll_delta(&mut self) -> Option<(i64, i64)> {
+        if self.starts.len() != 2 || self.latest.len() != 2 {
+            return None;
+        }
+        let current = centroid(&self.latest);
+        if !self.scrolling {
+            let geometry = self.current_geometry();
+            let centroid_distance = vector_length(geometry.dx, geometry.dy);
+            let spread_change = geometry.spread_um.abs_diff(self.start_spread_um);
+            if centroid_distance <= TAP_MAX_TRAVEL_UM
+                || !dominates(centroid_distance, spread_change)
+            {
+                self.previous_centroid = current;
+                return None;
+            }
+            self.scrolling = true;
+        }
+        let delta = (
+            current.x - self.previous_centroid.x,
+            current.y - self.previous_centroid.y,
+        );
+        self.previous_centroid = current;
+        Some(delta)
+    }
+
     fn classify(&self) -> GestureRecognition {
         if self.latest.len() < 2 {
             return GestureRecognition::Pending;
@@ -263,14 +313,8 @@ impl Stroke {
         let spread_change = current.spread_um.abs_diff(self.start_spread_um);
         let finger_count = self.starts.len();
 
-        if finger_count == 2
-            && centroid_distance > TAP_MAX_TRAVEL_UM
-            && dominates(centroid_distance, spread_change)
-        {
-            return GestureRecognition::NativeScroll;
-        }
-
-        if self.latest.len() == finger_count
+        if !self.scrolling
+            && self.latest.len() == finger_count
             && matches!(finger_count, 2 | 4)
             && spread_change >= self.pinch_threshold()
             && (finger_count == 4 || dominates(spread_change, centroid_distance))

@@ -433,6 +433,43 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     }
 }
 
+/// Content distance one wheel detent represents when a touchpad scroll has to
+/// fall back to wheel-class output, matching the points-per-tick scale macOS
+/// continuous scrolling carries in its native events.
+const PIXELS_PER_WHEEL_TICK: f64 = 10.0;
+
+/// Synthesise one frame of a touchpad-driven scroll gesture.
+///
+/// `delta` is the frame's travel expressed in [`ScrollDelta`]'s wheel
+/// convention but computed for content-following ("natural") fingers, because
+/// the host, not the device, now owns the stroke: streaming a pad's raw
+/// reports switches its firmware out of scroll translation. macOS applies the
+/// user's natural-scrolling preference only to device-generated events, so it
+/// re-orients synthesized ones here; wheel-class platforms let the desktop
+/// apply that preference itself and only need the distance, as wheel ticks.
+/// Non-finite input is rejected; zero-distance frames stay meaningful as
+/// gesture-phase terminators. `None` posts the frame wheel-class — no scroll
+/// phase — which apps clamp at document boundaries instead of rubber-banding
+/// the way an in-progress drag does; that is the shape the pad's own firmware
+/// uses for its native glide.
+pub fn post_touchpad_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
+    if !delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_touchpad_scroll(delta, phase);
+        }
+        _ => {
+            let _ = phase;
+            post_scroll(ScrollDelta::wheel_ticks(
+                delta.x() / PIXELS_PER_WHEEL_TICK,
+                delta.y() / PIXELS_PER_WHEEL_TICK,
+            ));
+        }
+    }
+}
+
 /// Return the `/dev/input/eventN` node for the action-injector uinput device,
 /// initialising it if needed.
 ///

@@ -16,7 +16,8 @@ use openlogi_core::binding::{
 use openlogi_core::scroll::ScrollDelta;
 
 use super::{
-    HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
+    HeldKey, HeldModifiers, KeyPhase, PIXELS_PER_WHEEL_TICK, QuantizedScroll, ScrollQuantizer,
+    SmoothScrollPhase,
 };
 
 static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
@@ -24,6 +25,11 @@ static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+// Touchpad frames carry their own sub-pixel residuals; sharing the wheel's
+// quantizer would round a touchpad stroke against a wheel animation's
+// leftover fractions.
+static TOUCHPAD_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
@@ -651,11 +657,9 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 }
 
 pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
-    const POINTS_PER_WHEEL_TICK: f64 = 10.0;
-
     let units_per_input = match delta {
         ScrollDelta::Pixels { .. } => 1.0,
-        ScrollDelta::WheelTicks { .. } => POINTS_PER_WHEEL_TICK,
+        ScrollDelta::WheelTicks { .. } => PIXELS_PER_WHEEL_TICK,
     };
     let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
@@ -663,7 +667,26 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     };
     let delta = quantizer.quantize(delta, units_per_input);
     drop(quantizer);
+    post_continuous_scroll(delta, Some(phase));
+}
 
+/// Synthesise one frame of a touchpad scroll after honouring the user's
+/// natural-scrolling preference (see [`super::post_touchpad_scroll`]).
+pub(super) fn post_touchpad_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
+    let delta = orient_by_scroll_preference(delta);
+    let Ok(mut quantizer) = TOUCHPAD_SCROLL_QUANTIZER.lock() else {
+        tracing::warn!("macOS touchpad scroll quantizer mutex poisoned");
+        return;
+    };
+    let delta = quantizer.quantize(delta, 1.0);
+    drop(quantizer);
+    if phase.is_none() && delta == QuantizedScroll::default() {
+        return;
+    }
+    post_continuous_scroll(delta, phase);
+}
+
+fn post_continuous_scroll(delta: QuantizedScroll, phase: Option<SmoothScrollPhase>) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for smooth scroll");
         return;
@@ -674,10 +697,58 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         return;
     };
     set_continuous_scroll_fields(&ev, delta);
-    ev.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
+    if let Some(phase) = phase {
+        ev.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
+    }
     ev.set_integer_value_field(MOMENTUM_PHASE, 0);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
+}
+
+/// How long a natural-scrolling preference read stays valid: long enough that
+/// a 130 Hz touchpad stream never hits cfprefsd per frame, short enough that
+/// flipping the system setting applies mid-session.
+const SCROLL_PREFERENCE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[expect(
+    unsafe_code,
+    reason = "CFPreferencesGetAppBooleanValue is an unsafe generated binding"
+)]
+fn natural_scrolling_enabled() -> bool {
+    use objc2_core_foundation::{CFPreferencesGetAppBooleanValue, CFString};
+
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut cache) = CACHE.lock() else {
+        return true;
+    };
+    if let Some((at, cached)) = *cache
+        && at.elapsed() < SCROLL_PREFERENCE_TTL
+    {
+        return cached;
+    }
+    let key = CFString::from_str("com.apple.swipescrolldirection");
+    let domain = CFString::from_str("AppleGlobalDomain");
+    // The out-parameter's `Boolean` alias is crate-private in the bindings;
+    // it is a plain u8.
+    let mut exists: u8 = 0;
+    // SAFETY: `exists` is a valid Boolean slot and both strings are retained
+    // locals that outlive the call.
+    let value =
+        unsafe { CFPreferencesGetAppBooleanValue(&key, &domain, std::ptr::addr_of_mut!(exists)) };
+    // A fresh install leaves the key unset until first toggled; macOS
+    // defaults to natural scrolling there.
+    let resolved = exists == 0 || value;
+    *cache = Some((std::time::Instant::now(), resolved));
+    resolved
+}
+
+fn orient_by_scroll_preference(delta: ScrollDelta) -> ScrollDelta {
+    if natural_scrolling_enabled() {
+        delta
+    } else {
+        ScrollDelta::pixels(-delta.x(), -delta.y())
+    }
 }
 
 const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {

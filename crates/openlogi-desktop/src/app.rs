@@ -24,6 +24,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
+use crate::features::touchpad::TouchpadScrollPanel;
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
@@ -164,6 +165,38 @@ impl DetailTab {
     }
 }
 
+/// The device-detail child panel entities, created once for the app's
+/// lifetime and shared by every workspace render.
+struct DetailPanelSet {
+    mouse_model: Entity<MouseModelView>,
+    action_ring: Entity<ActionRingPanel>,
+    keyboard_model: Entity<FunctionRowView>,
+    dpi_panel: Entity<DpiPanel>,
+    smartshift_panel: Entity<SmartShiftPanel>,
+    touchpad_scroll_panel: Entity<TouchpadScrollPanel>,
+    lighting_panel: Entity<LightingPanel>,
+    camera_preview: Entity<CameraPreview>,
+    camera_controls: Entity<CameraControlsPanel>,
+    light_panel: Entity<LightPanel>,
+}
+
+impl DetailPanelSet {
+    fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
+        Self {
+            mouse_model: cx.new(|cx| MouseModelView::new(window, cx)),
+            action_ring: cx.new(ActionRingPanel::new),
+            keyboard_model: cx.new(FunctionRowView::new),
+            dpi_panel: cx.new(DpiPanel::new),
+            smartshift_panel: cx.new(SmartShiftPanel::new),
+            touchpad_scroll_panel: cx.new(TouchpadScrollPanel::new),
+            lighting_panel: cx.new(LightingPanel::new),
+            camera_preview: cx.new(CameraPreview::new),
+            camera_controls: cx.new(CameraControlsPanel::new),
+            light_panel: cx.new(LightPanel::new),
+        }
+    }
+}
+
 /// Root application view.
 pub struct AppView {
     focus_handle: FocusHandle,
@@ -173,6 +206,7 @@ pub struct AppView {
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    touchpad_scroll_panel: Entity<TouchpadScrollPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
@@ -230,15 +264,7 @@ impl AppView {
             }
         }
 
-        let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
-        let action_ring_panel = cx.new(ActionRingPanel::new);
-        let keyboard_model = cx.new(FunctionRowView::new);
-        let dpi_panel = cx.new(DpiPanel::new);
-        let smartshift_panel = cx.new(SmartShiftPanel::new);
-        let lighting_panel = cx.new(LightingPanel::new);
-        let camera_preview = cx.new(CameraPreview::new);
-        let camera_controls = cx.new(CameraControlsPanel::new);
-        let light_panel = cx.new(LightPanel::new);
+        let panels = DetailPanelSet::new(window, cx);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
@@ -298,15 +324,16 @@ impl AppView {
         Self {
             focus_handle,
             route: Route::Home,
-            mouse_model,
-            action_ring_panel,
-            keyboard_model,
-            dpi_panel,
-            smartshift_panel,
-            lighting_panel,
-            camera_preview,
-            camera_controls,
-            light_panel,
+            mouse_model: panels.mouse_model,
+            action_ring_panel: panels.action_ring,
+            keyboard_model: panels.keyboard_model,
+            dpi_panel: panels.dpi_panel,
+            smartshift_panel: panels.smartshift_panel,
+            touchpad_scroll_panel: panels.touchpad_scroll_panel,
+            lighting_panel: panels.lighting_panel,
+            camera_preview: panels.camera_preview,
+            camera_controls: panels.camera_controls,
+            light_panel: panels.light_panel,
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
@@ -616,6 +643,7 @@ impl Render for AppView {
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        touchpad_scroll_panel: &self.touchpad_scroll_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,

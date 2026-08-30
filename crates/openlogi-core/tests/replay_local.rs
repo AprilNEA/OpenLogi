@@ -61,6 +61,10 @@ fn replay_one(path: &Path) {
     let mut index = 0usize;
     let mut commits: Vec<(usize, String)> = Vec::new();
     let mut deaths: Vec<String> = Vec::new();
+    // Scroll recognition streams one result per frame; the report cares about
+    // stroke boundaries and the accumulated distance, not every frame.
+    let mut scrolling = false;
+    let mut scroll_total = (0_i64, 0_i64);
 
     for line in text.lines() {
         index += 1;
@@ -75,45 +79,42 @@ fn replay_one(path: &Path) {
                 // survives to the watchdog END.
                 if std::env::var_os("OPENLOGI_REPLAY_IGNORE_CANCEL").is_none() {
                     if let Some(diag) = stroke.take() {
-                        deaths.push(format!("cancel@{index}: {}", diag.summarize()));
+                        deaths.push(format!(
+                            "cancel@{index}: {}{}",
+                            diag.summarize(),
+                            scroll_note(scrolling, scroll_total)
+                        ));
                     }
                     recognizer.cancel();
+                    scrolling = false;
                 }
             } else if kind == "END" {
                 if let Some(diag) = stroke.take() {
                     match recognizer.end() {
                         Some(tap) => deaths.push(format!(
-                            "end-tap@{index}: {tap:?} over {}",
-                            diag.summarize()
+                            "end-tap@{index}: {tap:?} over {}{}",
+                            diag.summarize(),
+                            scroll_note(scrolling, scroll_total)
                         )),
-                        None => deaths.push(format!("end-no-commit@{index}: {}", diag.summarize())),
+                        None => deaths.push(format!(
+                            "end-no-commit@{index}: {}{}",
+                            diag.summarize(),
+                            scroll_note(scrolling, scroll_total)
+                        )),
                     }
                 } else {
                     recognizer.end();
                 }
+                scrolling = false;
             }
+            scroll_total = (0, 0);
             continue;
         }
 
-        let timestamp: u64 = fields.next().unwrap().parse().unwrap();
-        let button = fields.next().unwrap() == "1";
-        let contacts: Vec<TouchContact> = fields
-            .next()
-            .unwrap_or("")
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .map(|triplet| {
-                let mut it = triplet.split(':');
-                TouchContact {
-                    id: it.next().unwrap().parse().unwrap(),
-                    x_um: it.next().unwrap().parse().unwrap(),
-                    y_um: it.next().unwrap().parse().unwrap(),
-                }
-            })
-            .collect();
-        let Ok(frame) = TouchFrame::new(timestamp, button, contacts.clone()) else {
+        let Some((frame, contacts)) = parse_frame(&mut fields) else {
             continue;
         };
+        let timestamp = frame.timestamp_us;
         if contacts.len() >= 2 && stroke.is_none() {
             stroke = Some(Diag::new(timestamp, &contacts));
         }
@@ -122,19 +123,26 @@ fn replay_one(path: &Path) {
         }
         match recognizer.update(&frame) {
             GestureRecognition::Gesture(id) => {
+                scrolling = false;
+                scroll_total = (0, 0);
                 let diag = stroke.take();
                 commits.push((index, describe_commit(id, timestamp, diag.as_ref())));
             }
-            GestureRecognition::NativeScroll => {
-                let diag = stroke.take();
-                commits.push((
-                    index,
-                    format!(
-                        "NATIVE-SCROLL @{}ms: {}",
-                        elapsed_ms(timestamp, diag.as_ref()),
-                        diag.map_or_else(|| "no stroke".to_string(), |d| d.summarize())
-                    ),
-                ));
+            GestureRecognition::Scroll { dx_um, dy_um } => {
+                if !scrolling {
+                    scrolling = true;
+                    let diag = stroke.as_ref();
+                    commits.push((
+                        index,
+                        format!(
+                            "SCROLL-OPEN @{}ms: {}",
+                            elapsed_ms(timestamp, diag),
+                            diag.map_or_else(|| "no stroke".to_string(), Diag::summarize)
+                        ),
+                    ));
+                }
+                scroll_total.0 += dx_um;
+                scroll_total.1 += dy_um;
             }
             GestureRecognition::Pending => {}
         }
@@ -152,6 +160,37 @@ fn replay_one(path: &Path) {
 
 fn elapsed_ms(timestamp: u64, diag: Option<&Diag>) -> u64 {
     diag.map_or(0, |d| timestamp.saturating_sub(d.t0_us) / 1_000)
+}
+
+fn scroll_note(scrolling: bool, total: (i64, i64)) -> String {
+    if scrolling {
+        format!(" scroll_total={total:?}um")
+    } else {
+        String::new()
+    }
+}
+
+fn parse_frame(
+    fields: &mut std::str::SplitWhitespace<'_>,
+) -> Option<(TouchFrame, Vec<TouchContact>)> {
+    let timestamp: u64 = fields.next()?.parse().ok()?;
+    let button = fields.next()? == "1";
+    let contacts: Vec<TouchContact> = fields
+        .next()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|triplet| {
+            let mut it = triplet.split(':');
+            TouchContact {
+                id: it.next().unwrap().parse().unwrap(),
+                x_um: it.next().unwrap().parse().unwrap(),
+                y_um: it.next().unwrap().parse().unwrap(),
+            }
+        })
+        .collect();
+    let frame = TouchFrame::new(timestamp, button, contacts.clone()).ok()?;
+    Some((frame, contacts))
 }
 
 fn describe_commit(id: ButtonId, timestamp: u64, diag: Option<&Diag>) -> String {
