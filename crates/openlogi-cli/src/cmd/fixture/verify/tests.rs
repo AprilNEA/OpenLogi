@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use openlogi_device::fixture::{
+use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, CANONICAL_FIXTURE_MANIFEST_JSON, CassetteExchange,
     FIXTURE_SCHEMA_VERSION, FixtureCase, FixtureCaseRelationship, FixtureManifest, HidCassette,
     IdentityLocation, IdentityOccurrence, IdentityRepresentation, ReportSupport, RequestMatch,
@@ -9,9 +9,8 @@ use openlogi_device::fixture::{
 use super::*;
 
 #[test]
-fn repository_fixture_corpus_is_complete_and_valid() {
-    let corpus =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../openlogi-device/tests/fixtures/devices");
+fn packaged_canonical_fixture_is_complete_and_valid() {
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../openlogi-fixture/fixtures/devices");
     require_directory(&corpus, "repository fixture corpus").expect("corpus root is real");
     let entries = read_directory(&corpus, "repository fixture corpus").expect("read corpus root");
     assert!(!entries.is_empty(), "repository fixture corpus is empty");
@@ -162,7 +161,7 @@ fn rejects_symlinked_fixture_assets_and_directories() {
 
 fn fixture_directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../openlogi-device/tests/fixtures/devices/openlogi-canonical-synthetic-001")
+        .join("../openlogi-fixture/fixtures/devices/openlogi-canonical-synthetic-001")
 }
 
 fn copied_canonical_fixture() -> (tempfile::TempDir, PathBuf) {

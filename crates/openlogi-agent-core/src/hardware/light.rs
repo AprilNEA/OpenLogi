@@ -258,7 +258,7 @@ fn light_write_lock(route: &DeviceRoute) -> LightWriteLock {
 mod tests {
     use super::*;
 
-    use openlogi_hid::fixture::{
+    use openlogi_hid::replay::{
         ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
         ReplayNode, ReplayTopology,
     };

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use openlogi_fixture::RequestMatch;
 use tokio::sync::mpsc;
 
 use super::Enumerator;
@@ -10,9 +11,7 @@ use super::replay_test_support::{
     BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, bolt_fixture, connection_notification,
     direct_fixture, malformed_dpi_fixture, short,
 };
-use crate::fixture::{
-    ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology, RequestMatch,
-};
+use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
 
 #[tokio::test]

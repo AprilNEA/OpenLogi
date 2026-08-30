@@ -18,10 +18,10 @@ categories = ["hardware-support"]
 hidpp = { workspace = true }
 openlogi-core = { version = "0.8.3", path = "../openlogi-core", default-features = false }
 openlogi-device-registry = { workspace = true }
+openlogi-fixture = { workspace = true }
 futures-lite = { workspace = true }
 futures-concurrency = "7"
 serde = { workspace = true }
-serde_ignored = "0.1.14"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

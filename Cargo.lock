@@ -5395,6 +5395,7 @@ dependencies = [
  "openlogi-agent-core",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-ipc",
@@ -5419,6 +5420,7 @@ version = "0.8.3"
 dependencies = [
  "futures-lite",
  "openlogi-core",
+ "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",
@@ -5492,6 +5494,7 @@ dependencies = [
  "openlogi-camera",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-fixture",
  "openlogi-hid",
  "openlogi-ipc",
  "png 0.17.16",
@@ -5554,6 +5557,7 @@ dependencies = [
  "openlogi-camera",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-fixture",
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-permissions",
@@ -5581,9 +5585,9 @@ dependencies = [
  "futures-lite",
  "openlogi-core",
  "openlogi-device-registry",
+ "openlogi-fixture",
  "openlogi-hidpp",
  "serde",
- "serde_ignored",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -5596,6 +5600,17 @@ name = "openlogi-device-registry"
 version = "0.8.3"
 
 [[package]]
+name = "openlogi-fixture"
+version = "0.8.3"
+dependencies = [
+ "openlogi-core",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "openlogi-hid"
 version = "0.8.3"
 dependencies = [
@@ -5606,6 +5621,7 @@ dependencies = [
  "openlogi-async-hid",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-fixture",
  "openlogi-hidpp",
  "serde",
  "serde_json",

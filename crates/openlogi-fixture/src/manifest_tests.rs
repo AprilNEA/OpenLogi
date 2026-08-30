@@ -1,4 +1,6 @@
-use crate::DeviceRoute;
+//! Manifest and complete asset verification tests.
+
+use openlogi_core::hid::DeviceRoute;
 
 use super::*;
 

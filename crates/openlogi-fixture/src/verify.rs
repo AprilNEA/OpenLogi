@@ -1,3 +1,5 @@
+//! Cross-asset schema, relationship, privacy, and replay verification.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 

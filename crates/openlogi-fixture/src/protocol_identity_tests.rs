@@ -1,3 +1,5 @@
+//! Protocol identity extraction tests.
+
 use super::*;
 
 const DEVICE: u8 = 1;

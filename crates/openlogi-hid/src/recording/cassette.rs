@@ -3,9 +3,7 @@
 use std::collections::BTreeSet;
 
 use hidpp::channel::RequestOutcome;
-use openlogi_device::fixture::{
-    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport,
-};
+use openlogi_fixture::{CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport};
 
 use super::{RecordedChannel, RecordedChannelOpenOutcome, RecordedRequest, RecordedRequestFact};
 

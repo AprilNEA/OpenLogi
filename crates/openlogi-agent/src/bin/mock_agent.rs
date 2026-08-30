@@ -52,9 +52,7 @@ use openlogi_core::device::{
     PairedDevice, StandaloneDevice,
 };
 use openlogi_core::single_instance::{self, InstanceError};
-use openlogi_device::fixture::{
-    DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting,
-};
+use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
     ScrollWheelMode, SmartShiftStatus, WriteError,

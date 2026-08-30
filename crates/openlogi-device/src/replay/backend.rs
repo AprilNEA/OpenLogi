@@ -4,15 +4,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use hidpp::channel::HidppChannel;
+use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch};
 use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo};
 
+use super::ReplayError;
 use super::barrier::{ReplayResponseBarrier, ResponseGates};
 use super::channel::{
     CassetteState, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter, ReplayRawWriterHandle,
 };
-use super::schema::{FixtureError, HidCassette, ReportSupport, RequestMatch, validate_report};
 
 /// Whether an OS HID node appears in enumeration snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,10 +157,7 @@ pub struct ReplayBackend {
 
 impl ReplayBackend {
     /// Validate and build a replay backend from topology plus named cassettes.
-    pub fn new(
-        topology: ReplayTopology,
-        cassettes: Vec<HidCassette>,
-    ) -> Result<Self, FixtureError> {
+    pub fn new(topology: ReplayTopology, cassettes: Vec<HidCassette>) -> Result<Self, ReplayError> {
         let channels = build_channels(topology.channels, cassettes)?;
         let nodes = build_nodes(topology.nodes, &channels)?;
 
@@ -174,7 +172,7 @@ impl ReplayBackend {
         &self,
         node: &NodeId,
         presence: NodePresence,
-    ) -> Result<(), FixtureError> {
+    ) -> Result<(), ReplayError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = find_node_mut(&mut state.nodes, node)?;
         runtime.node.presence = presence;
@@ -182,15 +180,11 @@ impl ReplayBackend {
     }
 
     /// Change the HID++ open result independently of node presence.
-    pub fn set_open_outcome(
-        &self,
-        node: &NodeId,
-        outcome: OpenOutcome,
-    ) -> Result<(), FixtureError> {
+    pub fn set_open_outcome(&self, node: &NodeId, outcome: OpenOutcome) -> Result<(), ReplayError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = find_node_mut(&mut state.nodes, node)?;
         if outcome == OpenOutcome::Hidpp && runtime.node.channel.is_none() {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("node {node} has no logical channel"),
             ));
@@ -207,12 +201,12 @@ impl ReplayBackend {
         &self,
         channel: &str,
         connection: ChannelConnection,
-    ) -> Result<(), FixtureError> {
+    ) -> Result<(), ReplayError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .channels
             .get_mut(channel)
-            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
+            .ok_or_else(|| ReplayError::UnknownChannel(channel.to_string()))?;
         runtime.connection = connection;
         runtime.lifetimes.retain(|lifetime| {
             let Some(connection_flag) = lifetime.connected.upgrade() else {
@@ -235,28 +229,32 @@ impl ReplayBackend {
         channel: &str,
         request_match: RequestMatch,
         request: &[u8],
-    ) -> Result<ReplayResponseBarrier, FixtureError> {
+    ) -> Result<ReplayResponseBarrier, ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .channels
             .get(channel)
-            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
-        validate_report(request, runtime.report_support)
-            .map_err(|message| FixtureError::invalid("replay response barrier", message))?;
+            .ok_or_else(|| ReplayError::UnknownChannel(channel.to_string()))?;
+        runtime
+            .report_support
+            .validate_report(request)
+            .map_err(|error| ReplayError::invalid("replay response barrier", error.to_string()))?;
         Ok(runtime.response_gates.hold(request_match, request))
     }
 
     /// Deliver an unsolicited report to every connected lifetime of `channel`.
     ///
     /// Returns the number of live channel lifetimes that received the report.
-    pub fn emit_channel_report(&self, channel: &str, report: &[u8]) -> Result<usize, FixtureError> {
+    pub fn emit_channel_report(&self, channel: &str, report: &[u8]) -> Result<usize, ReplayError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .channels
             .get_mut(channel)
-            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
-        validate_report(report, runtime.report_support)
-            .map_err(|message| FixtureError::invalid("replay channel report", message))?;
+            .ok_or_else(|| ReplayError::UnknownChannel(channel.to_string()))?;
+        runtime
+            .report_support
+            .validate_report(report)
+            .map_err(|error| ReplayError::invalid("replay channel report", error.to_string()))?;
         let mut delivered = 0;
         runtime.lifetimes.retain(|lifetime| {
             let Some(connected) = lifetime.connected.upgrade() else {
@@ -271,12 +269,12 @@ impl ReplayBackend {
     }
 
     /// Number of current raw-channel lifetimes for one logical channel.
-    pub fn channel_lifetime_count(&self, channel: &str) -> Result<usize, FixtureError> {
+    pub fn channel_lifetime_count(&self, channel: &str) -> Result<usize, ReplayError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .channels
             .get_mut(channel)
-            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
+            .ok_or_else(|| ReplayError::UnknownChannel(channel.to_string()))?;
         runtime
             .lifetimes
             .retain(|lifetime| lifetime.connected.upgrade().is_some());
@@ -289,7 +287,7 @@ impl ReplayBackend {
         node: &NodeId,
         slot: u8,
         slot_state: ReceiverSlotState,
-    ) -> Result<(), FixtureError> {
+    ) -> Result<(), ReplayError> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = find_node_mut(&mut state.nodes, node)?;
         let receiver_slot = runtime
@@ -298,7 +296,7 @@ impl ReplayBackend {
             .iter_mut()
             .find(|candidate| candidate.slot == slot)
             .ok_or_else(|| {
-                FixtureError::invalid(
+                ReplayError::invalid(
                     "replay topology",
                     format!("node {node} has no receiver slot {slot}"),
                 )
@@ -312,13 +310,13 @@ impl ReplayBackend {
         &self,
         node: &NodeId,
         slot: u8,
-    ) -> Result<ReceiverSlotState, FixtureError> {
+    ) -> Result<ReceiverSlotState, ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .nodes
             .iter()
             .find(|runtime| runtime.node.info.id == *node)
-            .ok_or_else(|| FixtureError::UnknownNode(node.to_string()))?;
+            .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))?;
         runtime
             .node
             .receiver_slots
@@ -326,7 +324,7 @@ impl ReplayBackend {
             .find(|candidate| candidate.slot == slot)
             .map(|receiver_slot| receiver_slot.state)
             .ok_or_else(|| {
-                FixtureError::invalid(
+                ReplayError::invalid(
                     "replay topology",
                     format!("node {node} has no receiver slot {slot}"),
                 )
@@ -342,23 +340,23 @@ impl ReplayBackend {
     }
 
     /// Number of HID++ open attempts made for `node`.
-    pub fn open_count(&self, node: &NodeId) -> Result<usize, FixtureError> {
+    pub fn open_count(&self, node: &NodeId) -> Result<usize, ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state
             .nodes
             .iter()
             .find(|runtime| runtime.node.info.id == *node)
             .map(|runtime| runtime.open_count)
-            .ok_or_else(|| FixtureError::UnknownNode(node.to_string()))
+            .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))
     }
 
     /// Current completion report for one logical channel.
-    pub fn channel_completion(&self, channel: &str) -> Result<ReplayCompletion, FixtureError> {
+    pub fn channel_completion(&self, channel: &str) -> Result<ReplayCompletion, ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .channels
             .get(channel)
-            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
+            .ok_or_else(|| ReplayError::UnknownChannel(channel.to_string()))?;
         let written = runtime
             .written
             .lock()
@@ -370,7 +368,7 @@ impl ReplayBackend {
     }
 
     /// Fail unless every logical channel consumed all required exchanges.
-    pub fn require_complete(&self) -> Result<(), FixtureError> {
+    pub fn require_complete(&self) -> Result<(), ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         for runtime in state.channels.values() {
             let written = runtime
@@ -384,13 +382,13 @@ impl ReplayBackend {
     }
 
     /// Inspection and connection handle for a node's raw writer.
-    pub fn raw_writer_handle(&self, node: &NodeId) -> Result<ReplayRawWriterHandle, FixtureError> {
+    pub fn raw_writer_handle(&self, node: &NodeId) -> Result<ReplayRawWriterHandle, ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = state
             .nodes
             .iter()
             .find(|runtime| runtime.node.info.id == *node)
-            .ok_or_else(|| FixtureError::UnknownNode(node.to_string()))?;
+            .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))?;
         Ok(ReplayRawWriterHandle::from_parts(
             Arc::clone(&runtime.raw_written),
             Arc::clone(&runtime.raw_connected),
@@ -401,7 +399,7 @@ impl ReplayBackend {
 fn build_channels(
     channels: Vec<ReplayChannel>,
     cassettes: Vec<HidCassette>,
-) -> Result<HashMap<String, ChannelRuntime>, FixtureError> {
+) -> Result<HashMap<String, ChannelRuntime>, ReplayError> {
     let mut cassette_by_channel = HashMap::new();
     for cassette in cassettes {
         cassette.validate()?;
@@ -410,7 +408,7 @@ fn build_channels(
             .insert(channel.clone(), cassette)
             .is_some()
         {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("multiple cassettes name channel {channel}"),
             ));
@@ -420,19 +418,19 @@ fn build_channels(
     let mut runtimes = HashMap::new();
     for channel in channels {
         if channel.id.trim().is_empty() {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 "channel id must not be empty",
             ));
         }
         let Some(cassette) = cassette_by_channel.remove(&channel.id) else {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("channel {} has no cassette", channel.id),
             ));
         };
         if cassette.report_support != channel.report_support {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!(
                     "channel {} and its cassette disagree on report support",
@@ -455,14 +453,14 @@ fn build_channels(
             )
             .is_some()
         {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("duplicate channel {}", channel.id),
             ));
         }
     }
     if let Some(extra) = cassette_by_channel.keys().next() {
-        return Err(FixtureError::invalid(
+        return Err(ReplayError::invalid(
             "replay topology",
             format!("cassette references unknown channel {extra}"),
         ));
@@ -473,18 +471,18 @@ fn build_channels(
 fn build_nodes(
     nodes: Vec<ReplayNode>,
     channels: &HashMap<String, ChannelRuntime>,
-) -> Result<Vec<NodeRuntime>, FixtureError> {
+) -> Result<Vec<NodeRuntime>, ReplayError> {
     let mut node_ids = HashSet::new();
     let mut runtimes = Vec::new();
     for node in nodes {
         if !node_ids.insert(node.info.id.clone()) {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("duplicate node {}", node.info.id),
             ));
         }
         if node.open_outcome == OpenOutcome::Hidpp && node.channel.is_none() {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("HID++ node {} has no logical channel", node.info.id),
             ));
@@ -492,7 +490,7 @@ fn build_nodes(
         if let Some(channel) = &node.channel
             && !channels.contains_key(channel)
         {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("node {} references unknown channel {channel}", node.info.id),
             ));
@@ -508,11 +506,11 @@ fn build_nodes(
     Ok(runtimes)
 }
 
-fn validate_receiver_slots(node: &ReplayNode) -> Result<(), FixtureError> {
+fn validate_receiver_slots(node: &ReplayNode) -> Result<(), ReplayError> {
     let mut slots = HashSet::new();
     for slot in &node.receiver_slots {
         if !(1..=6).contains(&slot.slot) {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!(
                     "node {} has invalid receiver slot {}",
@@ -521,7 +519,7 @@ fn validate_receiver_slots(node: &ReplayNode) -> Result<(), FixtureError> {
             ));
         }
         if !slots.insert(slot.slot) {
-            return Err(FixtureError::invalid(
+            return Err(ReplayError::invalid(
                 "replay topology",
                 format!("node {} repeats receiver slot {}", node.info.id, slot.slot),
             ));
@@ -533,11 +531,11 @@ fn validate_receiver_slots(node: &ReplayNode) -> Result<(), FixtureError> {
 fn find_node_mut<'a>(
     nodes: &'a mut [NodeRuntime],
     node: &NodeId,
-) -> Result<&'a mut NodeRuntime, FixtureError> {
+) -> Result<&'a mut NodeRuntime, ReplayError> {
     nodes
         .iter_mut()
         .find(|runtime| runtime.node.info.id == *node)
-        .ok_or_else(|| FixtureError::UnknownNode(node.to_string()))
+        .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))
 }
 
 #[hidpp::async_trait]

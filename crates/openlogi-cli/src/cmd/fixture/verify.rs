@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use openlogi_device::fixture::{DeviceProfile, FixtureManifest, HidCassette};
+use openlogi_fixture::{DeviceProfile, FixtureManifest, HidCassette};
 use serde::de::DeserializeOwned;
 
 const MANIFEST_FILE: &str = "manifest.json";

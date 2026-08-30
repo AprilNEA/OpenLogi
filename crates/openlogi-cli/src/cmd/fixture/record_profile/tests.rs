@@ -11,7 +11,7 @@ use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
     ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
-use openlogi_device::fixture::{
+use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
     classify_synthetic_profile_identity,
 };

@@ -1,3 +1,5 @@
+//! Stateful, read-only extraction of identity-bearing HID++ fields.
+
 use std::collections::BTreeMap;
 use std::ops::Range;
 

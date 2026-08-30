@@ -1,3 +1,5 @@
+//! Synthetic identity policy tests.
+
 use super::*;
 
 #[test]

@@ -53,7 +53,7 @@ pub(super) fn write_json_atomically<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_device::fixture::{
+    use openlogi_fixture::{
         CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
     };
 

@@ -1,3 +1,5 @@
+//! Deterministic synthetic identity generation and classification.
+
 use std::num::NonZeroU8;
 
 use thiserror::Error;

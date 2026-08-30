@@ -8,11 +8,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use openlogi_core::device::DeviceInventory;
-use openlogi_device::fixture::HidCassette;
 use openlogi_device::write::{
     self, FeatureEntry, FirmwareEntity, ReprogControlEntry, ScrollWheelMode, WriteError,
 };
 use openlogi_device::{BacklightState, DeviceRoute, DpiInfo, HidBackend, SmartShiftStatus};
+use openlogi_fixture::HidCassette;
 use openlogi_hid::recording::{HidCassetteAudit, NativeRecorder, NativeRecording};
 use openlogi_ipc::client::{self, ConnectError};
 

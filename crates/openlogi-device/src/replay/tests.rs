@@ -6,11 +6,16 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     PairedDevice, ReceiverInfo,
 };
+use openlogi_fixture::{
+    CANONICAL_DEVICE_PROFILE_JSON, CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION,
+    FixtureError, HidCassette, ProfileDeviceSettings, ProfileSetting, ProfileSupport,
+    ReportSupport, RequestMatch,
+};
 
 use crate::backend::{HidBackend, RawWriter};
 use crate::{
-    BacklightMode, BacklightState, BacklightStatus, DeviceRoute, Dpi, DpiCapabilities, DpiInfo,
-    Enumerator, HotplugEvent, NodeId, NodeInfo, get_dpi,
+    BacklightMode, BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, Dpi,
+    DpiCapabilities, DpiInfo, Enumerator, HotplugEvent, NodeId, NodeInfo, get_dpi,
 };
 
 use super::*;
@@ -459,7 +464,7 @@ fn completion_rejects_unconsumed_required_exchanges() {
     let error = handle
         .require_complete()
         .expect_err("required exchange was not used");
-    assert!(matches!(error, FixtureError::UnconsumedExchanges { .. }));
+    assert!(matches!(error, ReplayError::UnconsumedExchanges { .. }));
 }
 
 #[tokio::test]
@@ -637,7 +642,7 @@ fn direct_probe_fixture() -> SyntheticFixture {
                 unique_id: None,
             },
             paired: vec![PairedDevice {
-                slot: crate::DIRECT_DEVICE_INDEX,
+                slot: DIRECT_DEVICE_INDEX,
                 codename: Some(name.to_string()),
                 wpid: None,
                 kind: DeviceKind::Unknown,

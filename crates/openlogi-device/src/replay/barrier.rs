@@ -1,9 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use openlogi_fixture::RequestMatch;
 use tokio::sync::{Notify, mpsc};
-
-use super::schema::{RequestMatch, normalize_hidpp20};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum RequestKey {
@@ -15,7 +14,7 @@ impl RequestKey {
     pub(super) fn from_exchange(request_match: RequestMatch, request: &[u8]) -> Self {
         match request_match {
             RequestMatch::Exact => Self::Exact(request.to_vec()),
-            RequestMatch::Hidpp20 => Self::Hidpp20(normalize_hidpp20(request)),
+            RequestMatch::Hidpp20 => Self::Hidpp20(request_match.request_key(request)),
         }
     }
 }
@@ -43,7 +42,7 @@ impl ResponseGates {
 
     pub(super) fn take(&self, actual: &[u8]) -> Option<Arc<ResponseBarrierState>> {
         let exact = RequestKey::Exact(actual.to_vec());
-        let hidpp20 = RequestKey::Hidpp20(normalize_hidpp20(actual));
+        let hidpp20 = RequestKey::Hidpp20(RequestMatch::Hidpp20.request_key(actual));
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         pending
             .get_mut(&exact)

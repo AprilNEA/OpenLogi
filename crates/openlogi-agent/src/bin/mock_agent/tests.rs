@@ -4,7 +4,7 @@ use super::*;
 fn no_argument_mode_uses_the_canonical_profile_with_demo_time() {
     let state = state_from_args(std::iter::empty()).expect("no-argument mock state");
     let canonical: DeviceProfile =
-        serde_json::from_str(openlogi_device::fixture::CANONICAL_DEVICE_PROFILE_JSON)
+        serde_json::from_str(openlogi_fixture::CANONICAL_DEVICE_PROFILE_JSON)
             .expect("canonical profile parses");
 
     assert_eq!(state.profile, canonical);
@@ -75,11 +75,8 @@ fn fixture_argument_and_file_boundary_load_a_validated_profile() {
     let directory = tempfile::tempdir().expect("temporary fixture directory");
     let path = directory.path().join("profile.json");
     let profile = built_in_profile().expect("built-in profile should construct");
-    fs::write(
-        &path,
-        openlogi_device::fixture::CANONICAL_DEVICE_PROFILE_JSON,
-    )
-    .expect("fixture file should be writable");
+    fs::write(&path, openlogi_fixture::CANONICAL_DEVICE_PROFILE_JSON)
+        .expect("fixture file should be writable");
 
     let parsed =
         parse_fixture_arg([OsString::from("--fixture"), path.clone().into_os_string()].into_iter())

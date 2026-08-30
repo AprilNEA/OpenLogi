@@ -1,16 +1,19 @@
+//! Semantic profile and raw HID cassette schemas.
+
 use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus};
+use openlogi_core::hid::{
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, ScrollWheelMode,
+    SmartShiftStatus,
+};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
-
-use crate::{BacklightState, BacklightStatus, ScrollWheelMode};
 
 /// Schema version supported by the initial profile and cassette formats.
 pub const FIXTURE_SCHEMA_VERSION: u32 = 1;
 
-/// A fixture schema, validation, or replay failure.
+/// A fixture schema or validation failure.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum FixtureError {
     /// The asset uses a schema version this build does not understand.
@@ -31,30 +34,10 @@ pub enum FixtureError {
         /// Specific failed invariant.
         message: String,
     },
-    /// No pending cassette exchange matched an outgoing report.
-    #[error("unmatched HID request: actual={actual}, hidpp20_normalized={normalized}")]
-    UnmatchedRequest {
-        /// Exact outgoing bytes as lowercase hex.
-        actual: String,
-        /// The same bytes with only the HID++ 2.0 software-ID nibble cleared.
-        normalized: String,
-    },
-    /// One or more required cassette exchanges were not consumed.
-    #[error("required cassette exchanges were not consumed: {requests:?}")]
-    UnconsumedExchanges {
-        /// Normalized request keys that remained pending.
-        requests: Vec<String>,
-    },
-    /// A topology operation named a node that does not exist.
-    #[error("unknown replay node {0}")]
-    UnknownNode(String),
-    /// A topology operation named a logical channel that does not exist.
-    #[error("unknown replay channel {0}")]
-    UnknownChannel(String),
 }
 
 impl FixtureError {
-    pub(super) fn invalid(asset: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(asset: &'static str, message: impl Into<String>) -> Self {
         Self::InvalidAsset {
             asset,
             message: message.into(),
@@ -326,7 +309,7 @@ impl ProfileValidation {
             return Ok(());
         }
 
-        if inventory.paired.len() != 1 || inventory.paired[0].slot != crate::DIRECT_DEVICE_INDEX {
+        if inventory.paired.len() != 1 || inventory.paired[0].slot != DIRECT_DEVICE_INDEX {
             return Err(FixtureError::invalid(
                 "device profile",
                 format!(
@@ -643,12 +626,66 @@ pub enum ReportSupport {
 }
 
 impl ReportSupport {
-    pub(super) const fn flags(self) -> (bool, bool) {
-        match self {
-            Self::ShortAndLong => (true, true),
-            Self::LongOnly => (false, true),
-        }
+    /// Whether this channel accepts seven-byte (`0x10`) HID++ reports.
+    #[must_use]
+    pub const fn supports_short_reports(self) -> bool {
+        matches!(self, Self::ShortAndLong)
     }
+
+    /// Whether this channel accepts twenty-byte (`0x11`) HID++ reports.
+    #[must_use]
+    pub const fn supports_long_reports(self) -> bool {
+        true
+    }
+
+    /// Validate one report against its ID-defined width and this channel's support.
+    pub fn validate_report(self, report: &[u8]) -> Result<(), ReportValidationError> {
+        let expected = match report.first() {
+            Some(0x10) => 7,
+            Some(0x11) => 20,
+            Some(0x12) => 64,
+            Some(id) => return Err(ReportValidationError::UnsupportedId { id: *id }),
+            None => return Err(ReportValidationError::Empty),
+        };
+        if report.len() != expected {
+            return Err(ReportValidationError::InvalidLength {
+                id: report[0],
+                actual: report.len(),
+                expected,
+            });
+        }
+        if self == Self::LongOnly && report[0] == 0x10 {
+            return Err(ReportValidationError::ShortOnLongOnly);
+        }
+        Ok(())
+    }
+}
+
+/// Why a raw report is invalid for a cassette channel.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReportValidationError {
+    /// The report contains no report ID.
+    #[error("is empty")]
+    Empty,
+    /// The schema does not recognize this report ID.
+    #[error("uses unsupported report id 0x{id:02x}")]
+    UnsupportedId {
+        /// Rejected report ID.
+        id: u8,
+    },
+    /// The report width does not match its report ID.
+    #[error("has length {actual}, expected {expected} for report id 0x{id:02x}")]
+    InvalidLength {
+        /// Report ID whose width is fixed by the schema.
+        id: u8,
+        /// Observed report width.
+        actual: usize,
+        /// Required report width.
+        expected: usize,
+    },
+    /// A short report was used on a long-only channel.
+    #[error("uses a short report on a long-only channel")]
+    ShortOnLongOnly,
 }
 
 /// How one outgoing cassette request is keyed.
@@ -661,6 +698,17 @@ pub enum RequestMatch {
     /// Match a HID++ 2.0 report after clearing only byte 3's software-ID low
     /// nibble. No arbitrary masks are part of the schema.
     Hidpp20,
+}
+
+impl RequestMatch {
+    /// Build the deterministic replay key for one outgoing request.
+    #[must_use]
+    pub fn request_key(self, request: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Exact => request.to_vec(),
+            Self::Hidpp20 => normalize_hidpp20(request),
+        }
+    }
 }
 
 /// One required or optional request/response exchange in a raw HID cassette.
@@ -708,19 +756,23 @@ impl HidCassette {
             ));
         }
         for (index, exchange) in self.exchanges.iter().enumerate() {
-            validate_report(&exchange.request, self.report_support).map_err(|message| {
-                FixtureError::invalid(
-                    "HID cassette",
-                    format!("exchange {index} request {message}"),
-                )
-            })?;
-            if let Some(response) = &exchange.response {
-                validate_report(response, self.report_support).map_err(|message| {
+            self.report_support
+                .validate_report(&exchange.request)
+                .map_err(|error| {
                     FixtureError::invalid(
                         "HID cassette",
-                        format!("exchange {index} response {message}"),
+                        format!("exchange {index} request {error}"),
                     )
                 })?;
+            if let Some(response) = &exchange.response {
+                self.report_support
+                    .validate_report(response)
+                    .map_err(|error| {
+                        FixtureError::invalid(
+                            "HID cassette",
+                            format!("exchange {index} response {error}"),
+                        )
+                    })?;
             }
             if exchange.request_match == RequestMatch::Hidpp20 {
                 validate_hidpp20(exchange, index)?;
@@ -751,27 +803,6 @@ fn validate_name(asset: &'static str, field: &str, value: &str) -> Result<(), Fi
     } else {
         Ok(())
     }
-}
-
-pub(super) fn validate_report(report: &[u8], support: ReportSupport) -> Result<(), String> {
-    let expected = match report.first() {
-        Some(0x10) => 7,
-        Some(0x11) => 20,
-        Some(0x12) => 64,
-        Some(id) => return Err(format!("uses unsupported report id 0x{id:02x}")),
-        None => return Err("is empty".to_string()),
-    };
-    if report.len() != expected {
-        return Err(format!(
-            "has length {}, expected {expected} for report id 0x{:02x}",
-            report.len(),
-            report[0]
-        ));
-    }
-    if support == ReportSupport::LongOnly && report[0] == 0x10 {
-        return Err("uses a short report on a long-only channel".to_string());
-    }
-    Ok(())
 }
 
 fn validate_hidpp20(exchange: &CassetteExchange, index: usize) -> Result<(), FixtureError> {
@@ -811,7 +842,7 @@ fn validate_hidpp20(exchange: &CassetteExchange, index: usize) -> Result<(), Fix
     Ok(())
 }
 
-pub(super) fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
+fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     let mut normalized = request.to_vec();
     if normalized.len() >= 4 && matches!(normalized[0], 0x10 | 0x11) {
         normalized[3] &= 0xf0;
@@ -819,7 +850,7 @@ pub(super) fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     normalized
 }
 
-pub(super) fn format_hex(report: &[u8]) -> String {
+fn format_hex(report: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut formatted = String::with_capacity(report.len() * 2);
     for &byte in report {

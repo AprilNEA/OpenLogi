@@ -1,12 +1,14 @@
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::hid::PairingError;
+use openlogi_fixture::{
+    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    CassetteExchange, ChannelConnection, FIXTURE_SCHEMA_VERSION, HidCassette, NodePresence,
-    OpenOutcome, RawWriterAvailability, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
-    ReportSupport, RequestMatch,
+    ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
+    ReplayChannel, ReplayNode, ReplayTopology,
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{

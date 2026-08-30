@@ -4,6 +4,7 @@ members = [
     "crates/openlogi",
     "crates/openlogi-core",
     "crates/openlogi-device-registry",
+    "crates/openlogi-fixture",
     "crates/openlogi-inject",
     "crates/openlogi-hidpp",
     "crates/openlogi-hidpp-derive",
@@ -44,6 +45,7 @@ description = "Lightweight, local-first alternative to Logitech Options+ for HID
 [workspace.dependencies]
 hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.3" }
 openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.3" }
+openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.3" }
 async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.

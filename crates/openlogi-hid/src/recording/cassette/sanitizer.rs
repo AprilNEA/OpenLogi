@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use hidpp::channel::ChannelObservation;
-use openlogi_device::fixture::{
+use openlogi_fixture::{
     CassetteExchange, ProtocolIdentityError, ProtocolIdentityExtractor, RequestMatch,
     SyntheticIdentityKind, SyntheticIdentityOrdinal, generate_synthetic_identity,
     is_pairing_identity_traffic,

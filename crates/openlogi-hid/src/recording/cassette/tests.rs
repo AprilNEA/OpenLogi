@@ -9,7 +9,8 @@ use hidpp::channel::{
 };
 use hidpp::nibble::U4;
 use openlogi_device::backend::{NodeId, NodeInfo};
-use openlogi_device::fixture::{ReplayRawHidChannel, RequestMatch};
+use openlogi_device::replay::ReplayRawHidChannel;
+use openlogi_fixture::{HidCassette, RequestMatch};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use super::*;
@@ -549,7 +550,7 @@ async fn record_fire_and_forget(report: Vec<u8>) -> RecordedChannel {
     recorder.finish().unwrap().channels.remove(0)
 }
 
-async fn replay_with_different_lease(cassette: openlogi_device::fixture::HidCassette) {
+async fn replay_with_different_lease(cassette: HidCassette) {
     let exchanges = cassette.exchanges.clone();
     let (raw, handle) = ReplayRawHidChannel::new(cassette, 0x046d, 0xc548).unwrap();
     let mut channel = HidppChannel::from_raw_channel(raw).await.unwrap();

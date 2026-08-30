@@ -1,11 +1,13 @@
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
 };
+use openlogi_fixture::{
+    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
+};
 
-use crate::fixture::{
-    CassetteExchange, ChannelConnection, FIXTURE_SCHEMA_VERSION, HidCassette, NodePresence,
-    OpenOutcome, RawWriterAvailability, ReceiverLinkState, ReceiverSlot, ReceiverSlotState,
-    ReplayChannel, ReplayNode, ReportSupport, RequestMatch,
+use crate::replay::{
+    ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
+    ReceiverSlot, ReceiverSlotState, ReplayChannel, ReplayNode,
 };
 use crate::{DeviceRoute, NodeId, NodeInfo};
 

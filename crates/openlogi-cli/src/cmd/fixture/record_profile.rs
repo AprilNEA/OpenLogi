@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use openlogi_core::device::{DeviceInventory, PairedDevice, StandaloneDevice};
 use openlogi_core::hid::{DeviceRoute, WriteError};
-use openlogi_device::fixture::{
+use openlogi_fixture::{
     DeviceProfile, FIXTURE_SCHEMA_VERSION, ProfileDeviceSettings, ProfileSetting, ProfileSupport,
 };
 use openlogi_ipc::client::{self, ConnectError, Connection};

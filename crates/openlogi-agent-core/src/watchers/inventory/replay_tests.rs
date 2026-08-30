@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::config::Config;
-use openlogi_hid::fixture::{
-    CassetteExchange, ChannelConnection, FIXTURE_SCHEMA_VERSION, HidCassette, NodePresence,
-    OpenOutcome, RawWriterAvailability, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
-    ReportSupport, RequestMatch,
+use openlogi_fixture::{
+    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
+};
+use openlogi_hid::replay::{
+    ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
+    ReplayChannel, ReplayNode, ReplayTopology,
 };
 use openlogi_hid::{
     DeviceRoute, Dpi, HidppOperation, NodeId, NodeInfo, device_io_channel, get_dpi_info_on,

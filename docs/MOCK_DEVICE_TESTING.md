@@ -1,8 +1,9 @@
 # Mock device and hardware record/replay architecture
 
-Status: proposed architecture. This document defines boundaries and an
-incremental implementation plan; it does not make recorded fixtures a stable
-public format yet.
+Status: implemented architecture for fixture contracts, replay, recording,
+CLI capture/verification, semantic mock profiles, and injected agent hardware.
+The root corpus is ready for reviewed captures, but fixture schema v1 remains
+unreleased and is not yet a stable public format.
 
 ## Why this needs more than one mock
 
@@ -11,9 +12,9 @@ OpenLogi already has two useful but separate hardware-free paths:
 - `openlogi-agent-mock` implements the agent IPC service from a hard-coded,
   mutable inventory. It is good for manual GUI development, but it bypasses
   device enumeration and HID++ parsing.
-- `openlogi-device::channel::scripted` supplies raw HID++ responses to unit
-  tests. It exercises production device code, but its responders are written
-  one test at a time and cannot be produced from real hardware.
+- `openlogi-device::replay` supplies cassette-backed channels and mutable
+  topology below production device code. Focused unit tests still use concise
+  scripted responders where a persisted cassette would obscure the contract.
 
 The missing piece is not one more fake device. It is a small test platform that
 can retain facts learned from real devices, replay them below production device
@@ -140,26 +141,37 @@ later phase, not a prerequisite for useful fixtures.
     immediately, and every required exchange must be consumed by the end of a
     case.
 
-## Proposed ownership
+## Ownership
 
-Do not introduce a general “test utilities” workspace crate initially. The
-existing crate boundaries already identify the owners, and `openlogi-cli` is a
-published crate that should not depend on an unpublished workspace-only helper.
+Fixture contracts and device replay have different dependency boundaries. The
+schema is a published, host-free crate consumed by capture, verification, and
+semantic mocks; replay stays beside the `HidBackend` contract it implements.
+
+### `openlogi-fixture`
+
+Owns the persisted contract and its pure verification:
+
+- Versioned semantic profile, cassette, and manifest schemas.
+- Synthetic identity generation and protocol-aware identity extraction.
+- Exact relationship, privacy, occurrence-count, and framing validation.
+- The packaged canonical synthetic profile used by the no-argument mock.
+
+It performs no file I/O, host access, or async work and depends only on
+`openlogi-core` plus serialization/error support. This keeps the published CLI
+dependency closure valid and lets schema checks run without pulling in HID++
+transport.
 
 ### `openlogi-device`
 
-Add an optional `fixture` module containing host-free data and replay behavior:
+The `replay` module owns runtime behavior over fixture cassettes:
 
-- Versioned schema types. They derive `Serialize`/`Deserialize` but perform no
-  file I/O.
-- Validation and request normalization.
 - `ReplayRawHidChannel`, `ReplayRawWriter`, and `ReplayBackend`.
 - A mutable virtual topology and explicit event injection handles.
-- Consumption diagnostics for tests and `fixture verify`.
+- Response barriers, request matching, and completion diagnostics.
 
-Move the reusable transport plumbing from the current test-only
-`channel::scripted` module into this support. Keep concise responder helpers for
-hand-written unit tests; a fixture should not make small tests harder to read.
+Reusable transport plumbing lives here rather than in the test-only
+`channel::scripted` module. Concise responder helpers remain for hand-written
+unit tests; a fixture should not make small tests harder to read.
 
 This remains portable: it knows HID++ and `HidBackend`, not `async-hid`, paths,
 files, clocks, or a host OS.
@@ -299,7 +311,7 @@ Store one directory per sanitized physical specimen, with one or more transport
 links:
 
 ```text
-crates/openlogi-device/tests/fixtures/devices/
+fixtures/devices/
   mx-master-3s-001/
     manifest.json
     profile.json
@@ -308,6 +320,12 @@ crates/openlogi-device/tests/fixtures/devices/
       dpi-read.json
       smartshift-read.json
 ```
+
+The built-in profile-only synthetic fixture is packaging data rather than
+captured corpus. It lives under
+`crates/openlogi-fixture/fixtures/devices/openlogi-canonical-synthetic-001/`
+so crates.io packages remain self-contained. It must not be copied into the
+root corpus or presented as physical-hardware evidence.
 
 The numeric suffix is a synthetic specimen identity, not a device serial. Two
 captures are linked as the same specimen only when the recorder/operator knows

@@ -1,11 +1,12 @@
 //! Sanitized route derivation and strict production-operation self-replay.
 
 use anyhow::{Result, bail};
-use openlogi_device::fixture::{
+use openlogi_device::replay::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
     ReceiverSlot, ReceiverSlotState, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
 };
 use openlogi_device::{DeviceRoute, NodeId, NodeInfo};
+use openlogi_fixture::HidCassette;
 use openlogi_hid::recording::{HidCassetteAudit, SanitizedIdentityKind};
 
 use super::{
@@ -17,7 +18,7 @@ pub(super) async fn select_self_replaying(
     target: &TargetCandidate,
     captured: &SemanticObservation,
     candidates: Vec<SanitizedCandidate>,
-) -> Result<openlogi_device::fixture::HidCassette> {
+) -> Result<HidCassette> {
     let mut passing = Vec::new();
     for candidate in candidates {
         if candidate_passes(operation, target, captured, &candidate).await {
@@ -68,7 +69,7 @@ fn require_single_passing_candidate(
 fn replay_topology(
     target: &TargetCandidate,
     route: &DeviceRoute,
-    cassette: &openlogi_device::fixture::HidCassette,
+    cassette: &HidCassette,
 ) -> ReplayTopology {
     let receiver_slots = match route {
         DeviceRoute::Bolt { slot, .. } | DeviceRoute::Unifying { slot, .. } => {
@@ -163,10 +164,10 @@ fn unique_replacement(audit: &HidCassetteAudit, kind: SanitizedIdentityKind) -> 
 
 #[cfg(test)]
 mod tests {
-    use openlogi_device::fixture::{
+    use openlogi_device::write::FeatureEntry;
+    use openlogi_fixture::{
         CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
     };
-    use openlogi_device::write::FeatureEntry;
     use openlogi_hid::FeatureType;
     use openlogi_hid::recording::IdentityReplacement;
 

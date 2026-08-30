@@ -5,14 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::channel::RawHidChannel;
+use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch};
 use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, RawWriter};
 
+use super::ReplayError;
 use super::barrier::{RequestKey, ResponseGates};
-use super::schema::{
-    FixtureError, HidCassette, ReportSupport, RequestMatch, format_hex, normalize_hidpp20,
-};
 
 type Responder = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
@@ -43,7 +42,7 @@ pub(super) struct CassetteState {
 }
 
 impl CassetteState {
-    pub(super) fn new(cassette: HidCassette) -> Result<Arc<Self>, FixtureError> {
+    pub(super) fn new(cassette: HidCassette) -> Result<Arc<Self>, ReplayError> {
         cassette.validate()?;
         let mut queues: HashMap<_, VecDeque<_>> = HashMap::new();
         let exchanges = cassette
@@ -70,8 +69,8 @@ impl CassetteState {
         }))
     }
 
-    fn respond(&self, actual: &[u8]) -> Result<Option<Vec<u8>>, FixtureError> {
-        let normalized = normalize_hidpp20(actual);
+    fn respond(&self, actual: &[u8]) -> Result<Option<Vec<u8>>, ReplayError> {
+        let normalized = RequestMatch::Hidpp20.request_key(actual);
         let exact = RequestKey::Exact(actual.to_vec());
         let hidpp20 = RequestKey::Hidpp20(normalized.clone());
         let mut runtime = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
@@ -93,7 +92,7 @@ impl CassetteState {
                 normalized: format_hex(&normalized),
             };
             runtime.unmatched.push(mismatch.clone());
-            return Err(FixtureError::UnmatchedRequest {
+            return Err(ReplayError::UnmatchedRequest {
                 actual: mismatch.actual,
                 normalized: mismatch.normalized,
             });
@@ -183,9 +182,9 @@ impl ReplayCompletion {
     }
 
     /// Fail with the remaining required request keys when replay is incomplete.
-    pub fn require_complete(&self) -> Result<(), FixtureError> {
+    pub fn require_complete(&self) -> Result<(), ReplayError> {
         if let Some(mismatch) = self.unmatched_requests.first() {
-            return Err(FixtureError::UnmatchedRequest {
+            return Err(ReplayError::UnmatchedRequest {
                 actual: mismatch.actual.clone(),
                 normalized: mismatch.normalized.clone(),
             });
@@ -193,7 +192,7 @@ impl ReplayCompletion {
         if self.unconsumed_required.is_empty() {
             Ok(())
         } else {
-            Err(FixtureError::UnconsumedExchanges {
+            Err(ReplayError::UnconsumedExchanges {
                 requests: self.unconsumed_required.clone(),
             })
         }
@@ -247,7 +246,7 @@ impl ReplayChannelHandle {
     }
 
     /// Fail unless every required exchange was consumed without a mismatch.
-    pub fn require_complete(&self) -> Result<(), FixtureError> {
+    pub fn require_complete(&self) -> Result<(), ReplayError> {
         self.completion().require_complete()
     }
 
@@ -281,7 +280,7 @@ impl ReplayRawHidChannel {
         cassette: HidCassette,
         vendor_id: u16,
         product_id: u16,
-    ) -> Result<(Self, ReplayChannelHandle), FixtureError> {
+    ) -> Result<(Self, ReplayChannelHandle), ReplayError> {
         let report_support = cassette.report_support;
         let cassette = CassetteState::new(cassette)?;
         let written = Arc::new(Mutex::new(Vec::new()));
@@ -434,7 +433,10 @@ impl RawHidChannel for ReplayRawHidChannel {
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some(self.report_support.flags())
+        Some((
+            self.report_support.supports_short_reports(),
+            self.report_support.supports_long_reports(),
+        ))
     }
 
     async fn get_report_descriptor(
@@ -450,6 +452,16 @@ fn disconnected_error() -> Box<dyn Error + Send + Sync> {
         io::ErrorKind::BrokenPipe,
         "replay HID channel is disconnected",
     ))
+}
+
+fn format_hex(report: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut formatted = String::with_capacity(report.len() * 2);
+    for &byte in report {
+        formatted.push(char::from(HEX[usize::from(byte >> 4)]));
+        formatted.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    formatted
 }
 
 /// A raw output-report sink that records every successful write.

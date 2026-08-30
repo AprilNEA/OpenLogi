@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_device::fixture::{
+use openlogi_fixture::{
     SyntheticIdentityKind, SyntheticIdentityOrdinal, SyntheticIdentityValue,
     generate_synthetic_identity,
 };

@@ -76,6 +76,7 @@ workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
+openlogi-fixture = { workspace = true }
 tempfile = "3.27.0"
 
 [package.metadata.bundle]

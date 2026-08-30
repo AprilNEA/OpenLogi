@@ -1,3 +1,5 @@
+//! Fixture manifest and typed identity ledger.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};

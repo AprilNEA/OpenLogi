@@ -11,7 +11,7 @@ use std::sync::Arc;
 use hidpp::channel::{HidppChannel, RawHidChannel};
 
 use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
-pub(crate) use crate::fixture::ReplayRawHidChannel as ScriptedRawHidChannel;
+pub(crate) use crate::replay::ReplayRawHidChannel as ScriptedRawHidChannel;
 
 /// Answers a HID++ request as a particular scripted device would.
 pub(crate) type Responder = fn(&[u8]) -> Option<Vec<u8>>;

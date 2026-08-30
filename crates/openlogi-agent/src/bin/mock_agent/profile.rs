@@ -1,8 +1,8 @@
-use openlogi_device::fixture::{
+use openlogi_device::{DeviceRoute, LightCommand, WriteError};
+use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileDeviceSettings, ProfileSetting,
     ProfileSupport,
 };
-use openlogi_device::{DeviceRoute, LightCommand, WriteError};
 
 use super::{State, standalone_route};
 

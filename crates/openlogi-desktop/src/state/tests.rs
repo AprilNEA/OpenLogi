@@ -23,7 +23,7 @@ use openlogi_core::hid::{
 
 use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_device::fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSupport};
+use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSupport};
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
