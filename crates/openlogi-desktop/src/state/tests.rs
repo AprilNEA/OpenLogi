@@ -409,13 +409,20 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
     replaced.inventory[0].paired[0].online = false;
     replaced.inventory[0].paired[0].battery = None;
     replaced.inventory[0].paired[0].capabilities = None;
+    replaced.inventory[1].paired[0].online = false;
+    replaced.inventory[1].paired[0].battery = None;
+    replaced.inventory[1].paired[0].capabilities = None;
     state.apply_agent_snapshot(&replaced, &cache, &[]);
     let receiver_mouse = profile_device(&state, [1, 2, 3, 4]);
     assert!(!receiver_mouse.online);
     assert_eq!(receiver_mouse.battery, None);
     assert_eq!(receiver_mouse.capabilities, None);
+    let direct_mouse = profile_device(&state, [9, 10, 11, 12]);
+    assert!(!direct_mouse.online);
+    assert_eq!(direct_mouse.battery, None);
+    assert_eq!(direct_mouse.capabilities, None);
 
-    let mut without_receiver = snapshot_candidate(&profile);
+    let mut without_receiver = replaced;
     without_receiver.inventory.remove(0);
     for _ in 0..=super::INVENTORY_MISS_GRACE {
         state.apply_agent_snapshot(&without_receiver, &cache, &[]);
@@ -429,7 +436,7 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
         "all absent receiver records are removed after the probe-miss grace"
     );
     assert!(state.devices().iter().any(|record| {
-        matches!(record.route, Some(DeviceRoute::Direct { .. })) && record.online
+        matches!(record.route, Some(DeviceRoute::Direct { .. })) && !record.online
     }));
     assert!(state.devices().iter().any(|record| {
         matches!(record.route, Some(DeviceRoute::RawHid { .. })) && record.online
