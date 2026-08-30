@@ -311,40 +311,15 @@ impl Runtime {
             windows::add_device::apply_state(cx, snapshot.pairing.clone());
         });
         let (auto_download, asset_source, models) = cx.update(|cx| {
-            let (merged, auto_download, asset_source, models) =
+            let (changes, auto_download, asset_source, models) =
                 AppState::update(cx, |state, cx| {
-                    // Merge only completed enumerations. A scanning agent serves
-                    // an empty pre-enumeration list, which must not burn the GUI's
-                    // miss grace or replace the last known device set.
-                    let merged = inventory_ready
-                        && state.refresh_inventories(
-                            &snapshot.inventory,
-                            &snapshot.standalone,
-                            &self.cache,
-                            &self.cams,
-                        );
-                    if inventory_ready {
-                        state.store_inventory_snapshot(&snapshot.inventory);
-                    }
-                    let agent_changed =
-                        state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
-                    let camera_changed = state.set_camera_active(snapshot.camera_active);
-                    let foreground_changed = state.set_foreground(snapshot.foreground.clone());
-                    if merged {
-                        cx.emit(StateEvent::InventoryChanged);
-                    }
-                    if agent_changed {
-                        cx.emit(StateEvent::AgentChanged);
-                    }
-                    if camera_changed {
-                        cx.emit(StateEvent::CameraChanged);
-                    }
-                    if foreground_changed {
-                        cx.emit(StateEvent::ForegroundChanged);
+                    let changes = state.apply_agent_snapshot(snapshot, &self.cache, &self.cams);
+                    for event in &changes.events {
+                        cx.emit(event.clone());
                     }
                     let settings = state.app_settings();
                     (
-                        merged,
+                        changes,
                         settings.auto_download_assets,
                         settings.asset_source,
                         state.asset_models(),
@@ -353,10 +328,10 @@ impl Runtime {
             // A reconnect can drop an in-flight reply without changing the
             // inventory. Retry any cache entry that the reply lifecycle reset
             // to Unknown on every completed snapshot; resolved entries no-op.
-            if inventory_ready {
+            if changes.inventory_ready {
                 AppState::load_current_device_reads(cx);
             }
-            if merged {
+            if changes.inventory_changed() {
                 app::menu::rebuild(cx);
             }
             (auto_download, asset_source, models)

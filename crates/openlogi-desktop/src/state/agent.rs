@@ -1,9 +1,24 @@
-//! Agent connection status and debug monitor state.
+//! Agent connection status, snapshot projection, and debug monitor state.
 
+use openlogi_camera::Camera;
 use openlogi_core::device::DeviceInventory;
-use openlogi_ipc::ForegroundApps;
+use openlogi_ipc::{AgentSnapshot, ForegroundApps, InventoryHealth};
 
-use super::{AgentLink, AppState};
+use super::{AgentLink, AppState, StateEvent};
+use crate::services::assets::AssetResolver;
+
+/// State transitions produced by applying one complete agent snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SnapshotChanges {
+    pub(crate) inventory_ready: bool,
+    pub(crate) events: Vec<StateEvent>,
+}
+
+impl SnapshotChanges {
+    pub(crate) fn inventory_changed(&self) -> bool {
+        self.events.contains(&StateEvent::InventoryChanged)
+    }
+}
 
 /// Agent-owned observations accepted by the GUI for this process session.
 pub(super) struct AgentSession {
@@ -31,6 +46,51 @@ impl Default for AgentSession {
 }
 
 impl AppState {
+    /// Apply one complete agent snapshot through the desktop's production
+    /// state projection, without requiring GPUI or an IPC connection.
+    ///
+    /// Pairing UI, emitted GPUI events, device-read scheduling, and asset sync
+    /// remain runtime effects owned by the caller. This method owns only the
+    /// durable snapshot-to-state merge shared by runtime delivery and tests.
+    pub(crate) fn apply_agent_snapshot(
+        &mut self,
+        snapshot: &AgentSnapshot,
+        cache: &AssetResolver,
+        cameras: &[Camera],
+    ) -> SnapshotChanges {
+        let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
+        // Merge only completed enumerations. A scanning agent serves an empty
+        // pre-enumeration list, which must not burn the GUI's miss grace or
+        // replace the last known device set.
+        let inventory = inventory_ready
+            && self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, cache, cameras);
+        if inventory_ready {
+            self.store_inventory_snapshot(&snapshot.inventory);
+        }
+
+        let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
+        let camera = self.set_camera_active(snapshot.camera_active);
+        let foreground = self.set_foreground(snapshot.foreground.clone());
+        let mut events = Vec::new();
+        if inventory {
+            events.push(StateEvent::InventoryChanged);
+        }
+        if agent {
+            events.push(StateEvent::AgentChanged);
+        }
+        if camera {
+            events.push(StateEvent::CameraChanged);
+        }
+        if foreground {
+            events.push(StateEvent::ForegroundChanged);
+        }
+
+        SnapshotChanges {
+            inventory_ready,
+            events,
+        }
+    }
+
     /// Append a batch of live-monitor events, capping the retained history so the
     /// buffer can't grow without bound while the monitor is open.
     #[cfg(all(target_os = "macos", debug_assertions))]
