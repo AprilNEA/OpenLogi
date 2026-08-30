@@ -8,7 +8,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use evdev::uinput::VirtualDevice;
@@ -295,8 +298,10 @@ fn run_helper_or_chord(helper: HelperSpec, fallback: ChordSpec) {
     press_key(fallback.modifiers, fallback.key);
 }
 
-/// Spawn an allowlisted absolute helper. Never searches `PATH` and never
-/// shells out through `/bin/sh -c` (that path is only for user `RunShellCommand`).
+/// Spawn one allowlisted absolute helper. Never searches `PATH` and never
+/// shells out through `/bin/sh -c` (that path is only for user
+/// `RunShellCommand`). A concurrent request uses its keyboard fallback instead
+/// of creating another process.
 fn run_fixed_argv(program: &str, args: &[&str], fallback: ChordSpec) -> bool {
     let Some(path) = resolve_allowlisted(program) else {
         tracing::debug!(
@@ -305,12 +310,20 @@ fn run_fixed_argv(program: &str, args: &[&str], fallback: ChordSpec) -> bool {
         );
         return false;
     };
+    if HELPER_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        tracing::debug!(
+            program,
+            "Hyprland helper already in flight — using chord fallback"
+        );
+        return false;
+    }
     match Command::new(&path).args(args).spawn() {
         Ok(child) => {
             std::thread::spawn(move || wait_for_helper(child, fallback));
             true
         }
         Err(error) => {
+            HELPER_IN_FLIGHT.store(false, Ordering::Release);
             tracing::warn!(
                 program = %path.display(),
                 %error,
@@ -322,24 +335,25 @@ fn run_fixed_argv(program: &str, args: &[&str], fallback: ChordSpec) -> bool {
 }
 
 const HELPER_TIMEOUT: Duration = Duration::from_secs(2);
+static HELPER_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 fn wait_for_helper(mut child: Child, fallback: ChordSpec) {
     let deadline = Instant::now() + HELPER_TIMEOUT;
-    loop {
+    let succeeded = loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return,
+            Ok(Some(status)) if status.success() => break true,
             Ok(Some(status)) => {
                 tracing::debug!(
                     %status,
                     "Hyprland helper exited unsuccessfully — using chord fallback"
                 );
-                break;
+                break false;
             }
             Ok(None) if Instant::now() >= deadline => {
                 tracing::warn!("Hyprland helper timed out — using chord fallback");
                 let _ = child.kill();
                 let _ = child.wait();
-                break;
+                break false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => {
@@ -349,11 +363,14 @@ fn wait_for_helper(mut child: Child, fallback: ChordSpec) {
                 );
                 let _ = child.kill();
                 let _ = child.wait();
-                break;
+                break false;
             }
         }
+    };
+    if !succeeded {
+        press_key(fallback.modifiers, fallback.key);
     }
-    press_key(fallback.modifiers, fallback.key);
+    HELPER_IN_FLIGHT.store(false, Ordering::Release);
 }
 
 fn resolve_allowlisted(name: &str) -> Option<PathBuf> {
