@@ -783,6 +783,10 @@ fn callout_lane_is_lower(idx: usize) -> bool {
     idx.is_multiple_of(2)
 }
 
+fn binding_after_pick(current: Option<&Action>, picked: Action) -> Option<Action> {
+    (current != Some(&picked)).then_some(picked)
+}
+
 /// The scrollable config panel for the selected key. Lists the same action
 /// catalog the mouse picker uses, plus a Power User section. Renders the rows
 /// directly (no popover) in a tall card.
@@ -816,10 +820,14 @@ impl FunctionRowView {
 
         let view_for_pick = view.clone();
         let trigger_for_pick = trigger.clone();
+        let current_for_pick = current.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
+                state.commit_keyboard_binding(
+                    trigger_for_pick.clone(),
+                    binding_after_pick(current_for_pick.as_ref(), action),
+                );
                 if let Some(key) = key {
                     cx.emit(StateEvent::BindingsChanged(key));
                 }
@@ -1178,6 +1186,20 @@ mod tests {
         assert_eq!(next_selection_after_click(None, 3), Some(3));
         assert_eq!(next_selection_after_click(Some(3), 3), None);
         assert_eq!(next_selection_after_click(Some(3), 4), Some(4));
+    }
+
+    #[test]
+    fn picking_the_current_action_clears_the_binding() {
+        assert_eq!(binding_after_pick(Some(&Action::Copy), Action::Copy), None);
+    }
+
+    #[test]
+    fn picking_an_action_sets_or_replaces_the_binding() {
+        assert_eq!(binding_after_pick(None, Action::Copy), Some(Action::Copy));
+        assert_eq!(
+            binding_after_pick(Some(&Action::Paste), Action::Copy),
+            Some(Action::Copy)
+        );
     }
 
     #[test]
