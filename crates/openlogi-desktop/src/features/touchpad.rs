@@ -221,7 +221,11 @@ fn action_picker_content(
         .child(
             v_flex()
                 .id(list_identity)
-                .max_h(px(380.))
+                // Definite height, not a cap: the scrollbar wrapper's scroll
+                // area is size-full, and inside the auto-sized popover a
+                // max-height never resolves it — the list just clips ~10
+                // rows deep with wheel events going nowhere.
+                .h(px(380.))
                 .overflow_y_scrollbar()
                 .children(rows),
         )
