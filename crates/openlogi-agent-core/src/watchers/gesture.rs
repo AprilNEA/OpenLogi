@@ -52,13 +52,22 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 pub struct GestureOutputs {
     actions: ActionDispatcher,
     scroll: ScrollInputHandle,
+    hook_maps: SharedHookMaps,
 }
 
 impl GestureOutputs {
     /// Build gesture outputs backed by the shared action and scroll runtimes.
     #[must_use]
-    pub fn new(actions: ActionDispatcher, scroll: ScrollInputHandle) -> Self {
-        Self { actions, scroll }
+    pub fn new(
+        actions: ActionDispatcher,
+        scroll: ScrollInputHandle,
+        hook_maps: SharedHookMaps,
+    ) -> Self {
+        Self {
+            actions,
+            scroll,
+            hook_maps,
+        }
     }
 
     fn cancel_session(&self, session: &HidppSessionId) {
@@ -85,7 +94,6 @@ pub fn spawn(
     channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     outputs: GestureOutputs,
-    hook_maps: SharedHookMaps,
 ) {
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
@@ -107,7 +115,6 @@ pub fn spawn(
             receiver_requests,
             channel_registry,
             device_io,
-            hook_maps,
             outputs,
         ));
     });
@@ -322,12 +329,12 @@ fn restart_deadline(unexpected: bool, now: Instant) -> Option<Instant> {
 }
 
 impl GestureManagerState {
-    fn new(hook_maps: SharedHookMaps, outputs: GestureOutputs) -> Self {
+    fn new(outputs: GestureOutputs) -> Self {
         Self {
             sessions: HashMap::new(),
             pending_restores: HashMap::new(),
             restart_after: HashMap::new(),
-            input_dispatcher: InputDispatcher::new(hook_maps, outputs),
+            input_dispatcher: InputDispatcher::new(outputs),
             lease: std::sync::Weak::new(),
         }
     }
@@ -502,7 +509,6 @@ async fn manage(
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
     channel_registry: openlogi_hid::ChannelRegistry,
     mut device_io: DeviceIoGate,
-    hook_maps: SharedHookMaps,
     outputs: GestureOutputs,
 ) {
     let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
@@ -520,7 +526,7 @@ async fn manage(
         registry: channel_registry,
         device_io: device_io.clone(),
     };
-    let mut state = GestureManagerState::new(hook_maps, outputs);
+    let mut state = GestureManagerState::new(outputs);
     let mut reconcile = true;
 
     loop {

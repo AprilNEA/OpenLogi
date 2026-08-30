@@ -176,8 +176,11 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
         shared.device_io.clone(),
-        GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
-        shared.hook_maps.clone(),
+        GestureOutputs::new(
+            inputs.dispatcher.clone(),
+            inputs.scroll_input.clone(),
+            shared.hook_maps.clone(),
+        ),
     );
     watchers::host_switch::spawn(
         &shared.host_switch_links,

@@ -103,9 +103,9 @@ pub(super) struct InputDispatcher {
 
 impl InputDispatcher {
     /// Build a dispatcher for session-owned capture-plan snapshots.
-    pub(super) fn new(hook_maps: SharedHookMaps, outputs: GestureOutputs) -> Self {
+    pub(super) fn new(outputs: GestureOutputs) -> Self {
         Self {
-            hook_maps,
+            hook_maps: outputs.hook_maps.clone(),
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),

@@ -49,15 +49,6 @@ pub struct HookMaps {
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
 }
 
-impl HookMaps {
-    #[cfg(any(target_os = "windows", test))]
-    fn selected_thumbwheel_positive_is_forward(&self) -> Option<bool> {
-        self.thumbwheel_positive_is_forward
-            .get(self.selected_device.as_deref()?)
-            .copied()
-    }
-}
-
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
@@ -525,13 +516,16 @@ pub fn start(
 /// The built-in horizontal-scroll defaults intentionally return `None` so the
 /// physical wheel stays native unless the user changed that direction. On
 /// devices exposing `0x2150`, the learned `default_dir` determines which
-/// physical direction the native delta represents. Unknown devices retain the
-/// MX Master 2S fallback: positive is physical backward/down.
+/// physical direction the native delta represents. A selected device whose
+/// polarity has not arrived yet fails open instead of guessing the opposite
+/// action; only the legacy no-device-context path retains the MX Master 2S
+/// fallback (positive is physical backward/down).
 #[cfg(any(target_os = "windows", test))]
 fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId, Action)> {
-    let positive_is_forward = maps
-        .selected_thumbwheel_positive_is_forward()
-        .unwrap_or(false);
+    let positive_is_forward = match maps.selected_device.as_deref() {
+        Some(key) => maps.thumbwheel_positive_is_forward.get(key).copied()?,
+        None => false,
+    };
     let forward = if delta_x > 0.0 {
         positive_is_forward
     } else if delta_x < 0.0 {
