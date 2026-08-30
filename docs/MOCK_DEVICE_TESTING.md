@@ -197,6 +197,7 @@ HID manager per operation.
 
 Own user interaction and file I/O:
 
+- `openlogi fixture contribute`
 - `openlogi fixture record profile`
 - `openlogi fixture record case`
 - `openlogi fixture verify <fixture-directory>`
@@ -414,6 +415,46 @@ new IPC method.
 **Raw case capture** is a controlled direct diagnostic operation. It uses the
 same ownership model as the existing `openlogi diag` commands: select one target,
 open it, run one named operation, and exit. It is not an ambient sniffer.
+
+### Contribution wizard
+
+`openlogi fixture contribute` combines the safe capture modes without changing
+their ownership boundaries:
+
+```sh
+openlogi fixture contribute \
+  --id mx-master-3s-001 \
+  --name "MX Master 3S" \
+  --device "MX Master 3S" \
+  --output fixtures/devices/mx-master-3s-001
+```
+
+Run it once while the Agent is available. The CLI captures and validates one
+semantic profile, then stores only that sanitized profile and a hidden
+resumption file containing synthetic fixture metadata and a sanitized route.
+It never stores the selector, original receiver identity, node path, hashes,
+timestamps, or contributor identity.
+
+For HID++ devices, stop the Agent and rerun the same command. The CLI confirms
+the same transport kind and receiver slot (or direct VID/PID), records all eight
+supported read-only operation cases, self-replays every candidate, and generates
+`manifest.json` from the finalized profile and cassettes. Manifest generation
+re-extracts exact identity occurrences; it does not trust sanitizer audit
+counts. A profile-derived synthetic identity plan keeps cassette receiver and
+device identities related to the profile even when the selected receiver slot
+is not the first retained device.
+
+The wizard captures all cassettes in memory before publishing any case. A
+capture or verification failure leaves the resumable state in place and writes
+no partial case set. The state file is removed only after cases and manifest
+have been written; strict on-disk verification then rejects any unexpected
+entry or relationship. No upload, branch, commit, or pull request is created.
+
+`--profile-only` ends after the Agent phase. Raw-HID standalone devices use this
+mode automatically because fixture schema v1 has no safe replay contract for
+raw writes. The lower-level `fixture record profile` and `fixture record case`
+commands remain available for focused diagnostics, but contributors should not
+hand-author the manifest or identity occurrence ledger.
 
 On macOS these are different TCC identities. A packaged or development agent's
 Input Monitoring grant does not authorize the CLI, and a GUI grant authorizes

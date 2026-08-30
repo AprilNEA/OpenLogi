@@ -1,9 +1,13 @@
 //! Strict cassette construction from one completed recorded channel.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hidpp::channel::RequestOutcome;
-use openlogi_fixture::{CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport};
+use openlogi_fixture::{
+    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, SyntheticIdentityKind,
+    classify_synthetic_identity_bytes,
+};
+use thiserror::Error;
 
 use super::{RecordedChannel, RecordedChannelOpenOutcome, RecordedRequest, RecordedRequestFact};
 
@@ -34,6 +38,71 @@ pub enum SanitizedIdentityKind {
     DeviceUnitId,
     /// Device serial from HID++ 2.0 DeviceInformation function `2`.
     DeviceSerialNumber,
+}
+
+impl SanitizedIdentityKind {
+    const ALL: [Self; 4] = [
+        Self::ReceiverUniqueId,
+        Self::ReceiverSerialNumber,
+        Self::DeviceUnitId,
+        Self::DeviceSerialNumber,
+    ];
+
+    const fn policy_kind(self) -> SyntheticIdentityKind {
+        match self {
+            Self::ReceiverUniqueId => SyntheticIdentityKind::BoltReceiverUid,
+            Self::ReceiverSerialNumber => SyntheticIdentityKind::UnifyingReceiverSerial,
+            Self::DeviceUnitId => SyntheticIdentityKind::DeviceUnitId,
+            Self::DeviceSerialNumber => SyntheticIdentityKind::DeviceSerialNumber,
+        }
+    }
+}
+
+/// Preferred canonical identities for relation-preserving cassette sanitization.
+///
+/// Plans contain only synthetic bytes and are safe to retain in resumable
+/// contribution state. The original captured identities are never exposed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HidCassetteIdentityPlan {
+    replacements: BTreeMap<SanitizedIdentityKind, Vec<u8>>,
+}
+
+impl HidCassetteIdentityPlan {
+    /// Add the canonical synthetic value to use for the first identity of `kind`.
+    pub fn insert(
+        &mut self,
+        kind: SanitizedIdentityKind,
+        synthetic_value: Vec<u8>,
+    ) -> Result<(), HidCassetteIdentityPlanError> {
+        classify_synthetic_identity_bytes(kind.policy_kind(), &synthetic_value)
+            .map_err(|_| HidCassetteIdentityPlanError::InvalidValue { kind })?;
+        if self.replacements.contains_key(&kind) {
+            return Err(HidCassetteIdentityPlanError::DuplicateKind { kind });
+        }
+        self.replacements.insert(kind, synthetic_value);
+        Ok(())
+    }
+
+    pub(super) fn replacement(&self, kind: SanitizedIdentityKind) -> Option<&[u8]> {
+        self.replacements.get(&kind).map(Vec::as_slice)
+    }
+}
+
+/// A preferred cassette identity is malformed or duplicated.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum HidCassetteIdentityPlanError {
+    /// The plan contains two preferred values for one protocol identity kind.
+    #[error("identity plan repeats {kind:?}")]
+    DuplicateKind {
+        /// Repeated identity kind.
+        kind: SanitizedIdentityKind,
+    },
+    /// The preferred bytes do not match the canonical synthetic policy.
+    #[error("identity plan contains a noncanonical value for {kind:?}")]
+    InvalidValue {
+        /// Rejected identity kind.
+        kind: SanitizedIdentityKind,
+    },
 }
 
 /// One relation-preserving synthetic identity and its replacement count.
@@ -136,6 +205,9 @@ pub enum CassetteRejectionReason {
     MalformedIdentity,
     /// Sequential synthetic identifiers exhausted their fixed-width field.
     SyntheticIdentitySpaceExhausted,
+    /// A preferred synthetic value exactly matched the captured original, so
+    /// replacement could not be proven without retaining the original bytes.
+    PlannedIdentityMatchesOriginal,
     /// Pairing, discovery-address, or passkey traffic is never retained.
     PairingTraffic,
     /// No complete exchange remained after validation.
@@ -187,7 +259,17 @@ impl RecordedChannel {
     /// without blessing callback scheduling as a global replay order.
     #[must_use]
     pub fn build_hid_cassette(&self, metadata: HidCassetteMetadata) -> HidCassetteBuildReport {
-        CassetteBuilder::new(self, metadata).build()
+        self.build_hid_cassette_with_identity_plan(metadata, &HidCassetteIdentityPlan::default())
+    }
+
+    /// Audit and convert this channel while preferring profile-derived synthetic identities.
+    #[must_use]
+    pub fn build_hid_cassette_with_identity_plan(
+        &self,
+        metadata: HidCassetteMetadata,
+        identity_plan: &HidCassetteIdentityPlan,
+    ) -> HidCassetteBuildReport {
+        CassetteBuilder::new(self, metadata, identity_plan).build()
     }
 }
 
@@ -199,11 +281,15 @@ struct CassetteBuilder<'a> {
 }
 
 impl<'a> CassetteBuilder<'a> {
-    fn new(channel: &'a RecordedChannel, metadata: HidCassetteMetadata) -> Self {
+    fn new(
+        channel: &'a RecordedChannel,
+        metadata: HidCassetteMetadata,
+        identity_plan: &HidCassetteIdentityPlan,
+    ) -> Self {
         Self {
             channel,
             metadata,
-            sanitizer: ProtocolSanitizer::default(),
+            sanitizer: ProtocolSanitizer::with_identity_plan(identity_plan),
             rejections: Vec::new(),
         }
     }

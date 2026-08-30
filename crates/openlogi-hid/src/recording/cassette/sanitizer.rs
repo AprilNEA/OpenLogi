@@ -9,7 +9,8 @@ use openlogi_fixture::{
 };
 
 use super::{
-    CassetteRejectionReason, HidCassetteAudit, IdentityReplacement, SanitizedIdentityKind,
+    CassetteRejectionReason, HidCassetteAudit, HidCassetteIdentityPlan, IdentityReplacement,
+    SanitizedIdentityKind,
 };
 
 #[derive(Default)]
@@ -19,6 +20,13 @@ pub(super) struct ProtocolSanitizer {
 }
 
 impl ProtocolSanitizer {
+    pub(super) fn with_identity_plan(identity_plan: &HidCassetteIdentityPlan) -> Self {
+        Self {
+            protocol: ProtocolIdentityExtractor::default(),
+            identities: IdentitySanitizer::with_identity_plan(identity_plan),
+        }
+    }
+
     pub(super) fn exchange(
         &mut self,
         request: &[u8],
@@ -137,15 +145,6 @@ impl SanitizedIdentityKind {
             | SyntheticIdentityKind::RawHidProfileIdentity => None,
         }
     }
-
-    const fn policy_kind(self) -> SyntheticIdentityKind {
-        match self {
-            Self::ReceiverUniqueId => SyntheticIdentityKind::BoltReceiverUid,
-            Self::ReceiverSerialNumber => SyntheticIdentityKind::UnifyingReceiverSerial,
-            Self::DeviceUnitId => SyntheticIdentityKind::DeviceUnitId,
-            Self::DeviceSerialNumber => SyntheticIdentityKind::DeviceSerialNumber,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -165,9 +164,25 @@ struct IdentitySanitizer {
     replacements: BTreeMap<IdentityKey, ReplacementState>,
     used: BTreeSet<(SanitizedIdentityKind, Vec<u8>)>,
     counters: BTreeMap<SanitizedIdentityKind, u16>,
+    preferred: BTreeMap<SanitizedIdentityKind, Vec<u8>>,
 }
 
 impl IdentitySanitizer {
+    fn with_identity_plan(identity_plan: &HidCassetteIdentityPlan) -> Self {
+        let preferred = SanitizedIdentityKind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                identity_plan
+                    .replacement(kind)
+                    .map(|value| (kind, value.to_vec()))
+            })
+            .collect();
+        Self {
+            preferred,
+            ..Self::default()
+        }
+    }
+
     fn replace(
         &mut self,
         kind: SanitizedIdentityKind,
@@ -189,7 +204,13 @@ impl IdentitySanitizer {
             return Ok(());
         }
 
-        let synthetic = self.next_synthetic(kind, &key.original)?;
+        let synthetic = match self.preferred.remove(&kind) {
+            Some(preferred) if preferred == key.original => {
+                return Err(CassetteRejectionReason::PlannedIdentityMatchesOriginal);
+            }
+            Some(preferred) => preferred,
+            None => self.next_synthetic(kind, &key.original)?,
+        };
         response[range].copy_from_slice(&synthetic);
         self.used.insert((kind, synthetic.clone()));
         self.replacements.insert(
@@ -278,6 +299,35 @@ mod tests {
         assert_eq!(
             sanitizer.next_synthetic(SanitizedIdentityKind::DeviceUnitId, &[0; 4]),
             Err(CassetteRejectionReason::SyntheticIdentitySpaceExhausted)
+        );
+    }
+
+    #[test]
+    fn sanitizer_uses_a_profile_derived_preferred_identity() {
+        let mut plan = HidCassetteIdentityPlan::default();
+        plan.insert(SanitizedIdentityKind::DeviceUnitId, b"OLD\x07".to_vec())
+            .expect("preferred identity is canonical");
+        let mut sanitizer = IdentitySanitizer::with_identity_plan(&plan);
+        let mut response = b"REAL".to_vec();
+
+        sanitizer
+            .replace(SanitizedIdentityKind::DeviceUnitId, &mut response, 0..4)
+            .expect("preferred identity is applied");
+
+        assert_eq!(response, b"OLD\x07");
+    }
+
+    #[test]
+    fn preferred_identity_matching_the_original_fails_closed() {
+        let mut plan = HidCassetteIdentityPlan::default();
+        plan.insert(SanitizedIdentityKind::DeviceUnitId, b"OLD\x07".to_vec())
+            .expect("preferred identity is canonical");
+        let mut sanitizer = IdentitySanitizer::with_identity_plan(&plan);
+        let mut response = b"OLD\x07".to_vec();
+
+        assert_eq!(
+            sanitizer.replace(SanitizedIdentityKind::DeviceUnitId, &mut response, 0..4),
+            Err(CassetteRejectionReason::PlannedIdentityMatchesOriginal)
         );
     }
 }

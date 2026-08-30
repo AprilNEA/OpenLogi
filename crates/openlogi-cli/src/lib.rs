@@ -250,6 +250,39 @@ mod tests {
     }
 
     #[test]
+    fn fixture_contribution_wizard_parses_one_resumable_command() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "contribute",
+            "--id",
+            "mx-master-3s-001",
+            "--name",
+            "MX Master 3S contribution",
+            "--output",
+            "fixtures/devices/mx-master-3s-001",
+            "--device",
+            "MX Master 3S",
+            "--profile-only",
+        ])
+        .expect("fixture contribution parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Fixture(FixtureCmd::Contribute(args)) => {
+                assert_eq!(args.id, "mx-master-3s-001");
+                assert_eq!(args.name, "MX Master 3S contribution");
+                assert_eq!(
+                    args.output,
+                    std::path::PathBuf::from("fixtures/devices/mx-master-3s-001")
+                );
+                assert_eq!(args.device.as_deref(), Some("MX Master 3S"));
+                assert!(args.profile_only);
+            }
+            other => panic!("expected Fixture(Contribute), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn fixture_record_case_requires_operation_metadata_and_output() {
         let required_flags = ["--operation", "--name", "--channel", "--output"];
         let complete = [

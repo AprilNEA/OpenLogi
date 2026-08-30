@@ -55,6 +55,27 @@ pub async fn run(args: RecordProfileArgs) -> Result<()> {
     capture_connected(args, connection).await
 }
 
+pub(super) struct CapturedProfile {
+    pub(super) profile: DeviceProfile,
+    pub(super) selected_route: DeviceRoute,
+}
+
+type ProfileCaptureParts = (
+    Vec<DeviceInventory>,
+    Vec<StandaloneDevice>,
+    Vec<ProfileDeviceSettings>,
+    DeviceRoute,
+);
+
+pub(super) async fn capture_for_contribution(
+    id: String,
+    name: String,
+    selector: Option<&str>,
+) -> Result<CapturedProfile> {
+    let connection = connect_to_agent().await?;
+    capture_connected_profile(&connection, selector, id, name).await
+}
+
 async fn connect_to_agent() -> Result<Connection> {
     match tokio::time::timeout(CONNECT_TIMEOUT, client::connect()).await {
         Err(_) => bail!(
@@ -80,6 +101,29 @@ fn safe_connect_error(error: &ConnectError) -> anyhow::Error {
 }
 
 async fn capture_connected(args: RecordProfileArgs, connection: Connection) -> Result<()> {
+    let captured =
+        capture_connected_profile(&connection, args.device.as_deref(), args.id, args.name).await?;
+    let profile = captured.profile;
+    super::output::write_json_atomically(&args.output, &profile, args.force, "device profile")?;
+
+    println!(
+        "Recorded semantic profile `{}` to {} through the running Agent.",
+        profile.id,
+        args.output.display()
+    );
+    println!(
+        "The captured values are semantic review candidates, not proof of physical or protocol \
+         correctness. Review the profile before committing it."
+    );
+    Ok(())
+}
+
+async fn capture_connected_profile(
+    connection: &Connection,
+    selector: Option<&str>,
+    id: String,
+    name: String,
+) -> Result<CapturedProfile> {
     if connection.version != PROTOCOL_VERSION {
         bail!(
             "the running Agent speaks protocol v{}, but this CLI requires v{PROTOCOL_VERSION}; \
@@ -106,29 +150,12 @@ async fn capture_connected(args: RecordProfileArgs, connection: Connection) -> R
     .map_err(|_| anyhow!("the running Agent timed out while providing its device snapshot"))?
     .map_err(|_| anyhow!("the running Agent disconnected while providing its device snapshot"))?;
 
-    let profile = capture_profile(
-        &connection.client,
-        snapshot,
-        args.device.as_deref(),
-        args.id,
-        args.name,
-    )
-    .await?;
-    profile
+    let captured = capture_profile(&connection.client, snapshot, selector, id, name).await?;
+    captured
+        .profile
         .validate()
         .context("captured semantic profile failed version-1 validation; no profile was written")?;
-    super::output::write_json_atomically(&args.output, &profile, args.force, "device profile")?;
-
-    println!(
-        "Recorded semantic profile `{}` to {} through the running Agent.",
-        profile.id,
-        args.output.display()
-    );
-    println!(
-        "The captured values are semantic review candidates, not proof of physical or protocol \
-         correctness. Review the profile before committing it."
-    );
-    Ok(())
+    Ok(captured)
 }
 
 fn validate_metadata(args: &RecordProfileArgs) -> Result<()> {
@@ -147,7 +174,7 @@ async fn capture_profile(
     selector: Option<&str>,
     id: String,
     name: String,
-) -> Result<DeviceProfile> {
+) -> Result<CapturedProfile> {
     // Runtime status, camera, foreground-app, and pairing facts are dropped at
     // this boundary and can never enter the serializable profile value.
     let AgentSnapshot {
@@ -158,7 +185,7 @@ async fn capture_profile(
     let candidates = selection::target_candidates(&inventory, &standalone);
     let selected = selection::select_target(&candidates, selector)?;
 
-    let (inventories, standalone, settings) = match selected.location {
+    let (inventories, standalone, settings, selected_route) = match selected.location {
         TargetLocation::Inventory {
             inventory: inventory_index,
             device: device_index,
@@ -176,13 +203,16 @@ async fn capture_profile(
         }
     };
 
-    Ok(DeviceProfile {
-        schema_version: FIXTURE_SCHEMA_VERSION,
-        id,
-        name,
-        inventories,
-        standalone,
-        settings,
+    Ok(CapturedProfile {
+        profile: DeviceProfile {
+            schema_version: FIXTURE_SCHEMA_VERSION,
+            id,
+            name,
+            inventories,
+            standalone,
+            settings,
+        },
+        selected_route,
     })
 }
 
@@ -190,11 +220,7 @@ async fn capture_inventory(
     client: &AgentClient,
     source: &DeviceInventory,
     selected_device: usize,
-) -> Result<(
-    Vec<DeviceInventory>,
-    Vec<StandaloneDevice>,
-    Vec<ProfileDeviceSettings>,
-)> {
+) -> Result<ProfileCaptureParts> {
     let mut retained = source.clone();
     if retained.receiver.unique_id.is_none() {
         retained.paired = vec![source.paired.get(selected_device).cloned().ok_or_else(|| {
@@ -211,6 +237,11 @@ async fn capture_inventory(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let retained_selected = if retained.receiver.unique_id.is_none() {
+        0
+    } else {
+        selected_device
+    };
     sanitize::inventory(&mut retained)?;
     let profile_routes = retained
         .paired
@@ -220,6 +251,10 @@ async fn capture_inventory(
                 .ok_or_else(|| anyhow!("a sanitized profile route is not addressable"))
         })
         .collect::<Result<Vec<_>>>()?;
+    let selected_route = profile_routes
+        .get(retained_selected)
+        .cloned()
+        .ok_or_else(|| anyhow!("the sanitized selected profile route is absent"))?;
 
     let mut settings = Vec::with_capacity(retained.paired.len());
     for ((source_route, profile_route), device) in source_routes
@@ -229,7 +264,7 @@ async fn capture_inventory(
     {
         settings.push(capture_hidpp_settings(client, source_route, profile_route, device).await?);
     }
-    Ok((vec![retained], Vec::new(), settings))
+    Ok((vec![retained], Vec::new(), settings, selected_route))
 }
 
 async fn capture_hidpp_settings(
@@ -339,13 +374,7 @@ fn safe_read_error(family: &str) -> anyhow::Error {
     )
 }
 
-fn capture_standalone(
-    source: &StandaloneDevice,
-) -> Result<(
-    Vec<DeviceInventory>,
-    Vec<StandaloneDevice>,
-    Vec<ProfileDeviceSettings>,
-)> {
+fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> {
     let mut retained = source.clone();
     sanitize::standalone(&mut retained)?;
     let route = selection::standalone_route(&retained);
@@ -355,7 +384,7 @@ fn capture_standalone(
             || capabilities.temperature.is_some()
     });
     let settings = ProfileDeviceSettings {
-        route,
+        route: route.clone(),
         dpi: ProfileSetting::Unsupported,
         smartshift: ProfileSetting::Unsupported,
         wheel: ProfileSetting::Unsupported,
@@ -363,7 +392,7 @@ fn capture_standalone(
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };
-    Ok((Vec::new(), vec![retained], vec![settings]))
+    Ok((Vec::new(), vec![retained], vec![settings], route))
 }
 
 const fn profile_support(supported: bool) -> ProfileSupport {

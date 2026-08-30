@@ -13,7 +13,9 @@ use openlogi_device::write::{
 };
 use openlogi_device::{BacklightState, DeviceRoute, DpiInfo, HidBackend, SmartShiftStatus};
 use openlogi_fixture::HidCassette;
-use openlogi_hid::recording::{HidCassetteAudit, NativeRecorder, NativeRecording};
+use openlogi_hid::recording::{
+    HidCassetteAudit, HidCassetteIdentityPlan, NativeRecorder, NativeRecording,
+};
 use openlogi_ipc::client::{self, ConnectError};
 
 use super::target_selection::{self, FixtureTarget};
@@ -21,7 +23,7 @@ use super::target_selection::{self, FixtureTarget};
 mod audit;
 mod replay;
 
-const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
+pub(super) const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
 const MAX_RECORDING_CAPACITY: usize = 65_536;
 const AGENT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -89,6 +91,30 @@ enum SemanticObservation {
 }
 
 impl FixtureOperation {
+    pub(super) const ALL: [Self; 8] = [
+        Self::FeatureTable,
+        Self::FirmwareEntities,
+        Self::ReprogrammableControls,
+        Self::RawBattery,
+        Self::DpiInfo,
+        Self::SmartshiftStatus,
+        Self::WheelMode,
+        Self::BacklightState,
+    ];
+
+    pub(super) const fn slug(self) -> &'static str {
+        match self {
+            Self::FeatureTable => "feature-table",
+            Self::FirmwareEntities => "firmware-entities",
+            Self::ReprogrammableControls => "reprogrammable-controls",
+            Self::RawBattery => "raw-battery",
+            Self::DpiInfo => "dpi-info",
+            Self::SmartshiftStatus => "smartshift-status",
+            Self::WheelMode => "wheel-mode",
+            Self::BacklightState => "backlight-state",
+        }
+    }
+
     async fn observe(self, backend: &dyn HidBackend, route: &DeviceRoute) -> SemanticObservation {
         match self {
             Self::FeatureTable => {
@@ -163,11 +189,17 @@ fn replayable_error(error: &WriteError) -> bool {
 }
 
 #[derive(Clone, Debug)]
-struct TargetCandidate {
+pub(super) struct TargetCandidate {
     route: DeviceRoute,
     name: String,
     receiver_vendor_id: u16,
     receiver_product_id: u16,
+}
+
+impl TargetCandidate {
+    pub(super) fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
 }
 
 impl FixtureTarget for TargetCandidate {
@@ -189,22 +221,16 @@ struct SanitizedCandidate {
 pub async fn run(args: RecordCaseArgs) -> Result<()> {
     validate_metadata(&args)?;
     super::output::ensure_output_available(&args.output, args.force)?;
-    ensure_agent_stopped().await?;
-
-    eprintln!(
-        "warning: fixture case capture reads hardware directly with this CLI process's own HID \
-         permission and identity, not the OpenLogi agent"
-    );
-    let inventories = openlogi_hid::enumerate()
-        .await
-        .map_err(|_| anyhow!("failed to enumerate HID++ devices for direct fixture capture"))?;
-    let candidates = online_targets(&inventories);
-    let target = target_selection::select_target(&candidates, args.device.as_deref())?;
-
-    let (recording, observation) = capture(args.operation, &target.route, args.capacity).await?;
-    let candidates = audit::sanitize_recording(recording, &args.name, &args.channel)?;
-    let cassette =
-        replay::select_self_replaying(args.operation, &target, &observation, candidates).await?;
+    let target = prepare_contribution_target(args.device.as_deref()).await?;
+    let cassette = capture_for_contribution(
+        args.operation,
+        &target,
+        &args.name,
+        &args.channel,
+        args.capacity,
+        &HidCassetteIdentityPlan::default(),
+    )
+    .await?;
     super::output::write_json_atomically(&args.output, &cassette, args.force, "HID cassette")?;
 
     println!(
@@ -222,6 +248,32 @@ pub async fn run(args: RecordCaseArgs) -> Result<()> {
          cassette before committing it."
     );
     Ok(())
+}
+
+pub(super) async fn prepare_contribution_target(selector: Option<&str>) -> Result<TargetCandidate> {
+    ensure_agent_stopped().await?;
+    eprintln!(
+        "warning: fixture case capture reads hardware directly with this CLI process's own HID \
+         permission and identity, not the OpenLogi agent"
+    );
+    let inventories = openlogi_hid::enumerate()
+        .await
+        .map_err(|_| anyhow!("failed to enumerate HID++ devices for direct fixture capture"))?;
+    let candidates = online_targets(&inventories);
+    target_selection::select_target(&candidates, selector)
+}
+
+pub(super) async fn capture_for_contribution(
+    operation: FixtureOperation,
+    target: &TargetCandidate,
+    name: &str,
+    channel: &str,
+    capacity: usize,
+    identity_plan: &HidCassetteIdentityPlan,
+) -> Result<HidCassette> {
+    let (recording, observation) = capture(operation, &target.route, capacity).await?;
+    let candidates = audit::sanitize_recording_with_plan(recording, name, channel, identity_plan)?;
+    replay::select_self_replaying(operation, target, &observation, candidates).await
 }
 
 fn validate_metadata(args: &RecordCaseArgs) -> Result<()> {

@@ -2,24 +2,28 @@
 
 use anyhow::{Result, bail};
 use openlogi_hid::recording::{
-    CassetteRejectionReason, HidCassetteBuildReport, HidCassetteMetadata, NativeRecording,
-    SanitizedIdentityKind,
+    CassetteRejectionReason, HidCassetteBuildReport, HidCassetteIdentityPlan, HidCassetteMetadata,
+    NativeRecording, SanitizedIdentityKind,
 };
 
 use super::{SanitizedCandidate, uppercase_hex};
 
-pub(super) fn sanitize_recording(
+pub(super) fn sanitize_recording_with_plan(
     recording: NativeRecording,
     name: &str,
     channel: &str,
+    identity_plan: &HidCassetteIdentityPlan,
 ) -> Result<Vec<SanitizedCandidate>> {
     let recorded_raw_writers = !recording.raw_writers.is_empty();
     let mut candidates = Vec::new();
     for (index, recorded_channel) in recording.channels.iter().enumerate() {
-        let report = recorded_channel.build_hid_cassette(HidCassetteMetadata {
-            name: name.to_string(),
-            channel: channel.to_string(),
-        });
+        let report = recorded_channel.build_hid_cassette_with_identity_plan(
+            HidCassetteMetadata {
+                name: name.to_string(),
+                channel: channel.to_string(),
+            },
+            identity_plan,
+        );
         render_build_report(index, &report);
         if report.rejections.is_empty()
             && let Some(cassette) = report.cassette.clone()
@@ -139,6 +143,11 @@ fn rejection_label(reason: &CassetteRejectionReason) -> String {
         }
         CassetteRejectionReason::SyntheticIdentitySpaceExhausted => {
             "synthetic identity space is exhausted".to_string()
+        }
+        CassetteRejectionReason::PlannedIdentityMatchesOriginal => {
+            "profile-derived synthetic identity matched the captured original; replacement cannot \
+             be proven"
+                .to_string()
         }
         CassetteRejectionReason::PairingTraffic => {
             "pairing, discovery-address, or passkey traffic is forbidden".to_string()

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+pub(crate) mod contribute;
 mod output;
 pub(crate) mod record_case;
 pub(crate) mod record_profile;
@@ -12,6 +13,8 @@ pub(crate) mod verify;
 /// Commands that create or inspect mock-device fixtures.
 #[derive(Debug, Subcommand)]
 pub enum FixtureCmd {
+    /// Build a complete privacy-safe fixture with a resumable two-phase wizard.
+    Contribute(contribute::ContributeArgs),
     /// Capture privacy-safe fixture data through a read-only owner.
     #[command(subcommand)]
     Record(FixtureRecordCmd),
@@ -22,6 +25,7 @@ pub enum FixtureCmd {
 impl FixtureCmd {
     pub async fn run(self) -> Result<()> {
         match self {
+            Self::Contribute(args) => contribute::run(args).await,
             Self::Record(command) => command.run().await,
             Self::Verify(args) => verify::run(&args),
         }

@@ -8,8 +8,9 @@ use thiserror::Error;
 
 use super::{
     DeviceProfile, FixtureDeviceRoute, FixtureError, FixtureManifest, FixturePrincipal,
-    HidCassette, IdentityLocation, ProfileIdentityField, ProtocolIdentityExtractor,
-    SyntheticIdentityKind, classify_synthetic_identity_bytes, classify_synthetic_profile_identity,
+    HidCassette, IdentityLocation, IdentityOccurrence, ProfileIdentityField,
+    ProtocolIdentityExtractor, SyntheticIdentityKind, classify_synthetic_identity_bytes,
+    classify_synthetic_profile_identity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,6 +18,47 @@ struct CountKey {
     principal: String,
     kind: SyntheticIdentityKind,
     location: IdentityLocation,
+}
+
+pub(super) fn populate_exact_occurrences(
+    manifest: &mut FixtureManifest,
+    profile: &DeviceProfile,
+    cassettes: &[HidCassette],
+) -> Result<(), FixtureError> {
+    let observed = {
+        let cassettes = manifest
+            .validate_cassette_relationships(cassettes)
+            .map_err(FixtureVerificationError::into_fixture_error)?;
+        let ledger = LedgerIndex::new(manifest)?;
+        let mut observed = BTreeMap::new();
+        verify_profile(profile, &ledger, &mut observed)?;
+        verify_cassettes(&cassettes, &ledger, &mut observed)
+            .map_err(FixtureVerificationError::into_fixture_error)?;
+        observed
+    };
+
+    for entry in &mut manifest.identity_ledger {
+        let principal = entry.principal.id().to_string();
+        for representation in &mut entry.representations {
+            let kinds = representation
+                .value_keys()
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<BTreeSet<_>>();
+            for (key, count) in &observed {
+                if key.principal == principal && kinds.contains(&key.kind) {
+                    representation.push_occurrence(
+                        key.kind,
+                        IdentityOccurrence {
+                            location: key.location.clone(),
+                            count: *count,
+                        },
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 struct LedgerIndex<'a> {

@@ -500,6 +500,44 @@ impl IdentityRepresentation {
             }
         }
     }
+
+    pub(super) fn push_occurrence(
+        &mut self,
+        kind: SyntheticIdentityKind,
+        occurrence: IdentityOccurrence,
+    ) -> Result<(), FixtureError> {
+        match (self, kind) {
+            (Self::BoltReceiverUid { occurrences, .. }, SyntheticIdentityKind::BoltReceiverUid)
+            | (Self::DeviceUnitId { occurrences, .. }, SyntheticIdentityKind::DeviceUnitId)
+            | (
+                Self::DeviceSerialNumber { occurrences, .. },
+                SyntheticIdentityKind::DeviceSerialNumber,
+            )
+            | (
+                Self::RawHidProfileIdentity { occurrences, .. },
+                SyntheticIdentityKind::RawHidProfileIdentity,
+            ) => occurrences.push(occurrence),
+            (
+                Self::UnifyingReceiverSerial {
+                    binary_occurrences, ..
+                },
+                SyntheticIdentityKind::UnifyingReceiverSerial,
+            ) => binary_occurrences.push(occurrence),
+            (
+                Self::UnifyingReceiverSerial {
+                    route_occurrences, ..
+                },
+                SyntheticIdentityKind::UnifyingReceiverRoute,
+            ) => route_occurrences.push(occurrence),
+            _ => {
+                return Err(FixtureError::invalid(
+                    "fixture manifest generation",
+                    "identity occurrence kind does not match its representation",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_representation_owner(
