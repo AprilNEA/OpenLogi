@@ -217,6 +217,35 @@ fn spread_dominance_commits_pinch_in_and_out() {
 }
 
 #[test]
+fn drifting_four_finger_pinch_beats_the_swipe_gate() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![
+            contact(1, 20_000, 40_000),
+            contact(2, 80_000, 40_000),
+            contact(3, 20_000, 60_000),
+            contact(4, 80_000, 60_000),
+        ],
+    ));
+    // The hand drifts 10 mm down while closing (centroid travel ≈ spread
+    // change), the shape real pinches take when the wrist pivots — the swipe
+    // gate would otherwise claim it as TouchpadFourFingerSwipeDown.
+    assert_eq!(
+        recognizer.update(&frame(
+            60_000,
+            vec![
+                contact(1, 34_000, 52_000),
+                contact(2, 66_000, 52_000),
+                contact(3, 34_000, 68_000),
+                contact(4, 66_000, 68_000),
+            ],
+        )),
+        GestureRecognition::Gesture(ButtonId::TouchpadFourFingerPinchIn)
+    );
+}
+
+#[test]
 fn common_two_finger_motion_is_left_to_native_scrolling() {
     let mut recognizer = TouchpadGestureRecognizer::default();
     recognizer.update(&translated_frame(0, 2, 0, 0));

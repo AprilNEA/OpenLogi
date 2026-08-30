@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use hidpp::feature::CreatableFeature;
+use openlogi_core::binding::ButtonId;
 use openlogi_core::touchpad::{GestureRecognition, TouchpadGestureRecognizer};
 
 use super::*;
@@ -446,7 +447,7 @@ fn five_fingers_suppress_a_smaller_gesture_until_liftoff() {
 }
 
 #[test]
-fn a_dropped_active_frame_cancels_before_later_frames() {
+fn a_dropped_active_frame_keeps_the_stroke_tappable() {
     let mut stream = stream();
     let mut recognizer = TouchpadGestureRecognizer::default();
     let now = Instant::now();
@@ -468,33 +469,32 @@ fn a_dropped_active_frame_cancels_before_later_frames() {
     assert!(
         stream
             .push_chunk(
-                chunk(200, [point(1, 150, 100), point(2, 250, 100)], 3, false,),
+                chunk(200, [point(1, 100, 100), point(2, 200, 100)], 3, false,),
                 now + Duration::from_millis(10),
             )
             .is_empty()
     );
     let dropped = stream.push_chunk(
-        chunk(300, [point(1, 200, 100), point(2, 300, 100)], 3, false),
+        chunk(300, [point(1, 100, 100), point(2, 200, 100)], 3, false),
         now + Duration::from_millis(20),
     );
-    assert_eq!(
-        dropped,
-        vec![
-            TouchpadStreamEvent::DroppedFrames(1),
-            TouchpadStreamEvent::Cancel,
-        ]
-    );
-    recognizer.cancel();
+    // The liftoff drop reports the frame loss without cancelling: the stroke
+    // must stay tappable for the watchdog End.
+    assert_eq!(dropped, vec![TouchpadStreamEvent::DroppedFrames(1)]);
 
     let later = stream.push_chunk(
-        chunk(300, [point(3, 400, 100), empty()], 3, true),
+        chunk(300, [point(3, 300, 100), empty()], 3, true),
         now + Duration::from_millis(20),
     );
     let [TouchpadStreamEvent::Frame(frame)] = later.as_slice() else {
         panic!("the complete later frame should still be observable");
     };
     assert_eq!(recognizer.update(frame), GestureRecognition::Pending);
-    assert_eq!(recognizer.end(), None);
+    assert_eq!(
+        recognizer.end(),
+        Some(ButtonId::TouchpadThreeFingerTap),
+        "a dropped liftoff frame must not suppress the tap"
+    );
 }
 
 #[test]
@@ -526,7 +526,7 @@ fn silence_ends_the_previous_stroke() {
 }
 
 #[test]
-fn silence_cancels_an_incomplete_final_frame_before_ending() {
+fn silence_drops_the_incomplete_final_frame_before_ending() {
     let mut stream = stream();
     let now = Instant::now();
     let initial = TouchFrame::new(
@@ -562,7 +562,6 @@ fn silence_cancels_an_incomplete_final_frame_before_ending() {
         stream.poll_end(now + Duration::from_millis(1) + timeout),
         vec![
             TouchpadStreamEvent::DroppedFrames(1),
-            TouchpadStreamEvent::Cancel,
             TouchpadStreamEvent::End,
         ]
     );

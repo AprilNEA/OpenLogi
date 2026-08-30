@@ -99,12 +99,14 @@ impl TouchpadFrameStream {
         let mut events = Vec::new();
         if dropped != 0 {
             events.push(TouchpadStreamEvent::DroppedFrames(dropped));
+            // The stroke survives a dropped frame: liftoff drops are routine
+            // on >2-contact strokes, and the recognizer rebases on the next
+            // frame it sees.
             if self.active_contacts.is_some() || reported_contacts != 0 {
                 if self.active_contacts.is_none() {
                     self.active_contacts = Some(reported_contacts);
                 }
                 self.last_frame_at = Some(now);
-                events.push(TouchpadStreamEvent::Cancel);
             }
         }
         let Some(outcome) = outcome else {
@@ -137,8 +139,8 @@ impl TouchpadFrameStream {
         }
     }
 
-    /// End an active stroke after report silence, cancelling first when its
-    /// final logical frame never completed.
+    /// End an active stroke after report silence, dropping an incomplete
+    /// final frame first — without cancelling, so the tap is still evaluated.
     pub fn poll_end(&mut self, now: Instant) -> Vec<TouchpadStreamEvent> {
         let Some(last) = self.last_frame_at else {
             return Vec::new();
@@ -152,7 +154,6 @@ impl TouchpadFrameStream {
             events.push(TouchpadStreamEvent::DroppedFrames(1));
             self.active_contacts
                 .get_or_insert_with(|| usize::from(finger_count));
-            events.push(TouchpadStreamEvent::Cancel);
         }
         events.extend(self.end_event());
         events

@@ -20,6 +20,9 @@ const FLICK_MIN_DISTANCE_UM: u64 = 15_000;
 const SWIPE_CROSS_AXIS_FLOOR_UM: u64 = 3_000;
 const PINCH_MIN_SPREAD_CHANGE_UM: u64 = 8_000;
 const PINCH_MIN_SPREAD_PERCENT: u64 = 8;
+// Real swipes keep the spread within ~2 mm while pinching hands drift the
+// centroid past the spread change itself, so only two-finger pinches need
+// the dominance gate (130 Hz Casa Touch captures).
 const MOTION_DOMINANCE_NUMERATOR: u64 = 3;
 const MOTION_DOMINANCE_DENOMINATOR: u64 = 2;
 
@@ -270,7 +273,7 @@ impl Stroke {
         if self.latest.len() == finger_count
             && matches!(finger_count, 2 | 4)
             && spread_change >= self.pinch_threshold()
-            && dominates(spread_change, centroid_distance)
+            && (finger_count == 4 || dominates(spread_change, centroid_distance))
         {
             return GestureRecognition::Gesture(
                 self.pinch_gesture(current.spread_um >= self.start_spread_um),
