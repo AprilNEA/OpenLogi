@@ -12,6 +12,7 @@ use hidpp::{
     },
 };
 pub use openlogi_core::config::ScrollResolution;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
@@ -20,7 +21,8 @@ use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
 /// Destination for vertical wheel movement reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScrollReportingTarget {
     /// Ordinary HID scroll reports delivered to the operating system.
     Native,
@@ -50,7 +52,8 @@ impl TryFrom<WheelEventTarget> for ScrollReportingTarget {
 }
 
 /// Current HID++ `0x2121` wheel reporting mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScrollWheelMode {
     /// Vertical wheel reporting resolution.
     pub resolution: ScrollResolution,
