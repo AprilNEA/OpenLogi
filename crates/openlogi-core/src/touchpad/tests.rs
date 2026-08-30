@@ -412,3 +412,52 @@ fn cancellation_suppresses_frames_until_the_stroke_ends() {
         GestureRecognition::Gesture(ButtonId::TouchpadThreeFingerSwipeRight)
     );
 }
+
+#[test]
+fn a_lifted_and_relanded_finger_resumes_as_a_fresh_stroke() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 60_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        8_000,
+        vec![contact(1, 62_000, 50_000), contact(2, 72_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 0
+        }
+    );
+
+    // One finger lifts mid-scroll, then lands again beside the survivor:
+    // the recognizer must rebase and keep streaming instead of freezing
+    // until the silence watchdog ends the stroke.
+    assert_eq!(
+        recognizer.update(&frame(24_000, vec![contact(1, 68_000, 50_000)],)),
+        GestureRecognition::Pending
+    );
+    assert_eq!(
+        recognizer.update(&frame(
+            32_000,
+            vec![contact(1, 68_000, 50_000), contact(3, 78_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+    // 3.5 mm past the re-anchored start re-activates the scroll.
+    assert_eq!(
+        recognizer.update(&frame(
+            40_000,
+            vec![contact(1, 71_500, 50_000), contact(3, 81_500, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_500,
+            dy_um: 0
+        }
+    );
+}

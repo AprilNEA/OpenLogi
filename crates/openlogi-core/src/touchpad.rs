@@ -230,8 +230,11 @@ impl Stroke {
             return Some(ContactUpdate::Stable);
         }
 
-        let fingers_landed = self.latest.len() == self.starts.len()
-            && frame.contacts.len() > self.latest.len()
+        // A rising contact count re-anchors the stroke even when it does not
+        // return to the count the stroke started with: a 2→1→2 lift-and-
+        // re-land must resume as a fresh stroke, not fall through to the
+        // cancel below and freeze the recognizer until the watchdog ends it.
+        let fingers_landed = frame.contacts.len() > self.latest.len()
             && self
                 .latest
                 .iter()
