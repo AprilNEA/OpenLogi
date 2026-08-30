@@ -1,7 +1,41 @@
+use openlogi_core::touchpad::{TouchContact, TouchFrame};
 use openlogi_hid::thumbwheel::WheelResolution;
+use openlogi_inject::DockSwipeMotion;
 
 use super::wheel::{ScrollScale, WheelOutput, WheelRotation};
 use super::*;
+
+fn contact(id: u8, x_um: u32, y_um: u32) -> TouchContact {
+    TouchContact { id, x_um, y_um }
+}
+
+fn frame(timestamp_us: u64, contacts: Vec<TouchContact>) -> TouchFrame {
+    TouchFrame::new(timestamp_us, false, contacts).expect("test contacts have unique ids")
+}
+
+fn translated_frame(
+    timestamp_us: u64,
+    count: u8,
+    horizontal_um: i32,
+    vertical_um: i32,
+) -> TouchFrame {
+    let contacts = (0..count)
+        .map(|id| {
+            let x = 50_000_i32 + i32::from(id) * 10_000 + horizontal_um;
+            let y = 50_000_i32 + vertical_um;
+            contact(
+                id + 1,
+                u32::try_from(x).expect("test x stays positive"),
+                u32::try_from(y).expect("test y stays positive"),
+            )
+        })
+        .collect();
+    frame(timestamp_us, contacts)
+}
+
+fn idle() -> TouchpadOutcome {
+    TouchpadOutcome::default()
+}
 
 fn rotation(magnitude: i32) -> WheelRotation {
     let increments = i16::try_from(magnitude).expect("test magnitude fits in i16");
@@ -93,14 +127,11 @@ fn touchpad_stroke_freezes_bindings_from_its_first_frame() {
     let first_profile = BTreeMap::from([(trigger, Action::Copy)]);
     let replacement_profile = BTreeMap::from([(trigger, Action::Paste)]);
 
-    assert_eq!(
-        runtime.update(&frame, &first_profile, true),
-        TouchpadOutput::Idle
-    );
+    assert_eq!(runtime.update(&frame, &first_profile, true, false), idle());
     // A foreground-app change can replace the live plan before lift. The tap
     // must still resolve against the profile active when the stroke began.
     assert_eq!(
-        runtime.end(true),
+        runtime.end(true).routed,
         TouchpadOutput::Action {
             trigger: ButtonId::TouchpadTwoFingerTap,
             action: Action::Copy
@@ -108,11 +139,11 @@ fn touchpad_stroke_freezes_bindings_from_its_first_frame() {
     );
 
     assert_eq!(
-        runtime.update(&frame, &replacement_profile, true),
-        TouchpadOutput::Idle
+        runtime.update(&frame, &replacement_profile, true, false),
+        idle()
     );
     assert_eq!(
-        runtime.end(true),
+        runtime.end(true).routed,
         TouchpadOutput::Action {
             trigger: ButtonId::TouchpadTwoFingerTap,
             action: Action::Paste
@@ -145,21 +176,73 @@ fn diagnostic_touchpad_stroke_cannot_fire_if_management_enables_mid_stroke() {
     let bindings = BTreeMap::from([(trigger, Action::Copy)]);
     let mut runtime = TouchpadRuntime::default();
 
-    assert_eq!(
-        runtime.update(&frame, &bindings, false),
-        TouchpadOutput::Idle
-    );
-    assert_eq!(runtime.end(true), TouchpadOutput::Idle);
+    assert_eq!(runtime.update(&frame, &bindings, false, false), idle());
+    assert_eq!(runtime.end(true).routed, TouchpadOutput::Idle);
 
+    assert_eq!(runtime.update(&frame, &bindings, true, false), idle());
     assert_eq!(
-        runtime.update(&frame, &bindings, true),
-        TouchpadOutput::Idle
-    );
-    assert_eq!(
-        runtime.end(true),
+        runtime.end(true).routed,
         TouchpadOutput::Action {
             trigger,
             action: Action::Copy
+        }
+    );
+}
+
+#[test]
+fn native_swipe_streams_progress_instead_of_dispatching() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+
+    assert_eq!(
+        runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true),
+        idle()
+    );
+    assert_eq!(
+        runtime.update(
+            &translated_frame(60_000, 3, 15_000, 0),
+            &bindings,
+            true,
+            true
+        ),
+        idle()
+    );
+    let outcome = runtime.update(
+        &translated_frame(90_000, 3, 25_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Horizontal,
+            progress: 10_000.0 / 117_000.0,
+        }
+    );
+    let outcome = runtime.update(
+        &translated_frame(120_000, 3, 30_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: DockSwipeMotion::Horizontal,
+            delta: 5_000.0 / 117_000.0,
+        }
+    );
+
+    let outcome = runtime.end(true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Finish {
+            motion: DockSwipeMotion::Horizontal,
+            end: SwipeEnd::AtRelease,
         }
     );
 }
@@ -191,23 +274,29 @@ fn touchpad_scroll_streams_phases_and_terminates_on_end() {
     let mut runtime = TouchpadRuntime::default();
 
     assert_eq!(
-        runtime.update(&resting(0), &bindings, true),
+        runtime.update(&resting(0), &bindings, true, false).routed,
         TouchpadOutput::Idle
     );
     // Under the activation travel: no stream opens yet.
     assert_eq!(
-        runtime.update(&resting(2_000), &bindings, true),
+        runtime
+            .update(&resting(2_000), &bindings, true, false)
+            .routed,
         TouchpadOutput::Idle
     );
     assert_eq!(
-        runtime.update(&resting(5_000), &bindings, true),
+        runtime
+            .update(&resting(5_000), &bindings, true, false)
+            .routed,
         TouchpadOutput::Scroll {
             dx_um: 3_000,
             dy_um: 0
         }
     );
     assert_eq!(
-        runtime.update(&resting(7_000), &bindings, true),
+        runtime
+            .update(&resting(7_000), &bindings, true, false)
+            .routed,
         TouchpadOutput::Scroll {
             dx_um: 2_000,
             dy_um: 0
@@ -216,12 +305,12 @@ fn touchpad_scroll_streams_phases_and_terminates_on_end() {
     // The stroke ends without a tap: only the scroll terminator routes,
     // carrying the exit velocity for the momentum gate.
     assert_eq!(
-        runtime.end(true),
+        runtime.end(true).routed,
         TouchpadOutput::ScrollEnd {
             exit_velocity_um_per_s: Some((0.0, 0.0)),
         }
     );
-    assert_eq!(runtime.end(true), TouchpadOutput::Idle);
+    assert_eq!(runtime.end(true).routed, TouchpadOutput::Idle);
 }
 
 #[test]
@@ -250,24 +339,26 @@ fn touchpad_scroll_survives_disabled_actions_and_cancels_cleanly() {
     let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerTap, Action::Copy)]);
     let mut runtime = TouchpadRuntime::default();
 
-    runtime.update(&resting(0), &bindings, true);
-    runtime.update(&resting(2_000), &bindings, false);
+    runtime.update(&resting(0), &bindings, true, false);
+    runtime.update(&resting(2_000), &bindings, false, false);
     // Actions off must not stop the scroll: it replaces the firmware
     // scrolling the capture itself disabled, not a bound gesture.
     assert_eq!(
-        runtime.update(&resting(5_000), &bindings, false),
+        runtime
+            .update(&resting(5_000), &bindings, false, false)
+            .routed,
         TouchpadOutput::Scroll {
             dx_um: 3_000,
             dy_um: 0,
         }
     );
     assert_eq!(
-        runtime.cancel(),
+        runtime.cancel().routed,
         TouchpadOutput::ScrollEnd {
             exit_velocity_um_per_s: None,
         }
     );
-    assert_eq!(runtime.cancel(), TouchpadOutput::Idle);
+    assert_eq!(runtime.cancel().routed, TouchpadOutput::Idle);
 }
 
 #[test]
@@ -340,13 +431,13 @@ fn touchpad_scroll_exit_velocity_tracks_frames_and_releases_slowly() {
     let mut runtime = TouchpadRuntime::default();
 
     // Steady 3 mm per 25 ms frame = 120 mm/s to the right.
-    runtime.update(&travelling(0, 0), &bindings, true);
-    runtime.update(&travelling(25_000, 2_000), &bindings, true);
-    runtime.update(&travelling(50_000, 5_000), &bindings, true);
+    runtime.update(&travelling(0, 0), &bindings, true, false);
+    runtime.update(&travelling(25_000, 2_000), &bindings, true, false);
+    runtime.update(&travelling(50_000, 5_000), &bindings, true, false);
     let TouchpadOutput::ScrollEnd {
         exit_velocity_um_per_s: Some((vx, _vy)),
         ..
-    } = runtime.end(true)
+    } = runtime.end(true).routed
     else {
         panic!("a streamed stroke must report its exit velocity");
     };
@@ -355,14 +446,14 @@ fn touchpad_scroll_exit_velocity_tracks_frames_and_releases_slowly() {
     // One slow frame right before lift does not kill the glide: the filter
     // releases at α = 0.01, so the smoothed speed stays near the fast phase.
     let mut runtime = TouchpadRuntime::default();
-    runtime.update(&travelling(0, 0), &bindings, true);
-    runtime.update(&travelling(25_000, 2_000), &bindings, true);
-    runtime.update(&travelling(50_000, 5_000), &bindings, true);
-    runtime.update(&travelling(75_000, 5_500), &bindings, true);
+    runtime.update(&travelling(0, 0), &bindings, true, false);
+    runtime.update(&travelling(25_000, 2_000), &bindings, true, false);
+    runtime.update(&travelling(50_000, 5_000), &bindings, true, false);
+    runtime.update(&travelling(75_000, 5_500), &bindings, true, false);
     let TouchpadOutput::ScrollEnd {
         exit_velocity_um_per_s: Some((vx, _)),
         ..
-    } = runtime.end(true)
+    } = runtime.end(true).routed
     else {
         panic!("streamed stroke");
     };
@@ -400,19 +491,48 @@ fn a_same_axis_reversal_re_aims_the_exit_velocity() {
 
     // Right at 120 mm/s, then an immediate leftward flick at 80 mm/s: the
     // glide must follow the new direction, not average against the stale one.
-    runtime.update(&travelling(0, 0), &bindings, true);
-    runtime.update(&travelling(25_000, 3_000), &bindings, true);
-    runtime.update(&travelling(50_000, 6_000), &bindings, true);
-    runtime.update(&travelling(75_000, 4_000), &bindings, true);
+    runtime.update(&travelling(0, 0), &bindings, true, false);
+    runtime.update(&travelling(25_000, 3_000), &bindings, true, false);
+    runtime.update(&travelling(50_000, 6_000), &bindings, true, false);
+    runtime.update(&travelling(75_000, 4_000), &bindings, true, false);
     let TouchpadOutput::ScrollEnd {
         exit_velocity_um_per_s: Some((vx, _)),
-    } = runtime.end(true)
+    } = runtime.end(true).routed
     else {
         panic!("streamed stroke");
     };
     assert!(
         vx < -60_000.0,
         "the reversal must re-aim the exit velocity, got {vx} µm/s"
+    );
+}
+
+#[test]
+fn left_swipes_stream_negative_progress() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeLeft;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, -15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+
+    let outcome = runtime.update(
+        &translated_frame(90_000, 3, -25_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Horizontal,
+            progress: -10_000.0 / 117_000.0,
+        }
     );
 }
 
@@ -445,15 +565,20 @@ fn a_deliberate_hold_before_lift_kills_the_glide() {
     // A fast scroll, then the fingers sit still for a full second before
     // lifting: with the dt-normalized release (τ = 200 ms) the memory of the
     // fast phase has fully decayed — no glide out of a deliberate stop.
-    runtime.update(&travelling(0, 0), &bindings, true);
-    runtime.update(&travelling(25_000, 3_000), &bindings, true);
-    runtime.update(&travelling(50_000, 6_000), &bindings, true);
+    runtime.update(&travelling(0, 0), &bindings, true, false);
+    runtime.update(&travelling(25_000, 3_000), &bindings, true, false);
+    runtime.update(&travelling(50_000, 6_000), &bindings, true, false);
     for step in 1..=50 {
-        runtime.update(&travelling(50_000 + step * 20_000, 6_000), &bindings, true);
+        runtime.update(
+            &travelling(50_000 + step * 20_000, 6_000),
+            &bindings,
+            true,
+            false,
+        );
     }
     let TouchpadOutput::ScrollEnd {
         exit_velocity_um_per_s: Some((vx, _)),
-    } = runtime.end(true)
+    } = runtime.end(true).routed
     else {
         panic!("streamed stroke");
     };
@@ -461,4 +586,293 @@ fn a_deliberate_hold_before_lift_kills_the_glide() {
         vx.abs() < 5_000.0,
         "a held stop must not glide, got {vx} µm/s"
     );
+}
+
+#[test]
+fn unsupported_platform_keeps_discrete_swipe_dispatch() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, false);
+
+    let outcome = runtime.update(
+        &translated_frame(60_000, 3, 15_000, 0),
+        &bindings,
+        true,
+        false,
+    );
+    assert_eq!(
+        outcome.routed,
+        TouchpadOutput::Action {
+            trigger,
+            action: Action::NextDesktop
+        }
+    );
+    assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+#[test]
+fn vertical_up_swipes_stream_positive_progress() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeUp;
+    let bindings = BTreeMap::from([(trigger, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, 0, -15_000),
+        &bindings,
+        true,
+        true,
+    );
+
+    let outcome = runtime.update(
+        &translated_frame(90_000, 3, 0, -25_000),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: 10_000.0 / 75_600.0,
+        }
+    );
+    let outcome = runtime.update(
+        &translated_frame(120_000, 3, 0, -30_000),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: DockSwipeMotion::Vertical,
+            delta: 5_000.0 / 75_600.0,
+        }
+    );
+}
+
+#[test]
+fn vertical_down_swipes_stream_negative_progress() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeDown;
+    let bindings = BTreeMap::from([(trigger, Action::AppExpose)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, 0, 15_000),
+        &bindings,
+        true,
+        true,
+    );
+
+    let outcome = runtime.update(
+        &translated_frame(90_000, 3, 0, 25_000),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: -10_000.0 / 75_600.0,
+        }
+    );
+}
+
+#[test]
+fn cross_axis_binding_keeps_discrete_dispatch() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+
+    let outcome = runtime.update(
+        &translated_frame(60_000, 3, 15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(
+        outcome.routed,
+        TouchpadOutput::Action {
+            trigger,
+            action: Action::MissionControl
+        }
+    );
+    assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+#[test]
+fn dropped_frame_cancel_keeps_the_stream_running() {
+    let trigger = ButtonId::TouchpadFourFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 4, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 4, 15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+
+    runtime.cancel();
+    let outcome = runtime.update(
+        &translated_frame(90_000, 4, 25_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert!(matches!(outcome.stream, SwipeOutput::Begin { .. }));
+
+    let outcome = runtime.end(true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Finish {
+            motion: DockSwipeMotion::Horizontal,
+            end: SwipeEnd::AtRelease,
+        }
+    );
+}
+
+#[test]
+fn contact_set_change_does_not_jump_progress() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, 15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+
+    // Dropping contact 3 rebases the centroid without emitting progress.
+    let rebased = frame(
+        90_000,
+        vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+    );
+    let outcome = runtime.update(&rebased, &bindings, true, true);
+    assert_eq!(outcome.stream, SwipeOutput::Idle);
+
+    let moved = frame(
+        120_000,
+        vec![contact(1, 70_000, 50_000), contact(2, 80_000, 50_000)],
+    );
+    let outcome = runtime.update(&moved, &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Horizontal,
+            progress: 5_000.0 / 117_000.0,
+        }
+    );
+}
+
+#[test]
+fn session_teardown_cancels_the_running_animation() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeLeft;
+    let bindings = BTreeMap::from([(trigger, Action::PreviousDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, -15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    runtime.update(
+        &translated_frame(90_000, 3, -25_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+
+    assert_eq!(
+        runtime.terminate().stream,
+        SwipeOutput::Finish {
+            motion: DockSwipeMotion::Horizontal,
+            end: SwipeEnd::Cancelled,
+        }
+    );
+}
+
+#[test]
+fn unopened_stream_ends_silently() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, 15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+
+    let outcome = runtime.end(true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+#[test]
+fn four_finger_swipes_stream_like_three_finger_ones() {
+    let trigger = ButtonId::TouchpadFourFingerSwipeLeft;
+    let bindings = BTreeMap::from([(trigger, Action::PreviousDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 4, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 4, -15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    let outcome = runtime.update(
+        &translated_frame(90_000, 4, -25_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Horizontal,
+            progress: -10_000.0 / 117_000.0,
+        }
+    );
+}
+
+#[test]
+fn begin_failure_falls_back_to_discrete_action() {
+    let trigger = ButtonId::TouchpadThreeFingerSwipeRight;
+    let bindings = BTreeMap::from([(trigger, Action::NextDesktop)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
+    runtime.update(
+        &translated_frame(60_000, 3, 15_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    runtime.update(
+        &translated_frame(90_000, 3, 25_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+
+    assert_eq!(runtime.begin_failed(), Some((trigger, Action::NextDesktop)));
+
+    let outcome = runtime.update(
+        &translated_frame(120_000, 3, 30_000, 0),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(outcome.stream, SwipeOutput::Idle);
+    let outcome = runtime.end(true);
+    assert_eq!(outcome.stream, SwipeOutput::Idle);
 }

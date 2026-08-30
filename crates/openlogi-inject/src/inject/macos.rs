@@ -1499,3 +1499,5 @@ mod symbolic_hotkey {
         }
     }
 }
+
+pub(in crate::inject) mod dockswipe;

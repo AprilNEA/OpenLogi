@@ -40,7 +40,7 @@ objc2-app-kit = { workspace = true, features = [
 ] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFString", "CFPreferences"] }
 objc2-core-graphics = { workspace = true, features = ["CGEvent"] }
-objc2-foundation = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
