@@ -5490,6 +5490,7 @@ dependencies = [
  "openlogi-hid",
  "openlogi-ipc",
  "png 0.17.16",
+ "serde_json",
  "tarpc",
  "tokio",
  "tracing",

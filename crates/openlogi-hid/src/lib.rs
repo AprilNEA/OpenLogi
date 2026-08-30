@@ -19,6 +19,7 @@ mod transport;
 pub mod host;
 pub mod permissions;
 pub mod probe_cache;
+pub mod touchpad_journal;
 
 // The device layer, verbatim. `host` shadows the entry points that need a
 // backend with versions that supply this host's; everything else is the same
@@ -37,3 +38,4 @@ pub use host::{
     set_smartshift_sensitivity, toggle_smartshift, watch_hotplug,
 };
 pub use probe_cache::FileProbeCacheStore;
+pub use touchpad_journal::FileTouchpadJournalStore;

@@ -19,9 +19,9 @@
 //! Scripted behavior:
 //!
 //! - A Bolt receiver with an online mouse (DPI + SmartShift + battery that
-//!   drains ~1%/minute), an offline mouse, and a lighting-capable keyboard,
-//!   plus one directly-attached mouse — covering every panel and both route
-//!   kinds without hardware.
+//!   drains ~1%/minute), an offline mouse, a lighting-capable keyboard, and a
+//!   Casa Touch, plus one directly-attached mouse — covering every panel and
+//!   both route kinds without hardware.
 //! - A standalone Litra light whose power / brightness / temperature writes
 //!   persist, and a `camera_active` flag that flips every 30s so the
 //!   camera-linked light rendering has something to follow.
@@ -58,7 +58,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
     MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    PairingPhase, PairingUpdate, RingObservation, TouchpadMonitorBatch,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -73,6 +73,7 @@ const RECEIVER_UID: &str = "MOCK-BOLT-01";
 const MOUSE_SLOT: u8 = 1;
 const OFFLINE_SLOT: u8 = 2;
 const KEYBOARD_SLOT: u8 = 3;
+const TOUCHPAD_SLOT: u8 = 4;
 const MOCK_TORQUE: TunableTorque = match TunableTorque::try_new(50) {
     Ok(value) => value,
     Err(_) => panic!("valid mock SmartShift torque"),
@@ -314,6 +315,7 @@ impl State {
                 lighting: true,
             },
         );
+        settings.insert(TOUCHPAD_SLOT, DeviceSettings::unsupported());
         settings.insert(
             DIRECT_DEVICE_INDEX,
             DeviceSettings {
@@ -327,7 +329,7 @@ impl State {
         );
         Ok(Self {
             paired_extra: Vec::new(),
-            next_slot: KEYBOARD_SLOT + 1,
+            next_slot: TOUCHPAD_SLOT + 1,
             settings,
             pairing: None,
             pairing_updates: None,
@@ -556,6 +558,45 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     }
 }
 
+fn casa_touch() -> PairedDevice {
+    PairedDevice {
+        slot: TOUCHPAD_SLOT,
+        codename: Some("Casa Touch".to_string()),
+        wpid: None,
+        kind: DeviceKind::Touchpad,
+        online: true,
+        battery: Some(BatteryInfo {
+            percentage: 75,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        }),
+        model_info: Some(DeviceModelInfo {
+            entity_count: 1,
+            serial_number: Some("MOCKCASA1".to_string()),
+            unit_id: [0x11, 0x12, 0x13, 0x14],
+            transports: DeviceTransports {
+                usb: false,
+                equad: false,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xbb00, 0, 0],
+            extended_model_id: 2,
+        }),
+        capabilities: Some(Capabilities {
+            buttons: false,
+            pointer: false,
+            lighting: false,
+            scroll_inversion: false,
+            hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+            touchpad_raw_xy: true,
+        }),
+    }
+}
+
 /// The scripted Bolt receiver and its devices. `mouse_battery` is passed in
 /// because it is the one field that moves between polls.
 fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
@@ -596,6 +637,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: true,
                     haptic_feedback: true,
                     haptic_panel: true,
+                    touchpad_raw_xy: false,
                 }),
             },
             PairedDevice {
@@ -643,8 +685,10 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    touchpad_raw_xy: false,
                 }),
             },
+            casa_touch(),
         ],
     }
 }
@@ -692,6 +736,7 @@ fn direct_inventory() -> DeviceInventory {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                touchpad_raw_xy: false,
             }),
         }],
     }
@@ -1022,6 +1067,10 @@ impl Agent for MockAgent {
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
         Vec::new()
+    }
+
+    async fn poll_touchpad_monitor(self, _: Context, _: String) -> TouchpadMonitorBatch {
+        TouchpadMonitorBatch::default()
     }
 
     async fn set_light(

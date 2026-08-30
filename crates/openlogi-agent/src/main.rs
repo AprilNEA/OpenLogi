@@ -99,6 +99,7 @@ fn main() {
             return;
         }
     };
+    let shutdown_requests = shutdown::request_channel();
 
     // macOS hosts the menu-bar item, which needs an NSApplication run loop on
     // the process main thread — so the async core (orchestrator, IPC, watchers,
@@ -125,7 +126,12 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, uninstalled, armed_tx));
+                runtime.block_on(lifecycle::run(
+                    config,
+                    uninstalled,
+                    shutdown_requests,
+                    armed_tx,
+                ));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
@@ -151,7 +157,7 @@ fn main() {
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, uninstalled));
+        runtime.block_on(lifecycle::run(config, uninstalled, shutdown_requests));
     }
 }
 

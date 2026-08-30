@@ -65,11 +65,10 @@ pub fn spawn() {
 
 /// Ask the overlay to leave, on the way out of a deliberate agent shutdown.
 ///
-/// The helper is spawned detached and the menu-bar Quit is a `process::exit`
-/// that runs no destructors, so without this the overlay outlives the agent
-/// until its own give-up deadline — a minute of a stray GPUI process in
-/// Activity Monitor after the user asked for everything to stop. Nothing here
-/// is load-bearing: the overlay leaves either way, so the policy is tuned for a
+/// The helper is spawned detached, so without this it outlives the agent until
+/// its own give-up deadline — a minute of a stray GPUI process in Activity
+/// Monitor after the user asked for everything to stop. Nothing here is
+/// load-bearing: the overlay leaves either way, so the policy is tuned for a
 /// Quit that still feels instant rather than for a guaranteed exit.
 ///
 /// Only the tray platforms have a deliberate shutdown to hook. Elsewhere the

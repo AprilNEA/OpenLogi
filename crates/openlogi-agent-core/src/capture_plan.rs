@@ -12,12 +12,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
-use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, touchpad_bindings_for,
+};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{
-    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
+    CaptureSessionMode, CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
 };
 use tokio::sync::watch;
 
@@ -63,6 +65,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Effective one-shot actions for all raw-touchpad gestures. The
+    /// dispatcher snapshots this map on the first frame of a stroke.
+    pub touchpad_bindings: BTreeMap<ButtonId, Action>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -76,6 +81,16 @@ pub struct DeviceCapturePlan {
 
 /// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
 pub type SharedCapturePlans = watch::Receiver<Arc<Vec<DeviceCapturePlan>>>;
+
+/// Runtime capabilities and generation attached to a newly built capture plan.
+pub struct CapturePlanOptions {
+    /// Stable identity used by the durable touchpad raw-mode journal.
+    pub touchpad_journal_id: Option<String>,
+    /// Generation bumped after reconnect or wake to force firmware rearming.
+    pub rearm_generation: u64,
+    /// Whether macOS can attribute movement through its mouse hook.
+    pub os_mouse_hook_available: bool,
+}
 
 /// Back/Forward gesture maps that macOS must own through device-specific HID++
 /// capture because Bluetooth-direct CGEvents may carry no sender identity.
@@ -105,6 +120,36 @@ pub fn plan_for_device(
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
+    plan_for_device_with_touchpad(
+        config,
+        physical_key,
+        config_key,
+        route,
+        app,
+        CapturePlanOptions {
+            touchpad_journal_id: None,
+            rearm_generation,
+            os_mouse_hook_available,
+        },
+    )
+}
+
+/// Build one device's plan with an actually probed `0x6100` capability and
+/// stable raw-mode journal identity.
+#[must_use]
+pub fn plan_for_device_with_touchpad(
+    config: &Config,
+    physical_key: PhysicalDeviceKey,
+    config_key: &str,
+    route: DeviceRoute,
+    app: Option<&str>,
+    options: CapturePlanOptions,
+) -> DeviceCapturePlan {
+    let CapturePlanOptions {
+        touchpad_journal_id,
+        rearm_generation,
+        os_mouse_hook_available,
+    } = options;
     let bindings = button_bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
@@ -175,6 +220,7 @@ pub fn plan_for_device(
             physical_key,
             route,
             spec: CaptureSpec {
+                mode: CaptureSessionMode::Continuous,
                 capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
                     || thumbwheel_bindings_nondefault,
                 divert_gesture_sources: GESTURE_SOURCE_BUTTONS
@@ -184,6 +230,9 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                capture_touchpad: config.touchpad_gestures_enabled(config_key)
+                    && touchpad_journal_id.is_some(),
+                touchpad_journal_id,
             },
             rearm_generation,
         },
@@ -193,6 +242,38 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            touchpad_bindings: touchpad_bindings_for(config, config_key, app),
+        },
+    }
+}
+
+/// Build a one-shot plan that only resolves a durable raw-touchpad journal.
+#[must_use]
+pub fn touchpad_recovery_plan(
+    physical_key: PhysicalDeviceKey,
+    config_key: &str,
+    route: DeviceRoute,
+    touchpad_journal_id: String,
+    rearm_generation: u64,
+) -> DeviceCapturePlan {
+    DeviceCapturePlan {
+        target: CaptureTarget {
+            physical_key,
+            route,
+            spec: CaptureSpec {
+                mode: CaptureSessionMode::TouchpadRecovery,
+                touchpad_journal_id: Some(touchpad_journal_id),
+                ..CaptureSpec::default()
+            },
+            rearm_generation,
+        },
+        dispatch: DispatchPlan {
+            config_key: config_key.to_owned(),
+            bindings: BTreeMap::new(),
+            gesture_bindings: BTreeMap::new(),
+            side_gesture_bindings: BTreeMap::new(),
+            thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
+            touchpad_bindings: BTreeMap::new(),
         },
     }
 }
@@ -211,6 +292,10 @@ mod tests {
         }
     }
 
+    fn physical_key() -> PhysicalDeviceKey {
+        PhysicalDeviceKey::parse("receiver:cafe:slot:2").expect("fixture should be a physical key")
+    }
+
     fn plan_for_device(
         config: &Config,
         config_key: &str,
@@ -221,8 +306,7 @@ mod tests {
     ) -> DeviceCapturePlan {
         super::plan_for_device(
             config,
-            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
-                .expect("fixture should be a physical key"),
+            physical_key(),
             config_key,
             route,
             app,
@@ -529,6 +613,33 @@ mod tests {
     }
 
     #[test]
+    fn touchpad_capture_requires_both_opt_in_and_a_stable_probed_identity() {
+        let mut cfg = Config::default();
+        cfg.set_touchpad_gestures_enabled("unit:12345678", true);
+
+        let unsupported = plan_for_device(&cfg, "unit:12345678", route(), None, 0, true);
+        assert!(!unsupported.target.spec.capture_touchpad);
+
+        let supported = plan_for_device_with_touchpad(
+            &cfg,
+            physical_key(),
+            "unit:12345678",
+            route(),
+            None,
+            CapturePlanOptions {
+                touchpad_journal_id: Some("unit:12345678".to_string()),
+                rearm_generation: 0,
+                os_mouse_hook_available: true,
+            },
+        );
+        assert!(supported.target.spec.capture_touchpad);
+        assert_eq!(
+            supported.target.spec.touchpad_journal_id.as_deref(),
+            Some("unit:12345678")
+        );
+    }
+
+    #[test]
     fn mouse_capture_opt_out_keeps_single_os_hook_buttons_native() {
         let mut cfg = Config::default();
         cfg.app_settings.capture_mouse_events = false;
@@ -582,5 +693,24 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn disabled_touchpad_recovery_plan_captures_no_controls() {
+        let plan = touchpad_recovery_plan(
+            physical_key(),
+            "unit:12345678",
+            route(),
+            "unit:12345678".to_string(),
+            7,
+        );
+
+        assert_eq!(plan.target.spec.mode, CaptureSessionMode::TouchpadRecovery);
+        assert!(plan.dispatch.bindings.is_empty());
+        assert!(plan.dispatch.gesture_bindings.is_empty());
+        assert!(plan.target.spec.divert_buttons.is_empty());
+        assert!(!plan.target.spec.capture_thumbwheel);
+        assert!(plan.dispatch.touchpad_bindings.is_empty());
+        assert!(!plan.target.spec.capture_touchpad);
     }
 }

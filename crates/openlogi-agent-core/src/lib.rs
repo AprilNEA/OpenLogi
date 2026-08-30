@@ -19,6 +19,7 @@ pub mod observable;
 pub mod orchestrator;
 pub mod receiver_access;
 pub mod runtime;
+pub mod touchpad_monitor;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};

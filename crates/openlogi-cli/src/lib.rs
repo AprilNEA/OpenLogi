@@ -191,4 +191,29 @@ mod tests {
             other => panic!("expected Diag(Wheel), got {other:?}"),
         }
     }
+
+    #[test]
+    fn touchpad_trace_has_a_bounded_duration_and_device_filter() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "touchpad",
+            "--seconds",
+            "30",
+            "--device",
+            "Casa Touch",
+        ])
+        .expect("valid touchpad diagnostic invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Touchpad(args)) => {
+                assert_eq!(args.seconds, 30);
+                assert_eq!(args.device.as_deref(), Some("Casa Touch"));
+            }
+            other => panic!("expected Diag(Touchpad), got {other:?}"),
+        }
+
+        Cli::try_parse_from(["openlogi", "diag", "touchpad", "--seconds", "301"])
+            .expect_err("touchpad traces longer than five minutes must be rejected");
+    }
 }

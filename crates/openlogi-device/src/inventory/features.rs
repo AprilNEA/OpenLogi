@@ -3,15 +3,22 @@ use std::sync::Arc;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
-    feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature,
+        adjustable_dpi::AdjustableDpiFeature,
         battery_status::BatteryStatusFeature,
         battery_voltage::BatteryVoltageFeature,
+        color_led_effects::ColorLedEffectsFeature,
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
+        extended_dpi::ExtendedDpiFeature,
         gestures2::Gestures2Feature,
+        haptic_feedback::HapticFeedbackFeature,
+        hires_wheel::HiResWheelFeature,
+        per_key_lighting::PerKeyLightingFeature,
         reprog_controls::{ReprogControlsFeature, control_ids},
+        thumbwheel::ThumbwheelFeature,
+        touchpad_raw_xy::TouchpadRawXyFeature,
         unified_battery::UnifiedBatteryFeature,
     },
 };
@@ -156,6 +163,33 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
     legacy.or(voltage)
 }
 
+/// Derive runtime capabilities from the HID++ feature table. This protocol-aware
+/// layer owns the projection and uses each implemented feature's canonical ID.
+fn capabilities_from_feature_ids(ids: &[u16]) -> Capabilities {
+    const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, ReprogControlsFeature::ID];
+    const POINTER: [u16; 2] = [AdjustableDpiFeature::ID, ExtendedDpiFeature::ID];
+    // ColorLedEffects, PerKeyLighting2 and the older untyped PerKeyLighting
+    // (0x8080) — all three are driven by `set_keyboard_color`. Other families
+    // (backlight 0x198x) stay out so they don't earn an inert tab.
+    const LIGHTING: [u16; 3] = [
+        ColorLedEffectsFeature::ID,
+        PerKeyLightingFeature::ID,
+        0x8080,
+    ];
+    let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
+    Capabilities {
+        buttons: has(&BUTTONS),
+        pointer: has(&POINTER),
+        lighting: has(&LIGHTING),
+        scroll_inversion: false,
+        hires_wheel: ids.contains(&HiResWheelFeature::ID),
+        thumbwheel: ids.contains(&ThumbwheelFeature::ID),
+        haptic_feedback: ids.contains(&HapticFeedbackFeature::ID),
+        haptic_panel: false,
+        touchpad_raw_xy: ids.contains(&TouchpadRawXyFeature::ID),
+    }
+}
+
 /// Read the marketing identity from HID++ `0x0005` when the device exposes it.
 async fn read_marketing_identity(
     device: &Device,
@@ -225,8 +259,9 @@ pub(super) async fn probe_features(
                 // battery/identity snapshot that will be published.
                 subscriptions.register_device(slot, event_features);
             }
-            probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
-            Some(Capabilities::from_feature_ids(&ids))
+            probe_haptic_controls =
+                ids.contains(&HapticFeedbackFeature::ID) || ids.contains(&0x19c0);
+            Some(capabilities_from_feature_ids(&ids))
         }
         Ok(None) => None,
         Err(e) => {
@@ -364,11 +399,64 @@ async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use hidpp::feature::{
-        CreatableFeature as _, battery_status::BatteryStatusFeature,
-        battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
+        CreatableFeature as _, adjustable_dpi::AdjustableDpiFeature,
+        battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
+        color_led_effects::ColorLedEffectsFeature, extended_dpi::ExtendedDpiFeature,
+        hires_wheel::HiResWheelFeature, per_key_lighting::PerKeyLightingFeature,
+        reprog_controls::ReprogControlsFeature, thumbwheel::ThumbwheelFeature,
+        touchpad_raw_xy::TouchpadRawXyFeature, unified_battery::UnifiedBatteryFeature,
     };
+    use openlogi_core::device::Capabilities;
 
-    use super::{BatteryProbe, battery_feature_index};
+    use super::{BatteryProbe, battery_feature_index, capabilities_from_feature_ids};
+
+    #[test]
+    fn capabilities_track_the_driving_feature_ids() {
+        let mouse = capabilities_from_feature_ids(&[
+            0x0003,
+            ReprogControlsFeature::ID,
+            HiResWheelFeature::ID,
+            ThumbwheelFeature::ID,
+            ExtendedDpiFeature::ID,
+            0x2110,
+        ]);
+        assert_eq!(
+            mouse,
+            Capabilities {
+                buttons: true,
+                pointer: true,
+                lighting: false,
+                scroll_inversion: false,
+                hires_wheel: true,
+                thumbwheel: true,
+                haptic_feedback: false,
+                haptic_panel: false,
+                touchpad_raw_xy: false,
+            }
+        );
+        assert!(!capabilities_from_feature_ids(&[0x0003, ReprogControlsFeature::ID]).thumbwheel);
+        assert!(capabilities_from_feature_ids(&[TouchpadRawXyFeature::ID]).touchpad_raw_xy);
+        assert!(capabilities_from_feature_ids(&[AdjustableDpiFeature::ID]).pointer);
+        assert_eq!(
+            capabilities_from_feature_ids(&[0x0000, 0x0003]),
+            Capabilities::default()
+        );
+    }
+
+    #[test]
+    fn every_drivable_lighting_family_earns_the_tab() {
+        for id in [
+            ColorLedEffectsFeature::ID,
+            PerKeyLightingFeature::ID,
+            0x8080,
+        ] {
+            assert!(
+                capabilities_from_feature_ids(&[0x0001, id]).lighting,
+                "0x{id:04x} must offer the lighting tab"
+            );
+        }
+        assert!(!capabilities_from_feature_ids(&[0x0001, 0x1982]).lighting);
+    }
 
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {

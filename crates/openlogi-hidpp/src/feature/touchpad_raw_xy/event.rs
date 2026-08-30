@@ -47,6 +47,8 @@ pub struct DualXyData {
     pub touch2: TouchPoint,
     /// Whether the physical switch under the surface is pressed.
     pub button: bool,
+    /// Whether firmware marked this report as spurious and it must be dropped.
+    pub spurious: bool,
     /// Whether this is the last event for the frame.
     pub end_of_frame: bool,
     /// Total number of fingers in the frame.
@@ -95,6 +97,7 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<TouchpadRaw
             },
             // Byte 8 carries frame-level flags alongside touch 1's finger id.
             button: payload[8] & (1 << 2) != 0,
+            spurious: payload[8] & (1 << 1) != 0,
             end_of_frame: payload[8] & 1 != 0,
             finger_count: payload[15] & 0x0f,
         })),

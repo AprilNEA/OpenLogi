@@ -30,3 +30,4 @@ pub mod paths;
 pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;
+pub mod touchpad;

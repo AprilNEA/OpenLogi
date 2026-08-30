@@ -1097,6 +1097,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                touchpad_raw_xy: false,
             },
             light_capabilities: None,
             model_info: None,

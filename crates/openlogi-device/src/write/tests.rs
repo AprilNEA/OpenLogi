@@ -310,9 +310,9 @@ fn a_single_value_range_yields_just_that_value() {
 
 #[tokio::test]
 async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Result<(), WriteError> {
-    // `Capabilities::from_feature_ids` turns the DPI panel on for 0x2201 *or*
-    // 0x2202, so a mouse that only speaks 0x2202 has to be drivable — it used
-    // to get a panel that failed every read and write.
+    // The capability projection turns the DPI panel on for 0x2201 *or* 0x2202,
+    // so a mouse that only speaks 0x2202 has to be drivable — it used to get a
+    // panel that failed every read and write.
     let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
     let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
@@ -496,8 +496,8 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// A mouse that exposes `0x2202 ExtendedAdjustableDpi` and **no**
-/// `0x2201 AdjustableDpi` — the shape `Capabilities::from_feature_ids` lights
-/// the DPI panel up for but the write path could not drive.
+/// `0x2201 AdjustableDpi` — the shape that lights the DPI panel up but the
+/// write path could not drive.
 fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;

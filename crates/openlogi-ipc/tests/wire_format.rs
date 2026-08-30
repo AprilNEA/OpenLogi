@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -47,7 +47,8 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
     Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, TouchpadMonitorBatch,
+    TouchpadMonitorContact, TouchpadMonitorEvent, TouchpadMonitorRecord, TouchpadRawModeConflict,
 };
 use succession::{Compat, Run};
 
@@ -101,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -206,6 +207,18 @@ fn request_variant_order() {
         },
         "1902",
     );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Diagnostic,
+        },
+        "1903",
+    );
+    assert_wire(
+        &AgentRequest::PollTouchpadMonitor {
+            device_key: "unit:casa".into(),
+        },
+        "1a09756e69743a63617361",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -220,6 +233,8 @@ fn agent_identity_is_two_plain_integers() {
 
 #[test]
 fn action_ring_types() {
+    assert_wire(&Action::ZoomIn, "35");
+    assert_wire(&Action::ZoomOut, "36");
     assert_wire(
         &ActionRingInvocation {
             session_id: 42,
@@ -276,6 +291,47 @@ fn monitor_events() {
         "01000000000000803f",
     );
     assert_wire(&MonitorEvent::CaptureInterrupted, "02");
+}
+
+#[test]
+fn touchpad_monitor_types() {
+    let contact = TouchpadMonitorContact {
+        id: 2,
+        x_um: 10_000,
+        y_um: 20_000,
+    };
+    assert_wire(&contact, "02fb1027fb204e");
+
+    let event = TouchpadMonitorEvent::Frame {
+        timestamp_us: 8_000,
+        button: false,
+        contacts: vec![contact],
+    };
+    assert_wire(&event, "00fb401f000102fb1027fb204e");
+    assert_wire(&TouchpadMonitorEvent::End, "01");
+    assert_wire(&TouchpadMonitorEvent::Cancel, "02");
+    assert_wire(&TouchpadMonitorEvent::DroppedFrames { count: 7 }, "0307");
+
+    let record = TouchpadMonitorRecord {
+        device_key: "unit:casa".into(),
+        event,
+    };
+    assert_wire(&record, "09756e69743a6361736100fb401f000102fb1027fb204e");
+
+    let conflict = TouchpadRawModeConflict {
+        device_key: "unit:casa".into(),
+        expected: 0x05,
+        actual: 0,
+    };
+    assert_wire(&conflict, "09756e69743a636173610500");
+    assert_wire(
+        &TouchpadMonitorBatch {
+            events: vec![record],
+            dropped_events: 3,
+            conflicts: vec![conflict],
+        },
+        "0109756e69743a6361736100fb401f000102fb1027fb204e030109756e69743a636173610500",
+    );
 }
 
 #[test]
@@ -415,12 +471,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                touchpad_raw_xy: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101",
     );
 }
 

@@ -319,6 +319,12 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // one field here a user typed by hand, so the loss is the most visible.
     fold_option_field!(custom_name);
 
+    // `false` is the untouched default; a legacy `true` is therefore an
+    // explicit opt-in that must survive adoption into a bare canonical entry.
+    if !device.touchpad_gestures.enabled && legacy.touchpad_gestures.enabled {
+        device.touchpad_gestures = legacy.touchpad_gestures;
+    }
+
     if device.identity.is_none() {
         device.identity = legacy.identity.take();
     }
@@ -693,6 +699,24 @@ mod tests {
             Some("Desk mouse"),
             "the user's alias survives the fold"
         );
+    }
+
+    #[test]
+    fn folding_preserves_a_legacy_touchpad_opt_in() {
+        let mut config = Config::default();
+        let mut legacy = DeviceConfig::default();
+        legacy.touchpad_gestures.enabled = true;
+        config
+            .devices
+            .insert("receiver:82839805:slot:1".to_string(), legacy);
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+
+        assert!(config.devices["unit:6be9d300"].touchpad_gestures.enabled);
     }
 
     #[test]

@@ -268,11 +268,9 @@ fn open_command(command: DeeplinkCommand) {
     open_url(&command.to_url());
 }
 
-/// Menu-bar Quit: take a running GUI with us, then end the process.
-///
-/// Kept out of `define_class!` so the lint set actually sees the exit — clippy
-/// does not look inside macro expansions.
-fn quit_agent() -> ! {
+/// Menu-bar Quit: take a running GUI with us, then ask the lifecycle to restore
+/// device state and end the process.
+fn quit_agent() {
     // Tell a *running* GUI to quit too, but don't let `open` cold-launch one
     // just to immediately quit it (it would flash a window — and on first run
     // the update-consent prompt — before exiting). The gate keeps the target
@@ -285,12 +283,8 @@ fn quit_agent() -> ! {
             .output();
     }
     crate::overlay::evict_on_quit();
-    info!("menu-bar Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from an AppKit menu action on the main thread: the run loop owns `main`'s stack frame, so no status can travel back to it"
-    )]
-    std::process::exit(0)
+    info!("menu-bar Quit — requesting graceful agent shutdown");
+    crate::shutdown::request("menu-bar Quit");
 }
 
 /// Whether an OpenLogi GUI process is currently running (prod or dev bundle).

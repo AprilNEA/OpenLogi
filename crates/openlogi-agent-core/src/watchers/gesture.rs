@@ -23,14 +23,16 @@
 mod dispatch;
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::thread;
+use std::sync::{Arc, mpsc as std_mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
+use openlogi_hid::session::gesture::{CaptureSessionMode, TouchpadJournalStore};
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
+    CaptureChannel, CaptureSessionOutcome, CaptureSessionRequest, CapturedInput, DeviceIoGate,
+    FileTouchpadJournalStore, GestureError, PendingCaptureRestore,
     run_capture_session_with_registry_spec,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -44,8 +46,13 @@ use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiv
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
+use crate::touchpad_monitor::SharedTouchpadMonitor;
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Bounds deliberate process shutdown while active sessions restore their
+/// device controls. A timed-out worker remains detached, and the durable raw
+/// mode journal lets the next launch recover it.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Output capabilities shared by every HID++ gesture capture session.
 #[derive(Clone)]
@@ -84,9 +91,51 @@ impl GestureOutputs {
     }
 }
 
-/// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
-/// keeps one capture session pointed at the active device and dispatches each
-/// captured input.
+/// Unique owner of the capture-manager thread and its graceful shutdown.
+pub struct GestureWatcher {
+    shutdown: Option<oneshot::Sender<()>>,
+    done: std_mpsc::Receiver<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl GestureWatcher {
+    /// Stop every capture session, wait for its control restoration, and join
+    /// the manager thread. Returns false when the bounded wait expires or the
+    /// worker panicked.
+    pub fn shutdown(&mut self) -> bool {
+        self.shutdown_with_timeout(SHUTDOWN_TIMEOUT)
+    }
+
+    fn shutdown_with_timeout(&mut self, timeout: Duration) -> bool {
+        let Some(worker) = self.worker.take() else {
+            return true;
+        };
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if self.done.recv_timeout(timeout).is_err() {
+            warn!("capture watcher did not restore every session before the shutdown deadline");
+            return false;
+        }
+        if worker.join().is_err() {
+            warn!("capture watcher panicked during shutdown");
+            return false;
+        }
+        true
+    }
+}
+
+impl Drop for GestureWatcher {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+/// Spawn the capture-manager thread. It owns a current-thread tokio runtime
+/// that keeps one capture session pointed at the active device and dispatches
+/// each captured input. The returned owner must be shut down before process
+/// exit so raw touchpad mode can be restored.
+#[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
     capture_channel: CaptureChannel,
@@ -94,30 +143,53 @@ pub fn spawn(
     channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     outputs: GestureOutputs,
-) {
+    touchpad_monitor: SharedTouchpadMonitor,
+) -> GestureWatcher {
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
-    thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "capture watcher: could not build tokio runtime");
-                return;
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let (done, wait) = std_mpsc::channel();
+    let worker = thread::Builder::new()
+        .name("openlogi-capture".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!(error = %e, "capture watcher: could not build tokio runtime");
+                    let _ = done.send(());
+                    return;
+                }
+            };
+            let (context, event_rx) = ManagerContext::new(
+                plans,
+                capture_channel,
+                receiver_access,
+                receiver_requests,
+                channel_registry,
+                device_io,
+                touchpad_monitor,
+            );
+            runtime.block_on(manage(context, event_rx, outputs, shutdown_rx));
+            let _ = done.send(());
+        });
+    match worker {
+        Ok(worker) => GestureWatcher {
+            shutdown: Some(shutdown),
+            done: wait,
+            worker: Some(worker),
+        },
+        Err(error) => {
+            warn!(%error, "capture watcher: could not spawn manager thread");
+            GestureWatcher {
+                shutdown: None,
+                done: wait,
+                worker: None,
             }
-        };
-        runtime.block_on(manage(
-            plans,
-            capture_channel,
-            receiver_access,
-            receiver_requests,
-            channel_registry,
-            device_io,
-            outputs,
-        ));
-    });
+        }
+    }
 }
 
 type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
@@ -132,6 +204,7 @@ struct SessionDone {
     physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
     pending_restore: Option<PendingCaptureRestore>,
+    error: Option<GestureError>,
 }
 
 enum SessionEvent {
@@ -144,10 +217,17 @@ struct PendingRestore {
     retry_at: Instant,
 }
 
+#[derive(Clone)]
+struct BlockedTouchpad {
+    target: CaptureTarget,
+    config_key: String,
+}
+
 struct GestureManagerState {
     sessions: HashMap<PhysicalDeviceKey, RunningSession>,
     pending_restores: HashMap<PhysicalDeviceKey, PendingRestore>,
     restart_after: HashMap<PhysicalDeviceKey, Instant>,
+    blocked_touchpads: HashMap<PhysicalDeviceKey, BlockedTouchpad>,
     input_dispatcher: InputDispatcher,
     lease: std::sync::Weak<SessionReceiverLease>,
 }
@@ -158,6 +238,54 @@ struct SessionChannels {
     capture: CaptureChannel,
     registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
+    touchpad_journal: Option<Arc<dyn TouchpadJournalStore>>,
+}
+
+struct ManagerContext {
+    capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    receiver_access: ReceiverAccess,
+    receiver_requests: watch::Receiver<ReceiverRequestState>,
+    channels: SessionChannels,
+    device_io: DeviceIoGate,
+    touchpad_monitor: SharedTouchpadMonitor,
+}
+
+impl ManagerContext {
+    fn new(
+        capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+        capture_channel: CaptureChannel,
+        receiver_access: ReceiverAccess,
+        receiver_requests: watch::Receiver<ReceiverRequestState>,
+        channel_registry: openlogi_hid::ChannelRegistry,
+        device_io: DeviceIoGate,
+        touchpad_monitor: SharedTouchpadMonitor,
+    ) -> (Self, mpsc::UnboundedReceiver<SessionEvent>) {
+        let (events, event_rx) = mpsc::unbounded_channel();
+        let touchpad_journal = match FileTouchpadJournalStore::in_state_dir() {
+            Ok(store) => Some(Arc::new(store) as Arc<dyn TouchpadJournalStore>),
+            Err(error) => {
+                warn!(error = %error, "touchpad raw-mode journal unavailable — raw capture disabled");
+                None
+            }
+        };
+        (
+            Self {
+                capture_plans,
+                receiver_access,
+                receiver_requests,
+                channels: SessionChannels {
+                    events,
+                    capture: capture_channel,
+                    registry: channel_registry,
+                    device_io: device_io.clone(),
+                    touchpad_journal,
+                },
+                device_io,
+                touchpad_monitor,
+            },
+            event_rx,
+        )
+    }
 }
 
 /// Forward one capture session's inputs onto the manager's ordered event
@@ -207,15 +335,54 @@ fn dispatch_context_for<'a>(
 /// Snapshot the sessions that should be armed. An exclusive request
 /// temporarily makes the wanted set empty so normal teardown restores every
 /// control.
-#[cfg(test)]
 fn wanted_sessions(
     requests: ReceiverRequestState,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    published: &Arc<Vec<DeviceCapturePlan>>,
+    touchpad_monitor: &SharedTouchpadMonitor,
+    touchpad_journal: Option<&dyn TouchpadJournalStore>,
 ) -> Arc<Vec<DeviceCapturePlan>> {
     if requests.any() {
         return Arc::new(Vec::new());
     }
-    Arc::clone(&capture_plans.borrow())
+    Arc::new(
+        published
+            .iter()
+            .filter_map(|plan| effective_plan(plan, touchpad_monitor, touchpad_journal))
+            .collect(),
+    )
+}
+
+fn effective_plan(
+    plan: &DeviceCapturePlan,
+    touchpad_monitor: &SharedTouchpadMonitor,
+    touchpad_journal: Option<&dyn TouchpadJournalStore>,
+) -> Option<DeviceCapturePlan> {
+    let mut plan = plan.clone();
+    let diagnostic = touchpad_monitor.capture_requested_for(&plan.dispatch.config_key)
+        && plan.target.spec.touchpad_journal_id.is_some();
+    if diagnostic {
+        plan.target.spec.capture_touchpad = true;
+        if plan.target.spec.mode == CaptureSessionMode::TouchpadRecovery {
+            plan.target.spec.mode = CaptureSessionMode::TouchpadOnly;
+        }
+    }
+    if plan.target.spec.capture_touchpad && touchpad_journal.is_none() {
+        return None;
+    }
+    if plan.target.spec.mode == CaptureSessionMode::TouchpadRecovery {
+        let journal_id = plan.target.spec.touchpad_journal_id.as_deref()?;
+        let journal = touchpad_journal?;
+        match journal.load(journal_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return None,
+            Err(error) => warn!(
+                key = plan.dispatch.config_key,
+                %error,
+                "could not inspect touchpad raw-mode journal — attempting recovery"
+            ),
+        }
+    }
+    Some(plan)
 }
 
 fn reconcile_session(
@@ -238,18 +405,26 @@ fn reconcile_published_session(
     session: &mut RunningSession,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
     capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    touchpad_monitor: &SharedTouchpadMonitor,
+    touchpad_journal: Option<&dyn TouchpadJournalStore>,
     dispatcher: &mut InputDispatcher,
-) {
+) -> bool {
     if receiver_requests.borrow().any() {
         reconcile_session(session, None, dispatcher);
-    } else {
-        let plans = capture_plans.borrow();
-        let wanted = plans
-            .iter()
-            .find(|plan| plan.target.physical_key == *key)
-            .map(|plan| (&plan.target, &plan.dispatch));
-        reconcile_session(session, wanted, dispatcher);
+        return false;
     }
+    let plans = capture_plans.borrow();
+    let Some(published) = plans.iter().find(|plan| plan.target.physical_key == *key) else {
+        reconcile_session(session, None, dispatcher);
+        return false;
+    };
+    let actions_enabled = published.target.spec.capture_touchpad;
+    let effective = effective_plan(published, touchpad_monitor, touchpad_journal);
+    let wanted = effective
+        .as_ref()
+        .map(|plan| (&plan.target, &plan.dispatch));
+    reconcile_session(session, wanted, dispatcher);
+    actions_enabled
 }
 
 async fn wait_for_deadline(deadline: Option<Instant>) {
@@ -328,12 +503,23 @@ fn restart_deadline(unexpected: bool, now: Instant) -> Option<Instant> {
     unexpected.then_some(now + RETRY_DELAY)
 }
 
+fn request_session_stops(
+    sessions: &mut HashMap<PhysicalDeviceKey, RunningSession>,
+    mut cancel: impl FnMut(&HidppSessionId),
+) {
+    for session in sessions.values_mut() {
+        cancel(session.id());
+        let _ = session.reconcile(None);
+    }
+}
+
 impl GestureManagerState {
     fn new(outputs: GestureOutputs) -> Self {
         Self {
             sessions: HashMap::new(),
             pending_restores: HashMap::new(),
             restart_after: HashMap::new(),
+            blocked_touchpads: HashMap::new(),
             input_dispatcher: InputDispatcher::new(outputs),
             lease: std::sync::Weak::new(),
         }
@@ -355,6 +541,207 @@ impl GestureManagerState {
         }
     }
 
+    fn defer_due_pending_restores(&mut self, now: Instant) {
+        for pending in self.pending_restores.values_mut() {
+            if pending.retry_at <= now {
+                pending.retry_at = now + RETRY_DELAY;
+            }
+        }
+    }
+
+    fn handle_event(&mut self, event: SessionEvent, context: &ManagerContext) -> bool {
+        match event {
+            SessionEvent::Input(event) => {
+                self.handle_input(event, context);
+                false
+            }
+            SessionEvent::Done(done) => self.handle_done(done, context),
+        }
+    }
+
+    fn handle_input(&mut self, event: CapturedEvent, context: &ManagerContext) {
+        let key = &event.physical_key;
+        let mut touchpad_actions_enabled = false;
+        if context.device_io.allows_io()
+            && let Some(session) = self.sessions.get_mut(key)
+        {
+            touchpad_actions_enabled = reconcile_published_session(
+                key,
+                session,
+                &context.receiver_requests,
+                &context.capture_plans,
+                &context.touchpad_monitor,
+                context.channels.touchpad_journal.as_deref(),
+                &mut self.input_dispatcher,
+            );
+        }
+        let live = self.sessions.get(key);
+        let dispatch_context = dispatch_context_for(&event.session, live);
+        if let Some((session, plan)) = dispatch_context {
+            context
+                .touchpad_monitor
+                .record(session.device_key(), &event.input);
+            self.input_dispatcher
+                .dispatch(session, plan, event.input, touchpad_actions_enabled);
+        } else {
+            self.input_dispatcher.cancel_session(&event.session);
+            debug!(
+                key = key.as_str(),
+                epoch = event.session.epoch(),
+                "input from a stale capture session — ignored"
+            );
+        }
+    }
+
+    fn handle_done(&mut self, done: SessionDone, context: &ManagerContext) -> bool {
+        let key = &done.physical_key;
+        // Completion is queued behind every input the listener accepted during
+        // restoration, so cancellation cannot overtake the last diverted edge.
+        let Some((CompletionAction::Remove { unexpected }, dispatch_session)) = self
+            .sessions
+            .get(key)
+            .map(|session| (session.completion(&done.session), session.id().clone()))
+        else {
+            return false;
+        };
+        if let Some(pending) = done.pending_restore {
+            self.pending_restores.insert(
+                key.clone(),
+                PendingRestore {
+                    token: pending,
+                    retry_at: Instant::now() + RETRY_DELAY,
+                },
+            );
+        }
+        let tracked = self.sessions.get(key).map(|session| {
+            (
+                session.target().clone(),
+                session.dispatch().config_key.clone(),
+            )
+        });
+        let conflict = match done.error.as_ref() {
+            Some(GestureError::TouchpadRawModeConflict { expected, actual }) => {
+                Some((*expected, *actual))
+            }
+            _ => None,
+        };
+        let recovered_touchpad = done.error.is_none()
+            && tracked.as_ref().is_some_and(|(target, _)| {
+                target.spec.mode == CaptureSessionMode::TouchpadRecovery
+            });
+        if let (Some((expected, actual)), Some((target, config_key))) = (conflict, tracked) {
+            self.blocked_touchpads.insert(
+                key.clone(),
+                BlockedTouchpad {
+                    target,
+                    config_key: config_key.clone(),
+                },
+            );
+            context
+                .touchpad_monitor
+                .set_conflict(&config_key, expected, actual);
+            warn!(
+                key = key.as_str(),
+                expected,
+                actual,
+                "touchpad raw-mode conflict — capture blocked until its plan changes"
+            );
+        }
+        self.input_dispatcher.cancel_session(&dispatch_session);
+        if context.device_io.allows_io()
+            && let Some(deadline) = restart_deadline(
+                unexpected && !recovered_touchpad && conflict.is_none(),
+                Instant::now(),
+            )
+        {
+            self.restart_after.insert(key.clone(), deadline);
+            warn!(
+                key = key.as_str(),
+                "capture session ended unexpectedly, delaying re-arm"
+            );
+        }
+        self.sessions.remove(key);
+        true
+    }
+
+    fn begin_shutdown(&mut self) {
+        self.restart_after.clear();
+        request_session_stops(&mut self.sessions, |session| {
+            self.input_dispatcher.cancel_session(session);
+        });
+    }
+
+    async fn finish_shutdown(
+        &mut self,
+        event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+        context: &mut ManagerContext,
+        registry_changes: &mut watch::Receiver<()>,
+    ) {
+        self.begin_shutdown();
+        while !self.sessions.is_empty() || !self.pending_restores.is_empty() {
+            let now = Instant::now();
+            let device_io_allowed = context.device_io.allows_io();
+            let restore_due = device_io_allowed
+                && self
+                    .pending_restores
+                    .values()
+                    .any(|pending| pending.retry_at <= now);
+            if restore_due {
+                if acquire_session_lease(&context.receiver_access, &mut self.lease).is_some() {
+                    retry_pending_restores(
+                        &mut self.pending_restores,
+                        &context.channels.registry,
+                        now,
+                    )
+                    .await;
+                } else {
+                    self.defer_due_pending_restores(now);
+                }
+                if self.sessions.is_empty() && self.pending_restores.is_empty() {
+                    break;
+                }
+            }
+
+            let deadline = device_io_allowed
+                .then(|| {
+                    self.pending_restores
+                        .values()
+                        .map(|pending| pending.retry_at)
+                        .min()
+                })
+                .flatten();
+            tokio::select! {
+                Some(event) = event_rx.recv() => {
+                    if self.handle_event(event, context) {
+                        self.expedite_pending_restores();
+                    }
+                }
+                open = wait_for_registry_change(registry_changes, !self.pending_restores.is_empty()) => {
+                    if !open {
+                        return;
+                    }
+                    if context.device_io.allows_io() {
+                        self.expedite_pending_restores();
+                    }
+                }
+                result = context.receiver_requests.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                    if context.device_io.allows_io() {
+                        self.expedite_pending_restores();
+                    }
+                }
+                allowed = context.device_io.changed() => match allowed {
+                    Some(true) => self.expedite_pending_restores(),
+                    Some(false) => {}
+                    None => return,
+                },
+                () = wait_for_deadline(deadline) => {}
+            }
+        }
+    }
+
     async fn reconcile(
         &mut self,
         requests: ReceiverRequestState,
@@ -362,6 +749,7 @@ impl GestureManagerState {
         published: &Arc<Vec<DeviceCapturePlan>>,
         receiver_access: &ReceiverAccess,
         channels: &SessionChannels,
+        touchpad_monitor: &SharedTouchpadMonitor,
     ) {
         // Keep existing passive listeners and their firmware ownership intact
         // while the display/session is asleep. Retiring them here would issue
@@ -371,11 +759,12 @@ impl GestureManagerState {
             return;
         }
         let now = Instant::now();
-        let wanted = if requests.any() {
-            &[][..]
-        } else {
-            published.as_slice()
-        };
+        let wanted = wanted_sessions(
+            requests,
+            published,
+            touchpad_monitor,
+            channels.touchpad_journal.as_deref(),
+        );
         for (key, session) in &mut self.sessions {
             let wanted = wanted
                 .iter()
@@ -383,10 +772,16 @@ impl GestureManagerState {
                 .map(|plan| (&plan.target, &plan.dispatch));
             reconcile_session(session, wanted, &mut self.input_dispatcher);
         }
-        self.restart_after.retain(|key, _| {
-            published
+        self.restart_after
+            .retain(|key, _| wanted.iter().any(|plan| plan.target.physical_key == *key));
+        self.blocked_touchpads.retain(|key, blocked| {
+            let unchanged = wanted
                 .iter()
-                .any(|plan| plan.target.physical_key == *key)
+                .any(|plan| plan.target.physical_key == *key && plan.target == blocked.target);
+            if !unchanged {
+                touchpad_monitor.clear_conflict(&blocked.config_key);
+            }
+            unchanged
         });
 
         // Firmware ownership outlives the desired plan. Keep the strong lease
@@ -404,9 +799,15 @@ impl GestureManagerState {
             retry_pending_restores(&mut self.pending_restores, &channels.registry, now).await;
         }
 
-        for plan in wanted {
+        for plan in wanted.iter() {
             let key = &plan.target.physical_key;
-            if self.sessions.contains_key(key) || self.pending_restores.contains_key(key) {
+            if self.sessions.contains_key(key)
+                || self.pending_restores.contains_key(key)
+                || self
+                    .blocked_touchpads
+                    .get(key)
+                    .is_some_and(|blocked| blocked.target == plan.target)
+            {
                 continue;
             }
             if self
@@ -427,92 +828,19 @@ impl GestureManagerState {
             self.sessions.insert(key.clone(), session);
         }
     }
-
-    fn handle_session_event(
-        &mut self,
-        event: SessionEvent,
-        device_io_allowed: bool,
-        receiver_requests: &watch::Receiver<ReceiverRequestState>,
-        capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    ) -> bool {
-        match event {
-            SessionEvent::Input(event) => {
-                let key = &event.physical_key;
-                if device_io_allowed && let Some(session) = self.sessions.get_mut(key) {
-                    reconcile_published_session(
-                        key,
-                        session,
-                        receiver_requests,
-                        capture_plans,
-                        &mut self.input_dispatcher,
-                    );
-                }
-                let live = self.sessions.get(key);
-                let dispatch_context = dispatch_context_for(&event.session, live);
-                if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
-                } else {
-                    self.input_dispatcher.cancel_session(&event.session);
-                    debug!(
-                        key = key.as_str(),
-                        epoch = event.session.epoch(),
-                        "input from a stale capture session — ignored"
-                    );
-                }
-                false
-            }
-            SessionEvent::Done(done) => {
-                let key = &done.physical_key;
-                // Completion is queued behind every input the listener
-                // accepted during restoration, so cancellation cannot
-                // overtake the last diverted edge.
-                let Some((CompletionAction::Remove { unexpected }, dispatch_session)) = self
-                    .sessions
-                    .get(key)
-                    .map(|session| (session.completion(&done.session), session.id().clone()))
-                else {
-                    return false;
-                };
-                if let Some(pending) = done.pending_restore {
-                    self.pending_restores.insert(
-                        key.clone(),
-                        PendingRestore {
-                            token: pending,
-                            retry_at: Instant::now() + RETRY_DELAY,
-                        },
-                    );
-                }
-                self.input_dispatcher.cancel_session(&dispatch_session);
-                if device_io_allowed
-                    && let Some(deadline) = restart_deadline(unexpected, Instant::now())
-                {
-                    self.restart_after.insert(key.clone(), deadline);
-                    warn!(
-                        key = key.as_str(),
-                        "capture session ended unexpectedly, delaying re-arm"
-                    );
-                }
-                self.sessions.remove(key);
-                true
-            }
-        }
-    }
 }
 
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(
-    mut capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    capture_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
-    mut receiver_requests: watch::Receiver<ReceiverRequestState>,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    mut device_io: DeviceIoGate,
+    mut context: ManagerContext,
+    mut event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     outputs: GestureOutputs,
+    mut shutdown: oneshot::Receiver<()>,
 ) {
-    let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mut registry_changes = channel_registry.subscribe();
+    let mut registry_changes = context.channels.registry.subscribe();
+    let mut touchpad_requests = context.touchpad_monitor.subscribe_capture_requests();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -520,59 +848,63 @@ async fn manage(
     // retry deadline, a deliberately stopped one immediately frees its key for the
     // replacement once its teardown has drained, and stale completions are
     // ignored by the shared capture-session lifecycle.
-    let channels = SessionChannels {
-        events,
-        capture: capture_channel,
-        registry: channel_registry,
-        device_io: device_io.clone(),
-    };
     let mut state = GestureManagerState::new(outputs);
     let mut reconcile = true;
 
     loop {
         if reconcile {
             reconcile = false;
-            let device_io_allowed = device_io.allows_io();
+            let device_io_allowed = context.device_io.allows_io();
             if device_io_allowed {
-                let requests = *receiver_requests.borrow_and_update();
-                let published = Arc::clone(&capture_plans.borrow_and_update());
+                let requests = *context.receiver_requests.borrow_and_update();
+                let published = Arc::clone(&context.capture_plans.borrow_and_update());
                 state
                     .reconcile(
                         requests,
                         device_io_allowed,
                         &published,
-                        &receiver_access,
-                        &channels,
+                        &context.receiver_access,
+                        &context.channels,
+                        &context.touchpad_monitor,
                     )
                     .await;
             }
         }
 
-        let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests, device_io.allows_io());
+        let requests = *context.receiver_requests.borrow();
+        let deadline = state.deadline(requests, context.device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             reconcile = true;
             continue;
         }
 
         tokio::select! {
-            Some(event) = event_rx.recv() => {
-                reconcile |= state.handle_session_event(
-                    event,
-                    device_io.allows_io(),
-                    &receiver_requests,
-                    &capture_plans,
-                );
+            _ = &mut shutdown => {
+                state
+                    .finish_shutdown(
+                        &mut event_rx,
+                        &mut context,
+                        &mut registry_changes,
+                    )
+                    .await;
+                return;
             }
-            result = capture_plans.changed() => match result {
+            Some(event) = event_rx.recv() => {
+                reconcile |= state.handle_event(event, &context);
+            }
+            result = context.capture_plans.changed() => match result {
                 Ok(()) => reconcile = true,
                 Err(_) => return,
             },
-            result = receiver_requests.changed() => match result {
+            result = context.receiver_requests.changed() => match result {
                 Ok(()) => reconcile = true,
                 Err(_) => return,
             },
-            allowed = device_io.changed() => match allowed {
+            result = touchpad_requests.changed() => match result {
+                Ok(()) => reconcile = true,
+                Err(_) => return,
+            },
+            allowed = context.device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
                 Some(false) => {}
                 None => return,
@@ -584,7 +916,7 @@ async fn manage(
                 if !open {
                     return;
                 }
-                if device_io.allows_io() {
+                if context.device_io.allows_io() {
                     state.expedite_pending_restores();
                     reconcile = true;
                 }
@@ -626,25 +958,29 @@ fn spawn_session(
     let slot = Arc::clone(&channels.capture);
     let registry = channels.registry.clone();
     let device_io = channels.device_io.clone();
+    let touchpad_journal = channels.touchpad_journal.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        let pending_restore = match run_capture_session_with_registry_spec(
+        let result = run_capture_session_with_registry_spec(
             session_route,
-            session_spec,
-            session_tx,
-            stop_rx,
-            slot,
+            CaptureSessionRequest {
+                spec: session_spec,
+                touchpad_journal,
+                sink: session_tx,
+                shutdown: stop_rx,
+                channel_slot: slot,
+                device_io,
+            },
             &registry,
-            device_io,
         )
-        .await
-        {
-            Ok(CaptureSessionOutcome::Restored) => None,
-            Ok(CaptureSessionOutcome::RestorePending(pending)) => Some(pending),
+        .await;
+        let (error, pending_restore) = match result {
+            Ok(CaptureSessionOutcome::Restored) => (None, None),
+            Ok(CaptureSessionOutcome::RestorePending(pending)) => (None, Some(pending)),
             Err(failure) => {
                 let (error, pending) = failure.into_parts();
                 debug!(%error, "capture session ended");
-                pending
+                (Some(error), pending)
             }
         };
         // Use the same channel as input so completion follows every diverted
@@ -656,6 +992,7 @@ fn spawn_session(
                 physical_key: done_key,
                 session: done_id,
                 pending_restore,
+                error,
             },
         )
         .await;

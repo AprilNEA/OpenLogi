@@ -35,6 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
+use crate::features::touchpad::gesture_panel;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
@@ -116,6 +117,7 @@ pub(super) fn detail_content(
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
+        DetailTab::Gestures => gestures_tab(profile_icons, app_catalog, cx).into_any_element(),
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
@@ -238,6 +240,7 @@ fn detail_navigation(
 fn detail_tab_icon(tab: DetailTab) -> &'static str {
     match tab {
         DetailTab::Buttons => "action-icons/mouse-pointer-click.svg",
+        DetailTab::Gestures => "action-icons/move.svg",
         DetailTab::ActionsRing => "action-icons/layout-grid.svg",
         DetailTab::Keys => "action-icons/keyboard.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
@@ -261,6 +264,21 @@ fn buttons_tab(
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
+}
+
+/// Gestures tab: the same device/per-app profile scope as mouse bindings,
+/// followed by the capability-specific touchpad controls.
+fn gestures_tab(
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
+        .child(tab_body(ContentWidth::Medium, gesture_panel(cx)))
 }
 
 fn tab_body(

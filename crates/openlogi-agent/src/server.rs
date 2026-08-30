@@ -15,6 +15,7 @@ use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::ActionDispatcher;
+use openlogi_agent_core::touchpad_monitor::SharedTouchpadMonitor;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
@@ -26,7 +27,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    PairingCommandError, PairingUpdate, RingObservation, TouchpadMonitorBatch,
 };
 use succession::Compat;
 
@@ -40,6 +41,20 @@ use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+/// Diagnostic event streams served over IPC.
+#[derive(Clone)]
+pub struct AgentMonitors {
+    events: SharedEventMonitor,
+    touchpad: SharedTouchpadMonitor,
+}
+
+impl AgentMonitors {
+    /// Group the system-input and raw-touchpad diagnostic streams.
+    pub fn new(events: SharedEventMonitor, touchpad: SharedTouchpadMonitor) -> Self {
+        Self { events, touchpad }
+    }
+}
+
 /// Shared handle to the agent's state, cloned per connection (and per request).
 #[derive(Clone)]
 pub struct AgentServer {
@@ -49,7 +64,7 @@ pub struct AgentServer {
     /// per request: reads take no orchestrator lock and no permission syscall.
     pub observable: Arc<ObservableState>,
     pub pairing: Arc<PairingManager>,
-    pub event_monitor: SharedEventMonitor,
+    pub monitors: AgentMonitors,
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
@@ -66,7 +81,7 @@ impl AgentServer {
         shared: SharedRuntime,
         observable: Arc<ObservableState>,
         pairing: Arc<PairingManager>,
-        event_monitor: SharedEventMonitor,
+        monitors: AgentMonitors,
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
@@ -78,7 +93,7 @@ impl AgentServer {
                 shared,
                 observable,
                 pairing,
-                event_monitor,
+                monitors,
                 action_ring,
                 dispatcher,
                 ring_haptics,
@@ -242,7 +257,11 @@ impl Agent for AgentServer {
     }
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
-        self.event_monitor.poll()
+        self.monitors.events.poll()
+    }
+
+    async fn poll_touchpad_monitor(self, _: Context, device_key: String) -> TouchpadMonitorBatch {
+        self.monitors.touchpad.poll(&device_key)
     }
 
     async fn set_light(

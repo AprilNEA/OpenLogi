@@ -71,6 +71,8 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// Multi-finger raw-touchpad gesture bindings.
+    Gestures,
     /// Cursor-centred eight-slot action launcher.
     ActionsRing,
     /// The keyboard function-row remapper with clickable F-key bubbles.
@@ -117,6 +119,9 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
+        if caps.touchpad_raw_xy {
+            tabs.push(Self::Gestures);
+        }
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
@@ -148,6 +153,7 @@ impl DetailTab {
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("Buttons"),
+            Self::Gestures => tr!("Gestures"),
             Self::ActionsRing => tr!("Actions Ring"),
             Self::Keys => tr!("Keys"),
             Self::Pointer => tr!("Pointer"),
@@ -256,7 +262,7 @@ impl AppView {
                 }
                 StateEvent::DpiChanged(key) => {
                     !on_home
-                        && view.active_tab == DetailTab::Device
+                        && matches!(view.active_tab, DetailTab::Gestures | DetailTab::Device)
                         && active_key.as_ref() == Some(key)
                 }
                 StateEvent::LightingChanged(key) => {
@@ -839,6 +845,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            touchpad_raw_xy: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -861,6 +868,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            touchpad_raw_xy: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
@@ -881,6 +889,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            touchpad_raw_xy: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));
@@ -897,6 +906,22 @@ mod tests {
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert_eq!(tabs, vec![DetailTab::Lighting, DetailTab::Device]);
+    }
+
+    #[test]
+    fn gestures_tab_requires_raw_xy_capability_not_touchpad_kind() {
+        let without_feature =
+            DetailTab::tabs_for(&record(DeviceKind::Touchpad, Some(Capabilities::default())));
+        assert!(!without_feature.contains(&DetailTab::Gestures));
+
+        let with_feature = DetailTab::tabs_for(&record(
+            DeviceKind::Unknown,
+            Some(Capabilities {
+                touchpad_raw_xy: true,
+                ..Capabilities::default()
+            }),
+        ));
+        assert_eq!(with_feature, vec![DetailTab::Gestures, DetailTab::Device]);
     }
 
     #[test]
