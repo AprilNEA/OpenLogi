@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures_concurrency::future::Join as _;
 use hidpp::{
@@ -25,9 +29,7 @@ use crate::channel::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{
-    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
-};
+use super::{BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE};
 
 /// One node probe's verdict about its own trustworthiness. Three-valued on
 /// purpose: the old `healthy`/`complete` bool pair could also express
@@ -97,14 +99,33 @@ pub(super) async fn probe_one(
     channel: Arc<HidppChannel>,
     cache: &HashMap<CacheKey, Cached>,
     now: Instant,
+    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => {
-            probe_bolt_receiver(channel, info, bolt, cache, now, subscriptions).await
+            probe_bolt_receiver(
+                channel,
+                info,
+                bolt,
+                cache,
+                now,
+                arrival_drain,
+                subscriptions,
+            )
+            .await
         }
         Some(Receiver::Unifying(unifying)) => {
-            probe_unifying_receiver(channel, info, unifying, cache, now, subscriptions).await
+            probe_unifying_receiver(
+                channel,
+                info,
+                unifying,
+                cache,
+                now,
+                arrival_drain,
+                subscriptions,
+            )
+            .await
         }
         None | Some(_) => {
             // No recognised receiver — this might be a directly-paired device
@@ -122,13 +143,14 @@ async fn probe_bolt_receiver(
     bolt: BoltReceiver,
     cache: &HashMap<CacheKey, Cached>,
     now: Instant,
+    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
 
-    let connections = drain_device_arrival(&bolt, subscriptions).await;
+    let connections = drain_device_arrival(&bolt, arrival_drain, subscriptions).await;
     debug!(events = connections.len(), "drained device-arrival events");
     let by_slot: HashMap<u8, BoltDeviceConnection> =
         connections.into_iter().map(|c| (c.index, c)).collect();
@@ -212,6 +234,7 @@ async fn probe_unifying_receiver(
     unifying: UnifyingReceiver,
     cache: &HashMap<CacheKey, Cached>,
     now: Instant,
+    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
     // Pairing count is the health gate for this path: without it the result is
@@ -242,7 +265,7 @@ async fn probe_unifying_receiver(
     // failed arrival trigger is "couldn't check", not "no devices online":
     // settle it as a failed probe and let the ledger replay the last snapshot.
     let Some(connections) =
-        drain_device_arrival_unifying(&unifying, pairing_count, subscriptions).await
+        drain_device_arrival_unifying(&unifying, pairing_count, arrival_drain, subscriptions).await
     else {
         return NodeProbe::failed();
     };
@@ -591,6 +614,7 @@ async fn probe_direct(
 
 async fn drain_device_arrival(
     bolt: &BoltReceiver,
+    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> Vec<BoltDeviceConnection> {
     let rx = bolt.listen();
@@ -617,7 +641,7 @@ async fn drain_device_arrival(
 
     let mut out = Vec::new();
     loop {
-        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+        match timeout(arrival_drain, rx.recv()).await {
             Ok(Ok(BoltEvent::DeviceConnection(c))) => out.push(c),
             Ok(Ok(_)) => {} // BoltEvent is non_exhaustive; ignore future variants
             Ok(Err(_)) | Err(_) => break,
@@ -634,6 +658,7 @@ async fn drain_device_arrival(
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
     pairing_count: u8,
+    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
     let rx = unifying.listen();
@@ -649,7 +674,7 @@ async fn drain_device_arrival_unifying(
     }
     let mut out = Vec::new();
     loop {
-        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+        match timeout(arrival_drain, rx.recv()).await {
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => break,
@@ -685,7 +710,7 @@ async fn drain_device_arrival_unifying(
     }
     out.clear();
     loop {
-        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+        match timeout(arrival_drain, rx.recv()).await {
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => return Some(out),
