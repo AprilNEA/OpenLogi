@@ -6,6 +6,7 @@ use clap::Subcommand;
 mod output;
 pub(crate) mod record_case;
 pub(crate) mod record_profile;
+mod target_selection;
 
 /// Commands that create or inspect mock-device fixtures.
 #[derive(Debug, Subcommand)]
