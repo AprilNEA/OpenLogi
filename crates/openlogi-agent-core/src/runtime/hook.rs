@@ -31,10 +31,9 @@ use crate::event_monitor::SharedEventMonitor;
 pub struct HookMaps {
     /// Per-button immediate or threshold binding — the non-gesture dispatch path.
     pub bindings: BTreeMap<ButtonId, Binding>,
-    /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
-    /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
-    /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
-    /// instead — it never reaches the OS hook.
+    /// Per-direction maps for the OS-hook gesture buttons (Back/Forward in
+    /// gesture mode), so a hold+swipe resolves to a bound action. HID++
+    /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Device whose binding maps this snapshot contains.
     #[cfg_attr(
@@ -71,7 +70,7 @@ fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
     }
 }
 
-/// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
+/// Tracks which OS-hook gesture button (Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that

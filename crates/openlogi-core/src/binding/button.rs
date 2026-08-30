@@ -130,14 +130,35 @@ impl ButtonId {
         )
     }
 
+    /// Whether this button may use the OS hook's hold-and-swipe gesture path.
+    /// Back and Forward are the only eligible controls: Middle Click belongs
+    /// to the main wheel, whose controls intentionally remain single-action.
+    #[must_use]
+    pub fn is_os_hook_gesture_source(self) -> bool {
+        matches!(self, ButtonId::Back | ButtonId::Forward)
+    }
+
     /// Whether this button is a HID++ gesture source — a control that is
     /// captured over HID++ raw-XY diversion (never the OS hook) and can
-    /// therefore own the gesture role with swipe directions: the dedicated
-    /// gesture button, or the MX Master 4 haptic panel. The capture layer maps
-    /// each to its control ID.
+    /// therefore own the gesture role with swipe directions: DPI/ModeShift,
+    /// the dedicated gesture button, or the MX Master 4 haptic panel. The
+    /// capture layer maps each to its control ID and checks the device's
+    /// advertised raw-XY capability before arming it.
     #[must_use]
     pub fn is_hidpp_gesture_source(self) -> bool {
-        matches!(self, ButtonId::GestureButton | ButtonId::HapticPanel)
+        matches!(
+            self,
+            ButtonId::DpiToggle | ButtonId::GestureButton | ButtonId::HapticPanel
+        )
+    }
+
+    /// Whether OpenLogi offers gesture mode for this logical control. Wheel
+    /// controls and the primary clicks stay single-action by product policy;
+    /// device-specific HID++ capability checks may further narrow this set at
+    /// capture time.
+    #[must_use]
+    pub fn supports_gesture_mode(self) -> bool {
+        self.is_os_hook_gesture_source() || self.is_hidpp_gesture_source()
     }
 
     /// Human-readable label for popovers and tooltips.

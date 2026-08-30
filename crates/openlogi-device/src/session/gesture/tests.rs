@@ -852,6 +852,45 @@ fn a_side_gesture_button_tap_is_a_click() {
 }
 
 #[test]
+fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+    let buttons = [(cid, ButtonId::DpiToggle)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
+    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    acc.backdate_hold_for_test();
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 5, dy: -120 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::DpiToggle,
+            GestureDirection::Up
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::DpiToggle))
+    );
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[test]
 fn a_held_dpi_button_presses_once_on_the_rising_edge() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();

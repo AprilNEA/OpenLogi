@@ -61,8 +61,9 @@ pub fn button_bindings_for(
     bindings
 }
 
-/// Per-direction maps for every HID++ gesture source (the dedicated gesture
-/// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
+/// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
+/// dedicated gesture button, and the MX Master 4 haptic panel) in gesture mode
+/// on `config_key`,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI
@@ -96,7 +97,7 @@ pub fn hidpp_gesture_maps_for(
         .collect()
 }
 
-/// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
+/// Per-direction maps for every OS-hook gesture source (Back/Forward) in
 /// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
 /// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
 /// [`Config::is_gesture_mode`]), so any number of entries may be live at once —
@@ -131,7 +132,7 @@ pub fn oshook_gestures_for(
     config
         .effective_bindings(key, app_bundle)
         .into_iter()
-        .filter(|(id, _)| id.is_os_hook_button())
+        .filter(|(id, _)| id.is_os_hook_gesture_source())
         .filter_map(|(id, binding)| match binding {
             Binding::Gesture(map) => Some((id, map)),
             Binding::Single(_) | Binding::LongPress(_) => None,
@@ -252,26 +253,24 @@ mod tests {
     }
 
     #[test]
-    fn oshook_gestures_includes_every_gesture_mode_button() {
-        // The owner lock is gone: every OS-hook button in gesture mode
-        // dispatches, each through its own direction map.
+    fn oshook_gestures_includes_only_non_wheel_gesture_sources() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
+        cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
         cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
 
         let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
         assert!(oshook.contains_key(&ButtonId::Back), "got: {oshook:?}");
-        assert!(
-            oshook.contains_key(&ButtonId::MiddleClick),
-            "got: {oshook:?}"
-        );
+        assert!(oshook.contains_key(&ButtonId::Forward), "got: {oshook:?}");
+        assert!(!oshook.contains_key(&ButtonId::MiddleClick));
     }
 
     #[test]
     fn hidpp_gesture_maps_includes_every_gesture_mode_source() {
-        // Both HID++ sources in gesture mode dispatch simultaneously, each
+        // All HID++ sources in gesture mode dispatch simultaneously, each
         // through its own seeded direction map.
         let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
         let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
@@ -289,6 +288,12 @@ mod tests {
             .expect("a gesture-mode panel must dispatch");
         for dir in GestureDirection::ALL {
             assert!(panel.contains_key(&dir), "unseeded panel arm {dir:?}");
+        }
+        let dpi = maps
+            .get(&ButtonId::DpiToggle)
+            .expect("a gesture-mode DPI button must dispatch through HID++");
+        for dir in GestureDirection::ALL {
+            assert!(dpi.contains_key(&dir), "unseeded DPI arm {dir:?}");
         }
     }
 
