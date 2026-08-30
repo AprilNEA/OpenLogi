@@ -31,9 +31,11 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{
+    ButtonId, GESTURE_SWIPE_THRESHOLD, GestureDirection, SwipeAccumulator,
+};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
@@ -114,15 +116,113 @@ enum HoldState {
         /// A second armed source is held alongside the holder. Overlap motion
         /// could belong to either control — dropped until the overlap ends.
         overlap: bool,
-        /// The hold's next raw-XY sample must be dropped: the haptic panel's
-        /// first sample after contact is an absolute position jump, not a
-        /// delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
-        skip_first_raw_xy: bool,
+        /// Rejects raw-XY reports that carry an absolute position instead of a
+        /// delta (see [`JumpFilter`]).
+        jump: JumpFilter,
     },
 }
 
+/// Per-hold rejection of raw-XY reports that carry an absolute position rather
+/// than a delta — a firmware artifact of the MX Master 4 gesture sensors, seen
+/// on real hardware under both the haptic panel's CID and the mechanical
+/// gesture button's (raw-XY reports carry no CID on the wire, so a jump under
+/// either is the same touch-sensor quirk). Summed into [`SwipeAccumulator`]
+/// such a report commits a bogus direction — or the wrong axis — before real
+/// motion is ever read.
+///
+/// Two rules:
+///
+/// * The first report of a hold on a touch-sensor gesture source (the haptic
+///   panel or the mechanical gesture button) is dropped outright. On real
+///   hardware *every* hold opens with one — an absolute position hundreds to
+///   thousands of units off, discardable by position in the hold because
+///   there is exactly one and it is always first. A standard button
+///   repurposed as a raw-XY gesture source reports the relative pointer sensor
+///   from its first sample, so its first report is not pre-emptively dropped.
+/// * A later report whose dominant axis exceeds the hold's bound is dropped.
+///   The bound is [`RAW_XY_JUMP_RATIO`]× the largest report admitted so far
+///   this hold, floored at [`RAW_XY_JUMP_FLOOR`]. Raw-XY travel scales with
+///   the pointer resolution — measured ≤ ~35 units/report on an MX Master 4
+///   at 400 DPI, up to ~550 for a fast swipe at 8000 — so a fixed unit bound
+///   cannot fit both ends; keying it on the hold's own peak makes it
+///   proportional without reading the DPI. The peak is used rather than a
+///   mean because the contact jump is followed by a handful of ~1-unit
+///   settling reports: a mean keyed on those starves the real swipe that
+///   follows (observed on hardware); a peak only ever grows. The floor
+///   governs a hold's opening reports, before its peak is set, and clears the
+///   fastest opening reports seen at 8000 DPI. A run of
+///   [`RAW_XY_JUMP_DISENGAGE_AFTER`] reports all tripping the bound means it
+///   is wrong for the device, so the filter disengages for the rest of the
+///   hold rather than starve it — the worst case is a few reports of latency,
+///   never a lost gesture.
+#[derive(Debug, Default)]
+struct JumpFilter {
+    /// The hold's source is a touch-sensor gesture control (the haptic panel or
+    /// the mechanical gesture button), whose first report after contact is an
+    /// absolute position to discard.
+    contact_source: bool,
+    /// Raw-XY reports seen this hold, admitted or not.
+    reports_seen: u32,
+    /// Largest dominant-axis travel of any admitted report this hold.
+    peak: i32,
+    /// Reports dropped in an unbroken run, reset by any admitted report.
+    consecutive_discards: u32,
+    /// The magnitude bound has proven wrong for this hold; admit the rest.
+    disengaged: bool,
+}
+
+/// Multiple of a hold's largest admitted report past which a single raw-XY
+/// report is an absolute-position artifact rather than real motion.
+const RAW_XY_JUMP_RATIO: i32 = 5;
+
+/// Lower bound on [`JumpFilter`]'s per-hold bound, for the opening reports
+/// before a peak is established: twelve times a whole swipe's commit travel
+/// ([`GESTURE_SWIPE_THRESHOLD`]). A swipe ramping from zero does not reach this
+/// in one report at any resolution — the fastest opening reports measured on an
+/// MX Master 4 at 8000 DPI ran to ~550.
+const RAW_XY_JUMP_FLOOR: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
+
+/// An unbroken run of dropped reports this long means the bound is wrong for
+/// the device; [`JumpFilter`] then stops filtering the hold.
+const RAW_XY_JUMP_DISENGAGE_AFTER: u32 = 4;
+
+impl JumpFilter {
+    fn new(contact_source: bool) -> Self {
+        Self {
+            contact_source,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this raw-XY report is real motion for the swipe accumulator to
+    /// sum. `false` drops it as an absolute-position artifact.
+    fn admit(&mut self, dx: i16, dy: i16) -> bool {
+        let seen = self.reports_seen;
+        self.reports_seen = self.reports_seen.saturating_add(1);
+        if seen == 0 && self.contact_source {
+            return false;
+        }
+        if self.disengaged {
+            return true;
+        }
+        let dominant = i32::from(dx.unsigned_abs().max(dy.unsigned_abs()));
+        let bound = RAW_XY_JUMP_FLOOR.max(RAW_XY_JUMP_RATIO.saturating_mul(self.peak));
+        if dominant <= bound {
+            self.peak = self.peak.max(dominant);
+            self.consecutive_discards = 0;
+            return true;
+        }
+        self.consecutive_discards = self.consecutive_discards.saturating_add(1);
+        if self.consecutive_discards >= RAW_XY_JUMP_DISENGAGE_AFTER {
+            self.disengaged = true;
+            return true;
+        }
+        false
+    }
+}
+
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+fn begin_hold(cid: u16, button: ButtonId, overlap: bool) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
     swipe.begin();
     HoldState::Holding {
@@ -130,7 +230,7 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
         button,
         swipe,
         overlap,
-        skip_first_raw_xy,
+        jump: JumpFilter::new(gesture_source_button(cid).is_some()),
     }
 }
 
@@ -140,9 +240,8 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
 struct CaptureAccum {
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
-    /// The armed gesture sources held in the last event, for edge detection:
-    /// a source not previously held that becomes the holder is a fresh touch
-    /// (the haptic panel's first sample is then a contact jump to discard).
+    /// The armed gesture sources held in the last event, for rising/falling
+    /// button-edge detection.
     gestures_down: Vec<u16>,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
@@ -940,14 +1039,14 @@ fn handle_reprog_with_gesture_buttons(
                     cid,
                     button,
                     swipe,
-                    skip_first_raw_xy,
+                    jump,
                     ..
                 } if cids.contains(&cid) => HoldState::Holding {
                     cid,
                     button,
                     swipe,
                     overlap: held.len() > 1,
-                    skip_first_raw_xy,
+                    jump,
                 },
                 previous => {
                     // No holder, or the holder released: a released hold that
@@ -961,18 +1060,11 @@ fn handle_reprog_with_gesture_buttons(
                         let _ = sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
                     }
                     // ...and the first still-held source begins (or takes
-                    // over) the hold. A source not down in the previous event
-                    // is a fresh touch, so the panel's contact-jump discard
-                    // applies; one that was already held has had its jump
-                    // dropped during the overlap.
+                    // over) the hold with a fresh [`JumpFilter`] keyed to that
+                    // source, so a takeover to a touch-sensor source discards
+                    // its contact report just like an initial press does.
                     match held.first() {
-                        Some(&(cid, button)) => begin_hold(
-                            cid,
-                            button,
-                            held.len() > 1,
-                            cid == reprog_controls::HAPTIC_PANEL_CID
-                                && !acc.gestures_down.contains(&cid),
-                        ),
+                        Some(&(cid, button)) => begin_hold(cid, button, held.len() > 1),
                         None => HoldState::Idle,
                     }
                 }
@@ -1027,27 +1119,36 @@ fn handle_raw_xy(
     dy: i16,
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
+    // Every raw-XY report as it arrives off the wire, before any filtering —
+    // the sequence to capture when characterising the jump artifact or a
+    // gesture's feel on a given device and DPI (`…gesture=trace`).
+    trace!(dx, dy, "gesture: raw-XY report");
     // Motion is attributed to the holding source; outside a hold the report
     // is stray and dropped.
     let HoldState::Holding {
         button,
         swipe,
         overlap,
-        skip_first_raw_xy,
+        jump,
         ..
     } = &mut acc.hold
     else {
         return;
     };
+    // Tick the jump filter on every raw-XY report of the hold — including one
+    // dropped for overlap below — so its "first report after contact" and its
+    // per-report scale track the whole hold, not just its unambiguous stretch.
+    let real_motion = jump.admit(dx, dy);
     // While two armed sources are held the report could belong to either
     // control — drop it rather than miscommit a swipe through the holder's map.
     if *overlap {
         return;
     }
-    // The haptic panel's first sample after contact is a position jump;
-    // summing it would commit a bogus direction instantly.
-    if *skip_first_raw_xy {
-        *skip_first_raw_xy = false;
+    // Drop a report that carries an absolute position instead of a delta:
+    // summing it would let one report commit a bogus direction (see
+    // [`JumpFilter`]).
+    if !real_motion {
+        debug!(dx, dy, "gesture: discarded raw-XY jump artifact");
         return;
     }
     // Commit the instant a clean direction emerges (mid-swipe, once per hold);
