@@ -172,7 +172,7 @@ async fn capture_profile(
             let source = standalone
                 .get(device)
                 .ok_or_else(|| anyhow!("the Agent snapshot changed during target selection"))?;
-            capture_standalone(source)
+            capture_standalone(source)?
         }
     };
 
@@ -211,7 +211,7 @@ async fn capture_inventory(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    sanitize::inventory(&mut retained);
+    sanitize::inventory(&mut retained)?;
     let profile_routes = retained
         .paired
         .iter()
@@ -341,13 +341,13 @@ fn safe_read_error(family: &str) -> anyhow::Error {
 
 fn capture_standalone(
     source: &StandaloneDevice,
-) -> (
+) -> Result<(
     Vec<DeviceInventory>,
     Vec<StandaloneDevice>,
     Vec<ProfileDeviceSettings>,
-) {
+)> {
     let mut retained = source.clone();
-    sanitize::standalone(&mut retained);
+    sanitize::standalone(&mut retained)?;
     let route = selection::standalone_route(&retained);
     let light_supported = retained.light_capabilities.is_some_and(|capabilities| {
         capabilities.power
@@ -363,7 +363,7 @@ fn capture_standalone(
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };
-    (Vec::new(), vec![retained], vec![settings])
+    Ok((Vec::new(), vec![retained], vec![settings]))
 }
 
 const fn profile_support(supported: bool) -> ProfileSupport {
