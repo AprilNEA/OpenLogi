@@ -52,6 +52,7 @@ mod tests {
     use cmd::diag::lighting::Method;
     use cmd::diag::wheel::ResolutionArg;
     use cmd::fixture::record_case::FixtureOperation;
+    use cmd::fixture::record_profile::RecordProfileArgs;
     use cmd::fixture::{FixtureCmd, FixtureRecordCmd};
 
     /// Clap's own structural validation (arg ID collisions, invalid
@@ -338,5 +339,117 @@ mod tests {
             "--allow-writes",
         ])
         .expect_err("--allow-writes must not exist in this command");
+    }
+
+    #[test]
+    fn fixture_record_profile_requires_synthetic_metadata_and_output() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "record",
+            "profile",
+            "--id",
+            "mx-master-3s-001",
+            "--name",
+            "Synthetic MX Master 3S",
+            "--output",
+            "profile.json",
+            "--device",
+            "MX Master 3S",
+            "--force",
+        ])
+        .expect("valid profile capture parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Fixture(FixtureCmd::Record(FixtureRecordCmd::Profile(
+                RecordProfileArgs {
+                    id,
+                    name,
+                    output,
+                    device,
+                    force,
+                },
+            ))) => {
+                assert_eq!(id, "mx-master-3s-001");
+                assert_eq!(name, "Synthetic MX Master 3S");
+                assert_eq!(output, std::path::PathBuf::from("profile.json"));
+                assert_eq!(device.as_deref(), Some("MX Master 3S"));
+                assert!(force);
+            }
+            other => panic!("expected Fixture(Record(Profile)), got {other:?}"),
+        }
+
+        let required_flags = ["--id", "--name", "--output"];
+        let complete = [
+            "--id",
+            "synthetic-id",
+            "--name",
+            "Synthetic profile",
+            "--output",
+            "profile.json",
+        ];
+        for missing in required_flags {
+            let mut args = vec!["openlogi", "fixture", "record", "profile"];
+            let mut index = 0;
+            while index < complete.len() {
+                if complete[index] != missing {
+                    args.extend_from_slice(&complete[index..=index + 1]);
+                }
+                index += 2;
+            }
+            Cli::try_parse_from(args).expect_err("profile metadata and output must be explicit");
+        }
+    }
+
+    #[test]
+    fn fixture_record_profile_help_is_agent_only_and_semantic() {
+        let command = Cli::command();
+        let mut profile = command
+            .find_subcommand("fixture")
+            .and_then(|fixture| fixture.find_subcommand("record"))
+            .and_then(|record| record.find_subcommand("profile"))
+            .expect("profile command exists")
+            .clone();
+        let help = profile.render_long_help().to_string();
+
+        assert!(help.contains("running Agent IPC"), "{help}");
+        assert!(help.contains("without direct hardware access"), "{help}");
+        assert!(help.contains("Synthetic fixture profile ID"), "{help}");
+        for forbidden in ["--direct", "--capacity", "--allow-writes", "--operation"] {
+            assert!(
+                !help.contains(forbidden),
+                "profile help exposed {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_record_profile_exposes_no_direct_raw_or_write_path() {
+        let base = [
+            "openlogi",
+            "fixture",
+            "record",
+            "profile",
+            "--id",
+            "synthetic-id",
+            "--name",
+            "Synthetic profile",
+            "--output",
+            "profile.json",
+        ];
+        for forbidden in [
+            "--direct",
+            "--capacity",
+            "--allow-writes",
+            "--operation",
+            "--channel",
+        ] {
+            let mut args = base.to_vec();
+            args.push(forbidden);
+            if forbidden == "--capacity" || forbidden == "--operation" || forbidden == "--channel" {
+                args.push("value");
+            }
+            Cli::try_parse_from(args).expect_err("profile capture must reject non-Agent paths");
+        }
     }
 }
