@@ -137,6 +137,10 @@ Encode invariants in the type system instead of checking them at runtime:
 - Caches and leases do not extend a lifecycle they merely borrow. Their cleanup is
   RAII, and reusable leases return only after dependent workers and OS handles have
   shut down.
+- Native events improve freshness but are not completeness proofs. When an event source
+  can be unavailable, coalesced, or dropped, keep bounded reconciliation, a timeout or
+  watchdog, or last-good replay as the liveness path; the reconciled probe remains the
+  authority.
 - Libraries return `thiserror` types; binaries may use `anyhow`.
 
 House style:
@@ -169,7 +173,9 @@ House style:
   with full force.
 - Keep files reasonably sized (split around ~500 lines) into real modules — never
   simulate structure with `// ---- section ----` banner comments. But don't
-  over-extract either: inline single-use helpers.
+  over-extract either: inline single-use helpers. File size, coverage, and complexity
+  metrics are investigation signals, not abstraction targets; extract a reusable
+  responsibility or invariant, never a single-use layer solely to improve a number.
 - rustdoc every public item. Comments state non-obvious constraints only.
 - Tests cover failure and edge paths, not just the happy path (state machines
   especially). No tautological tests that mirror the implementation; never weaken an

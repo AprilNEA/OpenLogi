@@ -3,6 +3,9 @@ paths:
   - "crates/openlogi-hook/**"
   - "crates/openlogi-inject/**"
   - "crates/openlogi-hid/**"
+  - "crates/openlogi-agent/src/autostart/**"
+  - "crates/openlogi-agent/src/resume_windows.rs"
+  - "crates/openlogi-camera/**"
 ---
 
 # Platform / cfg-gated code — macOS-green is a trap
