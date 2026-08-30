@@ -570,6 +570,7 @@ pub(crate) struct MockRawHidHandle {
     written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
     responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     park_writes: Arc<AtomicBool>,
+    fail_writes: Arc<AtomicBool>,
 }
 
 impl MockRawHidHandle {
@@ -580,16 +581,24 @@ impl MockRawHidHandle {
             .push_back(raw_report(msg));
     }
 
-    async fn send_incoming(&self, msg: HidppMessage) {
+    pub(crate) async fn send_incoming(&self, msg: HidppMessage) {
         self.incoming_tx.send(raw_report(msg)).await.unwrap();
+    }
+
+    pub(crate) async fn send_incoming_raw(&self, report: Vec<u8>) {
+        self.incoming_tx.send(report).await.unwrap();
     }
 
     pub(crate) fn written_reports(&self) -> Vec<Vec<u8>> {
         self.written_reports.lock().unwrap().clone()
     }
 
-    fn park_writes(&self) {
+    pub(crate) fn park_writes(&self) {
         self.park_writes.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_writes(&self) {
+        self.fail_writes.store(true, Ordering::SeqCst);
     }
 }
 
@@ -599,6 +608,8 @@ pub(crate) struct MockRawHidChannel {
     written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
     responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     park_writes: Arc<AtomicBool>,
+    fail_writes: Arc<AtomicBool>,
+    report_support: (bool, bool),
     drop_flag: Option<&'static AtomicBool>,
 }
 
@@ -607,17 +618,30 @@ impl MockRawHidChannel {
         Self::with_drop_flag(None)
     }
 
+    pub(crate) fn long_only() -> (Self, MockRawHidHandle) {
+        Self::with_configuration(None, (false, true))
+    }
+
     fn with_drop_flag(drop_flag: Option<&'static AtomicBool>) -> (Self, MockRawHidHandle) {
+        Self::with_configuration(drop_flag, (true, true))
+    }
+
+    fn with_configuration(
+        drop_flag: Option<&'static AtomicBool>,
+        report_support: (bool, bool),
+    ) -> (Self, MockRawHidHandle) {
         let (incoming_tx, incoming_rx) = async_channel::unbounded();
         let written_reports = Arc::new(Mutex::new(Vec::new()));
         let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
         let park_writes = Arc::new(AtomicBool::new(false));
+        let fail_writes = Arc::new(AtomicBool::new(false));
 
         let handle = MockRawHidHandle {
             incoming_tx: incoming_tx.clone(),
             written_reports: Arc::clone(&written_reports),
             responses_on_write: Arc::clone(&responses_on_write),
             park_writes: Arc::clone(&park_writes),
+            fail_writes: Arc::clone(&fail_writes),
         };
 
         (
@@ -627,6 +651,8 @@ impl MockRawHidChannel {
                 written_reports,
                 responses_on_write,
                 park_writes,
+                fail_writes,
+                report_support,
                 drop_flag,
             },
             handle,
@@ -654,6 +680,9 @@ impl RawHidChannel for MockRawHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
         self.written_reports.lock().unwrap().push(src.to_vec());
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(mock_error());
+        }
         if self.park_writes.load(Ordering::SeqCst) {
             return std::future::pending().await;
         }
@@ -673,7 +702,7 @@ impl RawHidChannel for MockRawHidChannel {
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some((true, true))
+        Some(self.report_support)
     }
 
     async fn get_report_descriptor(
