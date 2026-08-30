@@ -8,7 +8,7 @@
         "name": "Synthetic Bolt Receiver",
         "vendor_id": 1133,
         "product_id": 50504,
-        "unique_id": "MOCK-BOLT-01"
+        "unique_id": "OL-BOLT-UID-0001"
       },
       "paired": [
         {
@@ -25,7 +25,7 @@
           "model_info": {
             "entity_count": 3,
             "serial_number": null,
-            "unit_id": [1, 2, 3, 4],
+            "unit_id": [79, 76, 68, 1],
             "transports": {
               "usb": false,
               "equad": true,
@@ -70,7 +70,7 @@
           "model_info": {
             "entity_count": 2,
             "serial_number": null,
-            "unit_id": [5, 6, 7, 8],
+            "unit_id": [79, 76, 68, 2],
             "transports": {
               "usb": false,
               "equad": true,
@@ -115,7 +115,7 @@
           "model_info": {
             "entity_count": 2,
             "serial_number": null,
-            "unit_id": [9, 10, 11, 12],
+            "unit_id": [79, 76, 68, 3],
             "transports": {
               "usb": true,
               "equad": false,
@@ -146,12 +146,12 @@
         "product_id": 51456,
         "usage_page": 65347,
         "usage_id": 514,
-        "identity": "MOCK-LITRA-01"
+        "identity": "OPENLOGI-FIXTURE-RAWHID-001"
       },
       "display_name": "Synthetic Studio Light",
       "manufacturer": "OpenLogi Test Fixture",
       "serial_number": null,
-      "unit_id": [13, 14, 15, 16],
+      "unit_id": [79, 76, 68, 4],
       "kind": "light",
       "online": true,
       "capabilities": null,
@@ -180,7 +180,7 @@
     {
       "route": {
         "Bolt": {
-          "receiver_uid": "MOCK-BOLT-01",
+          "receiver_uid": "OL-BOLT-UID-0001",
           "slot": 1
         }
       },
@@ -218,7 +218,7 @@
     {
       "route": {
         "Bolt": {
-          "receiver_uid": "MOCK-BOLT-01",
+          "receiver_uid": "OL-BOLT-UID-0001",
           "slot": 2
         }
       },
@@ -240,7 +240,7 @@
     {
       "route": {
         "Bolt": {
-          "receiver_uid": "MOCK-BOLT-01",
+          "receiver_uid": "OL-BOLT-UID-0001",
           "slot": 3
         }
       },
@@ -294,7 +294,7 @@
           "product_id": 51456,
           "usage_page": 65347,
           "usage_id": 514,
-          "identity": "MOCK-LITRA-01"
+          "identity": "OPENLOGI-FIXTURE-RAWHID-001"
         }
       },
       "dpi": {

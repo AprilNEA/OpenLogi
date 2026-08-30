@@ -80,7 +80,7 @@ mod profile;
 use profile::{built_in_profile, parse_profile, unsupported_settings, validate_light_command};
 
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
-const RECEIVER_UID: &str = "MOCK-BOLT-01";
+const RECEIVER_UID: &str = "OL-BOLT-UID-0001";
 const MOUSE_SLOT: u8 = 1;
 #[cfg(test)]
 const OFFLINE_SLOT: u8 = 2;

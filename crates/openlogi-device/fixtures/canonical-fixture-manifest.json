@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "id": "openlogi-canonical-synthetic-fixture",
+  "profile_id": "openlogi-canonical-synthetic-profile",
+  "cases": [],
+  "identity_ledger": [
+    {
+      "principal": {
+        "kind": "receiver",
+        "id": "bolt-receiver"
+      },
+      "representations": [
+        {
+          "kind": "bolt_receiver_uid",
+          "value": "OL-BOLT-UID-0001",
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "receiver_identity"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "profile",
+                "field": "receiver_route"
+              },
+              "count": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "receiver-mouse",
+        "route": {
+          "kind": "bolt",
+          "receiver": "bolt-receiver",
+          "slot": 1
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [79, 76, 68, 1],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "receiver-keyboard",
+        "route": {
+          "kind": "bolt",
+          "receiver": "bolt-receiver",
+          "slot": 3
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [79, 76, 68, 2],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "direct-mouse",
+        "route": {
+          "kind": "direct",
+          "vendor_id": 1133,
+          "product_id": 45088
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [79, 76, 68, 3],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "studio-light",
+        "route": {
+          "kind": "raw_hid",
+          "vendor_id": 1133,
+          "product_id": 51456,
+          "usage_page": 65347,
+          "usage_id": 514
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [79, 76, 68, 4],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            }
+          ]
+        },
+        {
+          "kind": "raw_hid_profile_identity",
+          "value": "OPENLOGI-FIXTURE-RAWHID-001",
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "raw_hid_address_identity"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "profile",
+                "field": "raw_hid_route_identity"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

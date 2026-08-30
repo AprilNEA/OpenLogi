@@ -307,12 +307,12 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
     assert_eq!(state.agent_status(), Some(&snapshot.status));
     assert_eq!(state.devices().len(), 5);
 
-    let receiver_mouse = profile_device(&state, [1, 2, 3, 4]);
-    assert_eq!(receiver_mouse.config_key, "unit:01020304");
+    let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
+    assert_eq!(receiver_mouse.config_key, "unit:4f4c4401");
     assert_eq!(
         receiver_mouse.route,
         Some(DeviceRoute::Bolt {
-            receiver_uid: "MOCK-BOLT-01".to_string(),
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
             slot: 1,
         })
     );
@@ -337,15 +337,15 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
     assert_eq!(
         offline_mouse.route,
         Some(DeviceRoute::Bolt {
-            receiver_uid: "MOCK-BOLT-01".to_string(),
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
             slot: 2,
         })
     );
     assert_eq!(offline_mouse.capabilities, None);
     assert_eq!(offline_mouse.battery, None);
 
-    let keyboard = profile_device(&state, [5, 6, 7, 8]);
-    assert_eq!(keyboard.config_key, "unit:05060708");
+    let keyboard = profile_device(&state, [79, 76, 68, 2]);
+    assert_eq!(keyboard.config_key, "unit:4f4c4402");
     assert_eq!(
         keyboard.capabilities,
         profile.inventories[0].paired[2].capabilities
@@ -355,8 +355,8 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
         Some(100)
     );
 
-    let direct = profile_device(&state, [9, 10, 11, 12]);
-    assert_eq!(direct.config_key, "unit:090a0b0c");
+    let direct = profile_device(&state, [79, 76, 68, 3]);
+    assert_eq!(direct.config_key, "unit:4f4c4403");
     assert_eq!(
         direct.route,
         Some(DeviceRoute::Direct {
@@ -373,8 +373,8 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
         Some(55)
     );
 
-    let light = profile_device(&state, [13, 14, 15, 16]);
-    assert_eq!(light.config_key, "unit:0d0e0f10");
+    let light = profile_device(&state, [79, 76, 68, 4]);
+    assert_eq!(light.config_key, "unit:4f4c4404");
     assert_eq!(
         light.route,
         Some(DeviceRoute::RawHid {
@@ -382,7 +382,7 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
             product_id: 0xc900,
             usage_page: 0xff43,
             usage_id: 0x0202,
-            identity: "MOCK-LITRA-01".to_string(),
+            identity: "OPENLOGI-FIXTURE-RAWHID-001".to_string(),
         })
     );
     assert_eq!(
@@ -413,11 +413,11 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
     replaced.inventory[1].paired[0].battery = None;
     replaced.inventory[1].paired[0].capabilities = None;
     state.apply_agent_snapshot(&replaced, &cache, &[]);
-    let receiver_mouse = profile_device(&state, [1, 2, 3, 4]);
+    let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
     assert!(!receiver_mouse.online);
     assert_eq!(receiver_mouse.battery, None);
     assert_eq!(receiver_mouse.capabilities, None);
-    let direct_mouse = profile_device(&state, [9, 10, 11, 12]);
+    let direct_mouse = profile_device(&state, [79, 76, 68, 3]);
     assert!(!direct_mouse.online);
     assert_eq!(direct_mouse.battery, None);
     assert_eq!(direct_mouse.capabilities, None);
@@ -460,7 +460,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
     let light_index = state
         .devices()
         .iter()
-        .position(|record| record.unit_id == [13, 14, 15, 16])
+        .position(|record| record.unit_id == [79, 76, 68, 4])
         .expect("canonical light is projected");
     state.set_current_device(light_index);
     let mut reloads = 0;
