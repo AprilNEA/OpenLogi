@@ -55,7 +55,7 @@ use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_device::fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings};
 use openlogi_hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftStatus,
-    TunableTorque, WriteError,
+    WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -75,20 +75,15 @@ use tracing_subscriber::EnvFilter;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
-use profile::{built_in_profile, unsupported_settings, validate_light_command};
+use profile::{built_in_profile, parse_profile, unsupported_settings, validate_light_command};
 
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
 const RECEIVER_UID: &str = "MOCK-BOLT-01";
 const MOUSE_SLOT: u8 = 1;
+#[cfg(test)]
 const OFFLINE_SLOT: u8 = 2;
+#[cfg(test)]
 const KEYBOARD_SLOT: u8 = 3;
-const MOCK_TORQUE: TunableTorque = match TunableTorque::try_new(50) {
-    Ok(value) => value,
-    Err(_) => panic!("valid mock SmartShift torque"),
-};
-/// Product ID of the scripted directly-attached mouse; `DeviceRoute::Direct`
-/// is matched against it.
-const DIRECT_PID: u16 = 0xb020;
 /// How often the scripted `camera_active` flag flips.
 const CAMERA_TOGGLE_PERIOD: Duration = Duration::from_secs(30);
 
@@ -212,12 +207,7 @@ fn parse_fixture_arg(mut args: impl Iterator<Item = OsString>) -> Result<Option<
 fn load_fixture_profile(path: &Path) -> Result<DeviceProfile, String> {
     let encoded = fs::read_to_string(path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let profile: DeviceProfile = serde_json::from_str(&encoded)
-        .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-    profile
-        .validate()
-        .map_err(|error| format!("could not validate {}: {error}", path.display()))?;
-    Ok(profile)
+    parse_profile(&encoded, &path.display().to_string())
 }
 
 /// Claim the `openlogi-dev` profile unless the caller picked one.
