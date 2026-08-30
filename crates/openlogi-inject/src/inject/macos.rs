@@ -715,9 +715,15 @@ fn set_continuous_axis(
     const POINTS_PER_LINE: i64 = 10;
     const FIXED_POINT_SCALE: i64 = 1 << 16;
     let points = i64::from(points);
-    event.set_integer_value_field(point_field, points);
+    // Write order is load-bearing: a scroll CGEvent keeps one canonical
+    // distance, and writing the coarse integer *line* field makes it the
+    // canonical value — the point delta is then re-derived from it at 8
+    // points per line, discarding pixel precision (measured on macOS 15.7:
+    // frames under 10 points arrived as zero and the rest quantized to
+    // 8-point steps). Writing the point delta last keeps it authoritative.
     event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
     event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
+    event.set_integer_value_field(point_field, points);
 }
 
 /// Raw FFI surface for the AXUIElement/CF calls used by [`ax_browser_navigate`]
