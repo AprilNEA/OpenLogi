@@ -12,79 +12,13 @@ use hidpp::{
     },
 };
 pub use openlogi_core::config::ScrollResolution;
-use serde::{Deserialize, Serialize};
+pub use openlogi_core::hid::scroll::{ScrollReportingTarget, ScrollWheelMode};
 use tracing::debug;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
-
-/// Destination for vertical wheel movement reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScrollReportingTarget {
-    /// Ordinary HID scroll reports delivered to the operating system.
-    Native,
-    /// HID++ notifications consumed by a host-side handler.
-    Diverted,
-}
-
-impl From<ScrollReportingTarget> for WheelEventTarget {
-    fn from(target: ScrollReportingTarget) -> Self {
-        match target {
-            ScrollReportingTarget::Native => Self::Native,
-            ScrollReportingTarget::Diverted => Self::Diverted,
-        }
-    }
-}
-
-impl TryFrom<WheelEventTarget> for ScrollReportingTarget {
-    type Error = WriteError;
-
-    fn try_from(target: WheelEventTarget) -> Result<Self, Self::Error> {
-        match target {
-            WheelEventTarget::Native => Ok(Self::Native),
-            WheelEventTarget::Diverted => Ok(Self::Diverted),
-            _ => Err(unsupported_read_response()),
-        }
-    }
-}
-
-/// Current HID++ `0x2121` wheel reporting mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScrollWheelMode {
-    /// Vertical wheel reporting resolution.
-    pub resolution: ScrollResolution,
-    /// Whether native vertical reports are inverted in firmware.
-    pub inverted: bool,
-    /// Destination for wheel movement reports.
-    pub target: ScrollReportingTarget,
-}
-
-impl TryFrom<HidppWheelMode> for ScrollWheelMode {
-    type Error = WriteError;
-
-    fn try_from(mode: HidppWheelMode) -> Result<Self, Self::Error> {
-        Ok(Self {
-            resolution: resolution_from_hidpp(mode.resolution)?,
-            inverted: mode.inverted,
-            target: mode.target.try_into()?,
-        })
-    }
-}
-
-#[cfg(test)]
-impl ScrollWheelMode {
-    fn native(resolution: ScrollResolution, inverted: bool) -> Self {
-        Self {
-            resolution,
-            inverted,
-            target: ScrollReportingTarget::Native,
-        }
-    }
-}
 
 /// Read the current vertical wheel reporting mode.
 pub async fn get_scroll_wheel_mode(
@@ -243,7 +177,7 @@ async fn change_wheel_mode_on_channel(
 
     let written = feature
         .set_wheel_mode(
-            desired.target.into(),
+            target_to_hidpp(desired.target),
             resolution_to_hidpp(desired.resolution),
             desired.inverted,
         )
@@ -251,7 +185,7 @@ async fn change_wheel_mode_on_channel(
         .map_err(|error| {
             classify_hidpp_error(error, HidppOperation::WriteWheelMode, HiResWheelFeature::ID)
         })?;
-    validate_applied(written.try_into()?, desired)?;
+    validate_applied(mode_from_hidpp(written)?, desired)?;
 
     let read_back = read_mode(&feature).await?;
     validate_applied(read_back, desired)?;
@@ -269,7 +203,7 @@ async fn read_mode(feature: &HiResWheelFeature) -> Result<ScrollWheelMode, Write
     let mode = feature.get_wheel_mode().await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::ReadWheelMode, HiResWheelFeature::ID)
     })?;
-    mode.try_into()
+    mode_from_hidpp(mode)
 }
 
 fn desired_mode(
@@ -318,6 +252,29 @@ fn resolution_to_hidpp(resolution: ScrollResolution) -> HidppWheelResolution {
     }
 }
 
+fn target_from_hidpp(target: WheelEventTarget) -> Result<ScrollReportingTarget, WriteError> {
+    match target {
+        WheelEventTarget::Native => Ok(ScrollReportingTarget::Native),
+        WheelEventTarget::Diverted => Ok(ScrollReportingTarget::Diverted),
+        _ => Err(unsupported_read_response()),
+    }
+}
+
+fn target_to_hidpp(target: ScrollReportingTarget) -> WheelEventTarget {
+    match target {
+        ScrollReportingTarget::Native => WheelEventTarget::Native,
+        ScrollReportingTarget::Diverted => WheelEventTarget::Diverted,
+    }
+}
+
+fn mode_from_hidpp(mode: HidppWheelMode) -> Result<ScrollWheelMode, WriteError> {
+    Ok(ScrollWheelMode {
+        resolution: resolution_from_hidpp(mode.resolution)?,
+        inverted: mode.inverted,
+        target: target_from_hidpp(mode.target)?,
+    })
+}
+
 fn unsupported_read_response() -> WriteError {
     WriteError::UnsupportedResponse {
         operation: HidppOperation::ReadWheelMode,
@@ -328,6 +285,14 @@ fn unsupported_read_response() -> WriteError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native(resolution: ScrollResolution, inverted: bool) -> ScrollWheelMode {
+        ScrollWheelMode {
+            resolution,
+            inverted,
+            target: ScrollReportingTarget::Native,
+        }
+    }
 
     #[test]
     fn mode_value_conversions_preserve_known_wire_values() -> Result<(), WriteError> {
@@ -340,19 +305,19 @@ mod tests {
             ScrollResolution::High
         );
         assert_eq!(
-            ScrollReportingTarget::try_from(WheelEventTarget::Native)?,
+            target_from_hidpp(WheelEventTarget::Native)?,
             ScrollReportingTarget::Native
         );
         assert_eq!(
-            ScrollReportingTarget::try_from(WheelEventTarget::Diverted)?,
+            target_from_hidpp(WheelEventTarget::Diverted)?,
             ScrollReportingTarget::Diverted
         );
         assert_eq!(
-            WheelEventTarget::from(ScrollReportingTarget::Native),
+            target_to_hidpp(ScrollReportingTarget::Native),
             WheelEventTarget::Native
         );
         assert_eq!(
-            WheelEventTarget::from(ScrollReportingTarget::Diverted),
+            target_to_hidpp(ScrollReportingTarget::Diverted),
             WheelEventTarget::Diverted
         );
         Ok(())
@@ -367,7 +332,7 @@ mod tests {
         };
         assert_eq!(
             desired_mode(current, Some(ScrollResolution::Low), None),
-            ScrollWheelMode::native(ScrollResolution::Low, true)
+            native(ScrollResolution::Low, true)
         );
     }
 
@@ -380,7 +345,7 @@ mod tests {
         };
         assert_eq!(
             desired_mode(current, None, Some(true)),
-            ScrollWheelMode::native(ScrollResolution::Low, true)
+            native(ScrollResolution::Low, true)
         );
     }
 
@@ -396,8 +361,8 @@ mod tests {
 
     #[test]
     fn mismatched_set_or_read_back_is_rejected() {
-        let desired = ScrollWheelMode::native(ScrollResolution::Low, false);
-        let actual = ScrollWheelMode::native(ScrollResolution::High, false);
+        let desired = native(ScrollResolution::Low, false);
+        let actual = native(ScrollResolution::High, false);
         assert!(matches!(
             validate_applied(actual, desired),
             Err(WriteError::UnsupportedResponse {
