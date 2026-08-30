@@ -34,25 +34,24 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPag
         .group(footer)
 }
 
-/// The About hero row: logo, wordmark, the clickable build line, and the link /
-/// diagnostics buttons.
+/// The About hero row: logo, wordmark, outbound links, and copy-diagnostics.
 fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
-    let diag_label = if copied {
-        tr!("Copied!")
-    } else {
-        tr!("Copy Diagnostics")
-    };
-    let view = view.clone();
-
     h_flex()
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            div()
+                .size(px(56.))
+                .flex_none()
+                .child(img(crate::app_assets::LOGO).size(px(56.))),
+        )
         .child(
             v_flex()
                 .gap_2()
+                .flex_1()
+                .min_w_0()
                 .child(
                     h_flex()
                         .items_center()
@@ -66,69 +65,84 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                         ),
                 )
                 .child(
-                    h_flex()
-                        .items_center()
+                    v_flex()
                         .gap_1()
                         .pt_1()
-                        .child(link_button(
-                            "about-repo",
-                            Icon::new(IconName::Github),
-                            tr!("GitHub"),
-                            REPO_URL,
-                        ))
-                        .child(link_button(
-                            "about-changelog",
-                            Icon::empty().path("action-icons/scroll-text.svg"),
-                            tr!("Changelog"),
-                            RELEASES_URL,
-                        ))
-                        .child(link_button(
-                            "about-docs",
-                            Icon::new(IconName::BookOpen),
-                            tr!("Documentation"),
-                            HELP_URL,
-                        ))
-                        .child(link_button(
-                            "about-issue",
-                            Icon::empty().path("action-icons/bug.svg"),
-                            tr!("Report an issue"),
-                            format!("{REPO_URL}/issues"),
-                        ))
-                        .child(div().w(px(1.)).h(px(16.)).mx_1().bg(pal.border))
-                        .child(
-                            Button::new("about-copy-diagnostics")
-                                .ghost()
-                                .small()
-                                .icon(IconName::Copy)
-                                .label(diag_label)
-                                .on_click(move |_, _, cx| {
-                                    let report =
-                                        crate::services::diagnostics::collect(cx).to_markdown();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(report));
-                                    view.update(cx, |this, cx| {
-                                        this.copied = true;
-                                        this.copied_gen = this.copied_gen.wrapping_add(1);
-                                        let generation = this.copied_gen;
-                                        cx.notify();
-                                        cx.spawn(async move |handle, cx| {
-                                            cx.background_executor()
-                                                .timer(std::time::Duration::from_secs(2))
-                                                .await;
-                                            handle
-                                                .update(cx, |this, cx| {
-                                                    if this.copied_gen == generation {
-                                                        this.copied = false;
-                                                        cx.notify();
-                                                    }
-                                                })
-                                                .ok();
-                                        })
-                                        .detach();
-                                    });
-                                }),
-                        ),
+                        .items_start()
+                        .child(about_links())
+                        .child(copy_diagnostics_button(view.clone(), copied)),
                 ),
         )
+}
+
+/// Outbound About links, on their own row so "Copied!" cannot unwrap them.
+fn about_links() -> gpui::Div {
+    h_flex()
+        .items_center()
+        .gap_1()
+        .flex_wrap()
+        .child(link_button(
+            "about-repo",
+            Icon::new(IconName::Github),
+            tr!("GitHub"),
+            REPO_URL,
+        ))
+        .child(link_button(
+            "about-changelog",
+            Icon::empty().path("action-icons/scroll-text.svg"),
+            tr!("Changelog"),
+            RELEASES_URL,
+        ))
+        .child(link_button(
+            "about-docs",
+            Icon::new(IconName::BookOpen),
+            tr!("Documentation"),
+            HELP_URL,
+        ))
+        .child(link_button(
+            "about-issue",
+            Icon::empty().path("action-icons/bug.svg"),
+            tr!("Report an issue"),
+            format!("{REPO_URL}/issues"),
+        ))
+}
+
+/// Copies a diagnostics report to the clipboard and flashes a confirmation.
+fn copy_diagnostics_button(view: Entity<SettingsView>, copied: bool) -> Button {
+    let diag_label = if copied {
+        tr!("Copied!")
+    } else {
+        tr!("Copy Diagnostics")
+    };
+    Button::new("about-copy-diagnostics")
+        .ghost()
+        .small()
+        .icon(IconName::Copy)
+        .label(diag_label)
+        .on_click(move |_, _, cx| {
+            let report = crate::services::diagnostics::collect(cx).to_markdown();
+            cx.write_to_clipboard(ClipboardItem::new_string(report));
+            view.update(cx, |this, cx| {
+                this.copied = true;
+                this.copied_gen = this.copied_gen.wrapping_add(1);
+                let generation = this.copied_gen;
+                cx.notify();
+                cx.spawn(async move |handle, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(2))
+                        .await;
+                    handle
+                        .update(cx, |this, cx| {
+                            if this.copied_gen == generation {
+                                this.copied = false;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+                .detach();
+            });
+        })
 }
 
 /// The config-file location row with a reveal-in-file-manager button.

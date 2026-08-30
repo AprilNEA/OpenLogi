@@ -142,7 +142,12 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                 .gap_3()
                 .flex_1()
                 .min_w_0()
-                .child(img(crate::app_assets::LOGO).w(px(52.)).h(px(52.)))
+                .child(
+                    div()
+                        .size(px(52.))
+                        .flex_none()
+                        .child(img(crate::app_assets::LOGO).size(px(52.))),
+                )
                 .child(
                     v_flex()
                         .gap_1()
