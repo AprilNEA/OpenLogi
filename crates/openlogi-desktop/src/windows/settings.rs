@@ -530,11 +530,11 @@ impl Render for SettingsView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar as an absolute overlay (with
-            // matching top padding) rather than a flex-column row — the
-            // `Settings` sidebar uses `h_resizable` percentage sizing, which a
-            // flex column would break. macOS / Windows keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Only where the compositor left the chrome to us, and as an
+            // absolute overlay (with matching top padding) rather than a
+            // flex-column row — the `Settings` sidebar uses `h_resizable`
+            // percentage sizing, which a flex column would break.
+            .when(windows::needs_client_titlebar(window), |this| {
                 this.pt(TITLE_BAR_HEIGHT).child(
                     div()
                         .absolute()

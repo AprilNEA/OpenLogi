@@ -497,11 +497,12 @@ impl Render for AppView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar (window controls + drag region)
-            // as the first row of every frame — including the pre-connection and
-            // error frames — so the chrome is present from the first frame on.
-            // macOS / Windows keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Drawn only where the compositor left the chrome to us — as the
+            // first row of every frame, including the pre-connection and error
+            // frames, so it is present from the first frame on. A compositor
+            // that decorates the window itself (KWin, and macOS / Windows)
+            // reports `Server` and this stays out of the way.
+            .when(crate::windows::needs_client_titlebar(window), |this| {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);

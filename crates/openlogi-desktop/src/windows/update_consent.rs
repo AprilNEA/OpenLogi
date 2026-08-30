@@ -81,10 +81,9 @@ impl Render for UpdateConsentView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar at the top of the window; the
-            // centred content sits in the flex-column below it. macOS / Windows
-            // keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Only where the compositor left the chrome to us; the centred
+            // content sits in the flex-column below it.
+            .when(windows::needs_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(tr!("OpenLogi"), cx))
             })
             .child(
