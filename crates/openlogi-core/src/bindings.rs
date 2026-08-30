@@ -97,12 +97,14 @@ pub fn hidpp_gesture_maps_for(
         .collect()
 }
 
-/// Per-direction maps for every OS-hook gesture source (Back/Forward) in
-/// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
-/// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
-/// [`Config::is_gesture_mode`]), so any number of entries may be live at once —
-/// concurrency between them is the hook's first-hold-wins policy, not a config
-/// concern.
+/// Per-direction maps for every OS-hook button with a stored gesture binding on
+/// `config_key`, with `app_bundle`'s per-app overlay applied, for the OS hook to
+/// resolve a hold+swipe. New gesture mode is offered only for Back/Forward, but
+/// v0.8.0 also persisted Middle Click gesture maps; accepting all OS-hook
+/// buttons here preserves those maps until the user turns that mode off.
+/// Gesture mode is per-button (see [`Config::is_gesture_mode`]), so any number
+/// of entries may be live at once — concurrency between them is the hook's
+/// first-hold-wins policy, not a config concern.
 ///
 /// Unlike [`hidpp_gesture_maps_for`] (whose maps seed every direction at
 /// projection time), this returns each button's raw stored map. In practice
@@ -132,7 +134,7 @@ pub fn oshook_gestures_for(
     config
         .effective_bindings(key, app_bundle)
         .into_iter()
-        .filter(|(id, _)| id.is_os_hook_gesture_source())
+        .filter(|(id, _)| id.is_os_hook_button())
         .filter_map(|(id, binding)| match binding {
             Binding::Gesture(map) => Some((id, map)),
             Binding::Single(_) | Binding::LongPress(_) => None,
@@ -253,16 +255,28 @@ mod tests {
     }
 
     #[test]
-    fn oshook_gestures_includes_only_non_wheel_gesture_sources() {
+    fn oshook_gestures_preserves_a_stored_middle_click_gesture() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
-        cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
+        let middle = BTreeMap::from([
+            (GestureDirection::Click, Action::MiddleClick),
+            (GestureDirection::Up, Action::Copy),
+        ]);
+        cfg.set_binding(
+            "2b042",
+            ButtonId::MiddleClick,
+            Binding::Gesture(middle.clone()),
+        );
 
         let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
         assert!(oshook.contains_key(&ButtonId::Back), "got: {oshook:?}");
         assert!(oshook.contains_key(&ButtonId::Forward), "got: {oshook:?}");
-        assert!(!oshook.contains_key(&ButtonId::MiddleClick));
+        assert_eq!(
+            oshook.get(&ButtonId::MiddleClick),
+            Some(&middle),
+            "an existing Middle Click gesture from v0.8.0 must keep dispatching"
+        );
     }
 
     #[test]
