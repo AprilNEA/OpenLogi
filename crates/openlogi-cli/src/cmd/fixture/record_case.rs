@@ -17,7 +17,6 @@ use openlogi_hid::recording::{HidCassetteAudit, NativeRecorder, NativeRecording}
 use openlogi_ipc::client::{self, ConnectError};
 
 mod audit;
-mod output;
 mod replay;
 
 const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
@@ -177,7 +176,7 @@ struct SanitizedCandidate {
 
 pub async fn run(args: RecordCaseArgs) -> Result<()> {
     validate_metadata(&args)?;
-    output::ensure_output_available(&args.output, args.force)?;
+    super::output::ensure_output_available(&args.output, args.force)?;
     ensure_agent_stopped().await?;
 
     eprintln!(
@@ -194,7 +193,7 @@ pub async fn run(args: RecordCaseArgs) -> Result<()> {
     let candidates = audit::sanitize_recording(recording, &args.name, &args.channel)?;
     let cassette =
         replay::select_self_replaying(args.operation, &target, &observation, candidates).await?;
-    output::write_cassette_atomically(&args.output, &cassette, args.force)?;
+    super::output::write_json_atomically(&args.output, &cassette, args.force, "HID cassette")?;
 
     println!(
         "Recorded `{}` for {:?} to {}.",

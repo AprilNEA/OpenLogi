@@ -1,11 +1,11 @@
-//! Validated cassette-only atomic publication.
+//! Validated fixture-only atomic publication.
 
 use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use atomic_write_file::AtomicWriteFile;
-use openlogi_device::fixture::HidCassette;
+use serde::Serialize;
 
 pub(super) fn ensure_output_available(path: &Path, force: bool) -> Result<()> {
     if !force && path.try_exists().context("could not inspect output path")? {
@@ -17,42 +17,44 @@ pub(super) fn ensure_output_available(path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn write_cassette_atomically(
+pub(super) fn write_json_atomically<T: Serialize>(
     path: &Path,
-    cassette: &HidCassette,
+    value: &T,
     force: bool,
+    asset: &str,
 ) -> Result<()> {
     ensure_output_available(path, force)?;
     let mut json =
-        serde_json::to_vec_pretty(cassette).context("could not serialize HID cassette")?;
+        serde_json::to_vec_pretty(value).with_context(|| format!("could not serialize {asset}"))?;
     json.push(b'\n');
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent).context("could not create cassette output directory")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {asset} output directory"))?;
     }
     ensure_output_available(path, force)?;
-    let mut output =
-        AtomicWriteFile::open(path).context("could not open atomic cassette output")?;
+    let mut output = AtomicWriteFile::open(path)
+        .with_context(|| format!("could not open atomic {asset} output"))?;
     output
         .write_all(&json)
-        .context("could not write atomic cassette output")?;
+        .with_context(|| format!("could not write atomic {asset} output"))?;
     if let Err(error) = ensure_output_available(path, force) {
         output
             .discard()
-            .context("could not discard refused cassette output")?;
+            .with_context(|| format!("could not discard refused {asset} output"))?;
         return Err(error);
     }
     output
         .commit()
-        .context("could not commit atomic cassette output")
+        .with_context(|| format!("could not commit atomic {asset} output"))
 }
 
 #[cfg(test)]
 mod tests {
     use openlogi_device::fixture::{
-        CassetteExchange, FIXTURE_SCHEMA_VERSION, ReportSupport, RequestMatch,
+        CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
     };
 
     use super::*;
@@ -84,14 +86,15 @@ mod tests {
             }],
         };
 
-        write_cassette_atomically(&output, &cassette, false).expect("atomic write succeeds");
+        write_json_atomically(&output, &cassette, false, "HID cassette")
+            .expect("atomic write succeeds");
 
         let bytes = std::fs::read(&output).expect("read cassette");
         assert!(bytes.ends_with(b"\n"));
         assert!(bytes.windows(2).any(|window| window == b"  "));
         let decoded: HidCassette = serde_json::from_slice(&bytes).expect("valid cassette JSON");
         assert_eq!(decoded, cassette);
-        write_cassette_atomically(&output, &cassette, false)
+        write_json_atomically(&output, &cassette, false, "HID cassette")
             .expect_err("a later non-force write must preserve the existing cassette");
     }
 }
