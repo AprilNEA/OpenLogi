@@ -251,8 +251,27 @@ impl Runtime {
     fn on_agent_update(&mut self, update: ipc::GuiUpdate, cx: &AsyncApp) {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
+                let first_snapshot = self.snapshot.is_none();
                 self.apply_snapshot(&snapshot, cx);
                 self.snapshot = Some(snapshot);
+                if first_snapshot {
+                    // `AppState::with_runtime` runs before the IPC client has
+                    // necessarily completed its handshake. Defer the initial
+                    // reload until this snapshot proves that the link is live;
+                    // otherwise a cold-start race can leave the GUI stuck on
+                    // the fail-closed "agent is not running" screen even
+                    // though the agent connects moments later.
+                    let should_reload = cx.update(|cx| {
+                        AppState::try_read(cx).is_some_and(|state| state.should_reload_agent())
+                    });
+                    if should_reload {
+                        cx.update(|cx| {
+                            AppState::update(cx, |state, _| {
+                                state.reload_agent_config();
+                            });
+                        });
+                    }
+                }
             }
             ipc::GuiUpdate::Unreachable => {
                 cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
