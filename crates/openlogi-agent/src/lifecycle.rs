@@ -56,6 +56,7 @@ pub(crate) async fn run(
     config: Config,
     shutdown_requests: ShutdownRequests,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+    device_io_gate: openlogi_hid::DeviceIoGate,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -66,6 +67,7 @@ pub(crate) async fn run(
         shutdown_requests,
         #[cfg(target_os = "macos")]
         armed_tx,
+        device_io_gate,
     )
     .await
     else {
@@ -97,6 +99,7 @@ struct Booted {
     /// Releases the main thread's tray loop once the agent arms.
     #[cfg(target_os = "macos")]
     armed_tx: std::sync::mpsc::Sender<()>,
+    device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
 impl Booted {
@@ -104,6 +107,7 @@ impl Booted {
         config: Config,
         shutdown_requests: ShutdownRequests,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+        device_io_gate: openlogi_hid::DeviceIoGate,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
@@ -119,6 +123,7 @@ impl Booted {
             launch_at_login,
             #[cfg(target_os = "macos")]
             armed_tx,
+            device_io_gate,
         })
     }
 
@@ -204,6 +209,7 @@ impl Wanted {
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
+            device_io_gate,
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
@@ -236,6 +242,7 @@ impl Wanted {
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
+                device_io_gate,
             },
         }
     }
@@ -260,9 +267,10 @@ struct Running {
     shutdown_requests: ShutdownRequests,
     hidpp_watchers: WatcherFleet,
     /// The OS hook, installed once Accessibility is granted and dropped on
-    /// revoke (dropping the handle stops its thread).
+    /// revoke or session inactivation (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
 impl Armed {
@@ -276,6 +284,7 @@ impl Armed {
                 .shut_down("Input Monitoring permission relaunch", None)
                 .await;
         }
+        let mut device_io_gate = running.device_io_gate.clone();
 
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
@@ -297,6 +306,19 @@ impl Armed {
                 }
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
+                }
+                device_io = device_io_gate.changed() => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        match device_io {
+                            Some(allowed) => running.apply_device_io(allowed).await,
+                            None => running.shut_down("device I/O lifecycle ended"),
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    if device_io.is_none() {
+                        break;
+                    }
                 }
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
@@ -369,6 +391,28 @@ impl Running {
         }
     }
 
+    /// Keep the global macOS event tap owned only by the active login session.
+    /// The HID gate already protects device I/O during sleep/session changes,
+    /// but an event tap is a separate machine-wide input path: leaving it live
+    /// in an inactive user's agent lets that agent suppress the active user's
+    /// physical wheel and post the replacement into the wrong session.
+    #[cfg(target_os = "macos")]
+    async fn apply_device_io(&mut self, allowed: bool) {
+        if allowed {
+            self.apply_accessibility(Hook::has_accessibility()).await;
+            return;
+        }
+
+        self.stop_hook();
+        self.orchestrator
+            .lock()
+            .await
+            .set_os_mouse_hook_available(false);
+        self.observable
+            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+        info!("inactive session — OS input hook released");
+    }
+
     /// Fold one inventory-watcher event into the orchestrator.
     async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
@@ -430,10 +474,15 @@ impl Running {
     /// observation can claim the hook is installed without the permission it
     /// requires.
     async fn apply_accessibility(&mut self, granted: bool) {
-        if !granted {
+        let should_install = hook_should_be_installed(
+            self.capture_mouse_events,
+            granted,
+            self.device_io_gate.allows_io(),
+        );
+        if !should_install {
             self.stop_hook();
         }
-        if granted && self.hook.is_none() {
+        if should_install && self.hook.is_none() {
             self.hook = self.start_hook();
         }
         self.orchestrator
@@ -548,6 +597,17 @@ impl Running {
     }
 }
 
+/// The event tap is a global input filter on macOS. It must be active only
+/// when the agent is configured to capture input, has Accessibility, and its
+/// login session is currently allowed to use host I/O.
+const fn hook_should_be_installed(
+    capture_mouse_events: bool,
+    accessibility_granted: bool,
+    device_io_allowed: bool,
+) -> bool {
+    capture_mouse_events && accessibility_granted && device_io_allowed
+}
+
 /// Prompt for Accessibility when the enabled mouse hook needs it.
 fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
@@ -584,4 +644,17 @@ async fn request_input_monitoring_and_schedule_relaunch() -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_should_be_installed;
+
+    #[test]
+    fn hook_requires_capture_permission_and_active_session() {
+        assert!(hook_should_be_installed(true, true, true));
+        assert!(!hook_should_be_installed(false, true, true));
+        assert!(!hook_should_be_installed(true, false, true));
+        assert!(!hook_should_be_installed(true, true, false));
+    }
 }
