@@ -8,10 +8,11 @@ use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo};
 
+use super::barrier::{ReplayResponseBarrier, ResponseGates};
 use super::channel::{
     CassetteState, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter, ReplayRawWriterHandle,
 };
-use super::schema::{FixtureError, HidCassette, ReportSupport};
+use super::schema::{FixtureError, HidCassette, ReportSupport, RequestMatch, validate_report};
 
 /// Whether an OS HID node appears in enumeration snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,9 +129,15 @@ struct ChannelRuntime {
     report_support: ReportSupport,
     connection: ChannelConnection,
     cassette: Arc<CassetteState>,
+    response_gates: Arc<ResponseGates>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
-    lifetimes: Vec<Weak<AtomicBool>>,
+    lifetimes: Vec<ChannelLifetime>,
     open_count: usize,
+}
+
+struct ChannelLifetime {
+    connected: Weak<AtomicBool>,
+    incoming: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 struct BackendState {
@@ -207,8 +214,8 @@ impl ReplayBackend {
             .get_mut(channel)
             .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
         runtime.connection = connection;
-        runtime.lifetimes.retain(|connection_flag| {
-            let Some(connection_flag) = connection_flag.upgrade() else {
+        runtime.lifetimes.retain(|lifetime| {
+            let Some(connection_flag) = lifetime.connected.upgrade() else {
                 return false;
             };
             if connection == ChannelConnection::Disconnected {
@@ -217,6 +224,63 @@ impl ReplayBackend {
             true
         });
         Ok(())
+    }
+
+    /// Hold the next matching cassette response behind an explicit barrier.
+    ///
+    /// The request still counts as written and consumes its cassette exchange.
+    /// Only response delivery waits for [`ReplayResponseBarrier::release`].
+    pub fn hold_next_response(
+        &self,
+        channel: &str,
+        request_match: RequestMatch,
+        request: &[u8],
+    ) -> Result<ReplayResponseBarrier, FixtureError> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let runtime = state
+            .channels
+            .get(channel)
+            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
+        validate_report(request, runtime.report_support)
+            .map_err(|message| FixtureError::invalid("replay response barrier", message))?;
+        Ok(runtime.response_gates.hold(request_match, request))
+    }
+
+    /// Deliver an unsolicited report to every connected lifetime of `channel`.
+    ///
+    /// Returns the number of live channel lifetimes that received the report.
+    pub fn emit_channel_report(&self, channel: &str, report: &[u8]) -> Result<usize, FixtureError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let runtime = state
+            .channels
+            .get_mut(channel)
+            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
+        validate_report(report, runtime.report_support)
+            .map_err(|message| FixtureError::invalid("replay channel report", message))?;
+        let mut delivered = 0;
+        runtime.lifetimes.retain(|lifetime| {
+            let Some(connected) = lifetime.connected.upgrade() else {
+                return false;
+            };
+            if connected.load(Ordering::SeqCst) && lifetime.incoming.send(report.to_vec()).is_ok() {
+                delivered += 1;
+            }
+            true
+        });
+        Ok(delivered)
+    }
+
+    /// Number of current raw-channel lifetimes for one logical channel.
+    pub fn channel_lifetime_count(&self, channel: &str) -> Result<usize, FixtureError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let runtime = state
+            .channels
+            .get_mut(channel)
+            .ok_or_else(|| FixtureError::UnknownChannel(channel.to_string()))?;
+        runtime
+            .lifetimes
+            .retain(|lifetime| lifetime.connected.upgrade().is_some());
+        Ok(runtime.lifetimes.len())
     }
 
     /// Change pairing/link state for one declared receiver slot.
@@ -383,6 +447,7 @@ fn build_channels(
                     report_support: channel.report_support,
                     connection: channel.connection,
                     cassette: CassetteState::new(cassette)?,
+                    response_gates: Arc::new(ResponseGates::default()),
                     written: Arc::new(Mutex::new(Vec::new())),
                     lifetimes: Vec::new(),
                     open_count: 0,
@@ -526,15 +591,20 @@ impl HidBackend for ReplayBackend {
             let connected = Arc::new(AtomicBool::new(
                 channel.connection == ChannelConnection::Connected,
             ));
-            channel.lifetimes.push(Arc::downgrade(&connected));
-            ReplayRawHidChannel::from_parts(
+            let raw = ReplayRawHidChannel::from_parts(
                 vendor_id,
                 product_id,
                 channel.report_support,
                 Arc::clone(&channel.cassette),
                 Arc::clone(&channel.written),
-                connected,
-            )
+                Arc::clone(&connected),
+                Arc::clone(&channel.response_gates),
+            );
+            channel.lifetimes.push(ChannelLifetime {
+                connected: Arc::downgrade(&connected),
+                incoming: raw.incoming_sender(),
+            });
+            raw
         };
         HidppChannel::from_raw_channel(raw)
             .await

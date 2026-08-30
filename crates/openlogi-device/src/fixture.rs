@@ -6,6 +6,7 @@
 //! remain hand-authored Rust rather than another serialized format.
 
 mod backend;
+mod barrier;
 mod channel;
 mod schema;
 
@@ -20,6 +21,7 @@ pub use backend::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
     ReceiverSlot, ReceiverSlotState, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
 };
+pub use barrier::ReplayResponseBarrier;
 pub use channel::{
     ReplayChannelHandle, ReplayCompletion, ReplayMismatch, ReplayRawHidChannel, ReplayRawWriter,
     ReplayRawWriterHandle,

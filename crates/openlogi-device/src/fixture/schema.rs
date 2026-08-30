@@ -746,7 +746,7 @@ fn validate_name(asset: &'static str, field: &str, value: &str) -> Result<(), Fi
     }
 }
 
-fn validate_report(report: &[u8], support: ReportSupport) -> Result<(), String> {
+pub(super) fn validate_report(report: &[u8], support: ReportSupport) -> Result<(), String> {
     let expected = match report.first() {
         Some(0x10) => 7,
         Some(0x11) => 20,

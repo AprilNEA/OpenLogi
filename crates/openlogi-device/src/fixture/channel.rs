@@ -9,26 +9,14 @@ use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, RawWriter};
 
+use super::barrier::{RequestKey, ResponseGates};
 use super::schema::{
     FixtureError, HidCassette, ReportSupport, RequestMatch, format_hex, normalize_hidpp20,
 };
 
 type Responder = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum RequestKey {
-    Exact(Vec<u8>),
-    Hidpp20(Vec<u8>),
-}
-
 impl RequestKey {
-    fn from_exchange(request_match: RequestMatch, request: &[u8]) -> Self {
-        match request_match {
-            RequestMatch::Exact => Self::Exact(request.to_vec()),
-            RequestMatch::Hidpp20 => Self::Hidpp20(normalize_hidpp20(request)),
-        }
-    }
-
     fn description(&self) -> String {
         match self {
             Self::Exact(bytes) => format!("exact:{}", format_hex(bytes)),
@@ -281,6 +269,7 @@ pub struct ReplayRawHidChannel {
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
     cassette: Option<Arc<CassetteState>>,
+    response_gates: Arc<ResponseGates>,
     responder: Option<Responder>,
     connected: Arc<AtomicBool>,
     fails: Option<fn(&[u8]) -> bool>,
@@ -297,6 +286,7 @@ impl ReplayRawHidChannel {
         let cassette = CassetteState::new(cassette)?;
         let written = Arc::new(Mutex::new(Vec::new()));
         let connected = Arc::new(AtomicBool::new(true));
+        let response_gates = Arc::new(ResponseGates::default());
         let channel = Self::from_parts(
             vendor_id,
             product_id,
@@ -304,6 +294,7 @@ impl ReplayRawHidChannel {
             Arc::clone(&cassette),
             Arc::clone(&written),
             Arc::clone(&connected),
+            response_gates,
         );
         let handle = ReplayChannelHandle::from_parts(cassette, written, connected);
         Ok((channel, handle))
@@ -316,6 +307,7 @@ impl ReplayRawHidChannel {
         cassette: Arc<CassetteState>,
         written: Arc<Mutex<Vec<Vec<u8>>>>,
         connected: Arc<AtomicBool>,
+        response_gates: Arc<ResponseGates>,
     ) -> Self {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         Self {
@@ -326,10 +318,15 @@ impl ReplayRawHidChannel {
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
             written,
             cassette: Some(cassette),
+            response_gates,
             responder: None,
             connected,
             fails: None,
         }
+    }
+
+    pub(super) fn incoming_sender(&self) -> mpsc::UnboundedSender<Vec<u8>> {
+        self.incoming_tx.clone()
     }
 
     #[cfg(test)]
@@ -371,6 +368,7 @@ impl ReplayRawHidChannel {
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written: Arc::clone(&written),
                 cassette: None,
+                response_gates: Arc::new(ResponseGates::default()),
                 responder: Some(Arc::new(responder)),
                 connected: Arc::clone(&connected),
                 fails,
@@ -410,6 +408,10 @@ impl RawHidChannel for ReplayRawHidChannel {
         } else {
             self.responder.as_ref().and_then(|responder| responder(src))
         };
+        if let Some(gate) = self.response_gates.take(src) {
+            gate.request_written(self.incoming_tx.clone(), response);
+            return Ok(src.len());
+        }
         if let Some(response) = response {
             self.incoming_tx
                 .send(response)
