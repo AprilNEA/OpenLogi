@@ -105,6 +105,7 @@ fn main() {
     // hook) runs on the tokio runtime on a dedicated thread, and the main thread
     // runs AppKit. Elsewhere there is no tray, so just block on the core.
     let device_io_signal = openlogi_hid::host::device_io_signal();
+    let device_io_gate = openlogi_hid::host::device_io_gate();
     #[cfg(target_os = "macos")]
     {
         // Fail closed before the core thread can enumerate or open HID devices.
@@ -125,7 +126,12 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, uninstalled, armed_tx));
+                runtime.block_on(lifecycle::run(
+                    config,
+                    uninstalled,
+                    armed_tx,
+                    device_io_gate,
+                ));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
@@ -151,7 +157,7 @@ fn main() {
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, uninstalled));
+        runtime.block_on(lifecycle::run(config, uninstalled, device_io_gate));
     }
 }
 
