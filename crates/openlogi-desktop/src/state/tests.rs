@@ -663,12 +663,12 @@ fn gesture_mode_is_not_editable_from_inside_a_per_app_profile() {
     // per-direction shape to promote into.
     let mut state = state_editing("com.apple.Safari");
 
-    state.commit_gesture_mode(ButtonId::MiddleClick, true);
+    state.commit_gesture_mode(ButtonId::DpiToggle, true);
 
     assert!(
         !state
             .config
-            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick),
+            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::DpiToggle),
         "a per-app profile must not promote a button globally"
     );
     assert!(
@@ -680,9 +680,9 @@ fn gesture_mode_is_not_editable_from_inside_a_per_app_profile() {
 #[test]
 fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
     let mut state = state_with_a_known_mouse();
-    state.commit_gesture_mode(ButtonId::MiddleClick, true);
+    state.commit_gesture_mode(ButtonId::DpiToggle, true);
     let global = state.current_gesture_maps();
-    assert!(global.contains_key(&ButtonId::MiddleClick));
+    assert!(global.contains_key(&ButtonId::DpiToggle));
 
     state.set_editing_app(Some("com.apple.Safari".into()));
     assert!(state.current_gesture_maps().is_empty());
@@ -700,6 +700,28 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
 
     state.set_editing_app(None);
     assert_eq!(state.current_gesture_maps(), global);
+}
+
+#[test]
+fn unsupported_controls_cannot_enter_gesture_mode_through_the_ui_state() {
+    let mut state = state_with_a_known_mouse();
+
+    for button in [
+        ButtonId::LeftClick,
+        ButtonId::RightClick,
+        ButtonId::MiddleClick,
+        ButtonId::WheelTiltLeft,
+        ButtonId::WheelTiltRight,
+        ButtonId::Thumbwheel,
+        ButtonId::ThumbwheelScrollUp,
+        ButtonId::ThumbwheelScrollDown,
+    ] {
+        state.commit_gesture_mode(button, true);
+        assert!(
+            !state.config.is_gesture_mode(KNOWN_MOUSE_KEY, button),
+            "unsupported control {button:?} entered gesture mode"
+        );
+    }
 }
 
 #[test]
