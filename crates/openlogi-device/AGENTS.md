@@ -16,16 +16,20 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
 - `openlogi-hidpp` (lib name `hidpp`, 0BSD) is a **hard fork**, not a tracked vendor
   copy — read `crates/openlogi-hidpp/AGENTS.md` before touching that crate. Its own
   rules (protocol facts from official specs, typed wire values end to end) live there
-  now, not here, to keep this file to the `openlogi-hid` side only.
+  now, not here, to keep this file to the device-layer seam only.
 - Device "kind" flows through four incompatible vocabularies (Bolt pairing register,
   feature `0x0005` `DeviceType` — defined in `openlogi-hidpp` — the assets-registry
   string, and `openlogi_core::device::DeviceKind`) — the same small integers mean
   different things in each. Never cross them by raw value; convert at the boundary.
-  `kind` is identity-only; capability decisions come from the feature table.
+  `kind` is identity-only. Capability decisions use a live feature-table probe or the
+  last-good capabilities retained by the cache. The sole kind-derived fallback is
+  `Capabilities::presumed_from_kind` for a device that has never been probed and is
+  currently offline; keep it centralized and do not add new `kind` gates.
 - The Agent's persistent enumerator is event-first: OS hotplug and HID++ lifecycle
-  notifications request authoritative reconciliation, while a named low-frequency
-  recovery scan covers missed/unsupported events and non-broadcast battery features.
-  Cache/ledger grace keeps sleeping or briefly unreachable devices visible. Changes to
-  probing must preserve last-good replay, bounded repair, and channel retirement/reopen
-  ordering — run the inventory/watcher tests and inspect partial-failure paths, not just
-  clean enumeration.
+  notifications are identity-free hints that request authoritative full
+  re-enumeration. A named low-frequency recovery scan covers missed/unsupported events
+  and non-broadcast battery features. Cache/ledger grace keeps sleeping or briefly
+  unreachable devices visible. Changes to probing must preserve last-good replay,
+  bounded repair, and channel retirement/reopen ordering — run the inventory/watcher
+  tests and cover event bursts or loss, partial failure, and recovery, not just clean
+  enumeration.

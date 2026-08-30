@@ -41,14 +41,15 @@ Two more things this crate is not:
 | `runtime.rs` | Everything the app does that isn't a render: one task, one `select!` arm per source that can change long-lived state (agent updates, camera scan, asset commands, finished downloads, `openlogi://` deeplinks). |
 | `app.rs`, `app/` | The main window's shell — home gallery, device detail, menu bar, status line, deeplink handling. |
 | `windows.rs`, `windows/` | The windows themselves plus the registry that keeps each a singleton. About and Updates are **pages inside Settings**, not windows of their own. |
-| `features/` | One module per device-feature panel: `mouse`, `pointer`, `keyboard`, `lighting`, `camera`, `action_ring`, `profile_scope`. |
+| `features/` | One module per device-feature panel: `mouse`, `pointer`, `keyboard`, `lighting`, `camera`, `action_ring`, `profiles`. |
 | `state.rs`, `state/` | `AppState`, the GPUI global every view reads. Anything two views share belongs here; per-component scratch (hover index, open popover) stays in the owning entity. |
 | `services/` | Infrastructure, not UI: the IPC client, asset resolution and download, device reads, diagnostics, i18n. |
 | `ui/` | Shared components and the hand-painted `Palette` (`theme.rs`). |
 | `platform/` | OS integration — app icon, OS facts, updater. |
 | `app_assets.rs` | The GPUI asset source, composed in order: embedded logo → `openlogi-ui`'s `action-icons/` → gpui-component's bundled lucide set. A new icon path that resolves nowhere renders blank rather than failing to build. |
 
-Panels gate on `Capabilities`, never on device `kind`; commits go through
+Panels gate on measured or last-good `Capabilities`; the sole kind-derived fallback
+for a never-probed offline device stays centralized in `tabs_for`. Commits go through
 `AppState`, never straight to `Config`. Both rules are spelled out in
 `.claude/rules/gui.md`.
 

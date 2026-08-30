@@ -27,9 +27,11 @@ All of these lines are `debug`-level except the open failure, which is a
 middle row — in such a log, the absence of the other lines is not evidence
 of anything.
 
-`openlogi list` showing the device while the GUI does not is **not** evidence
-either way: the CLI is a separate code-signing identity running its own HID
-stack, so it can succeed where the agent fails, for either reason.
+`openlogi list` first asks the running agent. When it prints
+`(inventory read from the running agent)`, it observes the same device-I/O owner
+as the GUI. Only `(no agent reachable — reading hardware directly...)` means
+the CLI is using its separate TCC identity. Record that provenance before
+drawing a permission conclusion.
 
 If there is no log at all, go to §3 — getting a log is the whole job.
 
@@ -42,7 +44,7 @@ permissions.
 |---|---|---|
 | `org.openlogi.agent` | `…/Contents/Library/LoginItems/OpenLogi Agent.app` | **Input Monitoring** (opens HID) and **Accessibility** (owns the event tap) |
 | `org.openlogi.openlogi` | `…/Contents/MacOS/openlogi-desktop` | Camera only. It is a pure IPC client and needs neither of the above. |
-| `openlogi` | `…/Contents/MacOS/openlogi` (embedded CLI) | Input Monitoring, because it opens HID directly today |
+| `openlogi` | `…/Contents/MacOS/openlogi` (embedded CLI) | Input Monitoring only for direct fallback and hardware diagnostic commands |
 | `org.openlogi.overlay` | `…/LoginItems/OpenLogiOverlay.app` | Nothing |
 
 Two consequences that drive most reports:
@@ -142,9 +144,11 @@ every grant on that machine is being ignored.
 
 ## 6. Invariants — do not break these
 
-1. **Only the agent holds device permissions.** Any UI that reports permission
-   state must read it from the agent over IPC, never by querying its own
-   process. The GUI never opens a HID device, so its own grant means nothing.
+1. **Only the agent holds the app runtime's device permissions.** Any UI that
+   reports permission state must read it from the agent over IPC, never by
+   querying its own process. The GUI never opens a HID device, so its own grant
+   means nothing. A CLI direct fallback or diagnostic uses the CLI's separate
+   identity and says nothing about the agent's grant.
 2. **Every helper launch establishes its own responsible process** (§4), and the
    spawn result is checked — a silently failed `disclaim` leaves the agent
    running under the GUI's identity, which is invisible until a user reports it.
@@ -159,13 +163,13 @@ every grant on that machine is being ignored.
    process happens to be running. A TCC grant is scoped to the identity that
    asked.
 
-## 7. Known-broken right now
+## 7. Check current evidence
 
-Nothing in the launch, permission-reporting, or diagnosis path is known
-broken right now: the Settings row reads the agent's own grant over IPC
-(#606), the agent writes a log file (§3), open failures classify themselves
-(§1), and the `open -g -n` handoff checks its exit status. This is a
-snapshot — re-check the tracker before telling anyone a gap is still open.
+Do not carry a "currently fixed/broken" snapshot in this skill. Search the
+current tracker and identify the reporter's release before answering. An open
+report is a claim, not a root cause: classify it with §1 logs and the actual
+running identity. Re-check the current state of linked upstream transport
+issues before attributing a probe timeout to them.
 
 ## 8. What this cannot fix
 

@@ -23,10 +23,9 @@ about licensing or attribution:
   crate's protocol knowledge came from even as the code itself moves away from
   upstream's structure.
 - `[lib] name = "hidpp"` in `Cargo.toml`. Every consumer imports it as
-  `use hidpp::...` — as of this writing that's 30+ files, all in
-  `crates/openlogi-hid/src/**`, plus a doctest in this crate's own `src/lib.rs`.
-  Renaming the lib target is not a documentation-only change: it means touching
-  every one of those call sites in the same commit. Don't do it as a drive-by.
+  `use hidpp::...` across `openlogi-device`, `openlogi-hid`, and doctests. Renaming
+  the lib target is not a documentation-only change: derive the current call-site
+  set with `rg` and update all of it in the same commit. Don't do it as a drive-by.
 
 ## Rules that hold regardless of fork/vendor status
 
