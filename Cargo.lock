@@ -5485,14 +5485,18 @@ name = "openlogi-cli"
 version = "0.8.2"
 dependencies = [
  "anyhow",
+ "atomic-write-file",
  "clap",
  "openlogi-assets",
  "openlogi-camera",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-hid",
  "openlogi-ipc",
  "png 0.17.16",
+ "serde_json",
  "tarpc",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
