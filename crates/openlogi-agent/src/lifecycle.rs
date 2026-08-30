@@ -365,6 +365,15 @@ impl Running {
                     .await
                     .reapply_volatile_on_next_refresh();
             }
+            // A device broadcast its own reconnection (`0x1d4b`): reconfigure
+            // it on the next snapshot even if no reconciliation ever saw it
+            // offline.
+            InventoryEvent::DeviceWake => {
+                self.orchestrator
+                    .lock()
+                    .await
+                    .reapply_reconnected_on_next_refresh();
+            }
         }
     }
 
