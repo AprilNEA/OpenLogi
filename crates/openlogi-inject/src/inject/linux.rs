@@ -184,7 +184,7 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
 fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
     match native {
         NativeAction::MissionControl | NativeAction::AppExpose | NativeAction::ShowDesktop => {
-            skip_unsupported_native(action)
+            skip_unsupported_native(action);
         }
         NativeAction::LaunchpadShow | NativeAction::PreviousDesktop | NativeAction::NextDesktop => {
             if let Some((helper, fallback)) = hyprland_helper(native) {
@@ -263,6 +263,13 @@ fn hyprland_helper(native: NativeAction) -> Option<(HelperSpec, ChordSpec)> {
             },
         )),
         _ => None,
+    }
+}
+
+fn hyprland_lock_helper() -> HelperSpec {
+    HelperSpec {
+        program: "omarchy-system-lock",
+        args: &[],
     }
 }
 
@@ -805,13 +812,15 @@ fn lock_screen() {
     press_key(chord.modifiers, chord.key);
 }
 
-/// Hyprland lock: logind, then `omarchy-system-lock`, then Super+Ctrl+L.
-/// Never Super+L — that chord toggles workspace layout on Omarchy.
+/// Hyprland lock: `omarchy-system-lock`, then Super+Ctrl+L.
+///
+/// Do not call logind `LockSession` here. A successful D-Bus reply only
+/// signals the session; Hyprland does not listen, so treating OK as locked
+/// skips the Omarchy helper and leaves the screen unlocked. Never Super+L —
+/// that chord toggles workspace layout on Omarchy.
 fn lock_screen_hyprland() {
-    if try_logind_lock() {
-        return;
-    }
-    if run_fixed_argv("omarchy-system-lock", &[]) {
+    let helper = hyprland_lock_helper();
+    if run_fixed_argv(helper.program, helper.args) {
         return;
     }
     tracing::debug!("LockScreen via Super+Ctrl+L (Hyprland / Omarchy)");
@@ -903,8 +912,9 @@ mod tests {
 
     use super::{
         HELPER_PREFIXES, combo, generic_linux_lock_fallback_chord, hid_usage_to_linux,
-        hyprland_helper, hyprland_lock_fallback_chord, hyprland_session_from_signature, key_ev,
-        key_phase_events, modifiers_to_keycodes, resolve_allowlisted_under, syn,
+        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
+        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes,
+        resolve_allowlisted_under, syn,
     };
     use crate::inject::KeyPhase;
 
@@ -1027,6 +1037,14 @@ mod tests {
         assert_eq!(hyprland_helper(NativeAction::ShowDesktop), None);
         assert_eq!(hyprland_helper(NativeAction::LockScreen), None);
         assert_eq!(hyprland_helper(NativeAction::Screenshot), None);
+    }
+
+    #[test]
+    fn hyprland_lock_uses_omarchy_helper_not_logind() {
+        let helper = hyprland_lock_helper();
+        assert_eq!(helper.program, "omarchy-system-lock");
+        assert_eq!(helper.args, [] as [&str; 0]);
+        assert_eq!(HELPER_PREFIXES, ["/usr/bin", "/usr/local/bin"]);
     }
 
     #[test]

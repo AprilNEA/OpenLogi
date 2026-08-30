@@ -8,7 +8,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
 
@@ -22,8 +22,19 @@ pub(super) fn reconcile(enabled: bool) {
 }
 
 fn apply(enabled: bool) -> io::Result<()> {
-    let path = unit_path()?;
     let exe = std::env::current_exe()?;
+    // A `cargo build`/`cargo run` binary must not rewrite or delete the user's
+    // packaged unit. launch_at_login would otherwise point ExecStart at
+    // `target/release` (or wipe /usr/bin when the setting is off).
+    if is_cargo_built_agent(&exe) {
+        debug!(
+            enabled,
+            path = %exe.display(),
+            "cargo-built agent — leaving the systemd user unit unchanged"
+        );
+        return Ok(());
+    }
+    let path = unit_path()?;
     let desired = enabled.then(|| render_unit(&exe.to_string_lossy()));
 
     let current = std::fs::read_to_string(&path).ok();
@@ -52,6 +63,19 @@ fn apply(enabled: bool) -> io::Result<()> {
         (None, None) => debug!("systemd user unit already absent"),
     }
     Ok(())
+}
+
+/// True for binaries under a Cargo `target/{debug,release}/` directory.
+fn is_cargo_built_agent(exe: &Path) -> bool {
+    let mut saw_target = false;
+    for component in exe.components() {
+        let name = component.as_os_str();
+        if saw_target && (name == "release" || name == "debug") {
+            return true;
+        }
+        saw_target = name == "target";
+    }
+    false
 }
 
 /// Path to the per-user systemd unit:
@@ -135,6 +159,23 @@ impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_built_agent_paths_are_detected() {
+        assert!(is_cargo_built_agent(Path::new(
+            "/home/dev/openlogi/target/release/openlogi-agent"
+        )));
+        assert!(is_cargo_built_agent(Path::new(
+            "/home/dev/openlogi/target/debug/openlogi-agent"
+        )));
+        assert!(!is_cargo_built_agent(Path::new("/usr/bin/openlogi-agent")));
+        assert!(!is_cargo_built_agent(Path::new(
+            "/usr/local/bin/openlogi-agent"
+        )));
+        assert!(!is_cargo_built_agent(Path::new(
+            "/home/dev/target-practice/openlogi-agent"
+        )));
+    }
 
     #[test]
     fn rendered_unit_targets_agent_and_restarts_on_failure() {

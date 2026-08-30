@@ -188,8 +188,8 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
 /// virtual device. Mouse clicks inject `BTN_*` events. When
 /// `HYPRLAND_INSTANCE_SIGNATURE` is non-empty, `LaunchpadShow` runs
 /// `omarchy-menu toggle`, desktop switches run `hyprctl dispatch workspace`,
-/// and `LockScreen` prefers logind then `omarchy-system-lock` (never Super+L).
-/// Otherwise macOS-only window manager actions (`MissionControl`, `AppExpose`,
+/// and `LockScreen` runs `omarchy-system-lock` (never Super+L; logind is not
+/// treated as locked on Hyprland). Otherwise macOS-only window manager actions (`MissionControl`, `AppExpose`,
 /// `ShowDesktop`, `LaunchpadShow`) have no universal Linux equivalent and are
 /// silently skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes
 /// to Linux key codes; macOS Cmd maps to Ctrl.

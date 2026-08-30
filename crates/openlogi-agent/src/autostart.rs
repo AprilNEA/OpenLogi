@@ -12,7 +12,9 @@
 //!   `config.toml` therefore takes effect the next time the GUI runs.
 //! - **Linux** ([`linux`]): a systemd **user** unit, written/removed and
 //!   `systemctl --user` enabled/disabled. `Restart=on-failure` mirrors the
-//!   macOS service's `KeepAlive = {SuccessfulExit: false}` semantics.
+//!   macOS service's `KeepAlive = {SuccessfulExit: false}` semantics. A
+//!   cargo `target/{debug,release}` binary skips reconcile so it cannot
+//!   overwrite or delete a packaged unit.
 //! - **Windows** ([`windows`]): an `HKCU\…\Run` registry value — login launch
 //!   only, no crash respawn.
 //!
