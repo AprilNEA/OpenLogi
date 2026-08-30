@@ -361,6 +361,7 @@ fn persisted_action_variant_names_are_stable() {
         "NextTrack",
         "None",
         "OpenApplication",
+        "Pan",
         "Paste",
         "PlayPause",
         "PrevTab",
@@ -387,6 +388,7 @@ fn persisted_action_variant_names_are_stable() {
         "VolumeDown",
         "VolumeUp",
         "Workflow",
+        "Zoom",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
@@ -465,6 +467,8 @@ fn category_scroll_variants() {
     assert_eq!(Action::ScrollDown.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollLeft.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollRight.category(), Category::Scroll);
+    assert_eq!(Action::Pan.category(), Category::Scroll);
+    assert_eq!(Action::Zoom.category(), Category::Scroll);
 }
 
 #[test]
@@ -618,6 +622,8 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
         Action::SetDpiPreset(2),
         Action::ToggleSmartShift,
         Action::ShowActionsRing,
+        Action::Pan,
+        Action::Zoom,
     ] {
         assert_matches!(action.effect(), Effect::AgentSide);
     }
@@ -640,5 +646,26 @@ fn scroll_actions_lower_to_unit_direction() {
     assert_eq!(
         Action::HorizontalScrollRight.effect(),
         Effect::Scroll { dx: 1, dy: 0 }
+    );
+}
+
+#[test]
+fn hold_mode_predicate_is_only_pan_and_zoom() {
+    assert!(Action::Pan.is_hold_mode());
+    assert!(Action::Zoom.is_hold_mode());
+    assert_eq!(Action::Pan.label(), "Pan");
+    assert_eq!(Action::Zoom.label(), "Pinch Zoom");
+    assert!(Action::catalog().contains(&Action::Pan));
+    assert!(Action::catalog().contains(&Action::Zoom));
+    assert_ne!(
+        Action::Zoom.label(),
+        "Zoom",
+        "must not reuse the window-menu Zoom locale key"
+    );
+    assert!(!Action::ScrollUp.is_hold_mode());
+    assert!(!Binding::Single(Action::Copy).is_hold_mode());
+    assert!(Binding::Single(Action::Pan).is_hold_mode());
+    assert!(
+        !Binding::Gesture(BTreeMap::from([(GestureDirection::Click, Action::Pan)])).is_hold_mode()
     );
 }

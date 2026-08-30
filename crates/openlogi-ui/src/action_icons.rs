@@ -147,4 +147,18 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn hold_mode_action_icons_are_embedded() {
+        use openlogi_core::binding::Action;
+
+        for action in [Action::Pan, Action::Zoom] {
+            let path = ActionRingIcon::for_action(&action).asset_path();
+            let loaded = ActionIcons.load(path);
+            assert!(
+                matches!(loaded, Ok(Some(_))),
+                "missing embedded asset for {action:?} ({path})"
+            );
+        }
+    }
 }

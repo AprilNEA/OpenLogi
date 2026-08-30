@@ -115,6 +115,18 @@ impl Binding {
         matches!(self, Binding::Gesture(_))
     }
 
+    /// Whether this binding is a hold-mode [`Single`](Binding::Single) that
+    /// needs a raw-XY divert. Gesture and long-press shapes cannot drive a
+    /// hold; they answer false even if a hand-edited map smuggled `Pan`/`Zoom`
+    /// into a direction slot.
+    #[must_use]
+    pub fn is_hold_mode(&self) -> bool {
+        match self {
+            Binding::Single(action) => action.is_hold_mode(),
+            Binding::Gesture(_) | Binding::LongPress(_) => false,
+        }
+    }
+
     /// Promote a [`Single`](Binding::Single) binding in place to a
     /// [`Gesture`](Binding::Gesture), keeping its action as the
     /// [`GestureDirection::Click`] entry and leaving the swipe arms unbound.

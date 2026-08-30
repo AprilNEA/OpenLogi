@@ -26,6 +26,7 @@ openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
+openlogi-inject = { path = "../openlogi-inject" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
 interprocess = { workspace = true }

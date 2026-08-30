@@ -35,6 +35,7 @@ pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 pub(super) use openlogi_core::config::{
     Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    ZoomSensitivity,
 };
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
@@ -119,8 +120,9 @@ pub struct SettingsView {
     initial_page: SettingsPage,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
-    thumbwheel_sensitivity_slider: Entity<SliderState>,
-    vertical_scroll_sensitivity_slider: Entity<SliderState>,
+    /// The General page's sensitivity sliders, owned here so their values
+    /// survive a page switch.
+    sensitivity_sliders: general::SensitivitySliders,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -212,9 +214,7 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let thumbwheel_sensitivity_slider = Self::thumbwheel_sensitivity_slider(window, cx);
-        let vertical_scroll_sensitivity_slider =
-            Self::vertical_scroll_sensitivity_slider(window, cx);
+        let sensitivity_sliders = Self::sensitivity_sliders(window, cx);
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -261,8 +261,7 @@ impl SettingsView {
             initial_page,
             language_select,
             asset_source_select,
-            thumbwheel_sensitivity_slider,
-            vertical_scroll_sensitivity_slider,
+            sensitivity_sliders,
             updater,
             updater_obs,
             copied: false,
@@ -324,6 +323,62 @@ impl SettingsView {
         cx.subscribe_in(&slider, window, Self::on_vertical_scroll_sensitivity_slider)
             .detach();
         slider
+    }
+
+    /// Build the General page's sensitivity sliders. Each subscribes itself
+    /// to this view, so they are constructed once and outlive page switches.
+    fn sensitivity_sliders(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> general::SensitivitySliders {
+        general::SensitivitySliders {
+            vertical_scroll: Self::vertical_scroll_sensitivity_slider(window, cx),
+            thumbwheel: Self::thumbwheel_sensitivity_slider(window, cx),
+            zoom: Self::zoom_sensitivity_slider(window, cx),
+        }
+    }
+
+    fn zoom_sensitivity_slider(window: &mut Window, cx: &mut Context<Self>) -> Entity<SliderState> {
+        let current = AppState::try_read(cx).map_or(ZoomSensitivity::DEFAULT, |state| {
+            state.app_settings().zoom_sensitivity
+        });
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(f32::from(ZoomSensitivity::MIN))
+                .max(f32::from(ZoomSensitivity::MAX))
+                .default_value(f32::from(current))
+        });
+        cx.subscribe_in(&slider, window, Self::on_zoom_sensitivity_slider)
+            .detach();
+        slider
+    }
+
+    /// Commit the hold-mode zoom sensitivity once the slider is released.
+    #[expect(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_zoom_sensitivity_slider(
+        &mut self,
+        slider: &Entity<SliderState>,
+        event: &SliderEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SliderEvent::Release(value) = event {
+            let sensitivity = ZoomSensitivity::from_rounded(value.start());
+            let committed = AppState::update(cx, |state, cx| {
+                state.set_zoom_sensitivity(sensitivity);
+                cx.emit(StateEvent::SettingsChanged);
+                state.app_settings().zoom_sensitivity
+            });
+            // A failed write restores AppState's persisted configuration.
+            // Re-seat the slider so it cannot keep showing a rejected value.
+            slider.update(cx, |slider, cx| {
+                slider.set_value(f32::from(committed), window, cx);
+            });
+        }
+        cx.notify();
     }
 
     /// Commit the thumb-wheel sensitivity slider. The label tracks the live
@@ -491,10 +546,7 @@ impl Render for SettingsView {
                 group_ix: None,
             })
             .page(general::general_page(
-                general::SensitivitySliders {
-                    vertical_scroll: self.vertical_scroll_sensitivity_slider.clone(),
-                    thumbwheel: self.thumbwheel_sensitivity_slider.clone(),
-                },
+                self.sensitivity_sliders.clone(),
                 self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));

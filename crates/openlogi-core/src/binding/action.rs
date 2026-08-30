@@ -187,6 +187,14 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Hold-mode two-axis pan: the cursor freezes and pointer travel scrolls
+    /// content on both axes until release. Appended because the serde variant
+    /// index is the wire format — new variants only ever go at the end.
+    Pan,
+    /// Hold-mode continuous pinch-zoom. Distinct from the window-menu "Zoom"
+    /// locale key (Italian `Ridimensiona`); this variant's catalog label is
+    /// "Pinch Zoom" so i18n must not reuse that key.
+    Zoom,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -285,6 +293,8 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" Scroll ScrollRight,
+            Pan "Pan" Scroll Mouse,
+            Zoom "Pinch Zoom" Scroll Search,
         }
     };
 }
@@ -367,5 +377,16 @@ impl Action {
             Self::HoldShortcut(combo) => Some(combo),
             _ => None,
         }
+    }
+
+    /// Whether this action is a hold-mode control that needs a raw-XY HID++
+    /// divert for the lifetime of the press.
+    ///
+    /// One definition: catalog filters, capture-plan derivation, and
+    /// [`RingAction`](super::action_ring::RingAction) validation all ask this
+    /// rather than matching `Pan | Zoom` in parallel.
+    #[must_use]
+    pub const fn is_hold_mode(&self) -> bool {
+        matches!(self, Self::Pan | Self::Zoom)
     }
 }

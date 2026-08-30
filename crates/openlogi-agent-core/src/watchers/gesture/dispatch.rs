@@ -1,5 +1,6 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
+mod hold;
 mod wheel;
 
 use std::collections::HashMap;
@@ -8,8 +9,9 @@ use std::time::Instant;
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::CapturedInput;
-use tracing::debug;
+use tracing::{debug, warn};
 
+use self::hold::HoldSessions;
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
@@ -99,6 +101,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
+    holds: HoldSessions,
 }
 
 impl InputDispatcher {
@@ -109,6 +112,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
+            holds: HoldSessions::default(),
         }
     }
 
@@ -128,10 +132,43 @@ impl InputDispatcher {
     }
 
     /// Cancel every input lifecycle retained for one capture session.
+    ///
+    /// A still-live epoch (dispatch-plan refresh) ends the hold but stays
+    /// writable so a later press can begin again. Call [`Self::retire_session`]
+    /// when the epoch is dead.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
+        if let Some(command) = self.holds.end_open(session) {
+            hold::emit(command);
+        }
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
+    }
+
+    /// End a live hold and lock the epoch. Retirement still owns drain
+    /// inputs, so a late HoldBegin must not open a pinch nothing closes.
+    pub(super) fn lock_holds(&mut self, session: &HidppSessionId) {
+        if let Some(command) = self.holds.close_session(session) {
+            hold::emit(command);
+        }
+    }
+
+    /// Epoch is gone. Late HoldBegin/HoldMotion must not reopen inject.
+    pub(super) fn retire_session(&mut self, session: &HidppSessionId) {
+        if let Some(command) = self.holds.close_session(session) {
+            hold::emit(command);
+        }
+        self.outputs.cancel_session(session);
+        self.wheels.cancel_session(session);
+        self.gesture_presses.cancel_session(session);
+    }
+
+    /// Watcher or process teardown: end every hold and flush inject.
+    pub(super) fn shutdown_holds(&mut self) {
+        for command in self.holds.close_all() {
+            hold::emit(command);
+        }
+        hold::flush_inject();
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -171,43 +208,14 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
-                // A raw-XY gesture source owns its click/swipe map; its physical
-                // lifecycle is still tracked, but it must not also fire the
-                // single-action projection on down.
-                let is_gesture = plan.gesture_bindings.contains_key(&button)
-                    || plan.side_gesture_bindings.contains_key(&button);
-                let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button with no binding — ignored");
-                }
-                let press = self
-                    .outputs
-                    .actions
-                    .try_hidpp_button_down(session, button, binding);
-                if is_gesture {
-                    if let Some(press) = press {
-                        self.gesture_presses.start(session, button, press);
-                    } else {
-                        self.gesture_presses.end(session, button);
-                    }
-                }
+                self.dispatch_button_down(session, plan, button);
             }
             CapturedInput::ButtonUp(button) => {
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.gesture_presses.end(session, button);
             }
             CapturedInput::ButtonPulse(button) => {
-                let binding = plan.bindings.get(&button);
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button pulse with no binding — ignored");
-                }
-                self.outputs
-                    .actions
-                    .dispatch_hidpp_button_pulse(session, button, binding);
+                self.dispatch_button_pulse(session, plan, button);
             }
             CapturedInput::Scroll {
                 increments,
@@ -237,8 +245,120 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
+            CapturedInput::HoldBegin(_)
+            | CapturedInput::HoldMotion { .. }
+            | CapturedInput::HoldEnd { .. } => self.dispatch_hold(session, plan, input),
         }
     }
+
+    fn dispatch_button_down(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+    ) {
+        let key = session.device_key();
+        if warn_suppressed_hold_click(key, plan, button) {
+            return;
+        }
+        // A raw-XY gesture source owns its click/swipe map; its physical
+        // lifecycle is still tracked, but it must not also fire the
+        // single-action projection on down.
+        let is_gesture = plan.gesture_bindings.contains_key(&button)
+            || plan.side_gesture_bindings.contains_key(&button);
+        let binding = hidpp_click_binding(plan, button);
+        if let Some(binding) = binding {
+            debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
+        } else {
+            debug!(key, ?button, "HID++ button with no binding — ignored");
+        }
+        let press = self
+            .outputs
+            .actions
+            .try_hidpp_button_down(session, button, binding);
+        if is_gesture {
+            if let Some(press) = press {
+                self.gesture_presses.start(session, button, press);
+            } else {
+                self.gesture_presses.end(session, button);
+            }
+        }
+    }
+
+    fn dispatch_button_pulse(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+    ) {
+        let key = session.device_key();
+        if warn_suppressed_hold_click(key, plan, button) {
+            return;
+        }
+        let binding = hidpp_click_binding(plan, button);
+        if let Some(binding) = binding {
+            debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
+        } else {
+            debug!(key, ?button, "HID++ button pulse with no binding — ignored");
+        }
+        self.outputs
+            .actions
+            .dispatch_hidpp_button_pulse(session, button, binding);
+    }
+
+    fn dispatch_hold(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        input: CapturedInput,
+    ) {
+        let command = match input {
+            CapturedInput::HoldBegin(button) => self.holds.begin(session, button, plan),
+            CapturedInput::HoldMotion { button, dx, dy } => {
+                self.holds.motion(session, button, dx, dy)
+            }
+            CapturedInput::HoldEnd { button, release } => self.holds.end(session, button, release),
+            _ => unreachable!("dispatch_hold is only called for Hold*"),
+        };
+        if let Some(command) = command {
+            hold::emit(command);
+        }
+    }
+}
+
+/// A hold-mode binding on the click path is a failed delivery, not a
+/// one-shot scroll. When hold is unarmed the plan plain-diverts the CID
+/// so firmware cannot keep scrolling; this rejects the resulting press.
+fn hidpp_hold_click_suppressed(plan: &DispatchPlan, button: ButtonId) -> Option<&Action> {
+    plan.hold_bindings.get(&button)
+}
+
+/// Log and refuse a hold-mode binding that arrived on the click path.
+fn warn_suppressed_hold_click(key: &str, plan: &DispatchPlan, button: ButtonId) -> bool {
+    let Some(action) = hidpp_hold_click_suppressed(plan, button) else {
+        return false;
+    };
+    warn!(
+        key,
+        ?button,
+        action = %action.label(),
+        "hold-mode action cannot be delivered as a click — ignored"
+    );
+    true
+}
+
+/// Click binding that would be handed to the action runtime. Hold-mode
+/// buttons are never a click, even when they still appear in `bindings`.
+fn hidpp_click_binding(plan: &DispatchPlan, button: ButtonId) -> Option<&Binding> {
+    if hidpp_hold_click_suppressed(plan, button).is_some() {
+        return None;
+    }
+    let is_gesture = plan.gesture_bindings.contains_key(&button)
+        || plan.side_gesture_bindings.contains_key(&button);
+    if is_gesture {
+        return None;
+    }
+    plan.bindings.get(&button)
 }
 
 #[cfg(test)]

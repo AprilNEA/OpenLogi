@@ -286,11 +286,7 @@ fn quit_agent() -> ! {
     }
     crate::overlay::evict_on_quit();
     info!("menu-bar Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from an AppKit menu action on the main thread: the run loop owns `main`'s stack frame, so no status can travel back to it"
-    )]
-    std::process::exit(0)
+    crate::shutdown::flush_and_exit(0)
 }
 
 /// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
@@ -325,11 +321,7 @@ pub fn run_app_loop(
 ) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
-        #[expect(
-            clippy::exit,
-            reason = "this branch means `run_app_loop` was called off the process main thread, where AppKit cannot run at all; the function is `-> !` and `main` returns `()`, so a failure status has nowhere to propagate"
-        )]
-        std::process::exit(1);
+        crate::shutdown::flush_and_exit(1);
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -349,11 +341,7 @@ pub fn run_app_loop(
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
-    #[expect(
-        clippy::exit,
-        reason = "AppKit only returns from `run()` once the loop is torn down, and the agent core is still running on another thread; this function is `-> !` with no return path, so the process ends here"
-    )]
-    std::process::exit(0);
+    crate::shutdown::flush_and_exit(0);
 }
 
 /// Observe display/session sleep and user-visible resume transitions. Generic

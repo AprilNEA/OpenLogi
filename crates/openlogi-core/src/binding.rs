@@ -37,7 +37,7 @@ pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{
-    GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
-    detect_swipe,
+    GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, HOLD_DRAG_DEADZONE_MM,
+    HOLD_STALE, StreamRelease, SwipeAccumulator, detect_swipe, hold_drag_threshold_counts,
 };
 pub use value::{Binding, LONG_PRESS_THRESHOLD, LongPressBinding};

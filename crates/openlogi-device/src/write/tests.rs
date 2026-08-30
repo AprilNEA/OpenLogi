@@ -223,6 +223,25 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
     Ok(())
 }
 
+#[tokio::test]
+async fn get_dpi_on_caches_the_sensor_reading() -> Result<(), WriteError> {
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(scripted_response);
+    let channel = scripted_channel(raw).await;
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0d01,
+    };
+    let shared = SharedChannel::new(channel, route.clone());
+    let dpi = get_dpi_on(&shared).await?;
+    assert_eq!(dpi, Dpi::new(800));
+    assert_eq!(
+        cached_sensor_dpi(&route),
+        Some(Dpi::new(800)),
+        "hold-mode must be able to read the same value without another HID++ round-trip"
+    );
+    Ok(())
+}
+
 #[test]
 fn stepped_dpi_ranges_expand_onto_their_step_grid() {
     assert_eq!(

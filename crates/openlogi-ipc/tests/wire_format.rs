@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -101,7 +101,17 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
+}
+
+/// Appended `Action` variants keep earlier indexes and occupy the next two
+/// slots. Pin both facts so a mid-list insert fails here instead of at a
+/// mismatched agent/GUI pair.
+#[test]
+fn hold_mode_actions() {
+    assert_wire(&Action::None, "00");
+    assert_wire(&Action::Pan, "35");
+    assert_wire(&Action::Zoom, "36");
 }
 
 #[test]

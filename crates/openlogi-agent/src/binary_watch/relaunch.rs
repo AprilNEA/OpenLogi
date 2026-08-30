@@ -40,6 +40,9 @@ pub(super) fn restart(path: &Path) {
         path = %path.display(),
         "executable changed on disk — restarting as the new binary"
     );
+    // `exec` replaces the image without `Drop`. Flush first so an open
+    // pan or a held Ctrl from zoom is closed before the old image is gone.
+    crate::shutdown::prepare_process_exit();
     // Forward our argv (none today) so a future flag survives the restart.
     let err = std::process::Command::new(path)
         .args(std::env::args_os().skip(1))
@@ -108,11 +111,7 @@ fn schedule_macos_relaunch(path: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "macos")]
 fn schedule_macos_relaunch_and_exit(path: &Path) -> std::io::Result<()> {
     schedule_macos_relaunch(path)?;
-    #[expect(
-        clippy::exit,
-        reason = "the delayed successor is already scheduled and waits for this process to release the singleton lock and IPC socket"
-    )]
-    std::process::exit(0)
+    crate::shutdown::flush_and_exit(0)
 }
 
 /// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
@@ -132,11 +131,7 @@ pub(super) fn restart(path: &Path) {
         path = %path.display(),
         "executable changed on disk — exiting so the new binary can start"
     );
-    #[expect(
-        clippy::exit,
-        reason = "windows has no `exec`, and this watcher thread cannot return a status to `main`, which is blocked on the agent core; releasing the singleton lock by exiting is what lets the replaced binary start"
-    )]
-    std::process::exit(0);
+    crate::shutdown::flush_and_exit(0);
 }
 
 #[cfg(target_os = "macos")]

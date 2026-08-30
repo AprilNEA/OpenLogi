@@ -248,6 +248,17 @@ pub struct AppSettings {
     /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Hold-mode pinch-zoom responsiveness. Scales how much magnification a
+    /// millimetre of pointer travel produces while a Zoom-bound button is
+    /// held. [`ZoomSensitivity::DEFAULT`] means 1x of the base rate.
+    #[serde(default)]
+    pub zoom_sensitivity: ZoomSensitivity,
+    /// Whether hold-mode pan moves the view instead of the content. Off by
+    /// default, which matches a trackpad's natural scrolling: the content
+    /// follows the hand. On, the viewport follows the hand instead, the way
+    /// dragging a scrollbar does.
+    #[serde(default)]
+    pub invert_pan: bool,
     /// Light/dark appearance preference. Defaults to following the OS.
     #[serde(default)]
     pub appearance: Appearance,
@@ -428,6 +439,74 @@ impl From<ThumbwheelSensitivity> for i32 {
     }
 }
 
+/// Hold-mode pinch-zoom responsiveness on OpenLogi's `1..=100` scale.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct ZoomSensitivity(u8);
+
+impl ZoomSensitivity {
+    /// Lowest selectable sensitivity.
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum zoom sensitivity"),
+    };
+    /// Highest selectable sensitivity.
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum zoom sensitivity"),
+    };
+    /// Out-of-the-box sensitivity. At this value zoom runs at 1x of the
+    /// hold-mode base rate.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default zoom sensitivity"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = rounded_sensitivity(value);
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped zoom sensitivity is always valid");
+        };
+        value
+    }
+
+    /// Magnification-per-travel multiplier relative to [`Self::DEFAULT`].
+    #[must_use]
+    pub fn zoom_multiplier(self) -> f32 {
+        f32::from(self.into_inner()) / f32::from(Self::DEFAULT.into_inner())
+    }
+}
+
+impl Default for ZoomSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<ZoomSensitivity> for f32 {
+    fn from(sensitivity: ZoomSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
 fn rounded_sensitivity(value: f32) -> u8 {
     let value = if value.is_nan() {
         f32::from(SENSITIVITY_MIN)
@@ -460,6 +539,8 @@ impl Default for AppSettings {
             capture_mouse_events: true,
             smooth_scroll: false,
             vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
+            zoom_sensitivity: ZoomSensitivity::DEFAULT,
+            invert_pan: false,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,

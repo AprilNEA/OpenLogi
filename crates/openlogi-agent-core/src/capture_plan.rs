@@ -8,13 +8,21 @@
 //! plan of the session it arrived on, never against a global selected-device
 //! map.
 
+mod hold;
+
+#[cfg(test)]
+pub(crate) use hold::FALLBACK_HOLD_SENSOR_DPI;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
-use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, ThumbwheelSensitivity};
+use openlogi_core::bindings::{
+    button_bindings_for, hidpp_gesture_maps_for, hold_mode_bindings_for, oshook_gestures_for,
+};
+use openlogi_core::config::{Config, ThumbwheelSensitivity, ZoomSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::hid::Dpi;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
@@ -63,6 +71,48 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Hold-mode (`Pan` / `Zoom`) button bindings. The OS-hook map must omit
+    /// these keys so HID++ is the only dispatch path.
+    pub hold_bindings: BTreeMap<ButtonId, Action>,
+    /// Live sensor DPI, for converting raw counts to millimetres. Unlike
+    /// [`CaptureSpec::sensor_dpi`] this tracks the real reading, so the felt
+    /// speed of a pan is right on a device whose sensor is not at the
+    /// fallback.
+    pub sensor_dpi: Option<Dpi>,
+    /// App-wide hold-mode zoom responsiveness.
+    pub zoom_sensitivity: ZoomSensitivity,
+    /// App-wide hold-mode pan direction. `false` is content-follows-hand.
+    pub invert_pan: bool,
+}
+
+/// Host facts that decide whether hold-mode raw-XY may be armed.
+///
+/// [`plan_for_device`] fail-closes on injection only: it stays unavailable
+/// until the orchestrator calls [`plan_for_device_with`]. A missing DPI no
+/// longer disables hold-mode — see [`hold::FALLBACK_HOLD_SENSOR_DPI`].
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureHostAbility {
+    /// Whether the OS movement hook is currently usable.
+    pub os_mouse_hook_available: bool,
+    /// Whether synthesised events can be delivered (macOS Accessibility).
+    /// Arming a raw-XY divert without this freezes the cursor for a gesture
+    /// that can never happen.
+    pub injection_available: bool,
+    /// Live sensor DPI. Falls back to the committed config DPI, then to a
+    /// named factory default, so a missing reading never disables hold-mode.
+    pub sensor_dpi: Option<Dpi>,
+}
+
+impl CaptureHostAbility {
+    /// Hook availability only — hold-mode stays unarmed.
+    #[must_use]
+    pub const fn hook_only(os_mouse_hook_available: bool) -> Self {
+        Self {
+            os_mouse_hook_available,
+            injection_available: false,
+            sensor_dpi: None,
+        }
+    }
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -105,6 +155,45 @@ pub fn plan_for_device(
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
+    plan_for_device_with(
+        config,
+        physical_key,
+        config_key,
+        route,
+        app,
+        rearm_generation,
+        CaptureHostAbility::hook_only(os_mouse_hook_available),
+    )
+}
+
+/// Whether any thumb-wheel control carries a non-default binding. That alone
+/// is reason to capture the wheel, independent of its sensitivity.
+fn thumbwheel_bindings_customized(bindings: &BTreeMap<ButtonId, Binding>) -> bool {
+    [
+        ButtonId::Thumbwheel,
+        ButtonId::ThumbwheelScrollUp,
+        ButtonId::ThumbwheelScrollDown,
+    ]
+    .iter()
+    .any(|button| {
+        bindings
+            .get(button)
+            .is_some_and(|binding| binding.click_action() != default_binding(*button))
+    })
+}
+
+/// Build one device's plan with explicit injection and DPI facts.
+#[must_use]
+pub fn plan_for_device_with(
+    config: &Config,
+    physical_key: PhysicalDeviceKey,
+    config_key: &str,
+    route: DeviceRoute,
+    app: Option<&str>,
+    rearm_generation: u64,
+    ability: CaptureHostAbility,
+) -> DeviceCapturePlan {
+    let os_mouse_hook_available = ability.os_mouse_hook_available;
     let bindings = button_bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
@@ -116,10 +205,34 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let hold_bindings = hold_mode_bindings_for(config, Some(config_key), app);
+    let resolved_dpi = hold::resolve_hold_sensor_dpi(ability.sensor_dpi, config.dpi(config_key));
+    hold::warn_if_hold_dpi_is_approximate(
+        config_key,
+        !hold_bindings.is_empty(),
+        ability.injection_available,
+        &resolved_dpi,
+    );
+    let sensor_dpi = Some(resolved_dpi.dpi);
+    // The armed spec carries the fallback only, never a live sensor reading.
+    // `CaptureSpec` is part of `CaptureTarget`'s identity, so folding the live
+    // value in would retire and re-arm the session the moment the first
+    // `getSensorDpi` lands, seconds after connect, tearing down any hold the
+    // user had already started. The device layer prefers the process-wide
+    // sensor cache at press time anyway, so this value only ever matters on a
+    // device whose DPI can never be read.
+    let armed_dpi = Some(hold::resolve_hold_sensor_dpi(None, config.dpi(config_key)).dpi);
+    let divert_hold_buttons = hold::raw_xy_hold_diverts(
+        &hold_bindings,
+        &gesture_bindings,
+        &oshook,
+        ability.injection_available,
+    );
     let divert_gesture_buttons = if os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
             .filter(|(_, button)| side_gesture_bindings.contains_key(button))
+            .filter(|(_, button)| !hold_bindings.contains_key(button))
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -142,6 +255,12 @@ pub fn plan_for_device(
         })
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
+            // Raw-XY hold owns these CIDs when injection can deliver. When it
+            // cannot, keep them on the plain-divert list so the button still
+            // runs its binding as a click instead of its native action.
+            !hold_bindings.contains_key(button) || !ability.injection_available
+        })
+        .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
                 if matches!(binding, Binding::LongPress(_)) {
                     return true;
@@ -158,17 +277,7 @@ pub fn plan_for_device(
             })
         })
         .collect();
-    let thumbwheel_bindings_nondefault = [
-        ButtonId::Thumbwheel,
-        ButtonId::ThumbwheelScrollUp,
-        ButtonId::ThumbwheelScrollDown,
-    ]
-    .iter()
-    .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
-    });
+    let thumbwheel_bindings_nondefault = thumbwheel_bindings_customized(&bindings);
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
@@ -183,7 +292,11 @@ pub fn plan_for_device(
                     .map(|(cid, _)| cid)
                     .collect(),
                 divert_gesture_buttons,
+                divert_hold_buttons,
                 divert_buttons,
+                sensor_dpi: armed_dpi,
+                hold_requested: hold_bindings.len(),
+                injection_available: ability.injection_available,
             },
             rearm_generation,
         },
@@ -193,6 +306,10 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            hold_bindings,
+            sensor_dpi,
+            zoom_sensitivity: config.app_settings.zoom_sensitivity,
+            invert_pan: config.app_settings.invert_pan,
         },
     }
 }
@@ -200,6 +317,7 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::{Binding, LongPressBinding};
+    use openlogi_core::hid::Dpi;
     use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
 
     use super::*;
@@ -582,5 +700,250 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    fn plan_with(
+        config: &Config,
+        config_key: &str,
+        ability: CaptureHostAbility,
+    ) -> DeviceCapturePlan {
+        super::plan_for_device_with(
+            config,
+            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                .expect("fixture should be a physical key"),
+            config_key,
+            route(),
+            None,
+            0,
+            ability,
+        )
+    }
+
+    fn hold_ready(dpi: Dpi) -> CaptureHostAbility {
+        CaptureHostAbility {
+            os_mouse_hook_available: true,
+            injection_available: true,
+            sensor_dpi: Some(dpi),
+        }
+    }
+
+    #[test]
+    fn hold_mode_button_is_raw_xy_diverted_and_not_plain_or_os_hook() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+
+        let plan = plan_with(&cfg, "2b042", hold_ready(Dpi::new(1000)));
+        assert_eq!(
+            plan.dispatch.hold_bindings.get(&ButtonId::Back),
+            Some(&Action::Pan)
+        );
+        assert!(
+            plan.target
+                .spec
+                .divert_hold_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "Pan must be a raw-XY hold divert: {:?}",
+            plan.target.spec.divert_hold_buttons
+        );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "a hold-mode button must not also be a plain divert"
+        );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_gesture_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "a hold-mode button must not stay on the swipe-gesture divert list"
+        );
+    }
+
+    #[test]
+    fn hold_mode_is_not_armed_without_injection() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Zoom));
+
+        let plan = plan_with(
+            &cfg,
+            "2b042",
+            CaptureHostAbility {
+                os_mouse_hook_available: true,
+                injection_available: false,
+                sensor_dpi: Some(Dpi::new(1000)),
+            },
+        );
+        assert!(
+            plan.dispatch.hold_bindings.contains_key(&ButtonId::Back),
+            "dispatch still names the hold so the hook map can strip it"
+        );
+        assert!(
+            plan.target.spec.divert_hold_buttons.is_empty(),
+            "arming without injection would freeze the cursor for a dropped gesture"
+        );
+    }
+
+    #[test]
+    fn hold_mode_arms_on_a_fallback_dpi_when_the_sensor_read_is_missing() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+
+        let plan = plan_with(
+            &cfg,
+            "2b042",
+            CaptureHostAbility {
+                os_mouse_hook_available: true,
+                injection_available: true,
+                sensor_dpi: None,
+            },
+        );
+        assert_eq!(
+            plan.target.spec.sensor_dpi,
+            Some(hold::FALLBACK_HOLD_SENSOR_DPI)
+        );
+        assert!(
+            plan.target
+                .spec
+                .divert_hold_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "a missing DPI must not disable the feature"
+        );
+    }
+
+    #[test]
+    fn hold_mode_scale_dpi_is_the_live_sensor_reading_not_a_constant() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+        cfg.set_dpi("2b042", Dpi::new(400));
+
+        let low = plan_with(&cfg, "2b042", hold_ready(Dpi::new(400)));
+        let high = plan_with(&cfg, "2b042", hold_ready(Dpi::new(1600)));
+        assert_eq!(low.dispatch.sensor_dpi, Some(Dpi::new(400)));
+        assert_eq!(high.dispatch.sensor_dpi, Some(Dpi::new(1600)));
+        assert_ne!(
+            low.dispatch.sensor_dpi, high.dispatch.sensor_dpi,
+            "if this were the DPI-blind path both plans would carry the same scale"
+        );
+    }
+
+    #[test]
+    fn a_live_dpi_reading_never_changes_the_armed_capture_target() {
+        // `CaptureSpec` is part of `CaptureTarget`'s identity. Folding the
+        // live reading in retired and re-armed the session the moment the
+        // first `getSensorDpi` landed, which tore down a hold the user had
+        // already started and, on a re-armed accumulator, turned the eventual
+        // release into a fresh click.
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+
+        let unread = plan_with(
+            &cfg,
+            "2b042",
+            CaptureHostAbility {
+                os_mouse_hook_available: true,
+                injection_available: true,
+                sensor_dpi: None,
+            },
+        );
+        let read = plan_with(&cfg, "2b042", hold_ready(Dpi::new(950)));
+
+        assert_eq!(
+            unread.target, read.target,
+            "a completed sensor read must not cycle the firmware diverts"
+        );
+        assert_ne!(
+            unread.dispatch.sensor_dpi, read.dispatch.sensor_dpi,
+            "the reading still has to reach the millimetre conversion"
+        );
+    }
+
+    #[test]
+    fn gesture_mode_takes_precedence_over_a_hold_mode_single() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.apple.Safari",
+            ButtonId::GestureButton,
+            Some(Action::Pan),
+        );
+
+        let plan = super::plan_for_device_with(
+            &cfg,
+            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                .expect("fixture should be a physical key"),
+            "2b042",
+            route(),
+            Some("com.apple.Safari"),
+            0,
+            hold_ready(Dpi::new(1000)),
+        );
+        assert_eq!(
+            plan.dispatch.hold_bindings.get(&ButtonId::GestureButton),
+            Some(&Action::Pan),
+            "the per-app overlay is a hold-mode Single"
+        );
+        assert!(
+            plan.dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::GestureButton),
+            "device-level gesture mode still owns the HID++ source"
+        );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_hold_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::GestureButton),
+            "a gesturing HID++ source must keep the swipe divert, not a hold-mode stream"
+        );
+    }
+
+    #[test]
+    fn hold_mode_uses_committed_config_dpi_when_the_sensor_is_unread() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+        cfg.set_dpi("2b042", Dpi::new(800));
+
+        let plan = plan_with(
+            &cfg,
+            "2b042",
+            CaptureHostAbility {
+                os_mouse_hook_available: true,
+                injection_available: true,
+                sensor_dpi: None,
+            },
+        );
+        assert_eq!(plan.target.spec.sensor_dpi, Some(Dpi::new(800)));
+        assert!(
+            plan.target
+                .spec
+                .divert_hold_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "config DPI must be enough to arm; a missing live reading is not a count-blind fallback"
+        );
+    }
+
+    #[test]
+    fn plan_for_device_fail_closes_hold_mode_until_the_host_opts_in() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Pan));
+        cfg.set_dpi("2b042", Dpi::new(1000));
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            plan.target.spec.divert_hold_buttons.is_empty(),
+            "the compatibility entry point must not arm hold-mode without injection"
+        );
     }
 }

@@ -17,9 +17,13 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
+use super::gesture::{
+    GesturePhase, PanFrame, WheelDetentBank, ZoomFrame, wheel_ticks_from_screen_pixels,
+};
 use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
+const HIGH_RES_UNITS_PER_TICK_I32: i32 = 120;
 
 #[derive(Default)]
 struct ScrollOutput {
@@ -29,6 +33,13 @@ struct ScrollOutput {
 
 static SCROLL_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
     LazyLock::new(|| Mutex::new(ScrollOutput::default()));
+
+/// Dedicated banks so hold-mode pan/zoom do not share residuals with
+/// [`post_scroll`] or with each other.
+static PAN_SCROLL: LazyLock<Mutex<ScrollOutput>> =
+    LazyLock::new(|| Mutex::new(ScrollOutput::default()));
+static ZOOM_DETENTS: LazyLock<Mutex<WheelDetentBank>> =
+    LazyLock::new(|| Mutex::new(WheelDetentBank::default()));
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.
@@ -433,6 +444,84 @@ fn push_scroll_axes(
     }
 }
 
+/// Linux has no scroll-phase or pixel-unit fields. Two-axis `REL_*WHEEL`
+/// is the existing high-resolution degradation; 10 screen pixels = 1 tick.
+pub(super) fn post_pan_frame(frame: PanFrame) {
+    if matches!(frame.phase, GesturePhase::Began | GesturePhase::Ended)
+        && frame.dx == 0
+        && frame.dy == 0
+    {
+        return;
+    }
+    let (tick_x, tick_y) = wheel_ticks_from_screen_pixels(frame.dx, frame.dy);
+    let Ok(mut output) = PAN_SCROLL.lock() else {
+        tracing::warn!("Linux pan quantizer mutex poisoned");
+        return;
+    };
+    let delta = ScrollDelta::wheel_ticks(tick_x, tick_y);
+    let high_resolution = output
+        .high_resolution
+        .quantize(delta, HIGH_RES_UNITS_PER_TICK);
+    let legacy = output.legacy.quantize(delta, 1.0);
+    drop(output);
+
+    let mut events = Vec::with_capacity(5);
+    push_scroll_axes(
+        &mut events,
+        high_resolution,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+    );
+    push_scroll_axes(
+        &mut events,
+        legacy,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL,
+    );
+    if !events.is_empty() {
+        events.push(syn());
+        emit(&events);
+    }
+}
+
+/// Continuous pinch degrades to Ctrl+wheel detents. `amount` is the same
+/// magnification increment macOS posts; one detent is
+/// [`MAGNIFICATION_PER_WHEEL_DETENT`].
+pub(super) fn post_zoom_frame(frame: ZoomFrame) {
+    match frame.phase {
+        GesturePhase::Began => {
+            emit(&[key_ev(KeyCode::KEY_LEFTCTRL, 1), syn()]);
+            emit_zoom_detents(frame.amount);
+        }
+        GesturePhase::Changed => emit_zoom_detents(frame.amount),
+        GesturePhase::Ended => {
+            if let Ok(mut bank) = ZOOM_DETENTS.lock() {
+                bank.reset();
+            }
+            emit(&[key_ev(KeyCode::KEY_LEFTCTRL, 0), syn()]);
+        }
+    }
+}
+
+fn emit_zoom_detents(amount: f32) {
+    let Ok(mut bank) = ZOOM_DETENTS.lock() else {
+        tracing::warn!("Linux zoom detent mutex poisoned");
+        return;
+    };
+    let detents = bank.ingest(amount);
+    drop(bank);
+    if detents != 0 {
+        emit(&[
+            rel_ev(RelativeAxisCode::REL_WHEEL, detents),
+            rel_ev(
+                RelativeAxisCode::REL_WHEEL_HI_RES,
+                detents.saturating_mul(HIGH_RES_UNITS_PER_TICK_I32),
+            ),
+            syn(),
+        ]);
+    }
+}
+
 /// Force the virtual device to initialise (if it hasn't already) and return
 /// its `/dev/input/eventN` node path.
 ///
@@ -788,3 +877,9 @@ mod tests {
         }
     }
 }
+
+/// Smart zoom has no native equivalent here, so a click on a Zoom-bound
+/// button does nothing. Upstream PR #1119 draws the same platform line for
+/// the standalone action: the gesture is a macOS one, and Ctrl+wheel cannot
+/// express "toggle to a sensible zoom level and back".
+pub(super) fn post_smart_zoom() {}

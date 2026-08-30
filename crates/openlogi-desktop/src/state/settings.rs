@@ -4,7 +4,7 @@ use super::{AppState, StateEvent};
 use gpui::Context;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
-    UiScale, VerticalScrollSensitivity,
+    UiScale, VerticalScrollSensitivity, ZoomSensitivity,
 };
 
 impl AppState {
@@ -270,6 +270,28 @@ impl AppState {
             .edit(|config| config.app_settings.vertical_scroll_sensitivity = sensitivity);
         self.persist_and_reload("vertical scroll sensitivity");
     }
+    /// Set hold-mode zoom responsiveness and persist it. The agent picks the
+    /// value up on config reload and applies it to the next hold. No-op when
+    /// unchanged; disk failures restore the persisted value.
+    pub fn set_zoom_sensitivity(&mut self, sensitivity: ZoomSensitivity) {
+        if self.config.app_settings.zoom_sensitivity == sensitivity {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.zoom_sensitivity = sensitivity);
+        self.persist_and_reload("zoom sensitivity");
+    }
+
+    /// Set whether hold-mode pan moves the view instead of the content.
+    pub fn set_invert_pan(&mut self, inverted: bool) {
+        if self.config.app_settings.invert_pan == inverted {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.invert_pan = inverted);
+        self.persist_and_reload("pan direction");
+    }
+
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
         if self.config.app_settings.auto_download_assets == enabled {
             return;
