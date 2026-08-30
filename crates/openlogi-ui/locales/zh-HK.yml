@@ -347,6 +347,8 @@ _version: 1
 "Update source": "更新來源"
 "View changelog": "檢視更新日誌"
 "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates.": "無常駐更新器 —— 僅在你開啟自動檢查或點擊「檢查更新」時連線。"
+"In-app updates aren't available on this platform — update OpenLogi the way you installed it.": "此平台不支援應用程式內更新 — 請以你安裝 OpenLogi 的方式更新。"
+"OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects.": "OpenLogi 在此平台不會發出更新請求 — 只有開啟發佈頁面時才會連線。"
 "Stable channel": "穩定版通道"
 "A native, local-first alternative to Logitech Options+.": "原生、本機優先的 Logitech Options+ 替代品。"
 "Changelog": "更新日誌"

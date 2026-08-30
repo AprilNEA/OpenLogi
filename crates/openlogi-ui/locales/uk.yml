@@ -347,6 +347,8 @@ _version: 1
 "Update source": "Джерело оновлень"
 "View changelog": "Переглянути список змін"
 "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates.": "Жодного фонового оновлювача — OpenLogi підключається лише тоді, коли ви вмикаєте автоматичну перевірку або натискаєте «Перевірити наявність оновлень»."
+"In-app updates aren't available on this platform — update OpenLogi the way you installed it.": "Оновлення з застосунку недоступні на цій платформі — оновлюйте OpenLogi так само, як його встановлювали."
+"OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects.": "На цій платформі OpenLogi не надсилає запитів на оновлення — з'єднання відбувається лише під час відкриття сторінки випусків."
 "Stable channel": "Стабільний канал"
 "A native, local-first alternative to Logitech Options+.": "Нативна локальна альтернатива Logitech Options+."
 "Changelog": "Список змін"

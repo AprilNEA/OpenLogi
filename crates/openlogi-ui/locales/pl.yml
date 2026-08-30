@@ -347,6 +347,8 @@ _version: 1
 "Update source": "Źródło aktualizacji"
 "View changelog": "Zobacz dziennik zmian"
 "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates.": "Brak aktualizatora działającego w tle — OpenLogi łączy się tylko po włączeniu automatycznych sprawdzeń lub kliknięciu Sprawdź dostępność aktualizacji."
+"In-app updates aren't available on this platform — update OpenLogi the way you installed it.": "Aktualizacje w aplikacji nie są dostępne na tej platformie — zaktualizuj OpenLogi tak samo, jak go zainstalowano."
+"OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects.": "OpenLogi nie wysyła na tej platformie żadnych żądań aktualizacji — łączy się tylko przy otwarciu strony wydań."
 "Stable channel": "Kanał stabilny"
 "A native, local-first alternative to Logitech Options+.": "Natywna, lokalna alternatywa dla Logitech Options+."
 "Changelog": "Dziennik zmian"

@@ -347,6 +347,8 @@ _version: 1
 "Update source": "Güncelleme kaynağı"
 "View changelog": "Değişiklik günlüğünü görüntüle"
 "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates.": "Arka planda çalışan bir güncelleyici yok — OpenLogi yalnızca otomatik denetimi açtığınızda veya Güncellemeleri Denetle'ye tıkladığınızda bağlanır."
+"In-app updates aren't available on this platform — update OpenLogi the way you installed it.": "Uygulama içi güncelleme bu platformda yok — OpenLogi'yi nasıl kurduysanız o yolla güncelleyin."
+"OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects.": "OpenLogi bu platformda hiçbir güncelleme isteği yapmaz — yalnızca sürümler sayfasını açtığınızda bağlanır."
 "Stable channel": "Kararlı kanal"
 "A native, local-first alternative to Logitech Options+.": "Logitech Options+ için yerel ve öncelikle çevrimdışı çalışan bir alternatif."
 "Changelog": "Değişiklik günlüğü"

@@ -57,12 +57,21 @@ pub fn open(cx: &mut App) {
 }
 
 /// Persist the user's answer, run one check if they opted in, and close.
+///
+/// The immediate check is gated the same way every other one is: where a
+/// release ships no in-place-updatable artifact, running it only resolves to
+/// "no release asset matched the current platform". `runtime` does not open
+/// this window there at all, so this is the belt to that suspenders — the
+/// setting is still recorded, since it is what the Updates page reads.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
     AppState::update(cx, |state, cx| {
         state.record_update_consent(enabled);
         cx.emit(StateEvent::SettingsChanged);
     });
-    if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
+    if enabled
+        && crate::platform::updater::IN_APP_UPDATES
+        && let Some(updater) = crate::platform::updater::shared(cx)
+    {
         updater.update(cx, Updater::check);
     }
     window.remove_window();

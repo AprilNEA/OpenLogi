@@ -125,7 +125,13 @@ pub fn rebuild(cx: &mut App) {
 /// Run a manual update check and open Settings → Updates where its status is
 /// rendered. Shared by the app menu and agent tray IPC commands.
 pub fn check_for_updates(cx: &mut App) {
-    if let Some(updater) = crate::platform::updater::shared(cx) {
+    // Where the release manifest carries no artifact for this platform,
+    // running the check only resolves to "no release asset matched the
+    // current platform". The menu item is labelled "Updates…" there and this
+    // just opens the page, which explains the situation.
+    if crate::platform::updater::IN_APP_UPDATES
+        && let Some(updater) = crate::platform::updater::shared(cx)
+    {
         updater.update(cx, gpui_updater::Updater::check);
     }
     crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
@@ -139,7 +145,17 @@ fn menus(cx: &App) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action(tr!("About OpenLogi"), OpenAbout),
-                MenuItem::action(tr!("Check for Updates…"), CheckForUpdates),
+                // Named for what it actually does on this build: where no
+                // artifact ships there is no check to run, and the item only
+                // opens the Updates page.
+                MenuItem::action(
+                    if crate::platform::updater::IN_APP_UPDATES {
+                        tr!("Check for Updates…")
+                    } else {
+                        tr!("Updates…")
+                    },
+                    CheckForUpdates,
+                ),
                 MenuItem::separator(),
                 MenuItem::action(tr!("Settings…"), OpenSettings),
                 #[cfg(target_os = "macos")]

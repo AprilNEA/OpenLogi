@@ -11,6 +11,10 @@ use crate::ui::theme::Typography as _;
 /// the contextual check / install / restart action; the opt-in auto-check and
 /// auto-install switches; and where updates come from.
 pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
+    if !crate::platform::updater::IN_APP_UPDATES {
+        return unmanaged_updates_page();
+    }
+
     let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
         update_hero(&updater, cx)
     }));
@@ -64,6 +68,99 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         .group(hero)
         .group(toggles)
         .group(source)
+}
+
+/// The Updates page for a build with no in-place-updatable artifact.
+///
+/// Linux releases ship distro packages only, so the check can never resolve to
+/// anything but "no release asset matched the current platform". Showing the
+/// check button and the auto-install switches there offers the user a control
+/// whose only possible outcome is a red "Update failed" pill; this page states
+/// the running version and where updates actually come from instead.
+fn unmanaged_updates_page() -> SettingPage {
+    let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
+        let pal = crate::ui::theme::palette(cx);
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(img(crate::app_assets::LOGO).w(px(52.)).h(px(52.)))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(concat!("OpenLogi ", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .child(div().text_caption().text_color(pal.text_muted).child(tr!(
+                        "In-app updates aren't available on this platform — update OpenLogi the way you installed it."
+                    ))),
+            )
+    }));
+
+    SettingPage::new(tr!("Updates"))
+        .icon(IconName::ArrowDown)
+        .resettable(false)
+        .group(hero)
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
+                unmanaged_update_source(cx)
+            })),
+        )
+}
+
+/// The "where releases live" row for a build with no in-app updater.
+///
+/// Deliberately not [`update_source`]: that one calls GitHub Releases the
+/// *update source* and explains when OpenLogi connects to it, both of which
+/// describe controls this page does not have. Here the link is somewhere to
+/// read the changelog, and the page says plainly that nothing reaches out on
+/// its own.
+fn unmanaged_update_source(cx: &App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
+    v_flex()
+        .w_full()
+        .gap_3()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().font_weight(FontWeight::MEDIUM).child(tr!("Releases")))
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .truncate()
+                                .child("github.com/AprilNEA/OpenLogi/releases"),
+                        ),
+                )
+                .child(
+                    div().flex_shrink_0().child(
+                        Button::new("update-changelog")
+                            .ghost()
+                            .icon(IconName::ExternalLink)
+                            .label(tr!("View changelog"))
+                            .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
+                    ),
+                ),
+        )
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!(
+                    "OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects."
+                )),
+        )
 }
 
 /// The Updates hero row: logo, name + version, a status pill, the live status

@@ -106,9 +106,14 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
 
         // First launch only: offer to opt in to the update check, since it
         // defaults to off. Marked seen either way so it shows just once.
+        // Skipped entirely where a release ships no in-place-updatable
+        // artifact — offering to turn on a check whose every outcome is
+        // "no release asset matched the current platform" is the same defect
+        // the Updates page avoids, one dialog earlier.
         cx.update(|cx| {
-            let show = AppState::try_global(cx)
-                .is_some_and(|state| !state.read(cx).app_settings().update_prompt_seen);
+            let show = crate::platform::updater::IN_APP_UPDATES
+                && AppState::try_global(cx)
+                    .is_some_and(|state| !state.read(cx).app_settings().update_prompt_seen);
             if show {
                 windows::update_consent::open(cx);
             }
