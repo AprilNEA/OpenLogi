@@ -27,14 +27,41 @@ struct SyntheticFixture {
 #[test]
 fn schemas_reject_unknown_fields_and_arbitrary_masks() {
     let fixture = direct_probe_fixture();
-    let mut profile = serde_json::to_value(&fixture.profile).expect("profile serializes");
-    profile
+    let profile = serde_json::to_value(&fixture.profile).expect("profile serializes");
+    let reject_profile = |profile, expected_path: &str| {
+        let error = serde_json::from_value::<DeviceProfile>(profile)
+            .expect_err("unknown profile fields must be rejected at every depth");
+        assert!(error.to_string().contains("unknown field"));
+        assert!(error.to_string().contains(expected_path));
+    };
+
+    let mut unknown_root = profile.clone();
+    unknown_root
         .as_object_mut()
         .expect("profile is an object")
         .insert("unexpected".to_string(), serde_json::Value::Bool(true));
-    let profile_error = serde_json::from_value::<DeviceProfile>(profile)
-        .expect_err("unknown profile fields must be rejected");
-    assert!(profile_error.to_string().contains("unknown field"));
+    reject_profile(unknown_root, "unexpected");
+
+    let mut unknown_inventory = profile.clone();
+    unknown_inventory["inventories"][0]
+        .as_object_mut()
+        .expect("inventory is an object")
+        .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+    reject_profile(unknown_inventory, "inventories.0.unexpected");
+
+    let mut unknown_receiver = profile.clone();
+    unknown_receiver["inventories"][0]["receiver"]
+        .as_object_mut()
+        .expect("receiver is an object")
+        .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+    reject_profile(unknown_receiver, "inventories.0.receiver.unexpected");
+
+    let mut unknown_device = profile;
+    unknown_device["inventories"][0]["paired"][0]
+        .as_object_mut()
+        .expect("paired device is an object")
+        .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+    reject_profile(unknown_device, "inventories.0.paired.0.unexpected");
 
     let mut cassette = serde_json::to_value(&fixture.cassette).expect("cassette serializes");
     assert_eq!(

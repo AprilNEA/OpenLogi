@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use openlogi_core::device::DeviceInventory;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
 /// Schema version supported by the initial profile and cassette formats.
@@ -63,8 +63,7 @@ impl FixtureError {
 ///
 /// Raw reports and mutable topology do not belong here. The profile is the
 /// independently reviewable expectation consumed by semantic mocks and tests.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DeviceProfile {
     /// Profile schema version.
     pub schema_version: u32,
@@ -74,6 +73,37 @@ pub struct DeviceProfile {
     pub name: String,
     /// Expected semantic device inventories.
     pub inventories: Vec<DeviceInventory>,
+}
+
+#[derive(Deserialize)]
+struct DeviceProfileFields {
+    schema_version: u32,
+    id: String,
+    name: String,
+    inventories: Vec<DeviceInventory>,
+}
+
+impl<'de> Deserialize<'de> for DeviceProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut unknown = None;
+        let fields: DeviceProfileFields = serde_ignored::deserialize(deserializer, |path| {
+            if unknown.is_none() {
+                unknown = Some(path.to_string());
+            }
+        })?;
+        if let Some(path) = unknown {
+            return Err(de::Error::custom(format!("unknown field at {path}")));
+        }
+        Ok(Self {
+            schema_version: fields.schema_version,
+            id: fields.id,
+            name: fields.name,
+            inventories: fields.inventories,
+        })
+    }
 }
 
 impl DeviceProfile {
