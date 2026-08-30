@@ -657,6 +657,17 @@ const fn hook_should_retry(hook_wanted: bool, hook_running: bool) -> bool {
     hook_wanted && !hook_running
 }
 
+/// The event tap is a global input filter on macOS. It must be active only
+/// when the agent is configured to capture input, has Accessibility, and its
+/// login session is currently allowed to use host I/O.
+const fn hook_should_be_installed(
+    capture_mouse_events: bool,
+    accessibility_granted: bool,
+    device_io_allowed: bool,
+) -> bool {
+    capture_mouse_events && accessibility_granted && device_io_allowed
+}
+
 /// Prompt for Accessibility when the enabled mouse hook needs it.
 fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
