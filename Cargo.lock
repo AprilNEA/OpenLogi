@@ -5547,6 +5547,7 @@ dependencies = [
  "openlogi-assets",
  "openlogi-camera",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-permissions",

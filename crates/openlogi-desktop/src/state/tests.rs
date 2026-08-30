@@ -23,6 +23,7 @@ use openlogi_core::hid::{
 
 use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
+use openlogi_device::fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSupport};
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
@@ -228,54 +229,42 @@ fn receiver_inventory() -> DeviceInventory {
     }
 }
 
-fn ready_snapshot(inventory: Vec<DeviceInventory>) -> AgentSnapshot {
+fn canonical_device_profile() -> DeviceProfile {
+    let profile: DeviceProfile =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    profile.validate().expect("canonical profile validates");
+    profile
+}
+
+fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
+    let editor = app("org.openlogi.synthetic-editor", "Synthetic Editor");
     AgentSnapshot {
         status: AgentStatus {
             accessibility_granted: true,
             hook_installed: true,
-            launch_at_login: true,
+            launch_at_login: false,
             inventory: InventoryHealth::Ready,
             protocol_version: PROTOCOL_VERSION,
-            agent_version: "test".to_string(),
+            agent_version: "synthetic-profile-test".to_string(),
             input_monitoring_granted: true,
             hid_open_failures: false,
         },
-        inventory,
-        standalone: Vec::new(),
-        camera_active: false,
+        inventory: profile.inventories.clone(),
+        standalone: profile.standalone.clone(),
+        camera_active: true,
         pairing: None,
-        foreground: ForegroundApps::default(),
+        foreground: ForegroundApps {
+            current: Some(editor.clone()),
+            recent: vec![editor],
+        },
     }
 }
 
-#[test]
-fn agent_snapshot_projects_receiver_and_direct_devices_on_their_own_routes() {
-    let receiver_capabilities = Capabilities::from_feature_ids(&[0x1b04, 0x2150]);
-    let direct_capabilities = Capabilities::from_feature_ids(&[0x2202, 0x19b0]);
-    let mut receiver = receiver_inventory();
-    receiver.paired[0].capabilities = Some(receiver_capabilities);
-    receiver.paired[0].battery = Some(BatteryInfo {
-        percentage: 64,
-        level: BatteryLevel::Good,
-        status: BatteryStatus::Discharging,
-    });
-    let mut direct = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
-    direct.paired[0].capabilities = Some(direct_capabilities);
-    direct.paired[0].battery = Some(BatteryInfo {
-        percentage: 37,
-        level: BatteryLevel::Low,
-        status: BatteryStatus::Discharging,
-    });
-    let mut snapshot = ready_snapshot(vec![receiver, direct]);
-    let editor = app("com.example.Editor", "Editor");
-    snapshot.camera_active = true;
-    snapshot.foreground = ForegroundApps {
-        current: Some(editor.clone()),
-        recent: vec![editor],
-    };
+fn canonical_profile_state(
+    commands: tokio::sync::mpsc::UnboundedSender<crate::services::ipc::Command>,
+) -> AppState {
     let cache = AssetResolver::new();
-    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
+    AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
@@ -283,7 +272,24 @@ fn agent_snapshot_projects_receiver_and_direct_devices_on_their_own_routes() {
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
-    );
+    )
+}
+
+fn profile_device(state: &AppState, unit_id: [u8; 4]) -> &super::DeviceRecord {
+    state
+        .devices()
+        .iter()
+        .find(|record| record.unit_id == unit_id)
+        .expect("canonical profile device is projected")
+}
+
+#[test]
+fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
+    let profile = canonical_device_profile();
+    let snapshot = snapshot_candidate(&profile);
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
 
     let changes = state.apply_agent_snapshot(&snapshot, &cache, &[]);
 
@@ -298,75 +304,119 @@ fn agent_snapshot_projects_receiver_and_direct_devices_on_their_own_routes() {
         ]
     );
     assert_eq!(state.last_inventory(), snapshot.inventory);
-    assert_eq!(state.devices().len(), 2);
+    assert_eq!(state.agent_status(), Some(&snapshot.status));
+    assert_eq!(state.devices().len(), 5);
 
-    let receiver = state
-        .devices()
-        .iter()
-        .find(|record| record.config_key == "unit:6be9d300")
-        .expect("receiver-backed mouse is projected");
-    assert!(matches!(
-        receiver.route.as_ref(),
-        Some(DeviceRoute::Bolt { receiver_uid, slot })
-            if receiver_uid == "82839805" && *slot == 1
-    ));
-    assert_eq!(receiver.capabilities, Some(receiver_capabilities));
+    let receiver_mouse = profile_device(&state, [1, 2, 3, 4]);
+    assert_eq!(receiver_mouse.config_key, "unit:01020304");
     assert_eq!(
-        receiver.battery.as_ref().map(|battery| battery.percentage),
-        Some(64)
+        receiver_mouse.route,
+        Some(DeviceRoute::Bolt {
+            receiver_uid: "MOCK-BOLT-01".to_string(),
+            slot: 1,
+        })
+    );
+    assert_eq!(
+        receiver_mouse.capabilities,
+        profile.inventories[0].paired[0].capabilities
+    );
+    assert_eq!(
+        receiver_mouse
+            .battery
+            .as_ref()
+            .map(|battery| battery.percentage),
+        Some(80)
     );
 
-    let direct = state
+    let offline_mouse = state
         .devices()
         .iter()
-        .find(|record| record.config_key == KNOWN_MOUSE_KEY)
-        .expect("direct mouse is projected");
-    assert!(matches!(
-        direct.route.as_ref(),
+        .find(|record| record.slot == 2)
+        .expect("offline receiver slot is projected");
+    assert!(!offline_mouse.online);
+    assert_eq!(
+        offline_mouse.route,
+        Some(DeviceRoute::Bolt {
+            receiver_uid: "MOCK-BOLT-01".to_string(),
+            slot: 2,
+        })
+    );
+    assert_eq!(offline_mouse.capabilities, None);
+    assert_eq!(offline_mouse.battery, None);
+
+    let keyboard = profile_device(&state, [5, 6, 7, 8]);
+    assert_eq!(keyboard.config_key, "unit:05060708");
+    assert_eq!(
+        keyboard.capabilities,
+        profile.inventories[0].paired[2].capabilities
+    );
+    assert_eq!(
+        keyboard.battery.as_ref().map(|battery| battery.percentage),
+        Some(100)
+    );
+
+    let direct = profile_device(&state, [9, 10, 11, 12]);
+    assert_eq!(direct.config_key, "unit:090a0b0c");
+    assert_eq!(
+        direct.route,
         Some(DeviceRoute::Direct {
             vendor_id: 0x046d,
-            product_id: 0xb023,
+            product_id: 0xb020,
         })
-    ));
-    assert_eq!(direct.capabilities, Some(direct_capabilities));
+    );
+    assert_eq!(
+        direct.capabilities,
+        profile.inventories[1].paired[0].capabilities
+    );
     assert_eq!(
         direct.battery.as_ref().map(|battery| battery.percentage),
-        Some(37)
+        Some(55)
+    );
+
+    let light = profile_device(&state, [13, 14, 15, 16]);
+    assert_eq!(light.config_key, "unit:0d0e0f10");
+    assert_eq!(
+        light.route,
+        Some(DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "MOCK-LITRA-01".to_string(),
+        })
+    );
+    assert_eq!(
+        light.light_capabilities,
+        profile.standalone[0].light_capabilities
     );
 }
 
 #[test]
-fn agent_snapshots_replace_online_state_and_eventually_remove_absent_receivers() {
-    let mut receiver = receiver_inventory();
-    let mut direct = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers() {
+    let profile = canonical_device_profile();
     let cache = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &cache,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
-    state.apply_agent_snapshot(
-        &ready_snapshot(vec![receiver.clone(), direct.clone()]),
-        &cache,
-        &[],
-    );
-    assert!(state.devices().iter().all(|record| record.online));
-
-    receiver.paired[0].online = false;
-    direct.paired[0].online = false;
-    state.apply_agent_snapshot(&ready_snapshot(vec![receiver, direct.clone()]), &cache, &[]);
+    let mut state = canonical_profile_state(commands);
+    state.apply_agent_snapshot(&snapshot_candidate(&profile), &cache, &[]);
     assert!(
-        state.devices().iter().all(|record| !record.online),
-        "an explicit offline observation replaces the old online records"
+        state
+            .devices()
+            .iter()
+            .any(|record| record.slot == 2 && !record.online)
     );
 
-    let receiver_key = "unit:6be9d300";
-    let without_receiver = ready_snapshot(vec![direct]);
+    let mut replaced = snapshot_candidate(&profile);
+    replaced.inventory[0].paired[0].online = false;
+    replaced.inventory[0].paired[0].battery = None;
+    replaced.inventory[0].paired[0].capabilities = None;
+    state.apply_agent_snapshot(&replaced, &cache, &[]);
+    let receiver_mouse = profile_device(&state, [1, 2, 3, 4]);
+    assert!(!receiver_mouse.online);
+    assert_eq!(receiver_mouse.battery, None);
+    assert_eq!(receiver_mouse.capabilities, None);
+
+    let mut without_receiver = snapshot_candidate(&profile);
+    without_receiver.inventory.remove(0);
     for _ in 0..=super::INVENTORY_MISS_GRACE {
         state.apply_agent_snapshot(&without_receiver, &cache, &[]);
     }
@@ -375,14 +425,107 @@ fn agent_snapshots_replace_online_state_and_eventually_remove_absent_receivers()
         state
             .devices()
             .iter()
-            .all(|record| record.config_key != receiver_key),
-        "an unplugged receiver record is removed after the probe-miss grace"
+            .all(|record| !matches!(record.route, Some(DeviceRoute::Bolt { .. }))),
+        "all absent receiver records are removed after the probe-miss grace"
     );
-    let [direct] = state.devices() else {
-        panic!("the known direct device remains as one offline placeholder");
+    assert!(state.devices().iter().any(|record| {
+        matches!(record.route, Some(DeviceRoute::Direct { .. })) && record.online
+    }));
+    assert!(state.devices().iter().any(|record| {
+        matches!(record.route, Some(DeviceRoute::RawHid { .. })) && record.online
+    }));
+}
+
+#[test]
+fn canonical_profile_light_setting_errors_reach_desktop_state() {
+    let profile = canonical_device_profile();
+    let raw_settings = profile
+        .settings
+        .iter()
+        .find(|settings| matches!(settings.route, DeviceRoute::RawHid { .. }))
+        .expect("canonical raw-HID settings");
+    assert_eq!(raw_settings.light, ProfileSupport::Supported);
+
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    state.apply_agent_snapshot(&snapshot_candidate(&profile), &cache, &[]);
+    let light_index = state
+        .devices()
+        .iter()
+        .position(|record| record.unit_id == [13, 14, 15, 16])
+        .expect("canonical light is projected");
+    state.set_current_device(light_index);
+    let mut reloads = 0;
+    loop {
+        match receiver.try_recv() {
+            Ok(crate::services::ipc::Command::ReloadConfig) => reloads += 1,
+            Ok(_) => panic!("unexpected command before the light write"),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("light command channel disconnected")
+            }
+        }
+    }
+    assert!(reloads > 0);
+    let light = state.current_record().expect("canonical light is selected");
+    assert!(light.online);
+    assert_eq!(light.route.as_ref(), Some(&raw_settings.route));
+    assert_eq!(
+        openlogi_core::hid::commands_for_light_settings(
+            LightSettings::new(false, 50, Some(3000)),
+            light
+                .light_capabilities
+                .expect("canonical light capabilities are projected"),
+        )
+        .len(),
+        3
+    );
+    let key = light.config_key.clone();
+
+    state.commit_light(LightSettings::new(false, 50, Some(3000)));
+    let mut pending = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(crate::services::ipc::Command::SetLight(
+                route,
+                command,
+                command_key,
+                request_id,
+            )) => {
+                assert_eq!(&route, &raw_settings.route);
+                assert_eq!(command_key, key);
+                pending.push((command, request_id));
+            }
+            Ok(_) => panic!("unexpected command while collecting light writes"),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("light command channel disconnected")
+            }
+        }
+    }
+    assert_eq!(pending.len(), 3);
+    assert!(pending.windows(2).all(|pair| pair[0].1 == pair[1].1));
+
+    let setting_error = WriteError::DeviceUnreachable {
+        index: openlogi_core::hid::DIRECT_DEVICE_INDEX,
     };
-    assert_eq!(direct.config_key, KNOWN_MOUSE_KEY);
-    assert!(!direct.online);
+    let expected_error = setting_error.to_string();
+    for (command, request_id) in pending {
+        let result = if matches!(
+            command,
+            openlogi_core::hid::LightCommand::TemperatureKelvin(_)
+        ) {
+            Err(setting_error.clone())
+        } else {
+            Ok(())
+        };
+        assert!(state.apply_light_command_result(key.clone(), request_id, command, result));
+    }
+    assert!(matches!(
+        state.light_command_status(),
+        Some(LightCommandStatus::Failed(error)) if error == expected_error
+    ));
 }
 
 #[test]
