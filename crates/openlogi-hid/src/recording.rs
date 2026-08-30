@@ -13,9 +13,11 @@ use hidpp::channel::{ChannelObservation, ChannelObserver};
 use openlogi_device::backend::{BackendError, HidBackend, NodeInfo, RawWriter};
 
 mod accumulator;
+mod cassette;
 mod model;
 
 use accumulator::{Accumulator, RecorderCommand};
+pub use cassette::*;
 pub use model::*;
 
 #[cfg(test)]
