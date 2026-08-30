@@ -34,7 +34,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::DeviceOp;
+use crate::hardware::{DeviceOp, HardwareContext};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -71,6 +71,9 @@ struct AgentDevice {
 /// consumers receive only read capabilities through this type.
 #[derive(Clone)]
 pub struct SharedRuntime {
+    /// Backend identity, I/O gate, channel pool, and inventory source shared by
+    /// every hardware-dependent agent service.
+    hardware: HardwareContext,
     /// The OS-hook callback's single-action + gesture maps, behind one lock so a
     /// rebuild publishes both atomically (see [`HookMaps`]). Also read by the
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
@@ -111,6 +114,12 @@ pub struct SharedRuntime {
 }
 
 impl SharedRuntime {
+    /// The hardware context used to build this runtime.
+    #[must_use]
+    pub fn hardware(&self) -> HardwareContext {
+        self.hardware.clone()
+    }
+
     /// Bind a device operation to `route` on the mouse/pointer capture
     /// channel — the registry-confirmed capture channel or the exact current
     /// inventory channel that every device write already resolves through.
@@ -211,10 +220,25 @@ impl Orchestrator {
     /// it carries are seeded here.
     #[must_use]
     pub fn new(config: Config, observable: Arc<ObservableState>) -> Self {
+        Self::with_hardware(config, observable, HardwareContext::production())
+    }
+
+    /// Build with an explicit hardware context. This is the injection boundary
+    /// for replay and alternate backends; every backend-dependent shared handle
+    /// is derived from `hardware`.
+    #[must_use]
+    pub fn with_hardware(
+        config: Config,
+        observable: Arc<ObservableState>,
+        hardware: HardwareContext,
+    ) -> Self {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedRuntime {
+            device_io: hardware.device_io(),
+            channel_pool: hardware.channel_pool(),
+            hardware,
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
             scroll_preferences: Arc::new(ScrollPreferences::new(
@@ -225,8 +249,6 @@ impl Orchestrator {
             capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
-            device_io: openlogi_hid::host::device_io_gate(),
-            channel_pool: openlogi_hid::host::channel_pool(),
             keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),

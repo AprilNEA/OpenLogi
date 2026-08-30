@@ -30,8 +30,10 @@ use tracing::{debug, warn};
 
 use crate::receiver_access::ReceiverAccess;
 
+mod context;
 mod light;
 
+pub use context::HardwareContext;
 pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
