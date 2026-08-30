@@ -991,6 +991,23 @@ fn key_points(asset: Option<&ResolvedAsset>) -> Vec<KeyPoint> {
             out.extend(f1_to_f19.iter().copied().map(calibrated_marker_point));
             return out;
         }
+
+        // Neither specialized layout fit, but the depot still has real markers
+        // for a shorter row (e.g. the Alto Keys K98M's 12: nine F-row icon
+        // keys plus End/Page Up/Page Down, with no Easy-Switch row at all —
+        // its `device_easyswitch_image` markers are on-photo host-indicator
+        // dots over the number row, not a physical button). Surface exactly
+        // that many real, marker-positioned keys instead of falling through
+        // to 20 evenly-spaced slots: the caller already tolerates a short
+        // `Vec` (`FUNCTION_KEYS.iter().zip(points.iter())` truncates to the
+        // shorter side), so a real 12-key row must not get padded out to
+        // phantom F13–F19 slots that don't exist on the physical keyboard.
+        if !key_markers.is_empty() {
+            let mut out = Vec::with_capacity(key_markers.len() + 1);
+            out.push(synthesized_esc_point(key_markers[0]));
+            out.extend(key_markers.iter().copied().map(calibrated_marker_point));
+            return out;
+        }
     }
     fallback_key_points()
 }
@@ -1248,6 +1265,36 @@ mod tests {
         assert_approx_eq(points[19].x_frac, 0.967);
         assert_approx_eq(points[19].y_frac, 0.153);
         assert_approx_eq(key_target_top_px(points[19].y_frac, 220.0, 30.0), 18.66);
+    }
+
+    /// The Alto Keys K98M's real depot data: 12 `device_keys_image` markers
+    /// (nine F-row icon keys plus End/Page Up/Page Down — see
+    /// `crates/openlogi-hid/src/keyboard.rs`'s `KeyCircle`/`KeyTriangle`/
+    /// `KeyDiamond` for those three) and 3 `device_easyswitch_image` markers
+    /// that are on-photo host-indicator dots over the number row, not a
+    /// physical Easy-Switch button row. 12 is below both the MX-Keys (≥16)
+    /// and full-row (≥19) thresholds, so this must resolve to exactly 12 real
+    /// keys rather than either misfiring the MX-Keys branch or padding out to
+    /// 20 phantom F-keys via the even-spacing fallback.
+    #[test]
+    fn k98m_style_short_row_resolves_to_its_real_key_count() {
+        let key_markers = vec![
+            26.45, 34.4, 39.2, 43.95, 48.74, 56.75, 61.55, 66.4, 71.1, 83.1, 87.9, 92.7,
+        ];
+        let easy_switch_markers = vec![12.0, 16.7, 21.5];
+        let asset = asset_with_markers(&key_markers, &easy_switch_markers);
+
+        let points = key_points(Some(&asset));
+
+        assert_eq!(points.len(), 13, "Esc + 12 real keys, no phantom F13-F19");
+        assert_approx_eq(points[1].x_frac, 0.2645 + FRONT_MARKER_X_OFFSET_FRAC);
+        assert_approx_eq(points[12].x_frac, 0.927 + FRONT_MARKER_X_OFFSET_FRAC);
+        assert!(
+            points
+                .windows(2)
+                .all(|pair| pair[0].x_frac < pair[1].x_frac),
+            "points stay in physical left-to-right order"
+        );
     }
 
     /// The G513 family's `metadata_full.json`: `device_image` markers in
