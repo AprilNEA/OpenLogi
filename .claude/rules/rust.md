@@ -53,11 +53,9 @@ changes day to day:
 ### `expect` by default, `allow` only when `expect` would break
 
 `#[allow]` goes quiet the day it stops suppressing anything, so suppressions rot in
-place — an audit in 2026-08 found 20 dead ones, including three module-wide `dead_code`
-blankets that had been inert since their modules went `pub`. `#[expect]` reports itself
-unfulfilled instead, which `-D warnings` turns into a failure. `allow_attributes`
-enforces this — but only for outer `#[allow]`; a module-wide `#![allow(…)]`, the shape
-that rots worst, is invisible to it and is on you.
+place. `#[expect]` reports itself unfulfilled instead, which `-D warnings` turns into a
+failure. `allow_attributes` enforces this — but only for outer `#[allow]`; a module-wide
+`#![allow(…)]`, the shape that rots worst, is invisible to it and is on you.
 
 Three cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
 an `#[expect(clippy::allow_attributes, reason = "see above")]` and a comment saying which
@@ -171,11 +169,10 @@ House style:
   not lift the cross-platform rule: the non-host files are only ever compiled by
   that platform's CI or a cross-lint, so `.claude/rules/cross-platform.md` applies
   with full force.
-- Keep files reasonably sized (split around ~500 lines) into real modules — never
-  simulate structure with `// ---- section ----` banner comments. But don't
-  over-extract either: inline single-use helpers. File size, coverage, and complexity
-  metrics are investigation signals, not abstraction targets; extract a reusable
-  responsibility or invariant, never a single-use layer solely to improve a number.
+- File size, coverage percentage, and complexity scores are investigation signals, not
+  goals. Split a large file when it contains a coherent responsibility that deserves a
+  real module; never manufacture a single-use abstraction only to improve a metric.
+  Do not simulate structure with `// ---- section ----` banner comments.
 - rustdoc every public item. Comments state non-obvious constraints only.
 - Tests cover failure and edge paths, not just the happy path (state machines
   especially). No tautological tests that mirror the implementation; never weaken an
