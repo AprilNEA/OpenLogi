@@ -17,12 +17,13 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, WriteError,
+    DeviceRoute, Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, WriteError,
 };
 
 use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_ipc::ForegroundApps;
+use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
@@ -225,6 +226,163 @@ fn receiver_inventory() -> DeviceInventory {
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
         }],
     }
+}
+
+fn ready_snapshot(inventory: Vec<DeviceInventory>) -> AgentSnapshot {
+    AgentSnapshot {
+        status: AgentStatus {
+            accessibility_granted: true,
+            hook_installed: true,
+            launch_at_login: true,
+            inventory: InventoryHealth::Ready,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: "test".to_string(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
+        },
+        inventory,
+        standalone: Vec::new(),
+        camera_active: false,
+        pairing: None,
+        foreground: ForegroundApps::default(),
+    }
+}
+
+#[test]
+fn agent_snapshot_projects_receiver_and_direct_devices_on_their_own_routes() {
+    let receiver_capabilities = Capabilities::from_feature_ids(&[0x1b04, 0x2150]);
+    let direct_capabilities = Capabilities::from_feature_ids(&[0x2202, 0x19b0]);
+    let mut receiver = receiver_inventory();
+    receiver.paired[0].capabilities = Some(receiver_capabilities);
+    receiver.paired[0].battery = Some(BatteryInfo {
+        percentage: 64,
+        level: BatteryLevel::Good,
+        status: BatteryStatus::Discharging,
+    });
+    let mut direct = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    direct.paired[0].capabilities = Some(direct_capabilities);
+    direct.paired[0].battery = Some(BatteryInfo {
+        percentage: 37,
+        level: BatteryLevel::Low,
+        status: BatteryStatus::Discharging,
+    });
+    let mut snapshot = ready_snapshot(vec![receiver, direct]);
+    let editor = app("com.example.Editor", "Editor");
+    snapshot.camera_active = true;
+    snapshot.foreground = ForegroundApps {
+        current: Some(editor.clone()),
+        recent: vec![editor],
+    };
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    let changes = state.apply_agent_snapshot(&snapshot, &cache, &[]);
+
+    assert!(changes.inventory_ready);
+    assert_eq!(
+        changes.events,
+        [
+            super::StateEvent::InventoryChanged,
+            super::StateEvent::AgentChanged,
+            super::StateEvent::CameraChanged,
+            super::StateEvent::ForegroundChanged,
+        ]
+    );
+    assert_eq!(state.last_inventory(), snapshot.inventory);
+    assert_eq!(state.devices().len(), 2);
+
+    let receiver = state
+        .devices()
+        .iter()
+        .find(|record| record.config_key == "unit:6be9d300")
+        .expect("receiver-backed mouse is projected");
+    assert!(matches!(
+        receiver.route.as_ref(),
+        Some(DeviceRoute::Bolt { receiver_uid, slot })
+            if receiver_uid == "82839805" && *slot == 1
+    ));
+    assert_eq!(receiver.capabilities, Some(receiver_capabilities));
+    assert_eq!(
+        receiver.battery.as_ref().map(|battery| battery.percentage),
+        Some(64)
+    );
+
+    let direct = state
+        .devices()
+        .iter()
+        .find(|record| record.config_key == KNOWN_MOUSE_KEY)
+        .expect("direct mouse is projected");
+    assert!(matches!(
+        direct.route.as_ref(),
+        Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb023,
+        })
+    ));
+    assert_eq!(direct.capabilities, Some(direct_capabilities));
+    assert_eq!(
+        direct.battery.as_ref().map(|battery| battery.percentage),
+        Some(37)
+    );
+}
+
+#[test]
+fn agent_snapshots_replace_online_state_and_eventually_remove_absent_receivers() {
+    let mut receiver = receiver_inventory();
+    let mut direct = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    state.apply_agent_snapshot(
+        &ready_snapshot(vec![receiver.clone(), direct.clone()]),
+        &cache,
+        &[],
+    );
+    assert!(state.devices().iter().all(|record| record.online));
+
+    receiver.paired[0].online = false;
+    direct.paired[0].online = false;
+    state.apply_agent_snapshot(&ready_snapshot(vec![receiver, direct.clone()]), &cache, &[]);
+    assert!(
+        state.devices().iter().all(|record| !record.online),
+        "an explicit offline observation replaces the old online records"
+    );
+
+    let receiver_key = "unit:6be9d300";
+    let without_receiver = ready_snapshot(vec![direct]);
+    for _ in 0..=super::INVENTORY_MISS_GRACE {
+        state.apply_agent_snapshot(&without_receiver, &cache, &[]);
+    }
+
+    assert!(
+        state
+            .devices()
+            .iter()
+            .all(|record| record.config_key != receiver_key),
+        "an unplugged receiver record is removed after the probe-miss grace"
+    );
+    let [direct] = state.devices() else {
+        panic!("the known direct device remains as one offline placeholder");
+    };
+    assert_eq!(direct.config_key, KNOWN_MOUSE_KEY);
+    assert!(!direct.online);
 }
 
 #[test]
