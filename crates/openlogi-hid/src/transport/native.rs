@@ -187,10 +187,10 @@ impl HidBackend for NativeBackend {
     }
 
     async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError> {
-        if !self.device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
         let Some(recording) = &self.recording else {
+            if !self.device_io.allows_io() {
+                return Err(device_io_suspended());
+            }
             let device = self.handle(node)?;
             return open_hidpp_channel(&device, self.device_io.clone()).await;
         };
@@ -199,11 +199,16 @@ impl HidBackend for NativeBackend {
             .begin_channel(node.clone())
             .map_err(|error| BackendError::Backend(error.to_string()))?;
         let observer = capture.observer();
-        let result = match self.handle(node) {
-            Ok(device) => {
-                open_hidpp_channel_with_observer(&device, self.device_io.clone(), observer).await
+        let result = if self.device_io.allows_io() {
+            match self.handle(node) {
+                Ok(device) => {
+                    open_hidpp_channel_with_observer(&device, self.device_io.clone(), observer)
+                        .await
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
+        } else {
+            Err(device_io_suspended())
         };
         let outcome = match &result {
             Ok(Some(channel)) => RecordedChannelOpenOutcome::Opened {
@@ -264,6 +269,8 @@ impl RawWriter for NativeRawWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recording::{NativeRecorder, RecordedChannelOpenOutcome};
+    use openlogi_device::device_io_channel;
 
     #[test]
     fn node_handle_keys_preserve_collections_on_the_same_os_node() {
@@ -297,5 +304,42 @@ mod tests {
 
         assert_eq!(handles.len(), 2);
         assert_eq!(handles.get(&hidpp_key), Some(&"hidpp"));
+    }
+
+    #[tokio::test]
+    async fn recording_backend_retains_suspended_channel_open_failure() {
+        let recorder = NativeRecorder::new(8).unwrap();
+        let (signal, device_io) = device_io_channel();
+        assert!(signal.suspend());
+        let backend = NativeBackend {
+            nodes: Mutex::new(HashMap::new()),
+            device_io,
+            recording: Some(recorder.sink()),
+        };
+        let node = NodeInfo {
+            id: NodeId::from("suspended-test-node".to_owned()),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            usage_page: 0xff00,
+            usage_id: 0x0002,
+            name: "Suspended Receiver".to_owned(),
+            manufacturer: Some("Logitech".to_owned()),
+            serial_number: None,
+        };
+
+        let Err(error) = backend.open_hidpp(&node).await else {
+            panic!("suspended channel open unexpectedly succeeded");
+        };
+        assert_eq!(error.to_string(), device_io_suspended().to_string());
+        drop(backend);
+
+        let recording = recorder.finish().unwrap();
+        assert_eq!(recording.channels.len(), 1);
+        assert!(matches!(
+            &recording.channels[0].open_outcome,
+            RecordedChannelOpenOutcome::Failed(message)
+                if message == &device_io_suspended().to_string()
+        ));
+        assert!(recording.channels[0].closed_at.is_some());
     }
 }
