@@ -21,6 +21,7 @@ mod device_io;
 
 pub mod backend;
 pub mod backlight;
+pub mod fixture;
 pub mod inventory;
 pub mod pairing;
 pub mod reprog_controls;
