@@ -39,7 +39,7 @@ use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
-use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::host_switch::{HostSwitchInventory, HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
 
@@ -106,8 +106,10 @@ pub struct SharedRuntime {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
-    /// Keyboard → pointing-device routes resolved from `config.toml`.
+    /// Keyboard → linked-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Online physical routes, independent of host-switch configuration.
+    pub host_switch_inventory: HostSwitchInventory,
 }
 
 impl SharedRuntime {
@@ -181,6 +183,7 @@ pub struct Orchestrator {
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
+    host_switch_inventory_tx: watch::Sender<Arc<Vec<DeviceRoute>>>,
     shared: SharedRuntime,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -214,6 +217,8 @@ impl Orchestrator {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let (host_switch_inventory_tx, host_switch_inventory) =
+            watch::channel(Arc::new(Vec::new()));
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -232,6 +237,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            host_switch_inventory,
         };
         let orch = Self {
             config,
@@ -248,6 +254,7 @@ impl Orchestrator {
             capture_plans_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
+            host_switch_inventory_tx,
             shared,
             observable,
         };
@@ -383,6 +390,10 @@ impl Orchestrator {
             self.config.keyboard.bindings.clone(),
             "keyboard_bindings",
         );
+        // Publish physical presence before configured links. A newly online
+        // keyboard must never arm a session before departure confirmation can
+        // see that it is still present.
+        publish_arc_if_changed(&self.host_switch_inventory_tx, online_routes(&self.devices));
         publish_arc_if_changed(
             &self.host_switch_links_tx,
             host_switch_links(&self.config, &self.devices),
@@ -1042,8 +1053,20 @@ fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitch
                         .and_then(|device| device.route.clone())
                 })
                 .collect::<Vec<_>>();
-            (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
+            (!targets.is_empty()).then_some(HostSwitchLink {
+                keyboard_key: keyboard_key.clone(),
+                keyboard,
+                targets,
+            })
         })
+        .collect()
+}
+
+fn online_routes(devices: &[AgentDevice]) -> Vec<DeviceRoute> {
+    devices
+        .iter()
+        .filter(|device| device.online)
+        .filter_map(|device| device.route.clone())
         .collect()
 }
 
