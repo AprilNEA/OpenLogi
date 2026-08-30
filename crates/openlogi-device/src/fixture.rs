@@ -32,4 +32,6 @@ pub use schema::{
 };
 
 #[cfg(test)]
+mod session_replay_tests;
+#[cfg(test)]
 mod tests;
