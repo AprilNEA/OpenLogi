@@ -11,7 +11,10 @@ use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
     ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
-use openlogi_device::fixture::CANONICAL_DEVICE_PROFILE_JSON;
+use openlogi_device::fixture::{
+    CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
+    classify_synthetic_profile_identity,
+};
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
@@ -447,14 +450,38 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
     assert_eq!(profile.settings.len(), 2);
     assert_eq!(
         profile.inventories[0].receiver.unique_id.as_deref(),
-        Some("OLFXREC000000001")
+        Some("OL-BOLT-UID-0001")
     );
     assert!(profile.settings.iter().all(|settings| {
         matches!(
             &settings.route,
-            DeviceRoute::Bolt { receiver_uid, .. } if receiver_uid == "OLFXREC000000001"
+            DeviceRoute::Bolt { receiver_uid, .. } if receiver_uid == "OL-BOLT-UID-0001"
         )
     }));
+    classify_synthetic_profile_identity(
+        SyntheticIdentityKind::BoltReceiverUid,
+        profile.inventories[0]
+            .receiver
+            .unique_id
+            .as_deref()
+            .expect("captured receiver identity"),
+    )
+    .expect("captured receiver follows the shared fixture policy");
+    for device in &profile.inventories[0].paired {
+        let model = device.model_info.as_ref().expect("captured model info");
+        let unit_ordinal =
+            classify_synthetic_identity_bytes(SyntheticIdentityKind::DeviceUnitId, &model.unit_id)
+                .expect("captured unit ID follows the shared fixture policy");
+        let serial_ordinal = classify_synthetic_profile_identity(
+            SyntheticIdentityKind::DeviceSerialNumber,
+            model
+                .serial_number
+                .as_deref()
+                .expect("captured synthetic serial"),
+        )
+        .expect("captured serial follows the shared fixture policy");
+        assert_eq!(unit_ordinal, serial_ordinal);
+    }
 }
 
 #[tokio::test]
@@ -480,8 +507,27 @@ async fn standalone_capture_retains_only_the_selected_semantic_device() {
     assert_eq!(profile.settings.len(), 1);
     assert_eq!(
         profile.standalone[0].address.identity,
-        "openlogi-fixture-raw-1"
+        "OPENLOGI-FIXTURE-RAWHID-001"
     );
+    classify_synthetic_profile_identity(
+        SyntheticIdentityKind::RawHidProfileIdentity,
+        &profile.standalone[0].address.identity,
+    )
+    .expect("captured raw-HID identity follows the shared fixture policy");
+    let unit_ordinal = classify_synthetic_identity_bytes(
+        SyntheticIdentityKind::DeviceUnitId,
+        &profile.standalone[0].unit_id,
+    )
+    .expect("captured standalone unit ID follows the shared fixture policy");
+    let serial_ordinal = classify_synthetic_profile_identity(
+        SyntheticIdentityKind::DeviceSerialNumber,
+        profile.standalone[0]
+            .serial_number
+            .as_deref()
+            .expect("captured standalone serial"),
+    )
+    .expect("captured standalone serial follows the shared fixture policy");
+    assert_eq!(unit_ordinal, serial_ordinal);
     assert!(profile.settings[0].light.is_supported());
     assert!(inspection.calls.lock().expect("calls lock").is_empty());
 }
@@ -512,6 +558,36 @@ async fn direct_capture_retains_only_the_selected_link() {
         profile.settings[0].route,
         DeviceRoute::Direct { .. }
     ));
+}
+
+#[tokio::test]
+async fn receiver_profile_is_stable_whichever_route_selects_the_receiver() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let mouse_output = directory.path().join("mouse.json");
+    let keyboard_output = directory.path().join("keyboard.json");
+
+    capture_connected(
+        args(mouse_output.clone(), Some("synthetic performance mouse")),
+        test_connection(fixture_agent()).await,
+    )
+    .await
+    .expect("mouse route selects the receiver profile");
+    capture_connected(
+        args(keyboard_output.clone(), Some("synthetic rgb keyboard")),
+        test_connection(fixture_agent()).await,
+    )
+    .await
+    .expect("keyboard route selects the same receiver profile");
+
+    let mouse: DeviceProfile = serde_json::from_slice(
+        &std::fs::read(mouse_output).expect("mouse-selected profile output"),
+    )
+    .expect("mouse-selected typed profile");
+    let keyboard: DeviceProfile = serde_json::from_slice(
+        &std::fs::read(keyboard_output).expect("keyboard-selected profile output"),
+    )
+    .expect("keyboard-selected typed profile");
+    assert_eq!(mouse, keyboard);
 }
 
 #[tokio::test]
