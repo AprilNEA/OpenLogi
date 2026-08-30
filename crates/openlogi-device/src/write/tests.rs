@@ -357,6 +357,39 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn a_dropped_dpi_write_is_retried_once() -> Result<(), WriteError> {
+    // Firmware still drowsy from a link re-establishment can ACK a
+    // `setSensorDpi` yet keep the old value. The read-back catches the
+    // mismatch and a single re-write lands the requested DPI.
+    let state = std::sync::Arc::new(std::sync::Mutex::new(DrowsyDpiState {
+        current: 1000,
+        set_writes: 0,
+    }));
+    let responder_state = std::sync::Arc::clone(&state);
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        adjustable_dpi_drowsy_response(request, &responder_state)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb034,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(650)).await?;
+
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.set_writes, 2,
+        "the dropped write must be retried exactly once"
+    );
+    assert_eq!(state.current, 650);
+    Ok(())
+}
+
 #[test]
 fn zone_presence_bits_decode_lsb_first_from_the_page_base() {
     let mut bitfield = [0u8; 14];
@@ -551,6 +584,56 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     response[1..4].copy_from_slice(&request[1..4]);
     let payload_len = response.len() - 4;
     response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// Live sensor state for [`adjustable_dpi_drowsy_response`].
+struct DrowsyDpiState {
+    current: u16,
+    set_writes: u8,
+}
+
+/// A `0x2201`-only mouse whose first `setSensorDpi` is ACKed but dropped —
+/// firmware drowsy from a link re-establishment — while the second is honored.
+fn adjustable_dpi_drowsy_response(
+    request: &[u8],
+    state: &std::sync::Mutex<DrowsyDpiState>,
+) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    match (feature_index, function) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => payload[0] = 4,
+        // Root feature lookup: only 0x2201 present.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x2201) * 0x04;
+        }
+        // getSensorDpi: the echoed sensor index, then the live value.
+        (0x04, 0x02) => {
+            payload[0] = request[4];
+            payload[1..3].copy_from_slice(&state.lock().unwrap().current.to_be_bytes());
+        }
+        // setSensorDpi: always ACKed, but the first write changes nothing.
+        (0x04, 0x03) => {
+            let mut state = state.lock().unwrap();
+            state.set_writes += 1;
+            if state.set_writes > 1 {
+                state.current = u16::from_be_bytes([request[5], request[6]]);
+            }
+            payload[..3].copy_from_slice(&request[4..7]);
+        }
+        _ => return None,
+    }
+
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload[..3]);
     Some(response)
 }
 
