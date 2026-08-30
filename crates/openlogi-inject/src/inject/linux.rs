@@ -8,7 +8,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
@@ -288,23 +289,51 @@ fn generic_linux_lock_fallback_chord() -> ChordSpec {
 }
 
 fn run_helper_or_chord(helper: HelperSpec, fallback: ChordSpec) {
-    if run_fixed_argv(helper.program, helper.args) {
-        return;
-    }
-    press_key(fallback.modifiers, fallback.key);
+    run_helper_or_else(helper, &HELPER_PREFIXES, move || {
+        press_key(fallback.modifiers, fallback.key);
+    });
 }
 
-/// Spawn an allowlisted absolute helper. Never searches `PATH` and never
-/// shells out through `/bin/sh -c` (that path is only for user `RunShellCommand`).
-fn run_fixed_argv(program: &str, args: &[&str]) -> bool {
-    let Some(path) = resolve_allowlisted(program) else {
+/// Resolve an allowlisted helper, then wait for it off the action/button
+/// worker. Missing helpers fall back on this thread (stat only); a helper
+/// that is slow or never exits must not stall remap dispatch.
+fn run_helper_or_else(
+    helper: HelperSpec,
+    prefixes: &[&str],
+    on_failure: impl Fn() + Send + Sync + 'static,
+) {
+    let Some(path) = resolve_allowlisted_under(helper.program, prefixes) else {
         tracing::debug!(
-            program,
+            program = helper.program,
             "Hyprland helper not in /usr/bin or /usr/local/bin — using chord fallback"
         );
-        return false;
+        on_failure();
+        return;
     };
-    match Command::new(&path).args(args).status() {
+    let args = helper.args;
+    let on_failure = Arc::new(on_failure);
+    let waiter_failure = Arc::clone(&on_failure);
+    match thread::Builder::new()
+        .name("openlogi-hypr-helper".into())
+        .spawn(move || {
+            if !run_resolved(&path, args) {
+                waiter_failure();
+            }
+        }) {
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                program = helper.program,
+                %error,
+                "failed to spawn Hyprland helper waiter — using chord fallback"
+            );
+            on_failure();
+        }
+    }
+}
+
+fn run_resolved(path: &Path, args: &[&str]) -> bool {
+    match Command::new(path).args(args).status() {
         Ok(status) if status.success() => true,
         Ok(status) => {
             tracing::debug!(
@@ -323,10 +352,6 @@ fn run_fixed_argv(program: &str, args: &[&str]) -> bool {
             false
         }
     }
-}
-
-fn resolve_allowlisted(name: &str) -> Option<PathBuf> {
-    resolve_allowlisted_under(name, &HELPER_PREFIXES)
 }
 
 fn resolve_allowlisted_under(name: &str, prefixes: &[&str]) -> Option<PathBuf> {
@@ -820,12 +845,11 @@ fn lock_screen() {
 /// that chord toggles workspace layout on Omarchy.
 fn lock_screen_hyprland() {
     let helper = hyprland_lock_helper();
-    if run_fixed_argv(helper.program, helper.args) {
-        return;
-    }
-    tracing::debug!("LockScreen via Super+Ctrl+L (Hyprland / Omarchy)");
-    let chord = hyprland_lock_fallback_chord();
-    press_key(chord.modifiers, chord.key);
+    run_helper_or_else(helper, &HELPER_PREFIXES, || {
+        tracing::debug!("LockScreen via Super+Ctrl+L (Hyprland / Omarchy)");
+        let chord = hyprland_lock_fallback_chord();
+        press_key(chord.modifiers, chord.key);
+    });
 }
 
 /// Suspend the system via logind's `Suspend()` on the system bus. The
@@ -911,10 +935,10 @@ mod tests {
     use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
 
     use super::{
-        HELPER_PREFIXES, combo, generic_linux_lock_fallback_chord, hid_usage_to_linux,
+        HELPER_PREFIXES, HelperSpec, combo, generic_linux_lock_fallback_chord, hid_usage_to_linux,
         hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
         hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes,
-        resolve_allowlisted_under, syn,
+        resolve_allowlisted_under, run_helper_or_else, syn,
     };
     use crate::inject::KeyPhase;
 
@@ -1088,5 +1112,85 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn helper_wait_does_not_block_the_caller() {
+        let dir = std::env::temp_dir().join(format!(
+            "openlogi-inject-helper-wait-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp helper dir");
+        let helper = dir.join("slow-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexec sleep 2\n").expect("slow helper script");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("executable helper");
+        }
+        let prefix = dir.to_str().expect("utf-8 temp path");
+        let started = std::time::Instant::now();
+        run_helper_or_else(
+            HelperSpec {
+                program: "slow-helper",
+                args: &[],
+            },
+            &[prefix],
+            || panic!("slow helper should start successfully"),
+        );
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "caller waited for the helper ({elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn missing_helper_falls_back_on_the_caller() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_helper_or_else(
+            HelperSpec {
+                program: "no-such-openlogi-helper",
+                args: &[],
+            },
+            &["/no/such/openlogi-prefix"],
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        rx.try_recv()
+            .expect("missing helper must fall back before returning");
+    }
+
+    #[test]
+    fn unsuccessful_helper_still_falls_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "openlogi-inject-helper-fail-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp helper dir");
+        let helper = dir.join("failing-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexit 1\n").expect("failing helper script");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("executable helper");
+        }
+        let prefix = dir.to_str().expect("utf-8 temp path");
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_helper_or_else(
+            HelperSpec {
+                program: "failing-helper",
+                args: &[],
+            },
+            &[prefix],
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        let arrived = rx.recv_timeout(std::time::Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&dir);
+        arrived.expect("fallback must still run after a helper non-zero exit");
     }
 }
