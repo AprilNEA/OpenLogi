@@ -322,7 +322,14 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // `false` is the untouched default; a legacy `true` is therefore an
     // explicit opt-in that must survive adoption into a bare canonical entry.
     if !device.touchpad_gestures.enabled && legacy.touchpad_gestures.enabled {
-        device.touchpad_gestures = legacy.touchpad_gestures;
+        device.touchpad_gestures.enabled = true;
+    }
+    // The scroll-speed override is user intent independent of the gesture
+    // switch: fold it whenever the canonical side still keeps the default,
+    // so a legacy entry that set a speed and later turned gestures off does
+    // not silently lose it.
+    if device.touchpad_gestures.scroll_sensitivity.is_none() {
+        device.touchpad_gestures.scroll_sensitivity = legacy.touchpad_gestures.scroll_sensitivity;
     }
 
     if device.identity.is_none() {
@@ -717,6 +724,34 @@ mod tests {
         assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
 
         assert!(config.devices["unit:6be9d300"].touchpad_gestures.enabled);
+    }
+
+    #[test]
+    fn folding_keeps_a_legacy_scroll_speed_set_before_gestures_went_off() {
+        use crate::config::TouchpadScrollSensitivity;
+
+        let mut config = Config::default();
+        let tuned = TouchpadScrollSensitivity::try_new(42).expect("valid sensitivity");
+        let mut legacy = DeviceConfig::default();
+        // The user tuned the speed, then switched gestures off: the tuning
+        // is still intent the canonical entry must inherit.
+        legacy.touchpad_gestures.scroll_sensitivity = Some(tuned);
+        config
+            .devices
+            .insert("receiver:82839805:slot:1".to_string(), legacy);
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+
+        assert_eq!(
+            config.devices["unit:6be9d300"]
+                .touchpad_gestures
+                .scroll_sensitivity,
+            Some(tuned)
+        );
     }
 
     #[test]
