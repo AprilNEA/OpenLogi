@@ -382,6 +382,10 @@ impl AppState {
     /// independently of every other button. Persists, tells the agent to
     /// rebuild, and refreshes the projected maps the UI reads.
     pub fn commit_gesture_mode(&mut self, button: ButtonId, enabled: bool) {
+        if enabled && !button.supports_gesture_mode() {
+            debug!(?button, "gesture mode is not supported for this control");
+            return;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -416,6 +420,10 @@ impl AppState {
         direction: GestureDirection,
         action: Action,
     ) {
+        if !button.supports_gesture_mode() {
+            debug!(?button, "gestures are not supported for this control");
+            return;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
