@@ -175,6 +175,8 @@ _version: 1
 "Middle": "가운데 버튼"
 "DPI Preset %{index}": "DPI 프리셋 %{index}"
 "Hold %{chord}": "%{chord} 길게 누르기"
+"Hold %{modifiers}, tap %{key}": "%{modifiers} 길게 누르고 %{key} 한 번 누르기"
+"Tap %{key}": "%{key} 한 번 누르기"
 "Gesture %{name}": "제스처 %{name}"
 "Left Click": "왼쪽 클릭"
 "Right Click": "오른쪽 클릭"

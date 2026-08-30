@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Centrale"
 "DPI Preset %{index}": "Preset DPI %{index}"
 "Hold %{chord}": "Tieni premuto %{chord}"
+"Hold %{modifiers}, tap %{key}": "Tieni premuto %{modifiers}, tocca %{key}"
+"Tap %{key}": "Tocca %{key}"
 "Gesture %{name}": "Gesture %{name}"
 "Left Click": "Click sinistro"
 "Right Click": "Click destro"

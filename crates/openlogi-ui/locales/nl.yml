@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Middenknop"
 "DPI Preset %{index}": "DPI-voorinstelling %{index}"
 "Hold %{chord}": "%{chord} ingedrukt houden"
+"Hold %{modifiers}, tap %{key}": "%{modifiers} ingedrukt houden, %{key} tikken"
+"Tap %{key}": "%{key} tikken"
 "Gesture %{name}": "Gebaar %{name}"
 "Left Click": "Linkerklik"
 "Right Click": "Rechterklik"

@@ -41,6 +41,12 @@ pub enum Effect<'a> {
     /// A user-recorded chord whose output is held by a lifecycle-aware
     /// runtime. A one-shot executor treats this as [`Effect::Key`] so direct
     /// dispatch remains balanced when no matching release can arrive.
+    ///
+    /// Which keys the runtime actually holds is the action's business, not
+    /// the backend's: [`Action::HoldShortcut`] holds the whole chord while
+    /// [`Action::TapKeyHoldingModifiers`] holds only the modifiers. Both
+    /// degrade to the same balanced chord tap here, so the split lives in
+    /// [`Action::held_chord`] rather than in this IR.
     HeldKey(&'a KeyCombo),
     /// Synthesise one scroll tick. `dx`/`dy` are unit direction (-1/0/1);
     /// each backend applies its own tick magnitude.
@@ -274,7 +280,9 @@ impl Action {
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
-            Action::HoldShortcut(combo) => Effect::HeldKey(combo),
+            Action::HoldShortcut(combo) | Action::TapKeyHoldingModifiers(combo) => {
+                Effect::HeldKey(combo)
+            }
 
             Action::TypeText(text) => Effect::Text(text),
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),

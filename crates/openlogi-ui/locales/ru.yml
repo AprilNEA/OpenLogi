@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Средняя"
 "DPI Preset %{index}": "Пресет DPI %{index}"
 "Hold %{chord}": "Удерживать %{chord}"
+"Hold %{modifiers}, tap %{key}": "Удерживать %{modifiers}, нажать %{key}"
+"Tap %{key}": "Нажать %{key}"
 "Gesture %{name}": "Жест %{name}"
 "Left Click": "Левый щелчок"
 "Right Click": "Правый щелчок"

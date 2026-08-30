@@ -317,7 +317,8 @@ macro_rules! derive_action_icon {
                     Action::CustomShortcut(_)
                     | Action::TypeText(_)
                     | Action::Workflow(_)
-                    | Action::HoldShortcut(_) => Self::Keyboard,
+                    | Action::HoldShortcut(_)
+                    | Action::TapKeyHoldingModifiers(_) => Self::Keyboard,
                     Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
                     Action::OpenApplication(_) => Self::Applications,
                 }

@@ -175,6 +175,8 @@ _version: 1
 "Middle": "Midterknap"
 "DPI Preset %{index}": "DPI-forindstilling %{index}"
 "Hold %{chord}": "Hold %{chord}"
+"Hold %{modifiers}, tap %{key}": "Hold %{modifiers}, tryk %{key}"
+"Tap %{key}": "Tryk %{key}"
 "Gesture %{name}": "Bevægelse %{name}"
 "Left Click": "Venstreklik"
 "Right Click": "Højreklik"
