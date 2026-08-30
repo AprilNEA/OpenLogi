@@ -50,6 +50,18 @@ impl GestureDirection {
             GestureDirection::Click => "Click",
         }
     }
+
+    /// Stable catalog key for the localized direction label.
+    #[must_use]
+    pub fn translation_key(self) -> &'static str {
+        match self {
+            GestureDirection::Up => "common.up",
+            GestureDirection::Down => "common.down",
+            GestureDirection::Left => "common.left",
+            GestureDirection::Right => "common.right",
+            GestureDirection::Click => "common.click",
+        }
+    }
 }
 
 impl fmt::Display for GestureDirection {

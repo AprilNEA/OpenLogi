@@ -156,17 +156,4 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-
-    /// Mirror of the overlay's guard: the `i18n!` at the top reaches the
-    /// shared catalog by relative path, and a wrong path does **not** fail the
-    /// build — `rust_i18n` compiles it to an empty catalog, and every tray
-    /// string silently renders in English in all locales. Pin one tray key in
-    /// a non-English locale so that breakage is loud.
-    #[test]
-    fn the_shared_catalog_is_wired_up() {
-        rust_i18n::set_locale("zh-CN");
-        assert_eq!(rust_i18n::t!("Show Main Window"), "显示主窗口");
-        rust_i18n::set_locale("en");
-    }
-}
+mod tests;

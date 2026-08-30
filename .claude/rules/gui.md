@@ -20,7 +20,7 @@ paths:
   itself, so each localized binary — the app, the overlay, and the agent — expands its
   own `rust_i18n::i18n!` over that shared directory by relative path. A wrong path
   there compiles to an **empty catalog** rather than an error, and every string
-  silently renders as its English key — `the_shared_catalog_is_wired_up` in
+  silently renders as its semantic key — `the_shared_catalog_is_wired_up` in
   `openlogi-overlay` and `openlogi-agent` is what makes that fail loudly.
 - `gpui`/`gpui_platform` track zed's default branch on purpose; the compatible zed
   commit is pinned **only in `Cargo.lock`**, in lockstep with the `gpui-component` rev.
