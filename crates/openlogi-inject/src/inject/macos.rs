@@ -19,8 +19,6 @@ use super::{
     HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
 };
 
-static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
-    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
@@ -430,11 +428,15 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use core_graphics::event::CGEventFlags;
+    use core_graphics::event::{CGEventFlags, EventField};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, held_key_event, hid_usage_to_macos};
-    use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
+    use super::{
+        SCROLL_PHASE, combo, held_key_event, hid_usage_to_macos, new_wheel_scroll_event,
+        scroll_phase_value, set_smooth_scroll_phase,
+    };
+    use crate::inject::{HeldKey, HeldModifiers, KeyPhase, SmoothScrollPhase};
 
     #[test]
     fn hid_usages_map_to_macos_virtual_keys() {
@@ -494,6 +496,35 @@ mod tests {
             .expect("Command has a macOS virtual-key mapping");
         assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
         assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+    }
+
+    #[test]
+    fn wheel_event_preserves_fractional_distance_when_phased() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event =
+            new_wheel_scroll_event(source, -0.025, 0.05).expect("wheel event must be created");
+        let fields = [
+            EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+            EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+        ];
+        let before = fields.map(|field| event.get_double_value_field(field));
+        assert!((before[0] - 0.05).abs() < 1.0e-4);
+        assert!((before[1] + 0.025).abs() < 1.0e-4);
+
+        set_smooth_scroll_phase(&event, SmoothScrollPhase::Changed);
+
+        let after = fields.map(|field| event.get_double_value_field(field));
+        assert!((after[0] - before[0]).abs() < f64::EPSILON);
+        assert!((after[1] - before[1]).abs() < f64::EPSILON);
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
+            0
+        );
+        assert_eq!(
+            event.get_integer_value_field(SCROLL_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Changed)
+        );
     }
 }
 
@@ -619,11 +650,20 @@ fn dispatch_scroll(dx: i8, dy: i8) {
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
-    let (quantizer, unit) = match delta {
-        ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
-        ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
-    };
-    let Ok(mut quantizer) = quantizer.lock() else {
+    if let ScrollDelta::WheelTicks { x, y } = delta {
+        let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for wheel scroll");
+            return;
+        };
+        let Some(event) = new_wheel_scroll_event(source, x, y) else {
+            return;
+        };
+        tag_synthetic(&event);
+        event.post(CGEventTapLocation::HID);
+        return;
+    }
+
+    let Ok(mut quantizer) = PIXEL_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS scroll quantizer mutex poisoned");
         return;
     };
@@ -637,29 +677,36 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         tracing::warn!("CGEventSource::new failed for precise scroll");
         return;
     };
-    let Ok(ev) = CGEvent::new_scroll_event(src, unit, 2, delta.y, delta.x, 0) else {
+    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, delta.y, delta.x, 0)
+    else {
         tracing::warn!("CGEvent::new_scroll_event failed for precise scroll");
         return;
     };
-    if unit == ScrollEventUnit::PIXEL {
-        set_continuous_scroll_fields(&ev, delta);
-    }
+    set_continuous_scroll_fields(&ev, delta);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
 }
 
 pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
-    const POINTS_PER_WHEEL_TICK: f64 = 10.0;
+    if let ScrollDelta::WheelTicks { x, y } = delta {
+        let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for smooth wheel scroll");
+            return;
+        };
+        let Some(event) = new_wheel_scroll_event(source, x, y) else {
+            return;
+        };
+        set_smooth_scroll_phase(&event, phase);
+        tag_synthetic(&event);
+        event.post(CGEventTapLocation::HID);
+        return;
+    }
 
-    let units_per_input = match delta {
-        ScrollDelta::Pixels { .. } => 1.0,
-        ScrollDelta::WheelTicks { .. } => POINTS_PER_WHEEL_TICK,
-    };
     let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
         return;
     };
-    let delta = quantizer.quantize(delta, units_per_input);
+    let delta = quantizer.quantize(delta, 1.0);
     drop(quantizer);
 
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
@@ -672,10 +719,28 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         return;
     };
     set_continuous_scroll_fields(&ev, delta);
-    ev.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
-    ev.set_integer_value_field(MOMENTUM_PHASE, 0);
+    set_smooth_scroll_phase(&ev, phase);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
+}
+
+/// Build a traditional, non-continuous wheel event without rounding its
+/// signed 16.16 line distance to an integer. Both output paths call this same
+/// helper, so smoothing changes only when the distance is posted.
+fn new_wheel_scroll_event(source: CGEventSource, x: f64, y: f64) -> Option<CGEvent> {
+    let Ok(event) = CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, 0, 0, 0) else {
+        tracing::warn!("CGEvent::new_scroll_event failed for wheel scroll");
+        return None;
+    };
+    event.set_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1, y);
+    event.set_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2, x);
+    event.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 0);
+    Some(event)
+}
+
+fn set_smooth_scroll_phase(event: &CGEvent, phase: SmoothScrollPhase) {
+    event.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
+    event.set_integer_value_field(MOMENTUM_PHASE, 0);
 }
 
 const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {
