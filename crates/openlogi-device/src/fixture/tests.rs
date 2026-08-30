@@ -29,6 +29,71 @@ struct SyntheticFixture {
 }
 
 #[test]
+fn canonical_device_profile_is_valid_synthetic_and_privacy_safe() {
+    let profile: DeviceProfile =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    profile.validate().expect("canonical profile validates");
+
+    assert_eq!(profile.id, "openlogi-canonical-synthetic-profile");
+    assert_eq!(profile.inventories.len(), 2);
+    assert_eq!(profile.inventories[0].paired.len(), 3);
+    assert_eq!(profile.standalone.len(), 1);
+    assert_eq!(profile.settings.len(), 5);
+    assert_eq!(
+        profile.inventories[0].receiver.unique_id.as_deref(),
+        Some("MOCK-BOLT-01")
+    );
+    assert!(
+        profile
+            .inventories
+            .iter()
+            .flat_map(|inventory| &inventory.paired)
+            .filter_map(|device| device.model_info.as_ref())
+            .all(|model| model.serial_number.is_none())
+    );
+    assert!(
+        profile
+            .standalone
+            .iter()
+            .all(|device| device.serial_number.is_none())
+    );
+}
+
+#[test]
+fn canonical_device_profile_rejects_unknown_fields_recursively() {
+    let canonical: serde_json::Value =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile is JSON");
+    let reject = |mut profile: serde_json::Value, pointer: &str, expected_path: &str| {
+        profile
+            .pointer_mut(pointer)
+            .expect("canonical pointer exists")
+            .as_object_mut()
+            .expect("canonical pointer names an object")
+            .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+        let error = serde_json::from_value::<DeviceProfile>(profile)
+            .expect_err("unknown nested field must be rejected");
+        assert!(error.to_string().contains("unknown field"), "{error}");
+        assert!(error.to_string().contains(expected_path), "{error}");
+    };
+
+    reject(
+        canonical.clone(),
+        "/standalone/0/address",
+        "standalone.0.address.unexpected",
+    );
+    reject(
+        canonical.clone(),
+        "/standalone/0/light_capabilities",
+        "power",
+    );
+    reject(
+        canonical,
+        "/settings/0/smartshift/value",
+        "settings.0.smartshift.value.unexpected",
+    );
+}
+
+#[test]
 fn schemas_reject_unknown_fields_and_arbitrary_masks() {
     let fixture = direct_probe_fixture();
     let profile = serde_json::to_value(&fixture.profile).expect("profile serializes");
