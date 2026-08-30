@@ -20,9 +20,12 @@ impl AppState {
                 .is_some_and(|device| device.effective_invert_scroll(&record.route_key))
         })
     }
-    /// Whether the active device's scroll direction can be inverted: through
-    /// the native HID++ wheel mode, or — for a raw-touchpad device — in the
-    /// scrolling OpenLogi synthesizes while capture is armed.
+    /// Whether the active device's scroll direction can be inverted through
+    /// any path the agent applies: the native HID++ wheel mode, or the
+    /// scrolling OpenLogi synthesizes for a raw-touchpad device while capture
+    /// is armed. The two GUI rows each gate on their own path's capability
+    /// (`capabilities.scroll_inversion` / `touchpad_raw_xy`); this answers
+    /// whether committing the shared setting can take effect at all.
     #[must_use]
     pub fn current_scroll_inversion_supported(&self) -> bool {
         self.current_record()
@@ -66,17 +69,11 @@ impl AppState {
         &self,
     ) -> openlogi_core::config::TouchpadScrollSensitivity {
         self.current_record()
-            .and_then(|record| {
-                record
-                    .persistent_config_key()
-                    .and_then(|key| self.config.devices.get(key))
-            })
-            .map_or_default(|device| {
-                device
-                    .touchpad_gestures
-                    .scroll_sensitivity
-                    .unwrap_or_default()
-            })
+            .and_then(|record| record.persistent_config_key())
+            .map_or_else(
+                openlogi_core::config::TouchpadScrollSensitivity::default,
+                |key| self.config.touchpad_scroll_sensitivity(key),
+            )
     }
     /// Persist the active touchpad's two-finger scroll speed and reload the
     /// agent's capture plan. No-op without a selected raw-touchpad device.

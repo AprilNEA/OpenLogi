@@ -8,7 +8,7 @@ use gpui::{
     Render, Styled, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{
-    Icon, Selectable as _, h_flex,
+    Disableable as _, Icon, Selectable as _, h_flex,
     popover::{Popover, PopoverState},
     scroll::ScrollableElement as _,
     slider::{Slider, SliderEvent, SliderState},
@@ -28,7 +28,10 @@ use crate::ui::theme::{self, Palette, Typography as _};
 /// Complete touchpad configuration surface. The caller capability-gates the
 /// tab; this function only projects and commits configuration through
 /// [`AppState`].
-pub(crate) fn gesture_panel(cx: &mut App) -> impl IntoElement {
+pub(crate) fn gesture_panel(
+    touchpad_scroll_panel: &gpui::Entity<TouchpadScrollPanel>,
+    cx: &mut App,
+) -> impl IntoElement {
     let pal = theme::palette(cx);
     let (enabled, bindings) = AppState::try_read(cx).map_or_else(
         || (false, BTreeMap::new()),
@@ -44,6 +47,7 @@ pub(crate) fn gesture_panel(cx: &mut App) -> impl IntoElement {
         .w_full()
         .gap_4()
         .child(management_card(enabled, pal))
+        .child(scrolling_card(touchpad_scroll_panel.clone(), pal, cx))
         .child(gesture_group(
             tr!("2-finger gestures"),
             &ButtonId::TOUCHPAD_TWO_FINGER,
@@ -95,6 +99,68 @@ fn management_card(enabled: bool, pal: Palette) -> PanelCard {
             .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Pointer movement, clicks, and secondary click remain native. Two-finger scrolling is re-synthesized by OpenLogi while gestures are on."
             ))),
+    )
+}
+
+/// Two-finger scrolling card: the synthesized scroll's speed and direction.
+/// Lives on this tab — not the Pointer tab's wheel-oriented Scrolling card —
+/// because it is gated on the raw-touchpad capability this tab already
+/// requires, and a pad without AdjustableDpi would never reach it there.
+fn scrolling_card(
+    touchpad_scroll_panel: gpui::Entity<TouchpadScrollPanel>,
+    pal: Palette,
+    cx: &mut App,
+) -> PanelCard {
+    let (supported, inverted) = AppState::try_read(cx).map_or((false, false), |state| {
+        (
+            state.current_touchpad_scroll_supported(),
+            state.current_invert_scroll(),
+        )
+    });
+    let description = tr!(
+        "Reverse this touchpad's two-finger scrolling relative to the system scroll direction."
+    );
+    let invert_row = h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("Invert scroll direction")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("touchpad-invert-scroll-toggle")
+                .selected(inverted)
+                .disabled(!supported)
+                .label((!supported).then(|| tr!("Unavailable")))
+                .on_change(|inverted, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_invert_scroll(*inverted);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        );
+    PanelCard::new(
+        tr!("Scrolling"),
+        Icon::empty().path("action-icons/mouse.svg"),
+        v_flex()
+            .gap_4()
+            .when(supported, |card| card.child(touchpad_scroll_panel))
+            .child(invert_row),
     )
 }
 
