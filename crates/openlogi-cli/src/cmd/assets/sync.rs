@@ -24,10 +24,23 @@ use openlogi_assets::{AssetRegistry, FRONT_RENDER_FILES, FetchOutcome, METADATA_
 ///   carousel and the buttons-config view. Newer depots name them
 ///   `front_ext_N`, older ones `front_extN`; the `front_ext` prefix covers
 ///   both.
+/// - `core_metadata_*.json` / `metadata_*.json` — per-variant hotspot
+///   metadata. Depots whose variants are *handed* rather than coloured ship
+///   no bare `core_metadata.json` at all (Lift has only
+///   `core_metadata_left.json` / `core_metadata_right.json`), and the depot
+///   manifest's `image_metadata` is what names the right one. Bundling them
+///   is what keeps such a device off the generic silhouette offline.
 ///
 /// (`back_*` renders stay remote until an easyswitch view needs them.)
 fn is_optional_asset(name: &str) -> bool {
     if name == "side_core.png" || name == "side.png" {
+        return true;
+    }
+    if (name.starts_with("core_metadata_") || name.starts_with("metadata_"))
+        && std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
         return true;
     }
     let path = std::path::Path::new(name);

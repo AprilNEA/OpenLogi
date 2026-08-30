@@ -169,26 +169,33 @@ fn sync_depot(
         warn!(depot, error = %e, "buttons render fetch failed");
     }
 
-    // Optional second pass: download the manifest-mapped render PNGs — the
+    // Optional second pass: download the manifest-mapped resources — the
     // colour variant matching the device's `extended_model_id` for the front
-    // (gallery) and side / buttons (mouse-model) views, plus the camera hero
+    // (gallery) and side / buttons (mouse-model) views, the camera hero
     // (`device_camera_image` — camera depots ship no bare `front*.png`, so the
-    // baseline fetch above brings no render for them at all). Failure is
-    // non-fatal — `AssetResolver.load_files` falls back to whatever landed.
+    // baseline fetch above brings no render for them at all), and this
+    // variant's hotspot metadata (`image_metadata`, the only place a depot
+    // with handed variants names its metadata file). Failure is non-fatal —
+    // `AssetResolver.load_files` falls back to whatever landed.
     let manifest_path = dir.join("manifest.json");
     for resource_key in [
         "device_image",
         "device_buttons_image",
         "device_camera_image",
+        "image_metadata",
     ] {
-        let Some(variant) =
-            pick_variant_filename(&manifest_path, &entry.model_id, ext, resource_key)
-        else {
+        let Some(variant) = pick_variant_filename(&manifest_path, entry, ext, resource_key) else {
             continue;
         };
         if matches!(
             variant.as_str(),
-            "front_core.png" | "front.png" | "side_core.png" | "side.png"
+            "front_core.png"
+                | "front.png"
+                | "side_core.png"
+                | "side.png"
+                | "core_metadata.json"
+                | "metadata_full.json"
+                | "metadata.json"
         ) {
             continue;
         }
@@ -230,9 +237,13 @@ fn fetch_to_cache(
 /// needed for depots whose base render isn't a baseline `front*.png` (the
 /// caller's skip list keeps already-fetched baseline names from re-fetching).
 /// `None` when the manifest is missing, malformed, or lacks the variant.
+///
+/// Every model id the depot answers to is tried as the variant base, the
+/// same way the resolver does: a manifest is keyed on whichever pid Logi
+/// authored it against, which isn't always the index primary.
 fn pick_variant_filename(
     manifest_path: &Path,
-    base_model_id: &str,
+    entry: &DeviceEntry,
     ext: u8,
     resource_key: &str,
 ) -> Option<String> {
@@ -242,8 +253,9 @@ fn pick_variant_filename(
     let manifest = DepotManifest::load_from(manifest_path)
         .map_err(|e| warn!(error = %e, path = %manifest_path.display(), "manifest unreadable"))
         .ok()?;
-    manifest
-        .resource_for_variant(base_model_id, ext, resource_key)
+    entry
+        .model_id_candidates()
+        .find_map(|base| manifest.resource_for_variant(base, ext, resource_key))
         .map(str::to_string)
 }
 

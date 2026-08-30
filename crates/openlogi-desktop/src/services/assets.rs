@@ -26,13 +26,16 @@ use std::sync::Arc;
 
 use openlogi_assets::http::safe_component_path;
 use openlogi_assets::{
-    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
+    BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES,
+    Metadata,
 };
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
+use self::images::{
+    buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
+};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
@@ -225,13 +228,6 @@ impl AssetResolver {
                 );
                 continue;
             };
-            // Hotspot metadata in whichever schema this depot cached:
-            // `core_metadata.json` (newer) or `metadata.json` (older).
-            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
-                continue;
-            };
-            let meta_path = dir.join(meta_name);
-
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
             // markers against the *buttons* image (typically
@@ -246,6 +242,13 @@ impl AssetResolver {
             // colour render resolves regardless of which pid Logi keyed on.
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
+
+            let Some((meta_name, meta_path)) =
+                resolve_metadata(&dir, entry, manifest.as_ref(), model.extended_model_id)
+            else {
+                continue;
+            };
+
             let buttons_name = manifest.as_ref().and_then(|m| {
                 entry
                     .model_id_candidates()
@@ -289,7 +292,7 @@ impl AssetResolver {
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
+                    warn!(depot, root = %root.display(), file = meta_name.as_str(), error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
                 }
             };
@@ -397,6 +400,36 @@ impl Default for AssetResolver {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve a depot's hotspot-metadata file inside `dir`, as `(filename, path)`.
+///
+/// The manifest's `image_metadata` for this colour variant comes first, then
+/// the well-known schema names ([`METADATA_FILES`]). Depots whose variants are
+/// *handed* rather than coloured ship none of the well-known names — the Lift
+/// keys its metadata `core_metadata_left.json` / `core_metadata_right.json` —
+/// so a name-only lookup skips the depot outright and the GUI falls back to the
+/// generic silhouette. Manifest-sourced names are attacker-influenced, so they
+/// pass the same component check as every other asset file.
+fn resolve_metadata(
+    dir: &Path,
+    entry: &DeviceEntry,
+    manifest: Option<&DepotManifest>,
+    ext: u8,
+) -> Option<(String, PathBuf)> {
+    let mut candidates: Vec<String> = manifest
+        .and_then(|m| {
+            entry
+                .model_id_candidates()
+                .find_map(|base| metadata_for(m, base, ext))
+        })
+        .into_iter()
+        .collect();
+    candidates.extend(METADATA_FILES.map(str::to_string));
+    candidates.into_iter().find_map(|name| {
+        let path = safe_component_path(dir, &name, "asset file").ok()?;
+        path.exists().then_some((name, path))
+    })
 }
 
 /// Match a connected device's HID++ model info against a loaded index,
@@ -621,6 +654,66 @@ mod tests {
             "front.png"
         );
         assert_eq!((asset.png_width, asset.png_height), (100, 200));
+        assert_eq!(asset.metadata.assignments().count(), 1);
+    }
+
+    /// A depot whose variants are handed rather than coloured ships none of
+    /// [`METADATA_FILES`] — the Lift keys its metadata `core_metadata_left`
+    /// / `core_metadata_right` and names the right one in the manifest's
+    /// `image_metadata`. Resolving by well-known name alone skipped the
+    /// depot outright and rendered the generic silhouette.
+    #[test]
+    fn resolves_depot_whose_metadata_is_only_named_by_the_manifest() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = "mx_vertical_mini";
+        let dir = root.path().join(depot);
+        std::fs::create_dir_all(&dir).expect("create depot dir");
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"devices":[{"modelId":"b031_ext4","resources":[
+                {"key":"image_metadata","src":"core_metadata_right.json"},
+                {"key":"device_image","src":"front_ext_2.png"}
+            ]}]}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            dir.join("core_metadata_right.json"),
+            r#"{"images":[
+                {"key":"device_buttons_image","origin":{"width":860,"height":1256},
+                 "assignments":[{"slotName":"SLOT_NAME_MIDDLE_BUTTON",
+                                 "marker":{"x":50,"y":50},"label":{"x":0,"y":0}}]}
+            ]}"#,
+        )
+        .expect("write variant metadata");
+        std::fs::write(dir.join("front_ext_2.png"), png_header(860, 1256))
+            .expect("write variant render");
+
+        let resolver = AssetResolver {
+            read_roots: vec![root.path().to_path_buf()],
+            write_root: root.path().to_path_buf(),
+            has_bundle: false,
+            index: None,
+        };
+        let entry = DeviceEntry {
+            model_id: "b031".to_string(),
+            model_ids: Vec::new(),
+            display_name: "Lift".to_string(),
+            kind: "MOUSE".to_string(),
+            asset_path: format!("v1/devices/{depot}/"),
+            files: Vec::new(),
+        };
+        let model = DeviceModelInfo {
+            extended_model_id: 4,
+            ..bare_model()
+        };
+
+        let asset = resolver
+            .load_files(depot, &entry, &model)
+            .expect("manifest-named metadata should resolve the depot");
+        assert_eq!(
+            asset.image_path.file_name().expect("image has a file name"),
+            "front_ext_2.png"
+        );
         assert_eq!(asset.metadata.assignments().count(), 1);
     }
 
