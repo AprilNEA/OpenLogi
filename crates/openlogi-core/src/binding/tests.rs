@@ -522,6 +522,25 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
 }
 
 #[test]
+fn gesture_mode_excludes_primary_clicks_and_every_wheel_control() {
+    let supported: Vec<_> = ButtonId::ALL
+        .into_iter()
+        .filter(|button| button.supports_gesture_mode())
+        .collect();
+
+    assert_eq!(
+        supported,
+        vec![
+            ButtonId::Back,
+            ButtonId::Forward,
+            ButtonId::DpiToggle,
+            ButtonId::GestureButton,
+            ButtonId::HapticPanel,
+        ]
+    );
+}
+
+#[test]
 fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
     // The seed has to match the native behavior on both sides: the capture
     // plan diverts a control only when its binding leaves the default, so any
