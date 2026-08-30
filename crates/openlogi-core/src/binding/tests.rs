@@ -100,6 +100,11 @@ fn smart_zoom_is_pickable_only_on_macos() {
 }
 
 #[test]
+fn smart_zoom_roundtrips_toml_on_every_platform() {
+    assert_eq!(roundtrip(&Action::SmartZoom), Action::SmartZoom);
+}
+
+#[test]
 fn power_user_actions_roundtrip_toml() {
     for action in [
         Action::TypeText("hello".into()),
