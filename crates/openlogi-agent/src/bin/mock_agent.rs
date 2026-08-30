@@ -7,6 +7,7 @@
 //!
 //! ```sh
 //! cargo run -p openlogi-agent --bin openlogi-agent-mock
+//! cargo run -p openlogi-agent --bin openlogi-agent-mock -- --fixture profile.json
 //! OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop   # in a second terminal
 //! ```
 //!
@@ -16,7 +17,11 @@
 //! socket instead, where the shared `agent.lock` keeps the mock and a real
 //! agent from running at the same time in either direction.
 //!
-//! Scripted behavior:
+//! With no arguments it retains the animated scripted demo. A semantic device
+//! profile loaded with `--fixture` runs in frozen test time instead: camera,
+//! foreground application, battery, and pairing never advance from wall time.
+//!
+//! Built-in demo behavior:
 //!
 //! - A Bolt receiver with an online mouse (DPI + SmartShift + battery that
 //!   drains ~1%/minute), an offline mouse, and a lighting-capable keyboard,
@@ -30,7 +35,9 @@
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
 
-use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,19 +46,16 @@ use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-    DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
-    PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    PairedDevice, StandaloneDevice,
 };
-use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
+use openlogi_device::fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings};
 use openlogi_hid::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, TunableTorque, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftStatus,
+    TunableTorque, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -68,6 +72,11 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+#[path = "mock_agent/profile.rs"]
+mod profile;
+
+use profile::{built_in_profile, unsupported_settings, validate_light_command};
+
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
 const RECEIVER_UID: &str = "MOCK-BOLT-01";
 const MOUSE_SLOT: u8 = 1;
@@ -80,7 +89,6 @@ const MOCK_TORQUE: TunableTorque = match TunableTorque::try_new(50) {
 /// Product ID of the scripted directly-attached mouse; `DeviceRoute::Direct`
 /// is matched against it.
 const DIRECT_PID: u16 = 0xb020;
-/// Product ID of the scripted standalone Litra light (Litra Glow).
 /// How often the scripted `camera_active` flag flips.
 const CAMERA_TOGGLE_PERIOD: Duration = Duration::from_secs(30);
 
@@ -126,6 +134,14 @@ fn main() -> ExitCode {
         )
         .init();
 
+    let state = match state_from_args(std::env::args_os().skip(1)) {
+        Ok(state) => state,
+        Err(error) => {
+            warn!(%error, "could not build the mock profile");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // Impersonate the agent role fully: holding `agent.lock` makes every real
     // agent spawned meanwhile (GUI auto-spawn, launchd KeepAlive) exit as a
     // duplicate — its takeover handshake sees us answer the current
@@ -141,14 +157,6 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             warn!(error = %e, "single-instance check failed");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let state = match State::new() {
-        Ok(state) => state,
-        Err(e) => {
-            warn!(error = %e, "could not build the scripted inventory");
             return ExitCode::FAILURE;
         }
     };
@@ -170,6 +178,46 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn state_from_args(args: impl Iterator<Item = OsString>) -> Result<State, String> {
+    if let Some(path) = parse_fixture_arg(args)? {
+        let profile = load_fixture_profile(&path)?;
+        State::new(profile, MockClock::Test(Duration::ZERO)).map_err(|error| error.to_string())
+    } else {
+        let profile = built_in_profile()?;
+        State::new(profile, MockClock::Demo(Instant::now())).map_err(|error| error.to_string())
+    }
+}
+
+fn parse_fixture_arg(mut args: impl Iterator<Item = OsString>) -> Result<Option<PathBuf>, String> {
+    let Some(argument) = args.next() else {
+        return Ok(None);
+    };
+    if argument != "--fixture" {
+        return Err(format!(
+            "unknown argument {}; expected --fixture <profile.json>",
+            argument.to_string_lossy()
+        ));
+    }
+    let path = args
+        .next()
+        .ok_or_else(|| "--fixture requires a profile JSON path".to_string())?;
+    if let Some(extra) = args.next() {
+        return Err(format!("unexpected argument {}", extra.to_string_lossy()));
+    }
+    Ok(Some(PathBuf::from(path)))
+}
+
+fn load_fixture_profile(path: &Path) -> Result<DeviceProfile, String> {
+    let encoded = fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let profile: DeviceProfile = serde_json::from_str(&encoded)
+        .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+    profile
+        .validate()
+        .map_err(|error| format!("could not validate {}: {error}", path.display()))?;
+    Ok(profile)
 }
 
 /// Claim the `openlogi-dev` profile unless the caller picked one.
@@ -223,28 +271,32 @@ async fn serve(server: MockAgent) -> std::io::Result<()> {
     }
 }
 
-/// Mutable DPI state for one scripted device.
-struct DpiState {
-    current: Dpi,
-    capabilities: DpiCapabilities,
+/// Time source and behavior policy for the semantic mock.
+enum MockClock {
+    /// Wall-clock animation used only by the no-argument developer demo.
+    Demo(Instant),
+    /// Frozen logical time used by loaded fixtures.
+    Test(Duration),
 }
 
-/// What one scripted device answers to the settings RPCs. `None` / `false`
-/// answer [`WriteError::FeatureUnsupported`], exercising the GUI's permanent-
-/// error path (it must stop re-probing).
-struct DeviceSettings {
-    dpi: Option<DpiState>,
-    smartshift: Option<SmartShiftStatus>,
-    lighting: bool,
-}
-
-impl DeviceSettings {
-    fn unsupported() -> Self {
-        Self {
-            dpi: None,
-            smartshift: None,
-            lighting: false,
+impl MockClock {
+    fn elapsed(&self) -> Duration {
+        match self {
+            Self::Demo(started) => started.elapsed(),
+            Self::Test(elapsed) => *elapsed,
         }
+    }
+
+    fn is_demo(&self) -> bool {
+        matches!(self, Self::Demo(_))
+    }
+
+    #[cfg(test)]
+    fn advance(&mut self, duration: Duration) {
+        let Self::Test(elapsed) = self else {
+            panic!("only frozen test time can be advanced logically");
+        };
+        *elapsed += duration;
     }
 }
 
@@ -264,15 +316,14 @@ struct PairingSession {
 /// Everything the RPCs read or mutate. Guarded by one async mutex; locks stay
 /// short and never span an await.
 struct State {
+    /// Validated device facts and mutable setting readback state.
+    profile: DeviceProfile,
     /// Devices added by a scripted pairing session, appended to the Bolt
     /// receiver's paired list. The scripted devices themselves are rebuilt per
     /// poll, so this holds only what pairing added.
     paired_extra: Vec<PairedDevice>,
     /// Slot the next scripted pairing assigns.
     next_slot: u8,
-    /// Keyed by HID++ device index (Bolt slot / [`DIRECT_DEVICE_INDEX`]),
-    /// unique here because the script has a single receiver.
-    settings: HashMap<u8, DeviceSettings>,
     pairing: Option<PairingSession>,
     /// Event stream for the most recently started pairing session. It outlives
     /// the live session long enough for a client to drain its terminal update.
@@ -282,58 +333,29 @@ struct State {
     phase: Option<PairingPhase>,
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
-    started: Instant,
+    clock: MockClock,
 }
 
 impl State {
-    fn new() -> Result<Self, WriteError> {
-        let mut settings = HashMap::new();
-        settings.insert(
-            MOUSE_SLOT,
-            DeviceSettings {
-                dpi: Some(DpiState {
-                    current: Dpi::new(1600),
-                    capabilities: DpiCapabilities::new((200u16..=8000).step_by(50).collect())?,
-                }),
-                smartshift: Some(SmartShiftStatus {
-                    mode: SmartShiftMode::Ratchet,
-                    auto_disengage: SmartShiftAutoDisengage::Threshold(
-                        SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-                    ),
-                    tunable_torque: Some(MOCK_TORQUE),
-                }),
-                lighting: false,
-            },
-        );
-        settings.insert(OFFLINE_SLOT, DeviceSettings::unsupported());
-        settings.insert(
-            KEYBOARD_SLOT,
-            DeviceSettings {
-                dpi: None,
-                smartshift: None,
-                lighting: true,
-            },
-        );
-        settings.insert(
-            DIRECT_DEVICE_INDEX,
-            DeviceSettings {
-                dpi: Some(DpiState {
-                    current: Dpi::new(1000),
-                    capabilities: DpiCapabilities::new((400u16..=4000).step_by(100).collect())?,
-                }),
-                smartshift: None,
-                lighting: false,
-            },
-        );
+    fn new(profile: DeviceProfile, clock: MockClock) -> Result<Self, FixtureError> {
+        profile.validate()?;
+        let next_slot = profile
+            .inventories
+            .iter()
+            .filter(|inventory| inventory.receiver.unique_id.as_deref() == Some(RECEIVER_UID))
+            .flat_map(|inventory| inventory.paired.iter().map(|device| device.slot))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         Ok(Self {
+            profile,
             paired_extra: Vec::new(),
-            next_slot: KEYBOARD_SLOT + 1,
-            settings,
+            next_slot,
             pairing: None,
             pairing_updates: None,
             phase: None,
             next_pairing_id: 0,
-            started: Instant::now(),
+            clock,
         })
     }
 
@@ -415,7 +437,7 @@ impl State {
     /// Whether a host camera is "in use" right now — flipped on a timer so the
     /// camera-linked light rendering has a changing input to follow.
     fn camera_active(&self) -> bool {
-        self.started.elapsed().as_secs() / CAMERA_TOGGLE_PERIOD.as_secs() % 2 == 1
+        self.clock.elapsed().as_secs() / CAMERA_TOGGLE_PERIOD.as_secs() % 2 == 1
     }
 
     /// The scripted foreground application, plus the ones "recently" in front.
@@ -430,7 +452,7 @@ impl State {
             id: id.to_string(),
             display_name: name.to_string(),
         };
-        let elapsed = self.started.elapsed().as_secs() / FOREGROUND_SWITCH_PERIOD.as_secs();
+        let elapsed = self.clock.elapsed().as_secs() / FOREGROUND_SWITCH_PERIOD.as_secs();
         let position = usize::try_from(elapsed).unwrap_or(usize::MAX) % SCRIPTED_APPS.len();
         let recent = (0..SCRIPTED_APPS.len())
             .map(|back| {
@@ -447,21 +469,94 @@ impl State {
     /// is re-derived from elapsed time: successive snapshots visibly differ and
     /// the GUI's poll → repaint loop can be watched working.
     fn render_inventory(&self) -> Vec<DeviceInventory> {
-        let mut bolt = bolt_inventory(draining_battery(self.started.elapsed()));
-        bolt.paired.extend_from_slice(&self.paired_extra);
-        vec![bolt, direct_inventory()]
+        let mut inventories = self.profile.inventories.clone();
+        if self.clock.is_demo()
+            && let Some(mouse) = inventories
+                .iter_mut()
+                .find(|inventory| inventory.receiver.unique_id.as_deref() == Some(RECEIVER_UID))
+                .and_then(|inventory| {
+                    inventory
+                        .paired
+                        .iter_mut()
+                        .find(|device| device.slot == MOUSE_SLOT)
+                })
+        {
+            mouse.battery = Some(draining_battery(self.clock.elapsed()));
+        }
+        if let Some(receiver) = inventories
+            .iter_mut()
+            .find(|inventory| inventory.receiver.unique_id.as_deref() == Some(RECEIVER_UID))
+        {
+            receiver.paired.extend_from_slice(&self.paired_extra);
+        }
+        inventories
     }
 
-    fn settings_for(&self, route: &DeviceRoute) -> Result<&DeviceSettings, WriteError> {
-        settings_key(route)
-            .and_then(|key| self.settings.get(&key))
+    fn standalone(&self) -> Vec<StandaloneDevice> {
+        self.profile.standalone.clone()
+    }
+
+    fn settings_for(&self, route: &DeviceRoute) -> Result<&ProfileDeviceSettings, WriteError> {
+        self.require_online(route)?;
+        self.profile
+            .settings
+            .iter()
+            .find(|settings| settings.route == *route)
             .ok_or(WriteError::DeviceNotFound)
     }
 
-    fn settings_for_mut(&mut self, route: &DeviceRoute) -> Result<&mut DeviceSettings, WriteError> {
-        settings_key(route)
-            .and_then(|key| self.settings.get_mut(&key))
+    fn settings_for_mut(
+        &mut self,
+        route: &DeviceRoute,
+    ) -> Result<&mut ProfileDeviceSettings, WriteError> {
+        self.require_online(route)?;
+        self.profile
+            .settings
+            .iter_mut()
+            .find(|settings| settings.route == *route)
             .ok_or(WriteError::DeviceNotFound)
+    }
+
+    fn require_online(&self, route: &DeviceRoute) -> Result<(), WriteError> {
+        match self.route_online(route) {
+            Some(true) => Ok(()),
+            Some(false) => Err(WriteError::DeviceUnreachable {
+                index: route.device_index(),
+            }),
+            None => Err(WriteError::DeviceNotFound),
+        }
+    }
+
+    fn route_online(&self, route: &DeviceRoute) -> Option<bool> {
+        self.profile
+            .inventories
+            .iter()
+            .find_map(|inventory| {
+                inventory.paired.iter().find_map(|device| {
+                    (DeviceRoute::device_route_for(inventory, device.slot).as_ref() == Some(route))
+                        .then_some(device.online)
+                })
+            })
+            .or_else(|| {
+                self.paired_extra.iter().find_map(|device| {
+                    (route
+                        == &DeviceRoute::Bolt {
+                            receiver_uid: RECEIVER_UID.to_string(),
+                            slot: device.slot,
+                        })
+                        .then_some(device.online)
+                })
+            })
+            .or_else(|| {
+                self.profile.standalone.iter().find_map(|device| {
+                    (standalone_route(device) == *route).then_some(device.online)
+                })
+            })
+    }
+
+    #[cfg(test)]
+    fn advance_test_time(&mut self, duration: Duration) {
+        self.clock.advance(duration);
     }
 
     /// Append the scripted pairing candidate to the Bolt receiver's inventory
@@ -483,60 +578,23 @@ impl State {
             model_info: None,
             capabilities: Some(Capabilities::default()),
         });
-        self.settings.insert(slot, DeviceSettings::unsupported());
+        self.profile
+            .settings
+            .push(unsupported_settings(DeviceRoute::Bolt {
+                receiver_uid: RECEIVER_UID.to_string(),
+                slot,
+            }));
         slot
     }
 }
 
-/// The scripted standalone Litra light. The wire form carries the light's
-/// *capabilities*, not its current values — the panel reads those from config —
-/// so this is constant, and writes are answered by [`MockAgent::set_light`].
-fn standalone_light() -> StandaloneDevice {
-    StandaloneDevice {
-        address: RawDeviceAddress {
-            vendor_id: LOGITECH_VENDOR_ID,
-            product_id: LITRA_GLOW_PRODUCT_ID,
-            usage_page: 0xff43,
-            usage_id: 0x0202,
-            identity: "MOCK-LITRA-01".to_string(),
-        },
-        display_name: "Litra Glow".to_string(),
-        manufacturer: Some("Logitech".to_string()),
-        serial_number: Some("MOCKLITRA1".to_string()),
-        unit_id: [0x0d, 0x0e, 0x0f, 0x10],
-        kind: DeviceKind::Unknown,
-        online: true,
-        capabilities: None,
-        light_capabilities: Some(LightCapabilities {
-            power: true,
-            brightness: LightValueRange::new(0, 100, 1, LightValueUnit::Percent).ok(),
-            temperature: LightValueRange::new(2700, 6500, 100, LightValueUnit::Kelvin).ok(),
-            color: false,
-            zones: false,
-        }),
-        driver_id: "litra".to_string(),
-        // `8c900` is the real registry id for a Litra Glow, so the asset lookup resolves.
-        registry_model_id: Some("8c900".to_string()),
-    }
-}
-
-/// The route the GUI addresses the scripted light by.
-fn light_route() -> DeviceRoute {
-    DeviceRoute::Direct {
-        vendor_id: LOGITECH_VENDOR_ID,
-        product_id: LITRA_GLOW_PRODUCT_ID,
-    }
-}
-
-/// Resolve a wire route to the scripted settings key. `None` = no such device.
-fn settings_key(route: &DeviceRoute) -> Option<u8> {
-    match route {
-        DeviceRoute::Bolt { receiver_uid, slot } if receiver_uid == RECEIVER_UID => Some(*slot),
-        DeviceRoute::Direct {
-            vendor_id: LOGITECH_VENDOR_ID,
-            product_id: DIRECT_PID,
-        } => Some(DIRECT_DEVICE_INDEX),
-        _ => None,
+fn standalone_route(device: &StandaloneDevice) -> DeviceRoute {
+    DeviceRoute::RawHid {
+        vendor_id: device.address.vendor_id,
+        product_id: device.address.product_id,
+        usage_page: device.address.usage_page,
+        usage_id: device.address.usage_id,
+        identity: device.address.identity.clone(),
     }
 }
 
@@ -553,147 +611,6 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
             _ => BatteryLevel::Good,
         },
         status: BatteryStatus::Discharging,
-    }
-}
-
-/// The scripted Bolt receiver and its devices. `mouse_battery` is passed in
-/// because it is the one field that moves between polls.
-fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
-    DeviceInventory {
-        receiver: ReceiverInfo {
-            name: "Logi Bolt Receiver".to_string(),
-            vendor_id: LOGITECH_VENDOR_ID,
-            product_id: 0xc548,
-            unique_id: Some(RECEIVER_UID.to_string()),
-        },
-        paired: vec![
-            PairedDevice {
-                slot: MOUSE_SLOT,
-                codename: Some("MX Master 3S".to_string()),
-                wpid: Some(0xb034),
-                kind: DeviceKind::Mouse,
-                online: true,
-                battery: Some(mouse_battery),
-                model_info: Some(DeviceModelInfo {
-                    entity_count: 3,
-                    serial_number: Some("2140LZ00MOCK".to_string()),
-                    unit_id: [0x01, 0x02, 0x03, 0x04],
-                    transports: DeviceTransports {
-                        usb: false,
-                        equad: true,
-                        btle: true,
-                        bluetooth: false,
-                    },
-                    model_ids: [0xb034, 0x4082, 0],
-                    extended_model_id: 0x0b,
-                }),
-                capabilities: Some(Capabilities {
-                    buttons: true,
-                    pointer: true,
-                    lighting: false,
-                    scroll_inversion: true,
-                    hires_wheel: true,
-                    thumbwheel: true,
-                    haptic_feedback: true,
-                    haptic_panel: true,
-                }),
-            },
-            PairedDevice {
-                slot: OFFLINE_SLOT,
-                codename: Some("MX Anywhere 3".to_string()),
-                wpid: Some(0x4090),
-                kind: DeviceKind::Mouse,
-                online: false,
-                battery: None,
-                model_info: None,
-                capabilities: None,
-            },
-            // Lighting is scripted `true` (unlike a real MX Keys) so the
-            // Lighting panel is reachable without G-series hardware.
-            PairedDevice {
-                slot: KEYBOARD_SLOT,
-                codename: Some("MX Keys".to_string()),
-                wpid: Some(0x408a),
-                kind: DeviceKind::Keyboard,
-                online: true,
-                battery: Some(BatteryInfo {
-                    percentage: 100,
-                    level: BatteryLevel::Full,
-                    status: BatteryStatus::Full,
-                }),
-                model_info: Some(DeviceModelInfo {
-                    entity_count: 2,
-                    serial_number: None,
-                    unit_id: [0x05, 0x06, 0x07, 0x08],
-                    transports: DeviceTransports {
-                        usb: false,
-                        equad: true,
-                        btle: true,
-                        bluetooth: false,
-                    },
-                    model_ids: [0xb35b, 0x408a, 0],
-                    extended_model_id: 0,
-                }),
-                capabilities: Some(Capabilities {
-                    buttons: false,
-                    pointer: false,
-                    lighting: true,
-                    scroll_inversion: false,
-                    hires_wheel: false,
-                    thumbwheel: false,
-                    haptic_feedback: false,
-                    haptic_panel: false,
-                }),
-            },
-        ],
-    }
-}
-
-/// A directly-attached (Bluetooth) mouse: its synthetic receiver entry mirrors
-/// the device itself, and its route is [`DeviceRoute::Direct`].
-fn direct_inventory() -> DeviceInventory {
-    DeviceInventory {
-        receiver: ReceiverInfo {
-            name: "MX Vertical".to_string(),
-            vendor_id: LOGITECH_VENDOR_ID,
-            product_id: DIRECT_PID,
-            unique_id: None,
-        },
-        paired: vec![PairedDevice {
-            slot: DIRECT_DEVICE_INDEX,
-            codename: Some("MX Vertical".to_string()),
-            wpid: None,
-            kind: DeviceKind::Mouse,
-            online: true,
-            battery: Some(BatteryInfo {
-                percentage: 55,
-                level: BatteryLevel::Good,
-                status: BatteryStatus::Discharging,
-            }),
-            model_info: Some(DeviceModelInfo {
-                entity_count: 2,
-                serial_number: None,
-                unit_id: [0x09, 0x0a, 0x0b, 0x0c],
-                transports: DeviceTransports {
-                    usb: true,
-                    equad: false,
-                    btle: true,
-                    bluetooth: false,
-                },
-                model_ids: [DIRECT_PID, 0, 0],
-                extended_model_id: 0,
-            }),
-            capabilities: Some(Capabilities {
-                buttons: true,
-                pointer: true,
-                lighting: false,
-                scroll_inversion: false,
-                hires_wheel: false,
-                thumbwheel: false,
-                haptic_feedback: false,
-                haptic_panel: false,
-            }),
-        }],
     }
 }
 
@@ -756,7 +673,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
     AgentSnapshot {
         status: agent_status(),
         inventory: state.render_inventory(),
-        standalone: vec![standalone_light()],
+        standalone: state.standalone(),
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
@@ -840,7 +757,7 @@ impl Agent for MockAgent {
         let settings = state.settings_for_mut(&route)?;
         let dpi_state = settings
             .dpi
-            .as_mut()
+            .value_mut()
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2201,
             })?;
@@ -856,7 +773,7 @@ impl Agent for MockAgent {
         lighting: Lighting,
     ) -> Result<(), WriteError> {
         let state = self.state.lock().await;
-        if !state.settings_for(&route)?.lighting {
+        if !state.settings_for(&route)?.lighting.is_supported() {
             return Err(WriteError::FeatureUnsupported {
                 feature_hex: 0x8070,
             });
@@ -875,7 +792,7 @@ impl Agent for MockAgent {
         let settings = state.settings_for_mut(&route)?;
         let smartshift = settings
             .smartshift
-            .as_mut()
+            .value_mut()
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })?;
@@ -889,11 +806,8 @@ impl Agent for MockAgent {
         state
             .settings_for(&route)?
             .dpi
-            .as_ref()
-            .map(|dpi| DpiInfo {
-                current: dpi.current,
-                capabilities: dpi.capabilities.clone(),
-            })
+            .value()
+            .cloned()
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2201,
             })
@@ -908,6 +822,8 @@ impl Agent for MockAgent {
         state
             .settings_for(&route)?
             .smartshift
+            .value()
+            .copied()
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })
@@ -924,6 +840,9 @@ impl Agent for MockAgent {
     ) -> Result<(), PairingCommandError> {
         let id = {
             let mut state = self.state.lock().await;
+            if !state.clock.is_demo() {
+                return Err(PairingCommandError::WatcherUnavailable);
+            }
             state.begin_pairing()?
         };
 
@@ -1030,9 +949,8 @@ impl Agent for MockAgent {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        if route != light_route() {
-            return Err(WriteError::DeviceNotFound);
-        }
+        let state = self.state.lock().await;
+        validate_light_command(&state, &route, command)?;
         info!(%route, ?command, "set_light");
         Ok(())
     }
@@ -1043,74 +961,13 @@ impl Agent for MockAgent {
         route: DeviceRoute,
         enabled: bool,
     ) -> Result<(), WriteError> {
-        if route != light_route() {
-            return Err(WriteError::DeviceNotFound);
-        }
+        let state = self.state.lock().await;
+        validate_light_command(&state, &route, LightCommand::Power(enabled))?;
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn state_with_discovery() -> State {
-        let mut state = State::new().expect("mock state should be valid");
-        let id = state
-            .begin_pairing()
-            .expect("idle mock should admit pairing");
-        state
-            .pairing_session(id)
-            .expect("new pairing session should be active")
-            .discovered = Some(FoundDevice {
-            address: CANDIDATE_ADDRESS,
-            name: "ERGO K860".to_string(),
-        });
-        state.set_phase(PairingPhase::Found(vec![FoundDevice {
-            address: CANDIDATE_ADDRESS,
-            name: "ERGO K860".to_string(),
-        }]));
-        state
-    }
-
-    #[test]
-    fn cancel_and_device_selection_are_atomic_in_either_order() {
-        let mut cancel_first = state_with_discovery();
-        cancel_first.cancel_pairing();
-
-        assert!(matches!(
-            cancel_first.select_pairing_device(CANDIDATE_ADDRESS),
-            Err(PairingCommandError::NoActiveSession)
-        ));
-        assert!(cancel_first.pairing.is_none());
-        assert_eq!(cancel_first.phase, None);
-        assert!(matches!(
-            cancel_first.next_pairing_update(),
-            Some(PairingUpdate::Searching)
-        ));
-        assert!(matches!(
-            cancel_first.next_pairing_update(),
-            Some(PairingUpdate::Failed(PairingFailure::Cancelled))
-        ));
-
-        let mut select_first = state_with_discovery();
-        select_first
-            .select_pairing_device(CANDIDATE_ADDRESS)
-            .expect("discovered device should be selectable");
-        assert_eq!(select_first.phase, Some(PairingPhase::Pairing));
-
-        select_first.cancel_pairing();
-
-        assert!(select_first.pairing.is_none());
-        assert_eq!(select_first.phase, None);
-        assert!(matches!(
-            select_first.next_pairing_update(),
-            Some(PairingUpdate::Searching)
-        ));
-        assert!(matches!(
-            select_first.next_pairing_update(),
-            Some(PairingUpdate::Failed(PairingFailure::Cancelled))
-        ));
-    }
-}
+#[path = "mock_agent/tests.rs"]
+mod tests;

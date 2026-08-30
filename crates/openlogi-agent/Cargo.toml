@@ -24,9 +24,11 @@ path = "src/bin/mock_agent.rs"
 [dependencies]
 openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
+openlogi-device = { path = "../openlogi-device" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+serde_json.workspace = true
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
