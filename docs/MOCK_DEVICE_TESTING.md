@@ -187,9 +187,9 @@ Own user interaction and file I/O:
 
 - `openlogi fixture record profile`
 - `openlogi fixture record case`
-- `openlogi fixture verify`
-- Strict target selection, safety warnings, sanitization report, temporary
-  output, self-replay, and atomic rename.
+- `openlogi fixture verify <fixture-directory>`
+- Strict target selection, safety warnings, sanitization report, case
+  self-replay, atomic publication, and strict corpus loading.
 
 `snapshot` already means camera capture, so fixture commands must not reuse
 that name.
@@ -315,18 +315,20 @@ they came from the same physical unit. Matching model IDs is insufficient.
 
 ### `manifest.json`
 
-Contains review metadata, not test expectations:
+Contains the exact privacy and relationship contract, not capture provenance or
+semantic expectations:
 
 - fixture schema version;
-- sanitized specimen ID and display model;
-- capture tool/OpenLogi version;
-- source OS and architecture;
-- transport link represented by each case;
-- whether raw reports passed the committable-fixture sanitizer;
-- optional notes about required manual hardware behavior.
+- synthetic specimen ID and related profile ID;
+- named case, logical channel, and receiver/device relationship;
+- fixture-local receiver and device principals with typed profile routes;
+- canonical synthetic identity representations;
+- exact nonzero occurrence counts at typed profile/cassette locations.
 
 Do not store contributor identity, local paths, OS node IDs, capture timestamps
-that create churn, or hashed hardware identifiers.
+that create churn, hashed hardware identifiers, original values, or a
+`sanitized` boolean. Verification re-extracts identity evidence from the profile
+and every cassette rather than trusting capture metadata.
 
 ### `profile.json`
 
@@ -355,25 +357,32 @@ session:
   "report_support": "short_and_long",
   "exchanges": [
     {
+      "request_match": "hidpp20",
       "request": "1101001100000000000000000000000000000000",
       "response": "1101001104000000000000000000000000000000",
       "required": true
     }
-  ],
-  "expect": {
-    "current_dpi": 1600
-  }
+  ]
 }
 ```
 
 The example illustrates shape only; captured values must come from the actual
-operation. Hex is lowercase and includes the report ID. Expected semantic
-values are human-reviewed and are not silently regenerated when replay output
-changes.
+operation. Hex is lowercase and includes the report ID. The cassette contains
+raw evidence only; independently reviewed semantic expectations belong in the
+profile or an operation-contract test and are not silently regenerated from
+replay output.
 
 Split cases because a full inventory probe can contain hundreds of exchanges
 and changes more often than a focused DPI read. A regression should identify
 the operation that no longer matches.
+
+Run `openlogi fixture verify <fixture-directory>` before review. The loader
+accepts only a real, non-symlink directory whose name equals the manifest ID,
+requires exactly `manifest.json`, `profile.json`, and the complete declared
+`cases/*.json` set, and rejects unknown files, unsafe case names, symlinks, and
+unknown JSON fields. It reports schema, relationship, privacy, and replay
+validation separately. This command performs no hardware access and does not
+establish semantic or physical correctness.
 
 ## Recording model
 

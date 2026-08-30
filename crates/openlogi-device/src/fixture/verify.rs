@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use openlogi_core::hid::{DeviceRoute, speaks_unifying_protocol};
+use thiserror::Error;
 
 use super::{
     DeviceProfile, FixtureDeviceRoute, FixtureError, FixtureManifest, FixturePrincipal,
@@ -21,6 +23,55 @@ struct LedgerIndex<'a> {
     expected: BTreeMap<CountKey, u32>,
 }
 
+/// Verification stage that rejected a complete fixture asset set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureVerificationStage {
+    /// Typed assets or their declared schema invariants are invalid.
+    Schema,
+    /// Manifest, profile, and named cassette relationships disagree.
+    Relationship,
+    /// Synthetic identity policy, ownership, or exact occurrence counts disagree.
+    Privacy,
+    /// Cassette framing, matching, or supported protocol evidence is invalid.
+    Replay,
+}
+
+impl fmt::Display for FixtureVerificationStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Schema => "schema",
+            Self::Relationship => "relationship",
+            Self::Privacy => "privacy",
+            Self::Replay => "replay",
+        })
+    }
+}
+
+/// A fixture verification failure tagged with the stage that rejected it.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("{stage} verification failed: {source}")]
+pub struct FixtureVerificationError {
+    stage: FixtureVerificationStage,
+    #[source]
+    source: FixtureError,
+}
+
+impl FixtureVerificationError {
+    /// Return the verification stage that rejected the fixture.
+    #[must_use]
+    pub const fn stage(&self) -> FixtureVerificationStage {
+        self.stage
+    }
+
+    fn new(stage: FixtureVerificationStage, source: FixtureError) -> Self {
+        Self { stage, source }
+    }
+
+    fn into_fixture_error(self) -> FixtureError {
+        self.source
+    }
+}
+
 impl FixtureManifest {
     /// Verify a semantic profile and complete named cassette set against this ledger.
     ///
@@ -33,26 +84,39 @@ impl FixtureManifest {
         profile: &DeviceProfile,
         cassettes: &[HidCassette],
     ) -> Result<(), FixtureError> {
-        self.validate()?;
-        profile.validate()?;
-        if profile.id != self.profile_id {
-            return invalid(format!(
-                "manifest profile_id {} does not match profile {}",
-                self.profile_id, profile.id
-            ));
-        }
-        let cassette_map = self.validate_cassettes(cassettes)?;
-        let ledger = LedgerIndex::new(self)?;
-        let mut observed = BTreeMap::new();
-        verify_profile(profile, &ledger, &mut observed)?;
-        verify_cassettes(&cassette_map, &ledger, &mut observed)?;
-        compare_counts(&ledger.expected, &observed)
+        self.verify_detailed(profile, cassettes)
+            .map_err(FixtureVerificationError::into_fixture_error)
     }
 
-    fn validate_cassettes<'a>(
+    /// Verify a complete fixture while preserving the rejecting validation stage.
+    pub fn verify_detailed(
+        &self,
+        profile: &DeviceProfile,
+        cassettes: &[HidCassette],
+    ) -> Result<(), FixtureVerificationError> {
+        self.validate().map_err(schema_error)?;
+        profile.validate().map_err(schema_error)?;
+        if profile.id != self.profile_id {
+            return Err(relationship_error(FixtureError::invalid(
+                "fixture verification",
+                format!(
+                    "manifest profile_id {} does not match profile {}",
+                    self.profile_id, profile.id
+                ),
+            )));
+        }
+        let cassette_map = self.validate_cassette_relationships(cassettes)?;
+        let ledger = LedgerIndex::new(self).map_err(schema_error)?;
+        let mut observed = BTreeMap::new();
+        verify_profile(profile, &ledger, &mut observed).map_err(privacy_error)?;
+        verify_cassettes(&cassette_map, &ledger, &mut observed)?;
+        compare_counts(&ledger.expected, &observed).map_err(privacy_error)
+    }
+
+    fn validate_cassette_relationships<'a>(
         &self,
         cassettes: &'a [HidCassette],
-    ) -> Result<BTreeMap<&'a str, &'a HidCassette>, FixtureError> {
+    ) -> Result<BTreeMap<&'a str, &'a HidCassette>, FixtureVerificationError> {
         let cases: BTreeMap<_, _> = self
             .cases
             .iter()
@@ -60,18 +124,27 @@ impl FixtureManifest {
             .collect();
         let mut found = BTreeMap::new();
         for cassette in cassettes {
-            cassette.validate()?;
+            cassette.validate().map_err(replay_error)?;
             let Some(case) = cases.get(cassette.name.as_str()) else {
-                return invalid(format!("extra cassette {}", cassette.name));
+                return Err(relationship_error(FixtureError::invalid(
+                    "fixture verification",
+                    format!("extra cassette {}", cassette.name),
+                )));
             };
             if cassette.channel != case.channel {
-                return invalid(format!(
-                    "cassette {} uses channel {}, expected {}",
-                    cassette.name, cassette.channel, case.channel
-                ));
+                return Err(relationship_error(FixtureError::invalid(
+                    "fixture verification",
+                    format!(
+                        "cassette {} uses channel {}, expected {}",
+                        cassette.name, cassette.channel, case.channel
+                    ),
+                )));
             }
             if found.insert(cassette.name.as_str(), cassette).is_some() {
-                return invalid(format!("duplicate cassette {}", cassette.name));
+                return Err(relationship_error(FixtureError::invalid(
+                    "fixture verification",
+                    format!("duplicate cassette {}", cassette.name),
+                )));
             }
         }
         if let Some(missing) = self
@@ -79,7 +152,10 @@ impl FixtureManifest {
             .iter()
             .find(|case| !found.contains_key(case.name.as_str()))
         {
-            return invalid(format!("missing cassette {}", missing.name));
+            return Err(relationship_error(FixtureError::invalid(
+                "fixture verification",
+                format!("missing cassette {}", missing.name),
+            )));
         }
         Ok(found)
     }
@@ -364,36 +440,43 @@ fn verify_cassettes(
     cassettes: &BTreeMap<&str, &HidCassette>,
     ledger: &LedgerIndex<'_>,
     observed: &mut BTreeMap<CountKey, u32>,
-) -> Result<(), FixtureError> {
+) -> Result<(), FixtureVerificationError> {
     for (case, cassette) in cassettes {
         let mut extractor = ProtocolIdentityExtractor::default();
         for exchange in &cassette.exchanges {
             let Some(response) = exchange.response.as_deref() else {
-                return invalid(format!(
-                    "cassette {case} contains unsupported response-less traffic"
-                ));
+                return Err(replay_error(FixtureError::invalid(
+                    "fixture verification",
+                    format!("cassette {case} contains unsupported response-less traffic"),
+                )));
             };
             let inspection = extractor
                 .inspect_exchange(&exchange.request, response)
                 .map_err(|error| {
-                    FixtureError::invalid(
+                    replay_error(FixtureError::invalid(
                         "fixture verification",
                         format!("cassette {case}: {error}"),
-                    )
+                    ))
                 })?;
             if inspection.request_match != exchange.request_match {
-                return invalid(format!(
-                    "cassette {case} uses the wrong request matching rule"
-                ));
+                return Err(replay_error(FixtureError::invalid(
+                    "fixture verification",
+                    format!("cassette {case} uses the wrong request matching rule"),
+                )));
             }
             for field in inspection.fields {
                 let value = field.value(response).map_err(|error| {
-                    FixtureError::invalid("fixture verification", error.to_string())
+                    replay_error(FixtureError::invalid(
+                        "fixture verification",
+                        error.to_string(),
+                    ))
                 })?;
                 if value.iter().all(|byte| *byte == 0) {
                     continue;
                 }
-                let principal = ledger.resolve_bytes(field.kind, value)?;
+                let principal = ledger
+                    .resolve_bytes(field.kind, value)
+                    .map_err(privacy_error)?;
                 observe(
                     observed,
                     principal,
@@ -535,4 +618,20 @@ fn compare_counts(
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, FixtureError> {
     Err(FixtureError::invalid("fixture verification", message))
+}
+
+fn schema_error(source: FixtureError) -> FixtureVerificationError {
+    FixtureVerificationError::new(FixtureVerificationStage::Schema, source)
+}
+
+fn relationship_error(source: FixtureError) -> FixtureVerificationError {
+    FixtureVerificationError::new(FixtureVerificationStage::Relationship, source)
+}
+
+fn privacy_error(source: FixtureError) -> FixtureVerificationError {
+    FixtureVerificationError::new(FixtureVerificationStage::Privacy, source)
+}
+
+fn replay_error(source: FixtureError) -> FixtureVerificationError {
+    FixtureVerificationError::new(FixtureVerificationStage::Replay, source)
 }
