@@ -1,5 +1,16 @@
 use super::*;
 
+#[test]
+fn no_argument_mode_uses_the_canonical_profile_with_demo_time() {
+    let state = state_from_args(std::iter::empty()).expect("no-argument mock state");
+    let canonical: DeviceProfile =
+        serde_json::from_str(openlogi_device::fixture::CANONICAL_DEVICE_PROFILE_JSON)
+            .expect("canonical profile parses");
+
+    assert_eq!(state.profile, canonical);
+    assert!(state.clock.is_demo());
+}
+
 fn demo_state() -> State {
     State::new(
         built_in_profile().expect("built-in profile should construct"),
@@ -49,7 +60,7 @@ fn fixture_argument_and_file_boundary_load_a_validated_profile() {
     let profile = built_in_profile().expect("built-in profile should construct");
     fs::write(
         &path,
-        serde_json::to_vec_pretty(&profile).expect("profile should serialize"),
+        openlogi_device::fixture::CANONICAL_DEVICE_PROFILE_JSON,
     )
     .expect("fixture file should be writable");
 
