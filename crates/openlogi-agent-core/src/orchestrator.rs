@@ -623,12 +623,9 @@ impl Orchestrator {
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
-            crate::hardware::set_light_in_background(
-                &self.shared.device_io,
-                Some(route),
-                &light,
-                capabilities,
-            );
+            self.shared
+                .hardware
+                .set_light_in_background(Some(route), &light, capabilities);
         }
     }
 
@@ -658,12 +655,9 @@ impl Orchestrator {
                 continue;
             };
             light.enabled = active;
-            crate::hardware::set_light_in_background(
-                &self.shared.device_io,
-                dev.route.clone(),
-                &light,
-                capabilities,
-            );
+            self.shared
+                .hardware
+                .set_light_in_background(dev.route.clone(), &light, capabilities);
             applied += 1;
         }
         info!(previous = ?previous, active, lights = applied, "applied camera-linked light state");
@@ -914,8 +908,7 @@ impl Orchestrator {
                 self.effective_light_settings(&dev.config_key),
                 dev.light_capabilities,
             ) {
-                crate::hardware::set_light_in_background(
-                    &self.shared.device_io,
+                self.shared.hardware.set_light_in_background(
                     dev.route.clone(),
                     &light,
                     capabilities,

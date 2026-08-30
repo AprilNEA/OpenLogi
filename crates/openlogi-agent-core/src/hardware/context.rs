@@ -3,9 +3,14 @@
 use std::sync::Arc;
 
 use openlogi_core::device::StandaloneDevice;
+use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
-use openlogi_hid::{ChannelPool, DeviceIoGate, Enumerator, FileProbeCacheStore, InventoryError};
+use openlogi_hid::{
+    ChannelPool, DeviceIoGate, DeviceRoute, Enumerator, FileProbeCacheStore, InventoryError,
+    LitraModel, PairingCommand, PairingEvent, ReceiverSelector,
+};
+use tokio::sync::mpsc;
 
 /// One coherent source for every backend-dependent agent hardware service.
 ///
@@ -61,6 +66,26 @@ impl HardwareContext {
         self.channel_pool.clone()
     }
 
+    /// Apply one explicit semantic command to a standalone light through this
+    /// context's backend and lifecycle gate.
+    pub async fn apply_light(
+        &self,
+        route: &DeviceRoute,
+        command: LightCommand,
+    ) -> Result<(), WriteError> {
+        super::light::cancel_light_reapply(route);
+        super::light::apply_light(self, route, command).await
+    }
+
+    pub(crate) fn set_light_in_background(
+        &self,
+        target: Option<DeviceRoute>,
+        light: &openlogi_core::config::LightSettings,
+        capabilities: openlogi_core::device::LightCapabilities,
+    ) {
+        super::light::set_light_in_background(self, target, light, capabilities);
+    }
+
     pub(crate) fn enumerator(&self) -> Enumerator {
         let enumerator = Enumerator::with_backend(Arc::clone(&self.backend));
         match &self.probe_cache {
@@ -77,6 +102,24 @@ impl HardwareContext {
         &self,
     ) -> Result<Vec<StandaloneDevice>, InventoryError> {
         openlogi_hid::inventory::standalone::enumerate_standalone(&*self.backend).await
+    }
+
+    pub(crate) async fn run_pairing(
+        &self,
+        target: ReceiverSelector,
+        commands: mpsc::UnboundedReceiver<PairingCommand>,
+        events: mpsc::UnboundedSender<PairingEvent>,
+    ) -> Result<(), PairingError> {
+        openlogi_hid::pairing::run_pairing(&*self.backend, target, commands, events).await
+    }
+
+    pub(super) async fn apply_litra(
+        &self,
+        route: &DeviceRoute,
+        model: LitraModel,
+        command: LightCommand,
+    ) -> Result<(), WriteError> {
+        openlogi_hid::write::apply_litra(&*self.backend, route, model, command).await
     }
 
     fn from_parts(

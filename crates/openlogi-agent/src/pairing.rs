@@ -143,7 +143,7 @@ impl PairingManager {
     /// be called inside the tokio runtime (it spawns the translator task).
     #[must_use]
     pub fn new(shared: SharedRuntime, observable: Arc<ObservableState>) -> Self {
-        let (ctrl, raw_events) = pairing::spawn();
+        let (ctrl, raw_events) = pairing::spawn_with_hardware(shared.hardware());
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
         let session = Arc::new(StdMutex::new(SessionOwner::default()));
         tokio::spawn(translate(
