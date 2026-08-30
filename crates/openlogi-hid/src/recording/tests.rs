@@ -1,6 +1,8 @@
 use std::error::Error;
+use std::future::Future as _;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use hidpp::async_trait;
@@ -141,6 +143,35 @@ async fn records_standalone_raw_writer_success_and_failure_separately() {
             .as_slice(),
         [vec![0x11, 0x22], vec![0xee, 0x33]]
     );
+}
+
+#[tokio::test]
+async fn cancelled_standalone_raw_write_retains_its_terminal_outcome() {
+    let recorder = NativeRecorder::new(8).unwrap();
+    let sink = recorder.sink();
+    let mut capture = sink.begin_raw_writer(test_node()).unwrap();
+    capture.complete(RecordedRawWriterOpenOutcome::Opened);
+    let mut writer = RecordingRawWriter::new(Box::new(PendingRawWriter), capture);
+    let report = [0x11, 0x22];
+
+    let mut write = Box::pin(writer.write_output_report(&report));
+    std::future::poll_fn(|context| {
+        assert!(write.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(write);
+    drop(writer);
+
+    let recording = recorder.finish().unwrap();
+    let raw_writer = &recording.raw_writers[0];
+    assert_eq!(raw_writer.writes.len(), 1);
+    assert_eq!(raw_writer.writes[0].report.as_ref(), report);
+    assert_eq!(
+        raw_writer.writes[0].outcome,
+        RecordedRawWriteOutcome::Cancelled
+    );
+    assert!(raw_writer.closed_at.is_some());
 }
 
 #[tokio::test]
@@ -442,5 +473,14 @@ impl RawWriter for FakeRawWriter {
         } else {
             Ok(())
         }
+    }
+}
+
+struct PendingRawWriter;
+
+#[async_trait]
+impl RawWriter for PendingRawWriter {
+    async fn write_output_report(&mut self, _report: &[u8]) -> Result<(), BackendError> {
+        std::future::pending().await
     }
 }

@@ -115,7 +115,7 @@ impl NativeRecorder {
     }
 
     #[cfg(test)]
-    fn sink(&self) -> RecordingSink {
+    pub(crate) fn sink(&self) -> RecordingSink {
         RecordingSink {
             shared: Arc::clone(&self.shared),
         }
