@@ -373,3 +373,7 @@ const fn profile_support(supported: bool) -> ProfileSupport {
         ProfileSupport::Unsupported
     }
 }
+
+#[cfg(test)]
+#[path = "record_profile/tests.rs"]
+mod tests;

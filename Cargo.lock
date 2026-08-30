@@ -5487,6 +5487,7 @@ dependencies = [
  "anyhow",
  "atomic-write-file",
  "clap",
+ "futures",
  "openlogi-assets",
  "openlogi-camera",
  "openlogi-core",
