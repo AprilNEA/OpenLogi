@@ -104,6 +104,27 @@ fn ci_yml_runs_what_this_runner_runs() {
     }
 }
 
+#[test]
+fn native_windows_clippy_plan_also_builds_rustdoc() {
+    let sh = Shell::new().expect("a shell");
+    let plan = Job::ClippyWindows
+        .plan(&sh, Host::Windows)
+        .expect("native Windows plan");
+    let Action::Run(steps) = plan.action else {
+        panic!("native Windows clippy must run");
+    };
+
+    assert_eq!(steps.len(), 2);
+    assert_eq!(
+        steps[0].argv_line(),
+        "cargo clippy --workspace --all-targets -- -D warnings"
+    );
+    assert_eq!(
+        steps[1].argv_line(),
+        "cargo doc --workspace --no-deps --document-private-items --exclude openlogi-ui --exclude openlogi-desktop --exclude openlogi-overlay --exclude openlogi-agent"
+    );
+}
+
 /// The wasm job skips itself on a machine without the wasm32 std, so its plan
 /// cannot be compared against `ci.yml` the way the others are. What must not
 /// drift is the crate list: a crate declared portable here but absent from the
