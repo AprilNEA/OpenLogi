@@ -213,6 +213,11 @@ impl Agent for AgentServer {
         Hook::prompt_accessibility();
     }
 
+    async fn request_input_monitoring(self, _: Context) {
+        #[cfg(target_os = "macos")]
+        let _request = tokio::spawn(crate::lifecycle::refresh_input_monitoring());
+    }
+
     async fn start_pairing(
         self,
         _: Context,

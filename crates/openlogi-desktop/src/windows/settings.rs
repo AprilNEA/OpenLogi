@@ -108,6 +108,9 @@ pub struct SettingsView {
     appearance_obs: Option<Subscription>,
     /// Refreshes host-owned snapshots when Settings becomes active again.
     _activation_obs: Subscription,
+    /// Consume one Input Monitoring recheck after returning from System Settings.
+    #[cfg(target_os = "macos")]
+    input_monitoring_return_pending: bool,
     _state_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
@@ -256,6 +259,8 @@ impl SettingsView {
             appearance_obs: None,
             _activation_obs: activation_obs,
             _state_obs: state_obs,
+            #[cfg(target_os = "macos")]
+            input_monitoring_return_pending: false,
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
@@ -286,6 +291,12 @@ impl SettingsView {
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.refresh_registration_status(cx);
+                #[cfg(target_os = "macos")]
+                if std::mem::take(&mut this.input_monitoring_return_pending)
+                    && let Some(state) = AppState::try_global(cx)
+                {
+                    state.read(cx).request_input_monitoring();
+                }
             }
         })
     }
@@ -500,7 +511,9 @@ impl Render for SettingsView {
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let settings = settings.page(permissions::permissions_page(has_camera, view.clone()));
+        #[cfg(target_os = "linux")]
         let settings = settings.page(permissions::permissions_page(has_camera));
         let settings = settings
             .page(appearance::appearance_page(

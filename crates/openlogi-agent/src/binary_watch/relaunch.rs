@@ -64,24 +64,24 @@ pub(super) fn restart(path: &Path) {
     }
 }
 
-/// Relaunch the macOS agent after Input Monitoring is granted.
+/// Relaunch the macOS agent after an Input Monitoring decision may have changed.
 ///
-/// macOS does not apply a new Input Monitoring grant to the running process.
+/// macOS does not apply a changed Input Monitoring decision to the running process.
 /// The successor starts only after this process exits and releases its
 /// singleton lock and IPC socket. If the relaunch cannot be scheduled, the
 /// current process stays alive so the user can restart it manually.
 #[cfg(target_os = "macos")]
-pub fn relaunch_after_input_monitoring_grant() {
+pub fn relaunch_after_input_monitoring_change() {
     let path = match std::env::current_exe() {
         Ok(path) => path,
         Err(e) => {
-            warn!(error = %e, "could not resolve own executable after Input Monitoring was granted — restart the agent manually");
+            warn!(error = %e, "could not resolve own executable after Input Monitoring changed — restart the agent manually");
             return;
         }
     };
-    info!("Input Monitoring granted — relaunching the macOS agent");
+    info!("Input Monitoring may have changed — relaunching the macOS agent");
     if let Err(e) = schedule_macos_relaunch_and_exit(&path) {
-        warn!(error = %e, "could not schedule agent relaunch after Input Monitoring was granted — restart the agent manually");
+        warn!(error = %e, "could not schedule agent relaunch after Input Monitoring changed — restart the agent manually");
     }
 }
 

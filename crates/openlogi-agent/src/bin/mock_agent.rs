@@ -797,6 +797,10 @@ impl Agent for MockAgent {
         Ok(())
     }
 
+    async fn request_input_monitoring(self, _: Context) {
+        info!("request_input_monitoring (no-op in the mock)");
+    }
+
     // The mock has no Actions Ring hardware: long-polls idle until the
     // overlay's request deadline (returning immediately would hot-loop it),
     // and interaction commands answer like an expired session.
