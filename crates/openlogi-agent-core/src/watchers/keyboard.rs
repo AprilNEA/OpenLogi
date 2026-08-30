@@ -11,7 +11,7 @@
 //! excludes) both. Like the gesture watcher, this needs no macOS Accessibility
 //! permission — the key events arrive over HID++.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -19,7 +19,8 @@ use std::time::Duration;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
     CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
-    DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session_with_registry,
+    DeviceRoute, KeyboardCaptureTargets, PendingCaptureRestore,
+    run_keyboard_capture_session_with_registry,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -41,6 +42,8 @@ pub struct KeyboardSpec {
     pub route: DeviceRoute,
     /// `0x1b04` control ID → button, for exactly the bound keys.
     pub wanted: BTreeMap<u16, ButtonId>,
+    /// Bound `0x8010` gaming keys to report in software-control mode.
+    pub wanted_g_keys: BTreeSet<ButtonId>,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -54,6 +57,7 @@ pub type SharedKeyboardSpec = watch::Receiver<Option<Arc<KeyboardSpec>>>;
 struct KeyboardTarget {
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
+    wanted_g_keys: BTreeSet<ButtonId>,
 }
 
 impl KeyboardTarget {
@@ -61,6 +65,7 @@ impl KeyboardTarget {
         Self {
             route: spec.route.clone(),
             wanted: spec.wanted.clone(),
+            wanted_g_keys: spec.wanted_g_keys.clone(),
         }
     }
 }
@@ -522,12 +527,16 @@ fn spawn_session(
     let done_id = id.clone();
     let route = target.route.clone();
     let wanted = target.wanted.clone();
+    let wanted_g_keys = target.wanted_g_keys.clone();
     let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
         let pending_restore = match run_keyboard_capture_session_with_registry(
             route,
-            wanted,
+            KeyboardCaptureTargets {
+                reprog: wanted,
+                gaming: wanted_g_keys,
+            },
             sink,
             stop_rx,
             slot,

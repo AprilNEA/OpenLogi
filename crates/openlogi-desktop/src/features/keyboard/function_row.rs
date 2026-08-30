@@ -31,7 +31,7 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 
 use super::editors::{
@@ -79,6 +79,14 @@ const FUNCTION_KEYS: [(&str, u16); 20] = [
     ("F19", 0x50),
 ];
 
+const GAMING_KEYS: [ButtonId; 5] = [
+    ButtonId::KeyG1,
+    ButtonId::KeyG2,
+    ButtonId::KeyG3,
+    ButtonId::KeyG4,
+    ButtonId::KeyG5,
+];
+
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
 /// Duration of the keyboard slide + panel slide animation.
@@ -120,6 +128,8 @@ pub struct FunctionRowView {
     /// The single selected key index (0 = Esc), or `None` when nothing is
     /// selected (no panel shown).
     selected_key: Option<usize>,
+    /// Selected dedicated G-key, mutually exclusive with `selected_key`.
+    selected_g_key: Option<ButtonId>,
     /// The hovered function-row key index, shared by callout bubbles, key hit
     /// zones, and leader lines.
     hovered_key: Option<usize>,
@@ -149,6 +159,7 @@ impl FunctionRowView {
         });
         Self {
             selected_key: None,
+            selected_g_key: None,
             hovered_key: None,
             active_editor: None,
             text_state: None,
@@ -166,6 +177,18 @@ impl FunctionRowView {
             self.workflow_draft.clear();
         }
         self.selected_key = idx;
+        if idx.is_some() {
+            self.selected_g_key = None;
+        }
+        cx.notify();
+    }
+
+    fn select_g_key(&mut self, button: ButtonId, cx: &mut Context<Self>) {
+        self.selected_g_key = (self.selected_g_key != Some(button)).then_some(button);
+        self.selected_key = None;
+        self.active_editor = None;
+        self.text_state = None;
+        self.workflow_draft.clear();
         cx.notify();
     }
 
@@ -245,6 +268,11 @@ impl Render for FunctionRowView {
         let state = AppState::try_read(cx);
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
         let bindings = state.map(AppState::keyboard_bindings);
+        let button_bindings = state.map(|state| state.button_bindings().clone());
+        let has_g_keys = state
+            .and_then(AppState::current_record)
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.g_keys);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -285,6 +313,9 @@ impl Render for FunctionRowView {
             self.text_state = None;
             self.workflow_draft.clear();
         }
+        if !has_g_keys {
+            self.selected_g_key = None;
+        }
         let selected = self.selected_key;
         let hovered = self.hovered_key;
         let active_editor = self.active_editor;
@@ -322,13 +353,24 @@ impl Render for FunctionRowView {
             KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
                 .selected(selected)
                 .hovered(hovered);
-        let panel = selected.map(|selected| self.config_panel(selected, &slots, &view, cx));
+        let panel = self
+            .selected_g_key
+            .map(|button| Self::gaming_key_panel(button, &view, cx))
+            .or_else(|| selected.map(|selected| self.config_panel(selected, &slots, &view, cx)));
 
         // The whole row animates as one: when a key is selected the right-side
         // panel grows in and the keyboard nudges left to make room.
         v_flex()
             .w_full()
             .items_center()
+            .when(has_g_keys, |layout| {
+                layout.child(gaming_key_strip(
+                    self.selected_g_key,
+                    button_bindings.as_ref(),
+                    &view,
+                    cx,
+                ))
+            })
             .child(InspectorRow::new(keyboard).panel(panel))
     }
 }
@@ -836,6 +878,83 @@ impl FunctionRowView {
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
+
+    fn gaming_key_panel(
+        button: ButtonId,
+        view: &Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let current =
+            AppState::try_read(cx).and_then(|state| state.button_bindings().get(&button).cloned());
+        let view_for_pick = view.clone();
+        let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+            AppState::update_bindings(cx, |state| state.commit_binding(button, action));
+            view_for_pick.update(cx, |_, vcx| vcx.notify());
+        });
+        let rows = action_rows("g-key-panel-action", current.as_ref(), &on_pick, pal);
+
+        compact_panel(pal)
+            .w(px(PANEL_W))
+            .max_h(px(500.))
+            .child(title_header(button.label(), &pal))
+            .child(divider(pal))
+            .child(editor_scroll_list("g-key-panel-scroll", rows))
+    }
+}
+
+fn gaming_key_strip(
+    selected: Option<ButtonId>,
+    bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
+    view: &Entity<FunctionRowView>,
+    cx: &mut Context<FunctionRowView>,
+) -> impl IntoElement {
+    let pal = theme::palette(cx);
+    v_flex()
+        .w_full()
+        .max_w(px(KEYBOARD_W))
+        .gap_2()
+        .mb_3()
+        .child(
+            div()
+                .text_caption()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(pal.text_muted)
+                .child("G1–G5"),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .children(GAMING_KEYS.into_iter().enumerate().map(|(index, button)| {
+                    let view = view.clone();
+                    let is_selected = selected == Some(button);
+                    let action = bindings.and_then(|bindings| bindings.get(&button));
+                    div().w(px(104.)).child(
+                        MenuRow::new(("gaming-g-key", index))
+                            .selected(is_selected)
+                            .role(Role::MenuItem)
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(pal.text_primary)
+                                            .child(button.label()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_caption()
+                                            .text_color(pal.text_muted)
+                                            .child(binding_label(action)),
+                                    ),
+                            )
+                            .on_click(move |_event, _window, cx| {
+                                view.update(cx, |view, cx| view.select_g_key(button, cx));
+                            }),
+                    )
+                })),
+        )
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".

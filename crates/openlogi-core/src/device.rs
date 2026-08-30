@@ -128,6 +128,9 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// Dedicated gaming-key event capture — HID++ `0x8010` (GamingGKeys).
+    #[serde(default)]
+    pub g_keys: bool,
 }
 
 impl Capabilities {
@@ -145,7 +148,7 @@ impl Capabilities {
         const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
-            buttons: has(&BUTTONS),
+            buttons: has(&BUTTONS) || ids.contains(&0x8010),
             pointer: has(&POINTER),
             lighting: has(&LIGHTING),
             scroll_inversion: false,
@@ -153,6 +156,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            g_keys: ids.contains(&0x8010),
         }
     }
 
@@ -173,6 +177,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                g_keys: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +483,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    g_keys: false,
                 }),
             }],
         }
@@ -548,6 +554,7 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                g_keys: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -564,8 +571,12 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                g_keys: false,
             }
         );
+        let gaming_keyboard = Capabilities::from_feature_ids(&[0x8010]);
+        assert!(gaming_keyboard.buttons);
+        assert!(gaming_keyboard.g_keys);
         // No driving features → nothing offered.
         assert_eq!(
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),

@@ -10,7 +10,7 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    GAMING_G_KEYS, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -348,13 +348,29 @@ impl Orchestrator {
             })
             .copied()
             .collect();
-        if wanted.is_empty() {
+        let wanted_g_keys = dev
+            .capabilities
+            .filter(|capabilities| capabilities.g_keys)
+            .map_or_else(BTreeSet::new, |_| {
+                GAMING_G_KEYS
+                    .iter()
+                    .map(|(_, button)| *button)
+                    .filter(|button| {
+                        bindings.get(button).is_some_and(|binding| {
+                            matches!(binding, Binding::LongPress(_))
+                                || binding.click_action() != Action::None
+                        })
+                    })
+                    .collect()
+            });
+        if wanted.is_empty() && wanted_g_keys.is_empty() {
             return None;
         }
         Some(KeyboardSpec {
             config_key: dev.config_key.clone(),
             route: dev.route.clone()?,
             wanted,
+            wanted_g_keys,
             bindings,
         })
     }

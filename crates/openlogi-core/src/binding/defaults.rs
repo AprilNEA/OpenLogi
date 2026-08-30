@@ -79,7 +79,12 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyPlayPause
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp => Action::None,
+        | ButtonId::KeyVolumeUp
+        | ButtonId::KeyG1
+        | ButtonId::KeyG2
+        | ButtonId::KeyG3
+        | ButtonId::KeyG4
+        | ButtonId::KeyG5 => Action::None,
     }
 }
 

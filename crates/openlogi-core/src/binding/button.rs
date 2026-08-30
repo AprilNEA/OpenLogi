@@ -77,6 +77,18 @@ pub enum ButtonId {
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
     WheelTiltRight,
+    /// Gaming keyboard macro key G1, reported through HID++ `0x8010`.
+    KeyG1,
+    /// Gaming keyboard macro key G2, reported through HID++ `0x8010`.
+    KeyG2,
+    /// Gaming keyboard macro key G3, reported through HID++ `0x8010`.
+    KeyG3,
+    /// Gaming keyboard macro key G4, reported through HID++ `0x8010`.
+    KeyG4,
+    /// Gaming keyboard macro key G5, reported through HID++ `0x8010`.
+    ///
+    /// Declared last because serialized variants are append-only.
+    KeyG5,
 }
 
 impl ButtonId {
@@ -99,11 +111,11 @@ impl ButtonId {
         ButtonId::HapticPanel,
     ];
 
-    /// The divertable keyboard F-row controls, in F-row order. Kept out of
-    /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
-    /// popover trigger list, while keyboard keys stay native unless the user
-    /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    /// The capturable keyboard controls, with the F-row first and G-key row
+    /// second. Kept out of [`ButtonId::ALL`]: that array seeds mouse defaults
+    /// and the mouse popover trigger list, while keyboard keys stay native
+    /// unless the user binds them (an unbound key is never captured).
+    pub const KEYBOARD_KEYS: [ButtonId; 14] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -113,6 +125,11 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+        ButtonId::KeyG1,
+        ButtonId::KeyG2,
+        ButtonId::KeyG3,
+        ButtonId::KeyG4,
+        ButtonId::KeyG5,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -166,6 +183,11 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::KeyG1 => "G1",
+            ButtonId::KeyG2 => "G2",
+            ButtonId::KeyG3 => "G3",
+            ButtonId::KeyG4 => "G4",
+            ButtonId::KeyG5 => "G5",
         }
     }
 

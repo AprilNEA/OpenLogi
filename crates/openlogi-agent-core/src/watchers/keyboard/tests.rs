@@ -8,6 +8,7 @@ fn target() -> KeyboardTarget {
             product_id: 0xc548,
         },
         wanted: BTreeMap::new(),
+        wanted_g_keys: BTreeSet::new(),
     }
 }
 
@@ -47,6 +48,7 @@ async fn publication_and_receiver_request_change_wanted_state_immediately() {
         config_key: "keyboard-a".to_owned(),
         route: target().route,
         wanted: target().wanted,
+        wanted_g_keys: target().wanted_g_keys,
         bindings: dispatch(Action::MissionControl).bindings,
     };
 

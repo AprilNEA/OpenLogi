@@ -28,6 +28,7 @@ pub mod extended_dpi;
 pub mod extended_report_rate;
 pub mod feature_set;
 pub mod fn_inversion;
+pub mod gaming_g_keys;
 pub mod gestures2;
 pub mod haptic_feedback;
 pub mod hires_wheel;
