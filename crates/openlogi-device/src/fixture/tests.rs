@@ -94,6 +94,23 @@ fn canonical_device_profile_rejects_unknown_fields_recursively() {
 }
 
 #[test]
+fn profile_setting_unavailable_is_value_less_and_strict() {
+    let unavailable: ProfileSetting<DpiInfo> = serde_json::from_str(r#"{"support":"unavailable"}"#)
+        .expect("unavailable setting needs no value");
+    assert_eq!(unavailable, ProfileSetting::Unavailable);
+    assert_eq!(
+        serde_json::to_value(&unavailable).expect("unavailable setting serializes"),
+        serde_json::json!({ "support": "unavailable" })
+    );
+
+    let error = serde_json::from_str::<ProfileSetting<DpiInfo>>(
+        r#"{"support":"unavailable","unexpected":true}"#,
+    )
+    .expect_err("unknown fields on an unavailable setting must be rejected");
+    assert!(error.to_string().contains("unexpected"), "{error}");
+}
+
+#[test]
 fn schemas_reject_unknown_fields_and_arbitrary_masks() {
     let fixture = direct_probe_fixture();
     let profile = serde_json::to_value(&fixture.profile).expect("profile serializes");
@@ -138,7 +155,9 @@ fn schemas_reject_unknown_fields_and_arbitrary_masks() {
         .as_object_mut()
         .expect("DPI behavior is an object")
         .insert("unexpected".to_string(), serde_json::Value::Bool(true));
-    reject_profile(unknown_setting, "settings.0.dpi.unexpected");
+    let setting_error = serde_json::from_value::<DeviceProfile>(unknown_setting)
+        .expect_err("unknown setting fields must be rejected");
+    assert!(setting_error.to_string().contains("unexpected"));
 
     let mut cassette = serde_json::to_value(&fixture.cassette).expect("cassette serializes");
     assert_eq!(
@@ -242,6 +261,80 @@ fn profile_validator_rejects_route_and_setting_inconsistencies() {
         .validate()
         .expect_err("backlight level must fit its declared range");
     assert!(error.to_string().contains("backlight level 4 exceeds"));
+}
+
+#[test]
+fn unavailable_settings_count_as_capability_support() {
+    let mut profile = direct_probe_fixture().profile;
+    profile.settings[0].dpi = ProfileSetting::Unavailable;
+    profile.settings[0].wheel = ProfileSetting::Unavailable;
+    profile.inventories[0].paired[0]
+        .capabilities
+        .as_mut()
+        .expect("direct fixture has capabilities")
+        .hires_wheel = true;
+    profile
+        .validate()
+        .expect("unavailable values still declare present features");
+
+    profile.inventories[0].paired[0]
+        .capabilities
+        .as_mut()
+        .expect("direct fixture has capabilities")
+        .pointer = false;
+    let error = profile
+        .validate()
+        .expect_err("unavailable DPI must still match pointer capability");
+    assert!(error.to_string().contains("DPI support does not match"));
+
+    let capabilities = profile.inventories[0].paired[0]
+        .capabilities
+        .as_mut()
+        .expect("direct fixture has capabilities");
+    capabilities.pointer = true;
+    capabilities.hires_wheel = false;
+    let error = profile
+        .validate()
+        .expect_err("unavailable wheel must still match wheel capability");
+    assert!(error.to_string().contains("wheel support does not match"));
+}
+
+#[test]
+fn unavailable_hidpp_settings_remain_invalid_for_standalone_devices() {
+    let mut profile: DeviceProfile =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    let settings = profile
+        .settings
+        .iter_mut()
+        .find(|settings| matches!(settings.route, DeviceRoute::RawHid { .. }))
+        .expect("canonical profile has standalone settings");
+    settings.backlight = ProfileSetting::Unavailable;
+
+    let error = profile
+        .validate()
+        .expect_err("standalone routes cannot expose unavailable HID++ families");
+    assert!(error.to_string().contains("declares a HID++ setting"));
+}
+
+#[test]
+fn unavailable_backlight_still_excludes_rgb_lighting() {
+    let mut profile: DeviceProfile =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    let settings = profile
+        .settings
+        .iter_mut()
+        .find(|settings| matches!(settings.route, DeviceRoute::Bolt { slot: 3, .. }))
+        .expect("canonical profile has RGB keyboard settings");
+    settings.backlight = ProfileSetting::Unavailable;
+
+    let error = profile
+        .validate()
+        .expect_err("present backlight and RGB lighting are mutually exclusive");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot expose RGB lighting and backlight together")
+    );
 }
 
 #[test]

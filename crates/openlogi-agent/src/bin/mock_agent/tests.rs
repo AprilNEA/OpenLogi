@@ -27,6 +27,23 @@ fn test_state() -> State {
     .expect("built-in profile should validate")
 }
 
+fn test_state_with_backlight(backlight: ProfileSetting<BacklightState>) -> State {
+    let mut profile = built_in_profile().expect("built-in profile should construct");
+    profile.settings[0].backlight = backlight;
+    State::new(profile, MockClock::Test(Duration::ZERO)).expect("backlight profile should validate")
+}
+
+fn test_state_with_unavailable_reads() -> State {
+    let mut profile = built_in_profile().expect("built-in profile should construct");
+    let settings = &mut profile.settings[0];
+    settings.dpi = ProfileSetting::Unavailable;
+    settings.smartshift = ProfileSetting::Unavailable;
+    settings.wheel = ProfileSetting::Unavailable;
+    settings.backlight = ProfileSetting::Unavailable;
+    State::new(profile, MockClock::Test(Duration::ZERO))
+        .expect("unavailable settings should preserve capability consistency")
+}
+
 fn mouse_route() -> DeviceRoute {
     DeviceRoute::Bolt {
         receiver_uid: RECEIVER_UID.to_string(),
@@ -148,6 +165,170 @@ async fn profile_backed_setting_rpcs_round_trip() {
             .expect("SmartShift should read back"),
         smartshift
     );
+}
+
+#[tokio::test]
+async fn profile_backed_wheel_and_backlight_reads_return_exact_values() {
+    let agent = MockAgent::new(test_state());
+    let wheel = agent
+        .read_wheel(tarpc::context::current(), mouse_route())
+        .await
+        .expect("mouse should expose its profile wheel state");
+    assert_eq!(
+        wheel,
+        ScrollWheelMode {
+            resolution: openlogi_core::config::ScrollResolution::High,
+            inverted: false,
+            target: openlogi_hid::ScrollReportingTarget::Native,
+        }
+    );
+
+    let expected = BacklightState {
+        enabled: true,
+        mode: openlogi_hid::BacklightMode::PermanentManual,
+        status: openlogi_hid::BacklightStatus::PermanentManual,
+        current_level: 3,
+        nb_levels: 8,
+    };
+    let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(
+        expected,
+    )));
+    assert_eq!(
+        agent
+            .read_backlight(tarpc::context::current(), mouse_route())
+            .await
+            .expect("backlight read should return exact profile state"),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn wheel_and_backlight_reads_preserve_route_and_support_errors() {
+    let agent = MockAgent::new(test_state());
+    let keyboard = DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: KEYBOARD_SLOT,
+    };
+    assert!(matches!(
+        agent
+            .clone()
+            .read_wheel(tarpc::context::current(), keyboard.clone())
+            .await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2121
+        })
+    ));
+    assert!(matches!(
+        agent
+            .clone()
+            .read_backlight(tarpc::context::current(), keyboard)
+            .await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1982
+        })
+    ));
+
+    let offline = DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: OFFLINE_SLOT,
+    };
+    assert!(matches!(
+        agent
+            .clone()
+            .read_wheel(tarpc::context::current(), offline.clone())
+            .await,
+        Err(WriteError::DeviceUnreachable {
+            index: OFFLINE_SLOT
+        })
+    ));
+    assert!(matches!(
+        agent
+            .clone()
+            .read_backlight(tarpc::context::current(), offline)
+            .await,
+        Err(WriteError::DeviceUnreachable {
+            index: OFFLINE_SLOT
+        })
+    ));
+
+    let unknown = DeviceRoute::Direct {
+        vendor_id: 0xffff,
+        product_id: 0xffff,
+    };
+    assert!(matches!(
+        agent
+            .clone()
+            .read_wheel(tarpc::context::current(), unknown.clone())
+            .await,
+        Err(WriteError::DeviceNotFound)
+    ));
+    assert!(matches!(
+        agent
+            .read_backlight(tarpc::context::current(), unknown)
+            .await,
+        Err(WriteError::DeviceNotFound)
+    ));
+}
+
+#[tokio::test]
+async fn unavailable_setting_reads_and_writes_remain_transient() {
+    let smartshift = test_state().profile.settings[0]
+        .smartshift
+        .value()
+        .copied()
+        .expect("canonical mouse has SmartShift state");
+    let agent = MockAgent::new(test_state_with_unavailable_reads());
+    let route = mouse_route();
+
+    assert_unreachable(
+        agent
+            .clone()
+            .read_dpi(tarpc::context::current(), route.clone())
+            .await,
+        MOUSE_SLOT,
+    );
+    assert_unreachable(
+        agent
+            .clone()
+            .set_dpi(tarpc::context::current(), route.clone(), Dpi::new(1600))
+            .await,
+        MOUSE_SLOT,
+    );
+    assert_unreachable(
+        agent
+            .clone()
+            .read_smartshift(tarpc::context::current(), route.clone())
+            .await,
+        MOUSE_SLOT,
+    );
+    assert_unreachable(
+        agent
+            .clone()
+            .set_smartshift(tarpc::context::current(), route.clone(), smartshift)
+            .await,
+        MOUSE_SLOT,
+    );
+    assert_unreachable(
+        agent
+            .clone()
+            .read_wheel(tarpc::context::current(), route.clone())
+            .await,
+        MOUSE_SLOT,
+    );
+    assert_unreachable(
+        agent.read_backlight(tarpc::context::current(), route).await,
+        MOUSE_SLOT,
+    );
+}
+
+fn assert_unreachable<T>(result: Result<T, WriteError>, index: u8) {
+    let Err(error) = result else {
+        panic!("setting should be unreachable");
+    };
+    assert!(matches!(
+        error,
+        WriteError::DeviceUnreachable { index: actual } if actual == index
+    ));
 }
 
 #[tokio::test]
