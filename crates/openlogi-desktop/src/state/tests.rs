@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use openlogi_camera::Camera;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection, RingAction,
 };
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
@@ -722,6 +722,67 @@ fn unsupported_controls_cannot_enter_gesture_mode_through_the_ui_state() {
             "unsupported control {button:?} entered gesture mode"
         );
     }
+}
+
+#[test]
+fn a_stored_middle_click_gesture_remains_editable_until_it_is_disabled() {
+    let middle = BTreeMap::from([
+        (GestureDirection::Click, Action::MiddleClick),
+        (GestureDirection::Up, Action::Copy),
+    ]);
+    let mut config = Config::ephemeral();
+    config.set_binding(
+        KNOWN_MOUSE_KEY,
+        ButtonId::MiddleClick,
+        Binding::Gesture(middle.clone()),
+    );
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        config,
+        &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    assert_eq!(
+        state.current_gesture_maps().get(&ButtonId::MiddleClick),
+        Some(&middle),
+        "the inspector must expose the persisted directions"
+    );
+
+    state.commit_gesture_binding(ButtonId::MiddleClick, GestureDirection::Down, Action::Paste);
+    assert_eq!(
+        state
+            .current_gesture_maps()
+            .get(&ButtonId::MiddleClick)
+            .and_then(|map| map.get(&GestureDirection::Down)),
+        Some(&Action::Paste),
+        "an existing Middle Click gesture must remain editable"
+    );
+
+    state.commit_gesture_mode(ButtonId::MiddleClick, false);
+    assert!(
+        !state
+            .config
+            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick)
+    );
+    assert!(
+        !state
+            .current_gesture_maps()
+            .contains_key(&ButtonId::MiddleClick)
+    );
+
+    state.commit_gesture_mode(ButtonId::MiddleClick, true);
+    assert!(
+        !state
+            .config
+            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick),
+        "once disabled, unsupported Middle Click gestures must not be re-enabled"
+    );
 }
 
 #[test]

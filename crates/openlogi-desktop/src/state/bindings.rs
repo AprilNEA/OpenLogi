@@ -420,10 +420,6 @@ impl AppState {
         direction: GestureDirection,
         action: Action,
     ) {
-        if !button.supports_gesture_mode() {
-            debug!(?button, "gestures are not supported for this control");
-            return;
-        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -436,6 +432,12 @@ impl AppState {
             );
             return;
         };
+        let is_gesture_mode = self.config.is_gesture_mode(&key, button);
+        let is_stored_os_hook_gesture = button.is_os_hook_button() && is_gesture_mode;
+        if !button.supports_gesture_mode() && !is_stored_os_hook_gesture {
+            debug!(?button, "gestures are not supported for this control");
+            return;
+        }
         // Same backstop as `commit_gesture_mode`: direction maps live only in
         // the global profile, so an edit arriving while a per-app one is open
         // would change every app instead of the one on screen.
@@ -449,8 +451,10 @@ impl AppState {
         }
         // A stray edit on a button not in gesture mode must NOT silently
         // promote it (the gesture editor shouldn't be reachable in that
-        // state): no-op instead.
-        if !self.config.is_gesture_mode(&key, button) {
+        // state): no-op instead. Checking the stored mode rather than the
+        // current enablement policy keeps v0.8.0 Middle Click gesture maps
+        // editable until the user explicitly turns them off.
+        if !is_gesture_mode {
             debug!(
                 ?button,
                 ?direction,

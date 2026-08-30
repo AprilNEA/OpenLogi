@@ -119,9 +119,10 @@ impl ButtonId {
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
     /// through (suppressing them would brick the mouse), and the DPI / thumb /
     /// dedicated gesture controls aren't visible to the OS hook at all (they're
-    /// captured over HID++). These are exactly the buttons that can become an
-    /// OS-hook gesture button, so the hook's remap gate and the gesture-owner
-    /// projection share this one definition.
+    /// captured over HID++). Stored gesture bindings also project through this
+    /// set so Middle Click configurations written by v0.8.0 keep working;
+    /// [`Self::supports_gesture_mode`] separately controls which buttons may be
+    /// newly promoted by the UI.
     #[must_use]
     pub fn is_os_hook_button(self) -> bool {
         matches!(
