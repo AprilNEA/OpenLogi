@@ -6,132 +6,15 @@
 //! needs a keyboard whose host slots it can dictate. Each module keeps its own
 //! responder; only the plumbing lives here.
 
-use std::error::Error;
-use std::io;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use hidpp::channel::{HidppChannel, RawHidChannel};
-use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter};
-
-#[derive(Clone)]
-pub(crate) struct ScriptedRawHidHandle {
-    written: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl ScriptedRawHidHandle {
-    pub(crate) fn written_reports(&self) -> Vec<Vec<u8>> {
-        self.written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-}
+pub(crate) use crate::fixture::ReplayRawHidChannel as ScriptedRawHidChannel;
 
 /// Answers a HID++ request as a particular scripted device would.
 pub(crate) type Responder = fn(&[u8]) -> Option<Vec<u8>>;
-type DynamicResponder = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
-
-/// Decides whether a raw write fails at the transport rather than reaching the
-/// device — the shape a node that has gone away takes.
-pub(crate) type WriteFailure = fn(&[u8]) -> bool;
-
-pub(crate) struct ScriptedRawHidChannel {
-    incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
-    incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
-    written: Arc<Mutex<Vec<Vec<u8>>>>,
-    responder: DynamicResponder,
-    fails: Option<WriteFailure>,
-}
-
-impl ScriptedRawHidChannel {
-    /// A channel answering as `responder`'s device.
-    pub(crate) fn with_responder(responder: Responder) -> (Self, ScriptedRawHidHandle) {
-        Self::build(responder, None)
-    }
-
-    /// A channel whose responder needs per-test captured state.
-    pub(crate) fn with_dynamic_responder(
-        responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
-    ) -> (Self, ScriptedRawHidHandle) {
-        Self::build(responder, None)
-    }
-
-    /// The same, except that a write `fails` selects errors at the transport
-    /// instead of being answered: a device whose HID node disappears part-way
-    /// through a conversation, which is a different failure from a device that
-    /// answered with a refusal.
-    pub(crate) fn with_failing_writes(
-        responder: Responder,
-        fails: WriteFailure,
-    ) -> (Self, ScriptedRawHidHandle) {
-        Self::build(responder, Some(fails))
-    }
-
-    fn build(
-        responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
-        fails: Option<WriteFailure>,
-    ) -> (Self, ScriptedRawHidHandle) {
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let written = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                incoming_tx,
-                incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-                written: Arc::clone(&written),
-                responder: Arc::new(responder),
-                fails,
-            },
-            ScriptedRawHidHandle { written },
-        )
-    }
-}
-
-#[hidpp::async_trait]
-impl RawHidChannel for ScriptedRawHidChannel {
-    fn vendor_id(&self) -> u16 {
-        0x046d
-    }
-
-    fn product_id(&self) -> u16 {
-        0xb35b
-    }
-
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        self.written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(src.to_vec());
-        if self.fails.is_some_and(|fails| fails(src)) {
-            return Err(mock_error());
-        }
-        if let Some(response) = (self.responder)(src) {
-            self.incoming_tx.send(response).map_err(|_| mock_error())?;
-        }
-        Ok(src.len())
-    }
-
-    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        let Some(report) = self.incoming_rx.lock().await.recv().await else {
-            return Err(mock_error());
-        };
-        let len = report.len().min(buf.len());
-        buf[..len].copy_from_slice(&report[..len]);
-        Ok(len)
-    }
-
-    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some((true, true))
-    }
-
-    async fn get_report_descriptor(
-        &self,
-        _buf: &mut [u8],
-    ) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        unreachable!("scripted channel declares HID++ support")
-    }
-}
 
 /// A HID++ 2.0 error response to `request`: feature index `0xff`, then the
 /// addressed feature index, the function/software id, and the error code.
@@ -144,13 +27,6 @@ pub(crate) fn feature_error(request: &[u8], error: u8) -> Vec<u8> {
     response[4] = request[3];
     response[5] = error;
     response
-}
-
-pub(crate) fn mock_error() -> Box<dyn Error + Send + Sync> {
-    Box::new(io::Error::new(
-        io::ErrorKind::BrokenPipe,
-        "scripted HID channel closed",
-    ))
 }
 
 /// A live channel over `raw`.

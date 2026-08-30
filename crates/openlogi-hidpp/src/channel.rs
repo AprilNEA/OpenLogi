@@ -19,6 +19,7 @@ use crate::{nibble::U4, sync::lock};
 
 mod error;
 mod message;
+mod observation;
 mod raw;
 
 #[cfg(test)]
@@ -28,8 +29,10 @@ pub use error::ChannelError;
 pub use message::{
     HidppMessage, LONG_REPORT_ID, LONG_REPORT_LENGTH, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
 };
+pub use observation::{ChannelObservation, ChannelObserver, ObservedReport, RequestOutcome};
 pub use raw::RawHidChannel;
 
+use observation::{RequestObservation, emit_report};
 use raw::supports_short_long_hidpp;
 
 /// This is the size of the buffer incoming reports are read into.
@@ -150,6 +153,9 @@ pub struct HidppChannel {
     /// The underlying raw HID channel.
     raw_channel: Arc<dyn RawHidChannel>,
 
+    /// Optional sink for reports and request lifecycle events.
+    observer: Option<Arc<dyn ChannelObserver>>,
+
     /// The software-id policy for outgoing requests (see [`SwIdPolicy`]).
     ///
     /// This must remain after `raw_channel`: fields drop in declaration order,
@@ -250,10 +256,8 @@ impl PendingRequest {
         request
     }
 
-    async fn receive(mut self) -> Result<HidppMessage, ChannelError> {
-        (&mut self.receiver)
-            .await
-            .map_err(|_| ChannelError::NoResponse)
+    async fn receive(mut self) -> Option<HidppMessage> {
+        (&mut self.receiver).await.ok()
     }
 }
 
@@ -266,6 +270,13 @@ impl Drop for PendingRequest {
     }
 }
 
+enum PendingRequestCompletion {
+    Response(HidppMessage),
+    WriteFailed(ChannelError),
+    NoResponse,
+    TimedOut,
+}
+
 impl HidppChannel {
     /// Tries to construct a HID++ channel from a raw HID channel.
     ///
@@ -276,6 +287,26 @@ impl HidppChannel {
     /// If the given HID channel does not support HID++,
     /// [`ChannelError::HidppNotSupported`] will be returned.
     pub async fn from_raw_channel(raw: impl RawHidChannel) -> Result<Self, ChannelError> {
+        Self::from_raw_channel_inner(raw, None).await
+    }
+
+    /// Tries to construct a HID++ channel that reports wire and request facts
+    /// to `observer`.
+    ///
+    /// This has the same channel behavior and failure contract as
+    /// [`Self::from_raw_channel`]. Observation is best enabled at construction
+    /// so incoming reports cannot race observer installation.
+    pub async fn from_raw_channel_with_observer(
+        raw: impl RawHidChannel,
+        observer: Arc<dyn ChannelObserver>,
+    ) -> Result<Self, ChannelError> {
+        Self::from_raw_channel_inner(raw, Some(observer)).await
+    }
+
+    async fn from_raw_channel_inner(
+        raw: impl RawHidChannel,
+        observer: Option<Arc<dyn ChannelObserver>>,
+    ) -> Result<Self, ChannelError> {
         let (supports_short, supports_long) = supports_short_long_hidpp(&raw).await?;
 
         if !supports_short && !supports_long {
@@ -292,12 +323,14 @@ impl HidppChannel {
             let raw_channel = Arc::clone(&raw_channel_rc);
             let pending_messages = Arc::clone(&pending_messages_rc);
             let message_listeners = Arc::clone(&message_listeners_rc);
+            let observer = observer.clone();
 
             move || {
                 futures::executor::block_on(read_loop(
                     &*raw_channel,
                     &pending_messages,
                     &message_listeners,
+                    observer.as_deref(),
                     close_receiver,
                 ));
             }
@@ -309,6 +342,7 @@ impl HidppChannel {
             vendor_id: raw_channel_rc.vendor_id(),
             product_id: raw_channel_rc.product_id(),
             raw_channel: raw_channel_rc,
+            observer,
             sw_id_policy: SwIdPolicy::default(),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
@@ -433,6 +467,7 @@ impl HidppChannel {
         trace!(dev, feat, func, "hidpp request");
 
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
+        let mut observation = RequestObservation::new(self.observer.as_deref(), pending_id);
         let pending_request = PendingRequest::register(
             pending_id,
             Arc::clone(&self.pending_messages),
@@ -442,27 +477,48 @@ impl HidppChannel {
         // The deadline covers the write as well: `write_report` has no
         // bounded-time contract of its own, so a wedged device could otherwise
         // park `send` forever before the response wait even starts.
-        let result = {
+        let completion = {
             let mut request = std::pin::pin!(
                 async move {
-                    self.send_and_forget(msg).await?;
-                    pending_request.receive().await
+                    if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+                        return PendingRequestCompletion::WriteFailed(error);
+                    }
+                    pending_request.receive().await.map_or(
+                        PendingRequestCompletion::NoResponse,
+                        PendingRequestCompletion::Response,
+                    )
                 }
                 .fuse()
             );
 
             select! {
-                result = request => result,
-                () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+                completion = request => completion,
+                () = futures_timer::Delay::new(timeout).fuse() => PendingRequestCompletion::TimedOut,
             }
         };
 
-        match &result {
-            Ok(_) => trace!(dev, feat, "hidpp response"),
-            Err(e) => trace!(dev, feat, error = ?e, "hidpp no response"),
+        match completion {
+            PendingRequestCompletion::Response(response) => {
+                observation.complete(RequestOutcome::Succeeded);
+                trace!(dev, feat, "hidpp response");
+                Ok(response)
+            }
+            PendingRequestCompletion::WriteFailed(error) => {
+                observation.complete(RequestOutcome::WriteFailed);
+                trace!(dev, feat, error = ?error, "hidpp no response");
+                Err(error)
+            }
+            PendingRequestCompletion::NoResponse => {
+                observation.complete(RequestOutcome::NoResponse);
+                trace!(dev, feat, error = ?ChannelError::NoResponse, "hidpp no response");
+                Err(ChannelError::NoResponse)
+            }
+            PendingRequestCompletion::TimedOut => {
+                observation.complete(RequestOutcome::TimedOut);
+                trace!(dev, feat, error = ?ChannelError::Timeout, "hidpp no response");
+                Err(ChannelError::Timeout)
+            }
         }
-
-        result
     }
 
     /// Sends a HID++ message across the channel and does not wait for a
@@ -475,8 +531,19 @@ impl HidppChannel {
             return Err(ChannelError::MessageTypeNotSupported);
         }
 
+        self.write_hidpp_report(msg, None).await
+    }
+
+    async fn write_hidpp_report(
+        &self,
+        msg: HidppMessage,
+        request_id: Option<u64>,
+    ) -> Result<(), ChannelError> {
         let mut buf = [0u8; LONG_REPORT_LENGTH];
         let len = msg.write_raw(&mut buf);
+        emit_report(self.observer.as_deref(), &buf[..len], |report| {
+            ChannelObservation::OutgoingReport { request_id, report }
+        });
         self.raw_channel
             .write_report(&buf[..len])
             .await
@@ -505,6 +572,12 @@ impl HidppChannel {
             return Err(ChannelError::InvalidRawReportLength(report.len()));
         }
 
+        emit_report(self.observer.as_deref(), report, |report| {
+            ChannelObservation::OutgoingReport {
+                request_id: None,
+                report,
+            }
+        });
         let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
         select! {
             result = write => result.map_err(ChannelError::Implementation),
@@ -556,6 +629,7 @@ async fn read_loop(
     raw_channel: &dyn RawHidChannel,
     pending_messages: &Mutex<VecDeque<PendingMessage>>,
     message_listeners: &Mutex<HashMap<u32, MessageListener>>,
+    observer: Option<&dyn ChannelObserver>,
     mut close: oneshot::Receiver<()>,
 ) {
     let mut buf = [0u8; MAX_REPORT_LENGTH];
@@ -577,11 +651,14 @@ async fn read_loop(
         };
 
         let Some(msg) = HidppMessage::read_raw(&buf[..len]) else {
+            emit_report(observer, &buf[..len], |report| {
+                ChannelObservation::MalformedIncomingReport { report }
+            });
             trace!(len, "report not HID++ — dropped");
             continue;
         };
 
-        let mut matched = false;
+        let mut matched_id = None;
         let pending_count;
         {
             let mut msgs = lock(pending_messages);
@@ -589,14 +666,21 @@ async fn read_loop(
             if let Some(pos) = msgs.iter().position(|elem| (elem.response_predicate)(&msg))
                 && let Some(waiting) = msgs.remove(pos)
             {
+                matched_id = Some(waiting.id);
                 let _ = waiting.sender.send(msg);
-                matched = true;
             }
         }
 
+        emit_report(observer, &buf[..len], |report| {
+            ChannelObservation::IncomingReport {
+                request_id: matched_id,
+                report,
+            }
+        });
+
         trace!(
             len,
-            matched,
+            matched = matched_id.is_some(),
             pending_count,
             payload = format_args!("{:02x?}", &buf[..len.min(16)]),
             "raw report received"
@@ -606,7 +690,7 @@ async fn read_loop(
         // without deadlocking on the lock it is being called under.
         let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
         for listener in listeners {
-            listener(msg, matched);
+            listener(msg, matched_id.is_some());
         }
     }
 }

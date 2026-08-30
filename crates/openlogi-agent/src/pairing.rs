@@ -143,7 +143,7 @@ impl PairingManager {
     /// be called inside the tokio runtime (it spawns the translator task).
     #[must_use]
     pub fn new(shared: SharedRuntime, observable: Arc<ObservableState>) -> Self {
-        let (ctrl, raw_events) = pairing::spawn();
+        let (ctrl, raw_events) = pairing::spawn_with_hardware(shared.hardware());
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
         let session = Arc::new(StdMutex::new(SessionOwner::default()));
         tokio::spawn(translate(
@@ -390,38 +390,16 @@ async fn translate(
 mod tests {
     use super::*;
 
-    use std::sync::RwLock;
-
-    use openlogi_agent_core::DpiCycles;
-    use openlogi_agent_core::receiver_access::ReceiverAccess;
-    use openlogi_agent_core::runtime::hook::HookMaps;
-    use openlogi_agent_core::runtime::scroll::ScrollPreferences;
-    use openlogi_core::config::VerticalScrollSensitivity;
+    use openlogi_agent_core::orchestrator::Orchestrator;
+    use openlogi_core::config::Config;
     use openlogi_hid::PairingError;
 
     fn shared_runtime() -> SharedRuntime {
-        let (_, capture_plans) = tokio::sync::watch::channel(Arc::new(Vec::new()));
-        let (_, keyboard_spec) = tokio::sync::watch::channel(None);
-        let (_, host_switch_links) = tokio::sync::watch::channel(Arc::new(Vec::new()));
-        SharedRuntime {
-            hook_maps: Arc::new(RwLock::new(HookMaps::default())),
-            keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
-            scroll_preferences: Arc::new(ScrollPreferences::new(
-                false,
-                VerticalScrollSensitivity::DEFAULT,
-            )),
-            dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
-            capture_plans,
-            capture_channel: Arc::new(RwLock::new(None)),
-            channel_registry: openlogi_hid::ChannelRegistry::default(),
-            device_io: openlogi_hid::device_io_channel().1,
-            channel_pool: openlogi_hid::host::channel_pool(),
-            keyboard_spec,
-            keyboard_channel: Arc::new(RwLock::new(None)),
-            capture_rearm_generation: Arc::new(0.into()),
-            receiver_access: ReceiverAccess::default(),
-            host_switch_links,
-        }
+        Orchestrator::new(
+            Config::default(),
+            Arc::new(ObservableState::new("test".to_string())),
+        )
+        .shared()
     }
 
     fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {

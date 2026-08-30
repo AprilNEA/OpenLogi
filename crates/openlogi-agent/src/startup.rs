@@ -249,9 +249,9 @@ pub(crate) fn spawn_state_watchers(
         .chain(stream::iter([WatcherEvent::Lost(source)]))
         .boxed()
     }
-    let inventory = watchers::inventory::spawn_with_registry(
+    let inventory = watchers::inventory::spawn_with_hardware(
+        shared.hardware(),
         shared.channel_registry.clone(),
-        shared.device_io.clone(),
     );
     let streams = stream::select_all([
         tagged(

@@ -16,7 +16,7 @@ use thiserror::Error;
 /// that genuinely lacks a feature would be re-probed forever. Variant order is
 /// therefore wire format: changes require a `PROTOCOL_VERSION` bump (guarded
 /// by `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteError {
     /// HID transport error serialized as text.
     ///

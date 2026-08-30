@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use hidpp::{
+    channel::HidppChannel,
     device::Device,
     feature::{
         CreatableFeature,
@@ -12,6 +13,7 @@ use hidpp::{
 };
 use tracing::debug;
 
+use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::backlight::{BacklightMode, BacklightState, BacklightStatus};
 use crate::channel::route::DeviceRoute;
@@ -86,13 +88,25 @@ pub async fn get_backlight(
 ) -> Result<BacklightState, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<BacklightFeature>(&mut device).await?;
-        read_state(&feature).await
+        get_backlight_on_channel(&channel, index).await
     })
     .await
+}
+
+/// Read the current backlight state on an already-open [`SharedChannel`].
+pub async fn get_backlight_on(shared: &SharedChannel) -> Result<BacklightState, WriteError> {
+    get_backlight_on_channel(shared.channel(), shared.device_index()).await
+}
+
+async fn get_backlight_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<BacklightState, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<BacklightFeature>(&mut device).await?;
+    read_state(&feature).await
 }
 
 /// Enable or disable the backlight on `route`, and return the read-back state.

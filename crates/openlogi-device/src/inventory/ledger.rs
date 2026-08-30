@@ -130,6 +130,11 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         self.last_good.retain(|node, _| seen.contains(node));
         self.failures.retain(|node, _| seen.contains(node));
     }
+
+    #[cfg(test)]
+    pub(super) fn contains_last_good(&self, node: &K) -> bool {
+        self.last_good.contains_key(node)
+    }
 }
 
 #[cfg(test)]

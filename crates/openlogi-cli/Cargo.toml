@@ -12,17 +12,25 @@ categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core", version = "0.8.2" }
+openlogi-device = { path = "../openlogi-device", version = "0.8.2" }
 openlogi-hid = { path = "../openlogi-hid", version = "0.8.2" }
 openlogi-camera = { path = "../openlogi-camera", version = "0.8.2" }
 openlogi-assets = { path = "../openlogi-assets", version = "0.8.2" }
 openlogi-ipc = { path = "../openlogi-ipc", version = "0.8.2" }
+atomic-write-file = { workspace = true }
 tarpc = { workspace = true }
 png = "0.17"
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+futures = "0.3"
+tempfile = "3"
 
 [lints]
 workspace = true
