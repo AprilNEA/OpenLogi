@@ -36,19 +36,29 @@ async fn sanitizes_every_supported_identity_and_preserves_relations_and_fifo() {
 
     let replacements = &report.audit.replacements;
     assert_eq!(replacements.len(), 4);
-    assert_replacement(replacements, SanitizedIdentityKind::ReceiverUniqueId, 1, 16);
+    assert_replacement(
+        replacements,
+        SanitizedIdentityKind::ReceiverUniqueId,
+        1,
+        b"OL-BOLT-UID-0001",
+    );
     assert_replacement(
         replacements,
         SanitizedIdentityKind::ReceiverSerialNumber,
         1,
-        4,
+        &[b'O', b'L', b'R', 1],
     );
-    assert_replacement(replacements, SanitizedIdentityKind::DeviceUnitId, 3, 4);
+    assert_replacement(
+        replacements,
+        SanitizedIdentityKind::DeviceUnitId,
+        3,
+        &[b'O', b'L', b'D', 1],
+    );
     assert_replacement(
         replacements,
         SanitizedIdentityKind::DeviceSerialNumber,
         1,
-        12,
+        b"OL-SER-00001",
     );
 
     let bytes: Vec<_> = cassette
@@ -191,7 +201,7 @@ async fn feature_set_learning_classifies_high_direct_device_indices_as_hidpp20()
         &report.audit.replacements,
         SanitizedIdentityKind::DeviceUnitId,
         1,
-        4,
+        &[b'O', b'L', b'D', 1],
     );
 }
 
@@ -577,14 +587,14 @@ fn assert_replacement(
     replacements: &[IdentityReplacement],
     kind: SanitizedIdentityKind,
     occurrences: usize,
-    length: usize,
+    expected: &[u8],
 ) {
     let replacement = replacements
         .iter()
         .find(|replacement| replacement.kind == kind)
         .expect("replacement kind present");
     assert_eq!(replacement.occurrences, occurrences);
-    assert_eq!(replacement.synthetic_value.len(), length);
+    assert_eq!(replacement.synthetic_value, expected);
 }
 
 fn assert_rejected(report: &HidCassetteBuildReport, expected: &CassetteRejectionReason) {
