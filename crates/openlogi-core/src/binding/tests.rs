@@ -48,7 +48,18 @@ fn hold_shortcut_has_distinct_lifecycle_semantics() {
     assert_eq!(held.category(), Category::Editing);
     assert_eq!(held.held_combo(), Some(&combo));
     assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
+    assert!(held.requires_press_lifecycle());
     assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+}
+
+#[test]
+fn horizontal_scroll_is_a_pickable_held_modifier() {
+    assert!(Action::catalog().contains(&Action::HorizontalScroll));
+    assert_eq!(Action::HorizontalScroll.category(), Category::Scroll);
+    assert_eq!(Action::HorizontalScroll.held_combo(), None);
+    assert!(Action::HorizontalScroll.requires_press_lifecycle());
+    assert_matches!(Action::HorizontalScroll.effect(), Effect::AgentSide);
+    assert!(!Action::Copy.requires_press_lifecycle());
 }
 
 #[test]
@@ -346,6 +357,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HorizontalScroll",
         "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",
@@ -465,6 +477,7 @@ fn category_scroll_variants() {
     assert_eq!(Action::ScrollDown.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollLeft.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollRight.category(), Category::Scroll);
+    assert_eq!(Action::HorizontalScroll.category(), Category::Scroll);
 }
 
 #[test]
@@ -618,6 +631,7 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
         Action::SetDpiPreset(2),
         Action::ToggleSmartShift,
         Action::ShowActionsRing,
+        Action::HorizontalScroll,
     ] {
         assert_matches!(action.effect(), Effect::AgentSide);
     }

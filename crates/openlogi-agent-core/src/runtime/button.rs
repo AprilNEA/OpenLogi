@@ -161,6 +161,17 @@ impl PressToken {
             generation: 0,
         }
     }
+
+    pub(crate) fn hidpp_for_test(id: u64, device_key: &str, epoch: u64, button: ButtonId) -> Self {
+        Self {
+            id: PressId(id),
+            key: PressKey::new(
+                ButtonSource::Hidpp(HidppSessionId::with_epoch(device_key, epoch)),
+                button,
+            ),
+            generation: 0,
+        }
+    }
 }
 
 /// State retained from `Down` until the exactly-once terminal event.

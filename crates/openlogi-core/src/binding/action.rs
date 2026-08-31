@@ -187,6 +187,15 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// While the originating physical control remains held, convert vertical
+    /// main-wheel input into horizontal scrolling. Rolling up scrolls left;
+    /// rolling down scrolls right. The modifier applies only to ordinary mouse
+    /// wheels, never trackpads.
+    ///
+    /// Lifecycle-aware runtimes clear the modifier on every terminal press
+    /// outcome. One-shot dispatchers deliberately do nothing because there is
+    /// no matching release with which to balance the state.
+    HorizontalScroll,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -285,6 +294,7 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            HorizontalScroll "Horizontal Scroll" "pointer.horizontal_scroll" Scroll ScrollLeft,
         }
     };
 }
@@ -401,5 +411,12 @@ impl Action {
             Self::HoldShortcut(combo) => Some(combo),
             _ => None,
         }
+    }
+
+    /// Whether this action needs the originating physical press to remain
+    /// alive until a matching release or cancellation arrives.
+    #[must_use]
+    pub const fn requires_press_lifecycle(&self) -> bool {
+        matches!(self, Self::HoldShortcut(_) | Self::HorizontalScroll)
     }
 }

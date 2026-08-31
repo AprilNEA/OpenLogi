@@ -416,7 +416,7 @@ fn handle_key(
     };
 
     info!(keycode, action = %action.label(), "key → executing bound action");
-    let queued = if action.held_combo().is_some() {
+    let queued = if action.requires_press_lifecycle() {
         let queued = dispatcher.try_hook_key_down(keycode, &action);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
@@ -487,14 +487,19 @@ pub fn start(
                         return queued_event_disposition(try_queue_action(&action_tx, action));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
-                        return queued_event_disposition(scroll.try_hook_scroll(delta));
+                        let queued = if dispatcher.horizontal_scroll_active() {
+                            scroll.try_hook_horizontal_scroll(delta)
+                        } else {
+                            scroll.try_hook_scroll(delta)
+                        };
+                        return queued_event_disposition(queued);
                     }
                     EventDisposition::PassThrough
                 }
             }
         }
         // Function-key remapper: ordinary actions remain one-shot, while a
-        // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
+        // held action enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
         HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),

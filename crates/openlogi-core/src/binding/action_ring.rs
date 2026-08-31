@@ -109,6 +109,10 @@ pub enum RingActionError {
     /// A ring cannot recursively open itself.
     #[error("Show Actions Ring cannot be assigned inside an Actions Ring")]
     RecursiveTrigger,
+    /// A ring activation has no physical release with which to balance a held
+    /// action's lifecycle.
+    #[error("actions that require a held press cannot be assigned inside an Actions Ring")]
+    RequiresHeldPress,
 }
 
 /// An action that is valid inside an Actions Ring.
@@ -145,6 +149,7 @@ fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
     match action {
         Action::None => Err(RingActionError::EmptyAction),
         Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        Action::HorizontalScroll => Err(RingActionError::RequiresHeldPress),
         _ => Ok(()),
     }
 }
@@ -361,6 +366,10 @@ mod tests {
         assert_eq!(
             RingAction::new(Action::ShowActionsRing),
             Err(RingActionError::RecursiveTrigger)
+        );
+        assert_eq!(
+            RingAction::new(Action::HorizontalScroll),
+            Err(RingActionError::RequiresHeldPress)
         );
     }
 

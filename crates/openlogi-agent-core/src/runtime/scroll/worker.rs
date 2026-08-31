@@ -86,16 +86,15 @@ impl ScrollPreferences {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum ScrollOutputMode {
-    Smooth { at: Instant },
-    Direct,
+    Smooth { impulse: WheelDelta, at: Instant },
+    Direct(ScrollDelta),
 }
 
 struct ScrollInput {
     generation: u64,
     source: ScrollSource,
-    impulse: WheelDelta,
     output: ScrollOutputMode,
 }
 
@@ -201,13 +200,50 @@ impl ScrollInputHandle {
             return false;
         };
         let output = if preferences.smooth_scroll {
-            ScrollOutputMode::Smooth { at: Instant::now() }
+            ScrollOutputMode::Smooth {
+                impulse: scaled,
+                at: Instant::now(),
+            }
         } else if scaled != impulse {
-            ScrollOutputMode::Direct
+            ScrollOutputMode::Direct(scaled.into())
         } else {
             return false;
         };
-        self.try_enqueue(ScrollSource::current_hook(), scaled, output)
+        self.try_enqueue(ScrollSource::current_hook(), output)
+    }
+
+    /// Queue a main-wheel impulse with its vertical axis rotated onto the
+    /// horizontal axis. Rolling up becomes left and rolling down becomes
+    /// right, matching the existing discrete horizontal-scroll actions.
+    ///
+    /// The physical event is suppressed only after this non-blocking enqueue
+    /// succeeds. Pixel-precise Logitech free-spin input keeps its native unit
+    /// and is emitted directly by the worker; ordinary wheel ticks still use
+    /// smooth scrolling when that setting is enabled.
+    #[must_use]
+    pub fn try_hook_horizontal_scroll(&self, delta: ScrollDelta) -> bool {
+        if !self.accepting.load(Ordering::Acquire) || !delta.is_finite() || delta.y() == 0.0 {
+            return false;
+        }
+        let preferences = self.preferences.load();
+        let horizontal = -(delta.y() * preferences.vertical_sensitivity.scroll_multiplier());
+        if !horizontal.is_finite() || horizontal == 0.0 {
+            return false;
+        }
+        let transformed = match delta {
+            ScrollDelta::Pixels { .. } => ScrollDelta::pixels(horizontal, 0.0),
+            ScrollDelta::WheelTicks { .. } => ScrollDelta::wheel_ticks(horizontal, 0.0),
+        };
+        let output = match transformed {
+            ScrollDelta::WheelTicks { x, y } if preferences.smooth_scroll => {
+                ScrollOutputMode::Smooth {
+                    impulse: WheelDelta { x, y },
+                    at: Instant::now(),
+                }
+            }
+            _ => ScrollOutputMode::Direct(transformed),
+        };
+        self.try_enqueue(ScrollSource::current_hook(), output)
     }
 
     /// Queue one diverted thumb-wheel impulse from an active HID++ session.
@@ -224,21 +260,17 @@ impl ScrollInputHandle {
         };
         self.try_enqueue(
             ScrollSource::Hidpp(session.clone()),
-            impulse,
-            ScrollOutputMode::Smooth { at: Instant::now() },
+            ScrollOutputMode::Smooth {
+                impulse,
+                at: Instant::now(),
+            },
         )
     }
 
-    fn try_enqueue(
-        &self,
-        source: ScrollSource,
-        impulse: WheelDelta,
-        output: ScrollOutputMode,
-    ) -> bool {
+    fn try_enqueue(&self, source: ScrollSource, output: ScrollOutputMode) -> bool {
         let input = ScrollInput {
             generation: self.generation.load(Ordering::Acquire),
             source,
-            impulse,
             output,
         };
         match self.commands.try_send(ScrollCommand::Input(input)) {
@@ -308,13 +340,13 @@ pub struct ScrollRuntime {
 impl ScrollRuntime {
     /// Start the dedicated output worker using the live scroll settings.
     pub fn spawn(preferences: Arc<ScrollPreferences>) -> io::Result<Self> {
-        Self::spawn_with(preferences, ScrollFrame::post, WheelDelta::post)
+        Self::spawn_with(preferences, ScrollFrame::post, openlogi_inject::post_scroll)
     }
 
     pub(super) fn spawn_with(
         preferences: Arc<ScrollPreferences>,
         mut emit_smooth: impl FnMut(ScrollFrame) + Send + 'static,
-        mut emit_direct: impl FnMut(WheelDelta) + Send + 'static,
+        mut emit_direct: impl FnMut(ScrollDelta) + Send + 'static,
     ) -> io::Result<Self> {
         let (commands, command_rx) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
         let (controls, control_rx) = mpsc::channel();
@@ -397,7 +429,7 @@ fn run_worker(
     shared_generation: &AtomicU64,
     preferences: &ScrollPreferences,
     emit_smooth: &mut impl FnMut(ScrollFrame),
-    emit_direct: &mut impl FnMut(WheelDelta),
+    emit_direct: &mut impl FnMut(ScrollDelta),
 ) {
     let mut engine = ScrollEngine::default();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
@@ -444,12 +476,14 @@ fn run_worker(
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output {
-                    ScrollOutputMode::Smooth { at } if preferences.smooth_scroll_enabled() => {
-                        engine.impulse(input.source, input.impulse, at, emit_smooth);
+                    ScrollOutputMode::Smooth { impulse, at }
+                        if preferences.smooth_scroll_enabled() =>
+                    {
+                        engine.impulse(input.source, impulse, at, emit_smooth);
                     }
-                    ScrollOutputMode::Direct => {
+                    ScrollOutputMode::Direct(delta) => {
                         engine.cancel_source(&input.source, emit_smooth);
-                        emit_direct(input.impulse);
+                        emit_direct(delta);
                     }
                     ScrollOutputMode::Smooth { .. } => {}
                 }
@@ -538,8 +572,10 @@ mod tests {
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
 
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
-        assert!(matches!(queued.output, ScrollOutputMode::Direct));
+        assert_eq!(
+            queued.output,
+            ScrollOutputMode::Direct(ScrollDelta::wheel_ticks(2.0, 1.0))
+        );
     }
 
     #[test]
@@ -548,8 +584,13 @@ mod tests {
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
 
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
-        assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+        assert!(matches!(
+            queued.output,
+            ScrollOutputMode::Smooth {
+                impulse: WheelDelta { x: 2.0, y: 1.0 },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -559,8 +600,13 @@ mod tests {
         assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)));
 
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
-        assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+        assert!(matches!(
+            queued.output,
+            ScrollOutputMode::Smooth {
+                impulse: WheelDelta { x: 0.0, y: 2.0 },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -573,14 +619,51 @@ mod tests {
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
         assert!(matches!(
             queued_input(&receiver).output,
-            ScrollOutputMode::Direct
+            ScrollOutputMode::Direct(ScrollDelta::WheelTicks { .. })
         ));
 
         preferences.publish(true, sensitivity(28));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
-        assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+        assert!(matches!(
+            queued.output,
+            ScrollOutputMode::Smooth {
+                impulse: WheelDelta { x: 0.0, y: 2.0 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn horizontal_modifier_rotates_scaled_wheel_ticks_and_smooths_when_enabled() {
+        let (direct, receiver, _controls) = standalone_input(1, preferences(false, 7));
+        assert!(direct.try_hook_horizontal_scroll(ScrollDelta::wheel_ticks(4.0, 2.0)));
+        assert_eq!(
+            queued_input(&receiver).output,
+            ScrollOutputMode::Direct(ScrollDelta::wheel_ticks(-1.0, 0.0))
+        );
+
+        let (smooth, receiver, _controls) = standalone_input(1, preferences(true, 28));
+        assert!(smooth.try_hook_horizontal_scroll(ScrollDelta::wheel_ticks(0.0, -1.0)));
+        assert!(matches!(
+            queued_input(&receiver).output,
+            ScrollOutputMode::Smooth {
+                impulse: WheelDelta { x: 2.0, y: 0.0 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn horizontal_modifier_preserves_free_spin_pixel_units_and_fails_open() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 14));
+        assert!(!input.try_hook_horizontal_scroll(ScrollDelta::pixels(2.0, 0.0)));
+        assert!(input.try_hook_horizontal_scroll(ScrollDelta::pixels(2.0, 3.5)));
+        assert!(!input.try_hook_horizontal_scroll(ScrollDelta::pixels(0.0, 1.0)));
+        assert_eq!(
+            queued_input(&receiver).output,
+            ScrollOutputMode::Direct(ScrollDelta::pixels(-3.5, 0.0))
+        );
     }
 
     #[test]
@@ -669,8 +752,7 @@ mod tests {
         let input = |session: &HidppSessionId, generation| ScrollInput {
             generation,
             source: ScrollSource::Hidpp(session.clone()),
-            impulse: WheelDelta { x: 0.0, y: 1.0 },
-            output: ScrollOutputMode::Direct,
+            output: ScrollOutputMode::Direct(ScrollDelta::wheel_ticks(0.0, 1.0)),
         };
         let mut cancellations = OverflowCancellations::new(0);
         cancellations.cancel(&cancelled, 0);
@@ -724,8 +806,10 @@ mod tests {
             .send(ScrollCommand::Input(ScrollInput {
                 generation: 1,
                 source: ScrollSource::Hidpp(session.clone()),
-                impulse: WheelDelta { x: 0.0, y: 1.0 },
-                output: ScrollOutputMode::Smooth { at: Instant::now() },
+                output: ScrollOutputMode::Smooth {
+                    impulse: WheelDelta { x: 0.0, y: 1.0 },
+                    at: Instant::now(),
+                },
             }))
             .expect("worker command channel remains open");
         assert_eq!(
@@ -806,7 +890,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .expect("direct worker output")
                 .expect("output must be direct"),
-            WheelDelta { x: 3.0, y: 1.0 }
+            ScrollDelta::wheel_ticks(3.0, 1.0)
         );
         runtime.shutdown();
     }

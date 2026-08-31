@@ -11,6 +11,7 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -26,33 +27,78 @@ use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
-/// Held output owned by accepted press capabilities rather than by a capture
+/// Cloneable read-mostly horizontal-scroll hold state. The OS-hook callback
+/// cannot consistently map a wheel event to a stable config key on every
+/// platform, so any accepted live hold enables the modifier for wheel sources
+/// that have already passed the hook's Logitech/non-trackpad safety policy.
+#[derive(Clone, Default)]
+struct HorizontalScrollState {
+    active: Arc<AtomicBool>,
+}
+
+impl HorizontalScrollState {
+    fn publish(&self, active: bool) {
+        self.active.store(active, Ordering::Release);
+    }
+
+    fn active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+enum HeldOutput {
+    Chord { _held: openlogi_inject::HeldChord },
+    HorizontalScroll,
+}
+
+/// Held outputs owned by accepted press capabilities rather than by a capture
 /// backend. Because every [`PressToken`] has exactly one terminal event, this
 /// map gives release, cancellation, invalidation, shutdown, and unwinding one
 /// RAII path.
-#[derive(Default)]
-struct HeldShortcuts {
-    by_press: HashMap<PressToken, openlogi_inject::HeldChord>,
+struct HeldOutputs {
+    by_press: HashMap<PressToken, HeldOutput>,
+    horizontal_scroll: HorizontalScrollState,
 }
 
-impl HeldShortcuts {
-    fn start(&mut self, press: &PressToken, action: &Action) -> bool {
-        let Some(combo) = action.held_combo() else {
-            return false;
-        };
-        match self.by_press.entry(press.clone()) {
-            std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().replace(combo);
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(openlogi_inject::press_hold(combo));
-            }
+impl HeldOutputs {
+    fn new(horizontal_scroll: HorizontalScrollState) -> Self {
+        Self {
+            by_press: HashMap::new(),
+            horizontal_scroll,
         }
+    }
+
+    fn start(&mut self, press: &PressToken, action: &Action) -> bool {
+        let output = match action {
+            Action::HoldShortcut(combo) => HeldOutput::Chord {
+                _held: openlogi_inject::press_hold(combo),
+            },
+            Action::HorizontalScroll => HeldOutput::HorizontalScroll,
+            _ => return false,
+        };
+        self.by_press.insert(press.clone(), output);
+        self.publish_horizontal_scroll();
         true
     }
 
     fn end(&mut self, press: &PressToken) {
-        self.by_press.remove(press);
+        if self.by_press.remove(press).is_some() {
+            self.publish_horizontal_scroll();
+        }
+    }
+
+    fn publish_horizontal_scroll(&self) {
+        self.horizontal_scroll.publish(
+            self.by_press
+                .values()
+                .any(|output| matches!(output, HeldOutput::HorizontalScroll)),
+        );
+    }
+}
+
+impl Drop for HeldOutputs {
+    fn drop(&mut self) {
+        self.horizontal_scroll.publish(false);
     }
 }
 
@@ -152,14 +198,14 @@ impl ActionExecutor {
 
 struct ButtonEventHandler {
     executor: ActionExecutor,
-    held: HeldShortcuts,
+    held: HeldOutputs,
 }
 
 impl ButtonEventHandler {
-    fn new(executor: ActionExecutor) -> Self {
+    fn new(executor: ActionExecutor, horizontal_scroll: HorizontalScrollState) -> Self {
         Self {
             executor,
-            held: HeldShortcuts::default(),
+            held: HeldOutputs::new(horizontal_scroll),
         }
     }
 
@@ -202,6 +248,7 @@ impl ButtonEventHandler {
 pub struct ActionDispatcher {
     executor: ActionExecutor,
     buttons: ButtonInputHandle,
+    horizontal_scroll: HorizontalScrollState,
 }
 
 /// Unique owner of the button worker plus its cloneable action dispatcher.
@@ -231,13 +278,16 @@ impl ActionRuntime {
             device_io,
             action_ring,
         };
-        let mut button_handler = ButtonEventHandler::new(executor.clone());
+        let horizontal_scroll = HorizontalScrollState::default();
+        let mut button_handler =
+            ButtonEventHandler::new(executor.clone(), horizontal_scroll.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
         let input = buttons.input();
         Ok(Self {
             dispatcher: ActionDispatcher {
                 executor,
                 buttons: input,
+                horizontal_scroll,
             },
             buttons,
         })
@@ -259,6 +309,12 @@ impl ActionDispatcher {
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
+    }
+
+    /// Whether any accepted live press currently owns the
+    /// vertical-to-horizontal main-wheel modifier.
+    pub(crate) fn horizontal_scroll_active(&self) -> bool {
+        self.horizontal_scroll.active()
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned
@@ -380,9 +436,34 @@ mod tests {
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);
-        let mut held = HeldShortcuts::default();
+        let mut held = HeldOutputs::new(HorizontalScrollState::default());
 
         assert!(!held.start(&press, &Action::Copy));
         held.end(&press);
+    }
+
+    #[test]
+    fn horizontal_scroll_holds_are_selection_independent_and_balanced() {
+        let state = HorizontalScrollState::default();
+        let mut held = HeldOutputs::new(state.clone());
+        let first = PressToken::hidpp_for_test(1, "mouse-a", 7, ButtonId::DpiToggle);
+        let second = PressToken::hidpp_for_test(2, "mouse-b", 3, ButtonId::DpiToggle);
+
+        assert!(!state.active());
+        assert!(held.start(&first, &Action::HorizontalScroll));
+        assert!(state.active());
+
+        assert!(held.start(&second, &Action::HorizontalScroll));
+        assert!(state.active());
+
+        held.end(&first);
+        assert!(state.active());
+
+        held.end(&second);
+        assert!(!state.active());
+
+        assert!(held.start(&first, &Action::HorizontalScroll));
+        drop(held);
+        assert!(!state.active());
     }
 }

@@ -2,9 +2,10 @@
 //!
 //! Hook callbacks submit typed wheel impulses through [`ScrollInputHandle`]
 //! without blocking. The worker either scales and emits them directly or
-//! evaluates finite smooth motion from absolute timestamps. Pixel-precise input
-//! never enters this runtime, so native trackpad and continuous wheel streams
-//! cannot be mixed with wheel ticks.
+//! evaluates finite smooth motion from absolute timestamps. Eligible
+//! pixel-precise mouse-wheel input may use the worker's direct-output path, but
+//! never enters the wheel-tick smoothing model; native trackpads are rejected
+//! before submission.
 
 mod worker;
 
@@ -63,10 +64,6 @@ impl WheelDelta {
     fn with_vertical_scale(self, factor: f64) -> Option<Self> {
         let y = self.y * factor;
         y.is_finite().then_some(Self { x: self.x, y })
-    }
-
-    fn post(self) {
-        openlogi_inject::post_scroll(self.into());
     }
 }
 
