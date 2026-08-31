@@ -35,17 +35,20 @@ pub struct ActionRingPanel {
     library_scroll: ScrollHandle,
     app_catalog: Entity<AppCatalogPicker>,
     app_icons: ProfileIconCache,
+    #[expect(
+        dead_code,
+        reason = "held to keep the application-picker observer alive"
+    )]
+    app_catalog_obs: Subscription,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
 
 impl ActionRingPanel {
     /// Create the editor and repaint it after any config/device change.
-    pub fn new(
-        app_catalog: Entity<AppCatalogPicker>,
-        app_icons: ProfileIconCache,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(app_icons: ProfileIconCache, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let app_catalog = cx.new(|cx| AppCatalogPicker::new(app_icons.clone(), window, cx));
+        let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
             let relevant = match event {
                 StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
@@ -66,6 +69,7 @@ impl ActionRingPanel {
             library_scroll: ScrollHandle::new(),
             app_catalog,
             app_icons,
+            app_catalog_obs,
             state_obs,
         }
     }
