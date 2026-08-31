@@ -8,7 +8,8 @@ pub(super) fn configure_window(window: &gpui::Window) {
     use raw_window_handle::RawWindowHandle;
     use tracing::debug;
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+        DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     };
 
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
@@ -20,6 +21,10 @@ pub(super) fn configure_window(window: &gpui::Window) {
     let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
 
     for (name, result) in [
+        (
+            "non-client rendering",
+            set_dwm_window_attribute(hwnd, DWMWA_NCRENDERING_POLICY, &DWMNCRP_DISABLED),
+        ),
         (
             "border color",
             set_dwm_window_attribute(hwnd, DWMWA_BORDER_COLOR, &DWMWA_COLOR_NONE),
