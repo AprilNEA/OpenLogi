@@ -5,33 +5,9 @@ use std::sync::Arc;
 /// Resolve a configured macOS application bundle to a small native icon.
 ///
 /// The lookup is blocking and must run on GPUI's background executor.
-#[cfg(target_os = "macos")]
 pub fn application_icon(target: &str) -> Option<Arc<gpui::RenderImage>> {
-    use appcatalog::{ApplicationIdentity, IdentityKind};
-    use objc2_foundation::{NSBundle, NSString};
-
     const ICON_EDGE: u32 = 64;
-
-    let expanded = shellexpand::tilde(target);
-    let path = NSString::from_str(expanded.as_ref());
-    let identifier = NSBundle::bundleWithPath(&path)?
-        .bundleIdentifier()?
-        .to_string();
-    let identity = ApplicationIdentity::new(IdentityKind::MacBundleIdentifier, identifier);
-    let icon = match appcatalog::application_icon(&identity, ICON_EDGE) {
-        Ok(icon) => icon?,
-        Err(error) => {
-            tracing::warn!(%target, %error, "could not render Actions Ring application icon");
-            return None;
-        }
-    };
-    openlogi_ui::image::render_image_from_rgba(icon.width(), icon.height(), icon.into_rgba())
-}
-
-/// Native application icons are not implemented away from macOS yet.
-#[cfg(not(target_os = "macos"))]
-pub fn application_icon(_target: &str) -> Option<Arc<gpui::RenderImage>> {
-    None
+    openlogi_ui::application_icon::application_icon(target, ICON_EDGE)
 }
 
 /// Keep the overlay out of the Dock and app switcher.

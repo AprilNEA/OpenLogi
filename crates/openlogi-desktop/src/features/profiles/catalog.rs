@@ -63,6 +63,8 @@ pub(crate) struct AppCatalogPicker {
     /// One in-flight icon resolve per application; dropping the picker
     /// cancels whatever has not landed yet.
     icon_tasks: HashMap<String, Task<()>>,
+    application_paths: HashMap<String, Option<String>>,
+    application_path_tasks: HashMap<String, Task<()>>,
     /// Keeps the catalog list's scroll position across repaints and feeds its
     /// scrollbar.
     list_scroll: UniformListScrollHandle,
@@ -118,6 +120,8 @@ impl AppCatalogPicker {
             preferred_identity: preferred_identity_kind(None),
             icons,
             icon_tasks: HashMap::new(),
+            application_paths: HashMap::new(),
+            application_path_tasks: HashMap::new(),
             list_scroll: UniformListScrollHandle::new(),
             _search_subscription: search_subscription,
             _discovery_task: discovery_task,
@@ -178,6 +182,38 @@ impl AppCatalogPicker {
 
     pub(super) fn icon_state(&self, app: &str) -> AppIconState {
         self.icons.state(app)
+    }
+
+    pub(super) fn ensure_application_path(&mut self, app: &str, cx: &mut Context<Self>) {
+        if self.application_paths.contains_key(app) || self.application_path_tasks.contains_key(app)
+        {
+            return;
+        }
+        let app = app.to_string();
+        let task = cx.spawn({
+            let app = app.clone();
+            async move |picker, cx| {
+                let path = cx
+                    .background_executor()
+                    .spawn({
+                        let app = app.clone();
+                        async move { crate::platform::app_icon::application_path(&app) }
+                    })
+                    .await;
+                picker
+                    .update(cx, |picker, cx| {
+                        picker.application_paths.insert(app.clone(), path);
+                        picker.application_path_tasks.remove(&app);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        });
+        self.application_path_tasks.insert(app, task);
+    }
+
+    pub(super) fn application_path(&self, app: &str) -> Option<&str> {
+        self.application_paths.get(app)?.as_deref()
     }
 
     pub(super) fn available_profiles(
