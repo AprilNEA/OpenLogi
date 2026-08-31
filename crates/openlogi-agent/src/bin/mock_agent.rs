@@ -29,8 +29,10 @@
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
+//! - `OPENLOGI_MOCK_ACTION_RING=1` presents a ring with Safari as its native-icon
+//!   target, so the standalone overlay can be exercised without hardware.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +40,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
@@ -55,10 +57,10 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
-    MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingPhase, PairingUpdate, RingObservation,
+    ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, Agent, AgentSnapshot,
+    AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation, Identity,
+    InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -88,6 +90,8 @@ const CAMERA_TOGGLE_PERIOD: Duration = Duration::from_secs(30);
 /// per-app rendering has something switching under it.
 const FOREGROUND_SWITCH_PERIOD: Duration = Duration::from_secs(10);
 
+const MOCK_ACTION_RING_ENV: &str = "OPENLOGI_MOCK_ACTION_RING";
+
 /// The applications the mock pretends the user is switching between, in the
 /// order it cycles them. Real macOS bundle identifiers, so a profile authored
 /// against the mock keeps working against a real agent.
@@ -116,6 +120,22 @@ const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
 /// change. The real agent is told by its watchers and needs no tick at all; a
 /// mock has nothing to be told by, so it compares instead.
 const OBSERVE_TICK: Duration = Duration::from_millis(250);
+
+fn scripted_action_ring(enabled: bool) -> Option<ActionRingInvocation> {
+    enabled.then(|| ActionRingInvocation {
+        session_id: 1,
+        slots: BTreeMap::from([(
+            ActionRingSlot::Top,
+            ActionRingPresentation {
+                label: "Safari".to_string(),
+                literal: true,
+                icon: ActionRingIcon::Applications,
+                application_icon: Some("/Applications/Safari.app".to_string()),
+            },
+        )]),
+        language: None,
+    })
+}
 
 fn main() -> ExitCode {
     default_to_dev_profile();
@@ -797,22 +817,22 @@ impl Agent for MockAgent {
         Ok(())
     }
 
-    // The mock has no Actions Ring hardware: long-polls idle until the
-    // overlay's request deadline (returning immediately would hot-loop it),
-    // and interaction commands answer like an expired session.
+    // The mock has no Actions Ring hardware. An opt-in scripted invocation
+    // lets the real overlay be exercised; otherwise long-polls stay idle.
     async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
         // Superseded by `observe_action_ring`.
         None
     }
 
-    async fn observe_action_ring(self, _: Context, _since: Generation) -> RingObservation {
-        // The mock scripts no rings, so it only ever has "none" to report —
-        // held for the window so an overlay polling it doesn't spin.
-        tokio::time::sleep(OBSERVE_HOLD).await;
-        RingObservation {
+    async fn observe_action_ring(self, _: Context, since: Generation) -> RingObservation {
+        let observation = RingObservation {
             generation: 1,
-            invocation: None,
+            invocation: scripted_action_ring(std::env::var_os(MOCK_ACTION_RING_ENV).is_some()),
+        };
+        if observation.invocation.is_none() || since == observation.generation {
+            tokio::time::sleep(OBSERVE_HOLD).await;
         }
+        observation
     }
 
     async fn action_ring_hover(
@@ -1054,6 +1074,18 @@ impl Agent for MockAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_action_ring_is_opt_in_and_requests_a_native_icon() {
+        assert_eq!(scripted_action_ring(false), None);
+        let invocation = scripted_action_ring(true).expect("enabled ring should be scripted");
+        assert_eq!(
+            invocation.slots[&ActionRingSlot::Top]
+                .application_icon
+                .as_deref(),
+            Some("/Applications/Safari.app")
+        );
+    }
 
     fn state_with_discovery() -> State {
         let mut state = State::new().expect("mock state should be valid");
