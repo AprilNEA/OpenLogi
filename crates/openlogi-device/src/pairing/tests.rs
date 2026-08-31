@@ -1,6 +1,11 @@
 use super::*;
 
-use std::{error::Error, io, time::Duration};
+use std::{
+    error::Error,
+    io,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use hidpp::{
     channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_ID},
@@ -37,6 +42,44 @@ fn passkey_clicks_are_msb_first_10_bits() {
             Click::Right,
         ]
     );
+}
+
+#[test]
+fn session_state_keeps_bolt_phases_separate_from_unifying() {
+    let mut device = DiscoveredDevice {
+        address: [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02],
+        authentication: 0x01,
+        kind: BoltDeviceKind::Keyboard,
+        name: "Test Keyboard".into(),
+    };
+
+    let mut bolt = SessionState::from(ReceiverFamily::Bolt);
+    let SessionState::BoltDiscovery(discovery) = &bolt else {
+        panic!("Bolt must start in discovery");
+    };
+    assert!(discovery.partial.is_empty());
+
+    bolt.select_bolt_device(&device)
+        .expect("Bolt discovery accepts a device selection");
+    let SessionState::BoltPairing(pairing) = &bolt else {
+        panic!("device selection must enter Bolt pairing");
+    };
+    assert_eq!(pairing.authentication, 0x01);
+
+    device.authentication = 0x00;
+    bolt.select_bolt_device(&device)
+        .expect("Bolt pairing preserves repeat-selection command acceptance");
+    let SessionState::BoltPairing(pairing) = &bolt else {
+        panic!("repeat selection must remain in Bolt pairing");
+    };
+    assert_eq!(pairing.authentication, 0x00);
+
+    let mut unifying = SessionState::from(ReceiverFamily::Unifying);
+    assert!(matches!(
+        unifying.select_bolt_device(&device),
+        Err(PairingError::UnsupportedCommand)
+    ));
+    assert!(matches!(unifying, SessionState::UnifyingPairing));
 }
 
 #[tokio::test]
@@ -204,14 +247,90 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
     assert!(reports[3][5..].iter().all(|byte| *byte == 0));
 }
 
+#[tokio::test]
+async fn failed_bolt_pair_write_cancels_bolt_pairing() {
+    let (raw, mut written_reports) = EchoRawHidChannel::failing_bolt_pair_write();
+    let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
+        panic!("mock must support HID++");
+    };
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    let (_notification_tx, mut notifications) = mpsc::unbounded_channel();
+    let (event_tx, _events) = mpsc::unbounded_channel();
+
+    assert!(
+        command_tx
+            .send(PairingCommand::Pair(DiscoveredDevice {
+                address: [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02],
+                authentication: 0x01,
+                kind: BoltDeviceKind::Keyboard,
+                name: "Test Keyboard".into(),
+            }))
+            .is_ok(),
+        "the pair command must reach the session's command receiver"
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_session(
+            &channel,
+            ReceiverFamily::Bolt,
+            &mut commands,
+            &mut notifications,
+            &event_tx,
+        ),
+    )
+    .await;
+    let Ok(result) = result else {
+        panic!("pairing session did not terminate");
+    };
+    assert!(matches!(result, Err(PairingError::Register(_))));
+
+    let reports: Vec<_> = std::iter::from_fn(|| written_reports.try_recv().ok()).collect();
+    assert_eq!(reports.len(), 4);
+    assert_eq!(
+        &reports[2][..5],
+        &[
+            LONG_REPORT_ID,
+            RECEIVER_INDEX,
+            u8::from(MessageType::SetLongRegister),
+            BOLT_PAIRING,
+            0x01,
+        ],
+        "the selected device is submitted to the Bolt pairing register"
+    );
+    assert_eq!(
+        &reports[3][..5],
+        &[
+            LONG_REPORT_ID,
+            RECEIVER_INDEX,
+            u8::from(MessageType::SetLongRegister),
+            BOLT_PAIRING,
+            0x02,
+        ],
+        "a failed pair write must cancel the Bolt pairing register, not discovery"
+    );
+    assert!(reports[3][5..].iter().all(|byte| *byte == 0));
+}
+
 struct EchoRawHidChannel {
     incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written_tx: mpsc::UnboundedSender<Vec<u8>>,
+    fail_bolt_pair_write: AtomicBool,
 }
 
 impl EchoRawHidChannel {
     fn new() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+        Self::with_failed_bolt_pair_write(false)
+    }
+
+    fn failing_bolt_pair_write() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+        Self::with_failed_bolt_pair_write(true)
+    }
+
+    fn with_failed_bolt_pair_write(
+        fail_bolt_pair_write: bool,
+    ) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let (written_tx, written_rx) = mpsc::unbounded_channel();
         (
@@ -219,6 +338,7 @@ impl EchoRawHidChannel {
                 incoming_tx,
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written_tx,
+                fail_bolt_pair_write: AtomicBool::new(fail_bolt_pair_write),
             },
             written_rx,
         )
@@ -237,7 +357,24 @@ impl RawHidChannel for EchoRawHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
         let report = src.to_vec();
-        if self.written_tx.send(report.clone()).is_err() || self.incoming_tx.send(report).is_err() {
+        if self.written_tx.send(report.clone()).is_err() {
+            return Err(mock_error());
+        }
+        if report.get(..5)
+            == Some(
+                &[
+                    LONG_REPORT_ID,
+                    RECEIVER_INDEX,
+                    u8::from(MessageType::SetLongRegister),
+                    BOLT_PAIRING,
+                    0x01,
+                ][..],
+            )
+            && self.fail_bolt_pair_write.swap(false, Ordering::Relaxed)
+        {
+            return Err(mock_error());
+        }
+        if self.incoming_tx.send(report).is_err() {
             return Err(mock_error());
         }
         Ok(src.len())
