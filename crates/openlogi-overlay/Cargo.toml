@@ -35,14 +35,17 @@ tracing-subscriber = { workspace = true }
 embed-resource = "3.0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+appcatalog = "0.1.1"
 # CGGetActiveDisplayList/CGDisplayBounds: placing the ring on the cursor's
 # display needs global display bounds, which GPUI's display API doesn't expose
 # (its bounds are display-relative). C FFI, so core-graphics.
 core-graphics = { workspace = true }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "block2"] }
+objc2-foundation = { workspace = true, features = ["NSBundle", "NSString"] }
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
+shellexpand = { workspace = true }
 
 [lints]
 workspace = true
