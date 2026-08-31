@@ -34,6 +34,7 @@ impl Render for ToggleHarness {
 
 struct MenuRowHarness {
     activations: Rc<Cell<usize>>,
+    disabled: bool,
 }
 
 impl Render for MenuRowHarness {
@@ -41,6 +42,7 @@ impl Render for MenuRowHarness {
         let activations = self.activations.clone();
         div().tab_group().size(px(100.)).child(
             MenuRow::new("keyboard-menu-row")
+                .disabled(self.disabled)
                 .role(Role::MenuItem)
                 .child("Action")
                 .on_click(move |_, _, _| activations.set(activations.get() + 1)),
@@ -175,7 +177,10 @@ fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
     let activations = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
         let activations = activations.clone();
-        move |_, _| MenuRowHarness { activations }
+        move |_, _| MenuRowHarness {
+            activations,
+            disabled: false,
+        }
     });
     cx.update(|window, cx| {
         window.draw(cx).clear(cx);
@@ -187,6 +192,30 @@ fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
     activate_key(cx, "space");
 
     assert_eq!(activations.get(), 2);
+}
+
+#[gpui::test]
+fn disabled_menu_row_is_not_focusable_or_activatable(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let activations = Rc::new(Cell::new(0));
+    let (_, cx) = cx.add_window_view({
+        let activations = activations.clone();
+        move |_, _| MenuRowHarness {
+            activations,
+            disabled: true,
+        }
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+
+    cx.update(Window::focus_next);
+    cx.update(|window, cx| assert!(window.focused(cx).is_none()));
+    cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+    activate_key(cx, "enter");
+    activate_key(cx, "space");
+
+    assert_eq!(activations.get(), 0);
 }
 
 /// The guard is the point: `set_placeholder` notifies unconditionally, so

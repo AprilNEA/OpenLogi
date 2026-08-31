@@ -30,7 +30,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
+use gpui_component::{Disableable as _, Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_core::device::Capabilities;
@@ -335,20 +335,7 @@ impl Render for FunctionRowView {
             })
             .collect();
 
-        // A stale selection can outlive a device switch to a shorter F-row;
-        // drop it instead of indexing past the new slot list.
-        if self.selected_key.is_some_and(|idx| idx >= slots.len()) {
-            self.selected_key = None;
-            self.active_editor = None;
-            self.text_state = None;
-            self.workflow_draft.clear();
-        }
-        let selected_gaming_key_is_supported = self
-            .selected_g_key
-            .is_none_or(|button| gaming_keys.supports(button));
-        if !selected_gaming_key_is_supported {
-            self.selected_g_key = None;
-        }
+        self.normalize_selection(slots.len(), gaming_keys, g_key_software_control);
         let selected = self.selected_key;
         let hovered = self.hovered_key;
         let active_editor = self.active_editor;
@@ -423,6 +410,16 @@ fn gaming_key_state(state: Option<&AppState>) -> (GamingKeysAvailable, bool) {
         })
         .unwrap_or(false);
     (available, software_control)
+}
+
+fn gaming_selection_ok(
+    selected: Option<ButtonId>,
+    available: GamingKeysAvailable,
+    software_control: bool,
+) -> bool {
+    selected.is_none_or(|button| {
+        available.supports(button) && (software_control || !GAMING_KEYS.contains(&button))
+    })
 }
 
 /// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]
@@ -951,18 +948,38 @@ impl FunctionRowView {
             .child(divider(pal))
             .child(editor_scroll_list("g-key-panel-scroll", rows))
     }
+
+    fn normalize_selection(
+        &mut self,
+        slot_count: usize,
+        gaming_keys: GamingKeysAvailable,
+        g_key_software_control: bool,
+    ) {
+        // A stale selection can outlive a device switch to a shorter F-row;
+        // drop it instead of indexing past the new slot list.
+        if self.selected_key.is_some_and(|idx| idx >= slot_count) {
+            self.selected_key = None;
+            self.active_editor = None;
+            self.text_state = None;
+            self.workflow_draft.clear();
+        }
+        if !gaming_selection_ok(self.selected_g_key, gaming_keys, g_key_software_control) {
+            self.selected_g_key = None;
+        }
+    }
 }
 
 fn gaming_key_strip(
     label: &'static str,
     element_id: &'static str,
     keys: &[ButtonId],
-    selected: Option<ButtonId>,
+    state: (bool, Option<ButtonId>),
     bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
     view: &Entity<FunctionRowView>,
     cx: &mut Context<FunctionRowView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let (enabled, selected) = state;
     v_flex()
         .w_full()
         .max_w(px(KEYBOARD_W))
@@ -985,6 +1002,7 @@ fn gaming_key_strip(
                     div().w(px(104.)).child(
                         MenuRow::new((element_id, index))
                             .selected(is_selected)
+                            .disabled(!enabled)
                             .role(Role::MenuItem)
                             .child(
                                 v_flex()
@@ -1027,7 +1045,7 @@ fn gaming_key_controls(
                     "G1–G5",
                     "gaming-g-key",
                     &GAMING_KEYS,
-                    selected,
+                    (g_key_software_control, selected),
                     bindings,
                     view,
                     cx,
@@ -1088,7 +1106,7 @@ fn gaming_key_controls(
                 "M1–M3 / MR",
                 "gaming-aux-key",
                 &keys,
-                selected,
+                (true, selected),
                 bindings,
                 view,
                 cx,
