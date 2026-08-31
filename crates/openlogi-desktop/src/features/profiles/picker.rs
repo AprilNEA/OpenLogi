@@ -113,7 +113,7 @@ pub(crate) fn application_popover(
                 .outline()
                 .w_full()
                 .icon(IconName::Folder)
-                .label(tr!("profiles.add_app_dialog")),
+                .label(tr!("profiles.browse_applications")),
         )
         .on_open_change(move |open, window, cx| {
             if *open {
