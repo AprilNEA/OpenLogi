@@ -80,7 +80,9 @@ fn main() -> Result<()> {
                         cx.new(|_| RingView::new(invocation, commands, &live_session))
                     }) {
                         Ok(handle) => {
-                            platform::configure_windows();
+                            let _ = handle.update(cx, |_, window, _| {
+                                platform::configure_window(window);
+                            });
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
                                 if handle
