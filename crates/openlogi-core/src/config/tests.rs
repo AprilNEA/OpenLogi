@@ -420,6 +420,28 @@ fn default_invert_scroll_is_omitted_from_toml() {
 }
 
 #[test]
+fn gaming_g_key_software_control_is_explicit_and_roundtrips() {
+    let mut cfg = Config::default();
+    assert!(!cfg.g_key_software_control("keyboard"));
+
+    cfg.set_binding(
+        "keyboard",
+        ButtonId::KeyG1,
+        Binding::Single(Action::MissionControl),
+    );
+    let default_body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !default_body.contains("g_key_software_control"),
+        "saved bindings alone must keep firmware ownership"
+    );
+
+    cfg.set_g_key_software_control("keyboard", true);
+    let restored = write_and_read(&cfg);
+    assert!(restored.g_key_software_control("keyboard"));
+    assert!(!restored.g_key_software_control("another-keyboard"));
+}
+
+#[test]
 fn scroll_resolution_roundtrips_all_three_states() {
     let mut cfg = Config::default();
     assert_eq!(cfg.scroll_resolution("mouse"), None);

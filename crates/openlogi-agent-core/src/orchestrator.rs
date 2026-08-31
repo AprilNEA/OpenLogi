@@ -350,23 +350,14 @@ impl Orchestrator {
             .collect();
         let wanted_g_keys = dev
             .capabilities
-            .filter(|capabilities| capabilities.g_keys)
+            .filter(|capabilities| {
+                capabilities.g_keys && self.config.g_key_software_control(&dev.config_key)
+            })
             .map_or_else(BTreeSet::new, |_| {
-                let row_has_action = GAMING_G_KEYS.iter().any(|(_, button)| {
-                    bindings.get(button).is_some_and(|binding| {
-                        matches!(binding, Binding::LongPress(_))
-                            || binding.click_action() != Action::None
-                    })
-                });
-                // 0x8010 transfers the whole physical row. Once any G-key has
-                // an action, the UI's remaining Off entries become deliberate
-                // software-owned no-ops; with no actions, firmware keeps the
-                // complete row.
-                if row_has_action {
-                    GAMING_G_KEYS.iter().map(|(_, button)| *button).collect()
-                } else {
-                    BTreeSet::new()
-                }
+                // HID++ 0x8010 exposes row-wide ownership only. Never infer
+                // that destructive hand-off from saved per-key bindings: the
+                // user must explicitly opt this device into software control.
+                GAMING_G_KEYS.iter().map(|(_, button)| *button).collect()
             });
         let wanted_aux_keys = dev.capabilities.map_or_else(BTreeSet::new, |capabilities| {
             GAMING_AUX_KEYS

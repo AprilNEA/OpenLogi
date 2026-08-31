@@ -140,6 +140,12 @@ pub struct DeviceConfig {
     /// is only serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Whether OpenLogi may enable HID++ `0x8010` software control for the
+    /// device's entire G-key row. The protocol exposes no per-key ownership,
+    /// so this explicit opt-in prevents one saved binding from silently
+    /// disabling unrelated onboard G-key actions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub g_key_software_control: bool,
     /// User-assigned name for this physical device. The persisted
     /// [`DeviceIdentity::display_name`] remains the hardware model name so an
     /// inventory refresh can never overwrite this alias or mistake it for
@@ -349,6 +355,7 @@ impl Default for DeviceConfig {
             // A fresh entry (e.g. created by a first DPI write) must stay
             // managed — `enabled: false` is an explicit user choice only.
             enabled: true,
+            g_key_software_control: false,
             custom_name: None,
             gesture_owner: None,
             identity: None,
@@ -493,6 +500,8 @@ struct RawDeviceConfig {
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
+    g_key_software_control: bool,
+    #[serde(default)]
     custom_name: Option<String>,
 }
 
@@ -529,6 +538,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 
         DeviceConfig {
             enabled: raw.enabled,
+            g_key_software_control: raw.g_key_software_control,
             custom_name: raw.custom_name,
             gesture_owner: raw.gesture_owner,
             identity: raw.identity.map(DeviceIdentity::without_unit_identifiers),

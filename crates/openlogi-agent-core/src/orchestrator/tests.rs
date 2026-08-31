@@ -1038,26 +1038,38 @@ fn equal_runtime_projection_does_not_wake_managers() {
 }
 
 #[test]
-fn one_bound_g913_g_key_owns_the_ui_row_with_implicit_off_entries() {
+fn g913_g_key_capture_requires_explicit_row_control() {
     let mut config = Config::default();
     config.set_binding(
         "keyboard",
         ButtonId::KeyG1,
         Binding::Single(Action::MissionControl),
     );
-    let mut keyboard = dev("keyboard", 1, true);
-    keyboard.kind = DeviceKind::Keyboard;
-    keyboard.capabilities = Some(Capabilities {
-        buttons: true,
-        g_keys: true,
-        ..Capabilities::default()
-    });
+    let keyboard = || {
+        let mut keyboard = dev("keyboard", 1, true);
+        keyboard.kind = DeviceKind::Keyboard;
+        keyboard.capabilities = Some(Capabilities {
+            buttons: true,
+            g_keys: true,
+            ..Capabilities::default()
+        });
+        keyboard
+    };
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![keyboard()];
+
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "saved bindings must not silently take ownership from onboard firmware"
+    );
+
+    config.set_g_key_software_control("keyboard", true);
     let mut orch = orchestrator(config);
-    orch.devices = vec![keyboard];
+    orch.devices = vec![keyboard()];
 
     let spec = orch
         .keyboard_spec_for()
-        .expect("a bound G-key should start keyboard capture");
+        .expect("explicit row control should start keyboard capture");
 
     assert!(spec.wanted.is_empty());
     assert_eq!(

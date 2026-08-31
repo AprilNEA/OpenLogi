@@ -201,6 +201,24 @@ impl AppState {
         self.persist_and_reload("device enabled");
     }
 
+    /// Whether the user explicitly gave OpenLogi row-wide ownership of this
+    /// device's gaming G-keys.
+    #[must_use]
+    pub fn g_key_software_control(&self, key: &str) -> bool {
+        self.config.g_key_software_control(key)
+    }
+
+    /// Persist the explicit row-wide G-key ownership choice and reload the
+    /// agent so HID++ software control is enabled or restored immediately.
+    pub fn set_g_key_software_control(&mut self, key: &str, enabled: bool) {
+        if self.config.g_key_software_control(key) == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_g_key_software_control(key, enabled));
+        self.persist_and_reload("gaming G-key software control");
+    }
+
     /// The effective thumb-wheel sensitivity for `key` (its per-device
     /// override, else the app-wide default).
     #[must_use]

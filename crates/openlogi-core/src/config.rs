@@ -1009,6 +1009,23 @@ impl Config {
             .enabled = enabled;
     }
 
+    /// Whether the user explicitly allowed OpenLogi to take row-wide software
+    /// control of this device's G-keys.
+    #[must_use]
+    pub fn g_key_software_control(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|device| device.g_key_software_control)
+    }
+
+    /// Persist the explicit row-wide G-key software-control choice.
+    pub fn set_g_key_software_control(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_software_control = enabled;
+    }
+
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
     /// override when set, else the app-wide default.
     #[must_use]

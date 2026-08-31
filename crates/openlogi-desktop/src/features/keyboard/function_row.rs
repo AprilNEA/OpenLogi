@@ -47,7 +47,7 @@ use crate::features::mouse::picker::{
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, Toggle};
 use crate::ui::theme::{self, ACCENT_BLUE, ContentWidth, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
@@ -302,7 +302,7 @@ impl Render for FunctionRowView {
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
         let bindings = state.map(AppState::keyboard_bindings);
         let button_bindings = state.map(|state| state.button_bindings().clone());
-        let gaming_keys = gaming_keys_available(state);
+        let (gaming_keys, g_key_software_control) = gaming_key_state(state);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -398,6 +398,7 @@ impl Render for FunctionRowView {
             .items_center()
             .child(gaming_key_controls(
                 gaming_keys,
+                g_key_software_control,
                 self.selected_g_key,
                 button_bindings.as_ref(),
                 &view,
@@ -407,12 +408,21 @@ impl Render for FunctionRowView {
     }
 }
 
-fn gaming_keys_available(state: Option<&AppState>) -> GamingKeysAvailable {
-    GamingKeysAvailable::from(
+fn gaming_key_state(state: Option<&AppState>) -> (GamingKeysAvailable, bool) {
+    let available = GamingKeysAvailable::from(
         state
             .and_then(AppState::current_record)
             .and_then(|record| record.capabilities),
-    )
+    );
+    let software_control = state
+        .and_then(|state| {
+            state
+                .current_record()
+                .and_then(DeviceRecord::persistent_config_key)
+                .map(|key| state.g_key_software_control(key))
+        })
+        .unwrap_or(false);
+    (available, software_control)
 }
 
 /// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]
@@ -1002,6 +1012,7 @@ fn gaming_key_strip(
 
 fn gaming_key_controls(
     available: GamingKeysAvailable,
+    g_key_software_control: bool,
     selected: Option<ButtonId>,
     bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
     view: &Entity<FunctionRowView>,
@@ -1022,14 +1033,47 @@ fn gaming_key_controls(
                     cx,
                 ))
                 .child(
-                    div()
+                    h_flex()
+                        .w_full()
                         .max_w(ContentWidth::Medium.rems())
                         .px_5()
                         .pb_3()
-                        .text_caption()
-                        .text_center()
-                        .text_color(theme::palette(cx).text_muted)
-                        .child(tr!("keyboard.g_key_row_control_description")),
+                        .gap_4()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_body()
+                                        .text_color(theme::palette(cx).text_primary)
+                                        .child(tr!("keyboard.g_key_software_control")),
+                                )
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(theme::palette(cx).text_muted)
+                                        .child(tr!("keyboard.g_key_software_control_description")),
+                                ),
+                        )
+                        .child(
+                            Toggle::new("g-key-software-control")
+                                .selected(g_key_software_control)
+                                .on_change(|enabled, _window, cx| {
+                                    AppState::update(cx, |state, cx| {
+                                        let device = state.current_record().and_then(|record| {
+                                            record
+                                                .persistent_config_key()
+                                                .map(|key| (key.to_string(), record.device_key()))
+                                        });
+                                        if let Some((config_key, device_key)) = device {
+                                            state.set_g_key_software_control(&config_key, *enabled);
+                                            cx.emit(StateEvent::BindingsChanged(device_key));
+                                        }
+                                    });
+                                }),
+                        ),
                 )
         })
         .when(available.mode || available.macro_record, |layout| {
