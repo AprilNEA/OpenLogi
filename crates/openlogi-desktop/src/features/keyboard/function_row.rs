@@ -48,7 +48,7 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, ContentWidth, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
@@ -1011,15 +1011,26 @@ fn gaming_key_controls(
         .w_full()
         .items_center()
         .when(available.g_row, |layout| {
-            layout.child(gaming_key_strip(
-                "G1–G5",
-                "gaming-g-key",
-                &GAMING_KEYS,
-                selected,
-                bindings,
-                view,
-                cx,
-            ))
+            layout
+                .child(gaming_key_strip(
+                    "G1–G5",
+                    "gaming-g-key",
+                    &GAMING_KEYS,
+                    selected,
+                    bindings,
+                    view,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .max_w(ContentWidth::Medium.rems())
+                        .px_5()
+                        .pb_3()
+                        .text_caption()
+                        .text_center()
+                        .text_color(theme::palette(cx).text_muted)
+                        .child(tr!("keyboard.g_key_row_control_description")),
+                )
         })
         .when(available.mode || available.macro_record, |layout| {
             let mut keys = Vec::new();

@@ -347,9 +347,10 @@ async fn arm_capture_targets(
             .key_count()
             .await
             .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
-        if g_key_row_is_fully_configured(count, &targets.gaming) {
+        if let Some(modeled) = configured_g_key_row(count, &targets.gaming) {
             // Record ownership before the write: a transport failure does not prove
             // that firmware ignored the mode transition.
+            armed.wanted_g_keys = modeled;
             armed.gaming_index = Some(info.index);
             gaming
                 .set_software_control(true)
@@ -399,13 +400,13 @@ async fn arm_capture_targets(
     Ok(())
 }
 
-fn g_key_row_is_fully_configured(count: u8, configured: &BTreeSet<ButtonId>) -> bool {
+fn configured_g_key_row(count: u8, configured: &BTreeSet<ButtonId>) -> Option<BTreeSet<ButtonId>> {
     let modeled: BTreeSet<_> = GAMING_G_KEYS
         .iter()
         .take(usize::from(count))
         .map(|(_, button)| *button)
         .collect();
-    modeled.len() == usize::from(count) && modeled == *configured
+    (modeled.len() == usize::from(count) && modeled.is_subset(configured)).then_some(modeled)
 }
 
 async fn monitor_keyboard_capture(
@@ -770,13 +771,21 @@ mod tests {
     }
 
     #[test]
-    fn g_key_row_requires_every_reported_key_to_be_explicit() {
+    fn g_key_row_requires_every_reported_key_and_discards_non_physical_entries() {
         let partial = BTreeSet::from([ButtonId::KeyG1, ButtonId::KeyG2]);
-        assert!(!g_key_row_is_fully_configured(5, &partial));
+        assert!(configured_g_key_row(5, &partial).is_none());
 
-        let complete = GAMING_G_KEYS.iter().map(|(_, button)| *button).collect();
-        assert!(g_key_row_is_fully_configured(5, &complete));
-        assert!(!g_key_row_is_fully_configured(6, &complete));
+        let complete: BTreeSet<_> = GAMING_G_KEYS.iter().map(|(_, button)| *button).collect();
+        assert_eq!(configured_g_key_row(5, &complete), Some(complete.clone()));
+        assert_eq!(
+            configured_g_key_row(3, &complete),
+            Some(BTreeSet::from([
+                ButtonId::KeyG1,
+                ButtonId::KeyG2,
+                ButtonId::KeyG3,
+            ]))
+        );
+        assert!(configured_g_key_row(6, &complete).is_none());
     }
 
     #[test]

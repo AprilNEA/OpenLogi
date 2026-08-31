@@ -16,8 +16,7 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::Dpi;
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
-use std::collections::BTreeSet;
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, GAMING_G_KEYS};
 use std::sync::Arc;
 
 use crate::observable::ObservableState;
@@ -1039,7 +1038,7 @@ fn equal_runtime_projection_does_not_wake_managers() {
 }
 
 #[test]
-fn bound_g913_g_key_enters_keyboard_capture_spec() {
+fn one_bound_g913_g_key_owns_the_ui_row_with_implicit_off_entries() {
     let mut config = Config::default();
     config.set_binding(
         "keyboard",
@@ -1061,5 +1060,8 @@ fn bound_g913_g_key_enters_keyboard_capture_spec() {
         .expect("a bound G-key should start keyboard capture");
 
     assert!(spec.wanted.is_empty());
-    assert_eq!(spec.wanted_g_keys, BTreeSet::from([ButtonId::KeyG1]));
+    assert_eq!(
+        spec.wanted_g_keys,
+        GAMING_G_KEYS.iter().map(|(_, button)| *button).collect()
+    );
 }
