@@ -52,6 +52,7 @@ const START_UM_PER_S: f64 = 40_000.0;
 #[derive(Debug)]
 pub(super) struct TouchpadMomentum {
     stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TouchpadMomentum {
@@ -76,13 +77,19 @@ impl TouchpadMomentum {
         }
 
         tracing::debug!(?velocity, "touchpad scroll momentum started");
-        Some(Self { stop })
+        Some(Self {
+            stop,
+            thread: spawned.ok(),
+        })
     }
 
-    /// Stop the tail within one tick. The thread simply stops posting — a
-    /// wheel-class stream has no closure event to send.
-    pub(super) fn stop(&self) {
+    /// The join is load-bearing: it orders every remaining delta before the
+    /// replacement output the caller posts next, never after it.
+    pub(super) fn stop(mut self) {
         self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -92,9 +99,7 @@ impl TouchpadMomentum {
 fn run(velocity: &mut (f64, f64), stop: &AtomicBool) {
     let mut ticks = 0_u32;
     loop {
-        // Check before posting, so a stop never leaves a stale frame behind
-        // (at flick speed one extra tick is ~110 px, and it could land after
-        // the replacement stroke's own first frame).
+        // Bounds a stop to the one in-flight frame; the join orders it.
         if stop.load(Ordering::Acquire) {
             break;
         }
