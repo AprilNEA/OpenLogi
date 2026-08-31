@@ -597,6 +597,8 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     haptic_feedback: true,
                     haptic_panel: true,
                     g_keys: false,
+                    m_keys: false,
+                    macro_record: false,
                 }),
             },
             PairedDevice {
@@ -645,6 +647,8 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     haptic_feedback: false,
                     haptic_panel: false,
                     g_keys: false,
+                    m_keys: false,
+                    macro_record: false,
                 }),
             },
         ],
@@ -695,6 +699,8 @@ fn direct_inventory() -> DeviceInventory {
                 haptic_feedback: false,
                 haptic_panel: false,
                 g_keys: false,
+                m_keys: false,
+                macro_record: false,
             }),
         }],
     }

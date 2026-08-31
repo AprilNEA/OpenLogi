@@ -84,7 +84,11 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyG2
         | ButtonId::KeyG3
         | ButtonId::KeyG4
-        | ButtonId::KeyG5 => Action::None,
+        | ButtonId::KeyG5
+        | ButtonId::KeyM1
+        | ButtonId::KeyM2
+        | ButtonId::KeyM3
+        | ButtonId::KeyMr => Action::None,
     }
 }
 

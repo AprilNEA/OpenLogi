@@ -44,6 +44,9 @@ pub struct KeyboardSpec {
     pub wanted: BTreeMap<u16, ButtonId>,
     /// Bound `0x8010` gaming keys to report in software-control mode.
     pub wanted_g_keys: BTreeSet<ButtonId>,
+    /// Bound `0x8020` M-keys and `0x8030` MR key to observe without disabling
+    /// their native bank-selection / macro-record behaviour.
+    pub wanted_aux_keys: BTreeSet<ButtonId>,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -58,6 +61,7 @@ struct KeyboardTarget {
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
     wanted_g_keys: BTreeSet<ButtonId>,
+    wanted_aux_keys: BTreeSet<ButtonId>,
 }
 
 impl KeyboardTarget {
@@ -66,6 +70,7 @@ impl KeyboardTarget {
             route: spec.route.clone(),
             wanted: spec.wanted.clone(),
             wanted_g_keys: spec.wanted_g_keys.clone(),
+            wanted_aux_keys: spec.wanted_aux_keys.clone(),
         }
     }
 }
@@ -528,6 +533,7 @@ fn spawn_session(
     let route = target.route.clone();
     let wanted = target.wanted.clone();
     let wanted_g_keys = target.wanted_g_keys.clone();
+    let wanted_aux_keys = target.wanted_aux_keys.clone();
     let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
@@ -536,6 +542,7 @@ fn spawn_session(
             KeyboardCaptureTargets {
                 reprog: wanted,
                 gaming: wanted_g_keys,
+                gaming_aux: wanted_aux_keys,
             },
             sink,
             stop_rx,

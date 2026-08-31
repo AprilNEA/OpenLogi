@@ -131,6 +131,12 @@ pub struct Capabilities {
     /// Dedicated gaming-key event capture — HID++ `0x8010` (GamingGKeys).
     #[serde(default)]
     pub g_keys: bool,
+    /// Gaming mode-key events — HID++ `0x8020` (GamingMKeys).
+    #[serde(default)]
+    pub m_keys: bool,
+    /// Gaming macro-record key events — HID++ `0x8030` (MacroRecord).
+    #[serde(default)]
+    pub macro_record: bool,
 }
 
 impl Capabilities {
@@ -148,7 +154,7 @@ impl Capabilities {
         const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
-            buttons: has(&BUTTONS) || ids.contains(&0x8010),
+            buttons: has(&BUTTONS) || ids.iter().any(|id| matches!(id, 0x8010 | 0x8020 | 0x8030)),
             pointer: has(&POINTER),
             lighting: has(&LIGHTING),
             scroll_inversion: false,
@@ -157,6 +163,8 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             g_keys: ids.contains(&0x8010),
+            m_keys: ids.contains(&0x8020),
+            macro_record: ids.contains(&0x8030),
         }
     }
 
@@ -178,6 +186,8 @@ impl Capabilities {
                 haptic_feedback: false,
                 haptic_panel: false,
                 g_keys: false,
+                m_keys: false,
+                macro_record: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -484,6 +494,8 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     g_keys: false,
+                    m_keys: false,
+                    macro_record: false,
                 }),
             }],
         }
@@ -555,6 +567,8 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 g_keys: false,
+                m_keys: false,
+                macro_record: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -572,11 +586,15 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 g_keys: false,
+                m_keys: false,
+                macro_record: false,
             }
         );
-        let gaming_keyboard = Capabilities::from_feature_ids(&[0x8010]);
+        let gaming_keyboard = Capabilities::from_feature_ids(&[0x8010, 0x8020, 0x8030]);
         assert!(gaming_keyboard.buttons);
         assert!(gaming_keyboard.g_keys);
+        assert!(gaming_keyboard.m_keys);
+        assert!(gaming_keyboard.macro_record);
         // No driving features → nothing offered.
         assert_eq!(
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),

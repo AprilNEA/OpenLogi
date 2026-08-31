@@ -9,6 +9,7 @@ fn target() -> KeyboardTarget {
         },
         wanted: BTreeMap::new(),
         wanted_g_keys: BTreeSet::new(),
+        wanted_aux_keys: BTreeSet::new(),
     }
 }
 
@@ -49,6 +50,7 @@ async fn publication_and_receiver_request_change_wanted_state_immediately() {
         route: target().route,
         wanted: target().wanted,
         wanted_g_keys: target().wanted_g_keys,
+        wanted_aux_keys: target().wanted_aux_keys,
         bindings: dispatch(Action::MissionControl).bindings,
     };
 

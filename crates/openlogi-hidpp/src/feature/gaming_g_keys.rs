@@ -14,8 +14,8 @@ use crate::{
 bitflags::bitflags! {
     /// Currently-held gaming G-keys from a `0x8010` state event.
     ///
-    /// Unknown bits are retained so keyboards with more than eight G-keys do
-    /// not silently turn a partially-understood state into a false release.
+    /// All eight bits are retained so the full HID++ state byte survives
+    /// decoding even when a particular keyboard exposes fewer physical keys.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct GKeyState: u8 {
@@ -65,6 +65,14 @@ pub struct GamingGKeysFeature {
 }
 
 impl GamingGKeysFeature {
+    /// Returns the number of physical G-keys in the row.
+    ///
+    /// This is reverse-engineered function 0. G913 reports `5` in the first
+    /// response byte.
+    pub async fn key_count(&self) -> Result<u8, Hidpp20Error> {
+        Ok(self.endpoint.call(0, [0; 3]).await?.extend_payload()[0])
+    }
+
     /// Selects host software event reporting (`true`) or onboard handling
     /// (`false`) for the G-key row.
     ///

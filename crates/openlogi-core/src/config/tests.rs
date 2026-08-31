@@ -586,6 +586,8 @@ fn device_identity_roundtrips_and_is_iterable() {
             haptic_feedback: false,
             haptic_panel: false,
             g_keys: false,
+            m_keys: false,
+            macro_record: false,
         },
         light_capabilities: None,
         driver_id: None,

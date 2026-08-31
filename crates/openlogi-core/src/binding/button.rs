@@ -89,6 +89,16 @@ pub enum ButtonId {
     ///
     /// Declared last because serialized variants are append-only.
     KeyG5,
+    /// Gaming keyboard mode key M1, reported through HID++ `0x8020`.
+    KeyM1,
+    /// Gaming keyboard mode key M2, reported through HID++ `0x8020`.
+    KeyM2,
+    /// Gaming keyboard mode key M3, reported through HID++ `0x8020`.
+    KeyM3,
+    /// Gaming keyboard macro-record key, reported through HID++ `0x8030`.
+    ///
+    /// Declared last because serialized variants are append-only.
+    KeyMr,
 }
 
 impl ButtonId {
@@ -115,7 +125,7 @@ impl ButtonId {
     /// second. Kept out of [`ButtonId::ALL`]: that array seeds mouse defaults
     /// and the mouse popover trigger list, while keyboard keys stay native
     /// unless the user binds them (an unbound key is never captured).
-    pub const KEYBOARD_KEYS: [ButtonId; 14] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 18] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -130,6 +140,10 @@ impl ButtonId {
         ButtonId::KeyG3,
         ButtonId::KeyG4,
         ButtonId::KeyG5,
+        ButtonId::KeyM1,
+        ButtonId::KeyM2,
+        ButtonId::KeyM3,
+        ButtonId::KeyMr,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -188,6 +202,10 @@ impl ButtonId {
             ButtonId::KeyG3 => "G3",
             ButtonId::KeyG4 => "G4",
             ButtonId::KeyG5 => "G5",
+            ButtonId::KeyM1 => "M1",
+            ButtonId::KeyM2 => "M2",
+            ButtonId::KeyM3 => "M3",
+            ButtonId::KeyMr => "MR",
         }
     }
 
@@ -217,6 +235,15 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::KeyG1 => "keyboard.g1_key",
+            ButtonId::KeyG2 => "keyboard.g2_key",
+            ButtonId::KeyG3 => "keyboard.g3_key",
+            ButtonId::KeyG4 => "keyboard.g4_key",
+            ButtonId::KeyG5 => "keyboard.g5_key",
+            ButtonId::KeyM1 => "keyboard.m1_key",
+            ButtonId::KeyM2 => "keyboard.m2_key",
+            ButtonId::KeyM3 => "keyboard.m3_key",
+            ButtonId::KeyMr => "keyboard.macro_record_key",
         }
     }
 }

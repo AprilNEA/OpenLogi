@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    GAMING_G_KEYS, KEYBOARD_KEY_CIDS,
+    GAMING_AUX_KEYS, GAMING_G_KEYS, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -355,15 +355,29 @@ impl Orchestrator {
                 GAMING_G_KEYS
                     .iter()
                     .map(|(_, button)| *button)
-                    .filter(|button| {
-                        bindings.get(button).is_some_and(|binding| {
-                            matches!(binding, Binding::LongPress(_))
-                                || binding.click_action() != Action::None
-                        })
-                    })
+                    // 0x8010 transfers the whole physical row. Preserve
+                    // onboard handling until every key has an explicit
+                    // binding, including an intentional `None` / Off.
+                    .filter(|button| bindings.contains_key(button))
                     .collect()
             });
-        if wanted.is_empty() && wanted_g_keys.is_empty() {
+        let wanted_aux_keys = dev.capabilities.map_or_else(BTreeSet::new, |capabilities| {
+            GAMING_AUX_KEYS
+                .into_iter()
+                .filter(|button| match button {
+                    ButtonId::KeyM1 | ButtonId::KeyM2 | ButtonId::KeyM3 => capabilities.m_keys,
+                    ButtonId::KeyMr => capabilities.macro_record,
+                    _ => false,
+                })
+                .filter(|button| {
+                    bindings.get(button).is_some_and(|binding| {
+                        matches!(binding, Binding::LongPress(_))
+                            || binding.click_action() != Action::None
+                    })
+                })
+                .collect()
+        });
+        if wanted.is_empty() && wanted_g_keys.is_empty() && wanted_aux_keys.is_empty() {
             return None;
         }
         Some(KeyboardSpec {
@@ -371,6 +385,7 @@ impl Orchestrator {
             route: dev.route.clone()?,
             wanted,
             wanted_g_keys,
+            wanted_aux_keys,
             bindings,
         })
     }

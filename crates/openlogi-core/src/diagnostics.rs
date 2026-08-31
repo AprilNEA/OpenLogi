@@ -598,6 +598,8 @@ mod tests {
                         haptic_feedback: false,
                         haptic_panel: false,
                         g_keys: false,
+                        m_keys: false,
+                        macro_record: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

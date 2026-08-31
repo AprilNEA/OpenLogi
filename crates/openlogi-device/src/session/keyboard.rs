@@ -1,13 +1,14 @@
 //! Live key capture for one keyboard: divert bound F-row controls over HID++
-//! `0x1b04`, enable bound gaming keys over `0x8010`, and turn their physical
-//! edges into [`CapturedInput`] the agent can dispatch.
+//! `0x1b04`, enable a fully configured gaming-key row over `0x8010`, passively
+//! observe `0x8020`/`0x8030`, and turn their physical edges into
+//! [`CapturedInput`] the agent can dispatch.
 //!
 //! [`run_keyboard_capture_session`] is the keyboard counterpart of
 //! [`crate::session::gesture::run_capture_session`]: one open channel, diversion armed
 //! on exactly the controls the caller asks for (an unbound key is never
 //! diverted, so it keeps its native firmware function), listeners for both
-//! event families, and every captured control handed back to the firmware on
-//! shutdown.
+//! event families, and every actively captured control handed back to the
+//! firmware on shutdown.
 //!
 //! Diversion works on the key's *control* — the printed media/shortcut
 //! function — so it fires when Fn-lock is off (or via Fn+key when it is on).
@@ -22,6 +23,8 @@ use hidpp::{
     feature::{
         CreatableFeature, EmittingFeature,
         gaming_g_keys::{GKeyState, GamingGKeysEvent, GamingGKeysFeature},
+        gaming_m_keys::{GamingMKeysEvent, GamingMKeysFeature, MKeyState},
+        macro_record::{MacroRecordEvent, MacroRecordFeature},
         wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
     },
     protocol::v20,
@@ -70,6 +73,22 @@ pub const GAMING_G_KEYS: [(GKeyState, ButtonId); 5] = [
     (GKeyState::G5, ButtonId::KeyG5),
 ];
 
+/// G913 mode keys OpenLogi models, in physical left-to-right order.
+pub const GAMING_M_KEYS: [(MKeyState, ButtonId); 3] = [
+    (MKeyState::M1, ButtonId::KeyM1),
+    (MKeyState::M2, ButtonId::KeyM2),
+    (MKeyState::M3, ButtonId::KeyM3),
+];
+
+/// Gaming controls whose native firmware action remains active while OpenLogi
+/// observes their HID++ events.
+pub const GAMING_AUX_KEYS: [ButtonId; 4] = [
+    ButtonId::KeyM1,
+    ButtonId::KeyM2,
+    ButtonId::KeyM3,
+    ButtonId::KeyMr,
+];
+
 /// Bound keyboard controls that one capture session should own.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeyboardCaptureTargets {
@@ -77,6 +96,9 @@ pub struct KeyboardCaptureTargets {
     pub reprog: BTreeMap<u16, ButtonId>,
     /// `0x8010` gaming keys that should emit software events.
     pub gaming: BTreeSet<ButtonId>,
+    /// `0x8020` M-keys and `0x8030` MR key to observe without taking their
+    /// native firmware function away.
+    pub gaming_aux: BTreeSet<ButtonId>,
 }
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
@@ -87,7 +109,11 @@ pub struct KeyboardCaptureTargets {
 /// the caller passes only the keys that carry a real binding. Controls the
 /// device doesn't expose (or can't divert) are skipped with a debug log, so a
 /// partially-supported keyboard degrades per key rather than failing whole.
-/// `targets.gaming` applies the same bound-only rule to `0x8010` G-key events.
+/// `targets.gaming` must name the device's complete physical G-key row before
+/// `0x8010` software control is enabled. This feature has one row-wide control
+/// switch, so partial ownership would otherwise swallow every unbound G key.
+/// `targets.gaming_aux` observes `0x8020`/`0x8030` without changing the native
+/// M-bank or macro-record behaviour.
 pub async fn run_keyboard_capture_session(
     backend: &dyn HidBackend,
     route: DeviceRoute,
@@ -171,6 +197,9 @@ async fn run_keyboard_capture_session_on(
         gaming: None,
         gaming_index: None,
         wanted_g_keys: targets.gaming.clone(),
+        m_keys: None,
+        macro_record: None,
+        wanted_aux_keys: targets.gaming_aux.clone(),
     };
 
     let setup = arm_capture_targets(&device, &shared, &targets, &mut armed).await;
@@ -231,6 +260,7 @@ async fn run_keyboard_capture_session_on(
         index = device_index,
         reprog_keys = armed.diverted.len(),
         g_keys = armed.wanted_g_keys.len(),
+        auxiliary_gaming_keys = armed.wanted_aux_keys.len(),
         wake_rearm = wireless.is_some(),
         "keyboard key capture active"
     );
@@ -260,13 +290,13 @@ async fn run_keyboard_capture_session_on(
     {
         *slot = None;
     }
-    let (pending, gaming_listener) = armed.into_restore(&shared);
+    let (pending, gaming_listeners) = armed.into_restore(&shared);
     // Keep accepting edges until firmware restoration is complete. The agent
     // drains this listener's forwarding task before publishing ordered Done,
     // so this session remains the sole owner of every input captured while
     // its controls could still be diverted.
     let outcome = drop_listener_after(
-        (listener, gaming_listener),
+        (listener, gaming_listeners),
         restore_after_stop(stop, pending, &shared, registry),
     )
     .await;
@@ -305,25 +335,77 @@ async fn arm_capture_targets(
         arm_keys(&available, &targets.reprog, armed).await?;
     }
 
-    if targets.gaming.is_empty() {
-        return Ok(());
+    if !targets.gaming.is_empty() {
+        let info = device
+            .root()
+            .get_feature(GamingGKeysFeature::ID)
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?
+            .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x8010 GamingGKeys".into()))?;
+        let gaming = GamingGKeysFeature::new(Arc::clone(chan), device_index, info.index);
+        let count = gaming
+            .key_count()
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+        if g_key_row_is_fully_configured(count, &targets.gaming) {
+            // Record ownership before the write: a transport failure does not prove
+            // that firmware ignored the mode transition.
+            armed.gaming_index = Some(info.index);
+            gaming
+                .set_software_control(true)
+                .await
+                .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+            armed.gaming = Some(gaming);
+        } else {
+            info!(
+                physical_g_keys = count,
+                explicitly_configured = targets.gaming.len(),
+                "G-key row is only partially configured — keeping onboard firmware control"
+            );
+            armed.wanted_g_keys.clear();
+        }
     }
-    let info = device
-        .root()
-        .get_feature(GamingGKeysFeature::ID)
-        .await
-        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?
-        .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x8010 GamingGKeys".into()))?;
-    let gaming = GamingGKeysFeature::new(Arc::clone(chan), device_index, info.index);
-    // Record ownership before the write: a transport failure does not prove
-    // that firmware ignored the mode transition.
-    armed.gaming_index = Some(info.index);
-    gaming
-        .set_software_control(true)
-        .await
-        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
-    armed.gaming = Some(gaming);
+
+    let wants_m_keys = targets
+        .gaming_aux
+        .iter()
+        .any(|button| matches!(button, ButtonId::KeyM1 | ButtonId::KeyM2 | ButtonId::KeyM3));
+    if wants_m_keys {
+        let info = device
+            .root()
+            .get_feature(GamingMKeysFeature::ID)
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?
+            .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x8020 GamingMKeys".into()))?;
+        armed.m_keys = Some(GamingMKeysFeature::new(
+            Arc::clone(chan),
+            device_index,
+            info.index,
+        ));
+    }
+    if targets.gaming_aux.contains(&ButtonId::KeyMr) {
+        let info = device
+            .root()
+            .get_feature(MacroRecordFeature::ID)
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?
+            .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x8030 MacroRecord".into()))?;
+        armed.macro_record = Some(MacroRecordFeature::new(
+            Arc::clone(chan),
+            device_index,
+            info.index,
+        ));
+    }
     Ok(())
+}
+
+fn g_key_row_is_fully_configured(count: u8, configured: &BTreeSet<ButtonId>) -> bool {
+    let modeled: BTreeSet<_> = GAMING_G_KEYS
+        .iter()
+        .take(usize::from(count))
+        .map(|(_, button)| *button)
+        .collect();
+    modeled.len() == usize::from(count) && modeled == *configured
 }
 
 async fn monitor_keyboard_capture(
@@ -334,7 +416,15 @@ async fn monitor_keyboard_capture(
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut g_key_events = context.armed.gaming.as_ref().map(EmittingFeature::listen);
+    let mut m_key_events = context.armed.m_keys.as_ref().map(EmittingFeature::listen);
+    let mut mr_events = context
+        .armed
+        .macro_record
+        .as_ref()
+        .map(EmittingFeature::listen);
     let mut g_keys_down = GKeyState::empty();
+    let mut m_keys_down = MKeyState::empty();
+    let mut mr_down = false;
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
         if !device_io.allows_io() && !device_io.wait_until_allowed().await {
@@ -385,6 +475,40 @@ async fn monitor_keyboard_capture(
                     context.sink,
                 );
             }
+            event = async {
+                match m_key_events.as_ref() {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(GamingMKeysEvent::StateChanged(state)) = event else {
+                    m_key_events = None;
+                    continue;
+                };
+                emit_m_key_edges(
+                    &mut m_keys_down,
+                    state,
+                    &context.armed.wanted_aux_keys,
+                    context.sink,
+                );
+            }
+            event = async {
+                match mr_events.as_ref() {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(MacroRecordEvent::StateChanged(down)) = event else {
+                    mr_events = None;
+                    continue;
+                };
+                emit_mr_edges(
+                    &mut mr_down,
+                    down,
+                    context.armed.wanted_aux_keys.contains(&ButtonId::KeyMr),
+                    context.sink,
+                );
+            }
         }
     }
 }
@@ -406,6 +530,44 @@ fn emit_g_key_edges(
         } else if !now && was {
             let _ = sink.send(CapturedInput::ButtonUp(button));
         }
+    }
+    *down = state;
+}
+
+fn emit_m_key_edges(
+    down: &mut MKeyState,
+    state: MKeyState,
+    wanted: &BTreeSet<ButtonId>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    for (flag, button) in GAMING_M_KEYS {
+        if !wanted.contains(&button) {
+            continue;
+        }
+        let now = state.contains(flag);
+        let was = down.contains(flag);
+        if now && !was {
+            let _ = sink.send(CapturedInput::ButtonDown(button));
+        } else if !now && was {
+            let _ = sink.send(CapturedInput::ButtonUp(button));
+        }
+    }
+    *down = state;
+}
+
+fn emit_mr_edges(
+    down: &mut bool,
+    state: bool,
+    wanted: bool,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    if wanted && state != *down {
+        let input = if state {
+            CapturedInput::ButtonDown(ButtonId::KeyMr)
+        } else {
+            CapturedInput::ButtonUp(ButtonId::KeyMr)
+        };
+        let _ = sink.send(input);
     }
     *down = state;
 }
@@ -441,7 +603,16 @@ struct ArmedKeys {
     gaming: Option<GamingGKeysFeature>,
     gaming_index: Option<u8>,
     wanted_g_keys: BTreeSet<ButtonId>,
+    m_keys: Option<GamingMKeysFeature>,
+    macro_record: Option<MacroRecordFeature>,
+    wanted_aux_keys: BTreeSet<ButtonId>,
 }
+
+type GamingListeners = (
+    Option<GamingGKeysFeature>,
+    Option<GamingMKeysFeature>,
+    Option<MacroRecordFeature>,
+);
 
 impl ArmedKeys {
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
@@ -451,15 +622,19 @@ impl ArmedKeys {
     fn into_restore(
         mut self,
         retired: &SharedChannel,
-    ) -> (Option<PendingCaptureRestore>, Option<GamingGKeysFeature>) {
-        let gaming_listener = self.gaming.take();
+    ) -> (Option<PendingCaptureRestore>, GamingListeners) {
+        let gaming_listeners = (
+            self.gaming.take(),
+            self.m_keys.take(),
+            self.macro_record.take(),
+        );
         let reprog = self
             .controls
             .as_ref()
             .and_then(|controls| ReprogRestore::new(controls.feature_index(), self.reporting));
         (
             PendingCaptureRestore::new(retired, reprog, None, self.gaming_index),
-            gaming_listener,
+            gaming_listeners,
         )
     }
 }
@@ -590,6 +765,48 @@ mod tests {
                 CapturedInput::ButtonDown(ButtonId::KeyG5),
                 CapturedInput::ButtonUp(ButtonId::KeyG1),
                 CapturedInput::ButtonUp(ButtonId::KeyG5),
+            ]
+        );
+    }
+
+    #[test]
+    fn g_key_row_requires_every_reported_key_to_be_explicit() {
+        let partial = BTreeSet::from([ButtonId::KeyG1, ButtonId::KeyG2]);
+        assert!(!g_key_row_is_fully_configured(5, &partial));
+
+        let complete = GAMING_G_KEYS.iter().map(|(_, button)| *button).collect();
+        assert!(g_key_row_is_fully_configured(5, &complete));
+        assert!(!g_key_row_is_fully_configured(6, &complete));
+    }
+
+    #[test]
+    fn mode_and_record_snapshots_emit_balanced_edges() {
+        let wanted = BTreeSet::from([ButtonId::KeyM1, ButtonId::KeyM3, ButtonId::KeyMr]);
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+        let mut mode_down = MKeyState::empty();
+        let mut mr_down = false;
+
+        emit_m_key_edges(&mut mode_down, MKeyState::M1, &wanted, &sink);
+        emit_m_key_edges(
+            &mut mode_down,
+            MKeyState::M1 | MKeyState::M2 | MKeyState::M3,
+            &wanted,
+            &sink,
+        );
+        emit_m_key_edges(&mut mode_down, MKeyState::empty(), &wanted, &sink);
+        emit_mr_edges(&mut mr_down, true, true, &sink);
+        emit_mr_edges(&mut mr_down, true, true, &sink);
+        emit_mr_edges(&mut mr_down, false, true, &sink);
+
+        assert_eq!(
+            std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::KeyM1),
+                CapturedInput::ButtonDown(ButtonId::KeyM3),
+                CapturedInput::ButtonUp(ButtonId::KeyM1),
+                CapturedInput::ButtonUp(ButtonId::KeyM3),
+                CapturedInput::ButtonDown(ButtonId::KeyMr),
+                CapturedInput::ButtonUp(ButtonId::KeyMr),
             ]
         );
     }

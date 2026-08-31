@@ -33,6 +33,7 @@ use gpui::{
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::device::Capabilities;
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -86,6 +87,38 @@ const GAMING_KEYS: [ButtonId; 5] = [
     ButtonId::KeyG4,
     ButtonId::KeyG5,
 ];
+
+const GAMING_AUX_KEYS: [ButtonId; 4] = [
+    ButtonId::KeyM1,
+    ButtonId::KeyM2,
+    ButtonId::KeyM3,
+    ButtonId::KeyMr,
+];
+
+#[derive(Clone, Copy, Default)]
+struct GamingKeysAvailable {
+    g_row: bool,
+    mode: bool,
+    macro_record: bool,
+}
+
+impl GamingKeysAvailable {
+    fn supports(self, button: ButtonId) -> bool {
+        (self.g_row && GAMING_KEYS.contains(&button))
+            || (self.mode && matches!(button, ButtonId::KeyM1 | ButtonId::KeyM2 | ButtonId::KeyM3))
+            || (self.macro_record && button == ButtonId::KeyMr)
+    }
+}
+
+impl From<Option<Capabilities>> for GamingKeysAvailable {
+    fn from(capabilities: Option<Capabilities>) -> Self {
+        capabilities.map_or_else(Self::default, |capabilities| Self {
+            g_row: capabilities.g_keys,
+            mode: capabilities.m_keys,
+            macro_record: capabilities.macro_record,
+        })
+    }
+}
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -269,10 +302,7 @@ impl Render for FunctionRowView {
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
         let bindings = state.map(AppState::keyboard_bindings);
         let button_bindings = state.map(|state| state.button_bindings().clone());
-        let has_g_keys = state
-            .and_then(AppState::current_record)
-            .and_then(|record| record.capabilities)
-            .is_some_and(|capabilities| capabilities.g_keys);
+        let gaming_keys = gaming_keys_available(state);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -313,7 +343,10 @@ impl Render for FunctionRowView {
             self.text_state = None;
             self.workflow_draft.clear();
         }
-        if !has_g_keys {
+        let selected_gaming_key_is_supported = self
+            .selected_g_key
+            .is_none_or(|button| gaming_keys.supports(button));
+        if !selected_gaming_key_is_supported {
             self.selected_g_key = None;
         }
         let selected = self.selected_key;
@@ -363,16 +396,23 @@ impl Render for FunctionRowView {
         v_flex()
             .w_full()
             .items_center()
-            .when(has_g_keys, |layout| {
-                layout.child(gaming_key_strip(
-                    self.selected_g_key,
-                    button_bindings.as_ref(),
-                    &view,
-                    cx,
-                ))
-            })
+            .child(gaming_key_controls(
+                gaming_keys,
+                self.selected_g_key,
+                button_bindings.as_ref(),
+                &view,
+                cx,
+            ))
             .child(InspectorRow::new(keyboard).panel(panel))
     }
+}
+
+fn gaming_keys_available(state: Option<&AppState>) -> GamingKeysAvailable {
+    GamingKeysAvailable::from(
+        state
+            .and_then(AppState::current_record)
+            .and_then(|record| record.capabilities),
+    )
 }
 
 /// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]
@@ -904,6 +944,9 @@ impl FunctionRowView {
 }
 
 fn gaming_key_strip(
+    label: &'static str,
+    element_id: &'static str,
+    keys: &[ButtonId],
     selected: Option<ButtonId>,
     bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
     view: &Entity<FunctionRowView>,
@@ -920,17 +963,17 @@ fn gaming_key_strip(
                 .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
-                .child("G1–G5"),
+                .child(label),
         )
         .child(
             h_flex()
                 .gap_2()
-                .children(GAMING_KEYS.into_iter().enumerate().map(|(index, button)| {
+                .children(keys.iter().copied().enumerate().map(|(index, button)| {
                     let view = view.clone();
                     let is_selected = selected == Some(button);
                     let action = bindings.and_then(|bindings| bindings.get(&button));
                     div().w(px(104.)).child(
-                        MenuRow::new(("gaming-g-key", index))
+                        MenuRow::new((element_id, index))
                             .selected(is_selected)
                             .role(Role::MenuItem)
                             .child(
@@ -955,6 +998,47 @@ fn gaming_key_strip(
                     )
                 })),
         )
+}
+
+fn gaming_key_controls(
+    available: GamingKeysAvailable,
+    selected: Option<ButtonId>,
+    bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
+    view: &Entity<FunctionRowView>,
+    cx: &mut Context<FunctionRowView>,
+) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .items_center()
+        .when(available.g_row, |layout| {
+            layout.child(gaming_key_strip(
+                "G1–G5",
+                "gaming-g-key",
+                &GAMING_KEYS,
+                selected,
+                bindings,
+                view,
+                cx,
+            ))
+        })
+        .when(available.mode || available.macro_record, |layout| {
+            let mut keys = Vec::new();
+            if available.mode {
+                keys.extend_from_slice(&GAMING_AUX_KEYS[..3]);
+            }
+            if available.macro_record {
+                keys.push(ButtonId::KeyMr);
+            }
+            layout.child(gaming_key_strip(
+                "M1–M3 / MR",
+                "gaming-aux-key",
+                &keys,
+                selected,
+                bindings,
+                view,
+                cx,
+            ))
+        })
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".
