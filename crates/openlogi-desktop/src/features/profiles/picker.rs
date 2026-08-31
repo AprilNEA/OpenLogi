@@ -102,7 +102,9 @@ pub(crate) fn application_popover(
     pal: Palette,
 ) -> impl IntoElement {
     let select: AppSelection = Rc::new(move |choice, cx| {
-        on_select(choice.launch_target, choice.name, cx);
+        if let Some(target) = choice.launch_target {
+            on_select(target, choice.name, cx);
+        }
     });
     let catalog_on_open = catalog.clone();
     Popover::new(format!("{id_base}:application-popover"))
@@ -286,13 +288,15 @@ fn application_choices(
 ) -> AddAppChoices {
     let (catalog_recent, catalog) = match catalog {
         CatalogPresentation::Ready(applications) => {
+            let applications = applications
+                .into_iter()
+                .filter(|choice| choice.launch_target.is_some());
             let recent_ids = recent_apps
                 .iter()
                 .map(|(app, _)| app.as_str())
                 .collect::<HashSet<_>>();
-            let (recent, remaining) = applications
-                .into_iter()
-                .partition(|choice| recent_ids.contains(choice.app.as_str()));
+            let (recent, remaining) =
+                applications.partition(|choice| recent_ids.contains(choice.app.as_str()));
             (recent, CatalogPresentation::Ready(remaining))
         }
         catalog => (Vec::new(), catalog),
@@ -307,7 +311,7 @@ fn application_choices(
             let mut choice = catalog_recent.remove(app).or_else(|| {
                 application_paths.get(app).map(|path| ProfileChoice {
                     app: app.clone(),
-                    launch_target: path.clone(),
+                    launch_target: Some(path.clone()),
                     name: name.clone(),
                     override_count: 0,
                     persisted: false,
@@ -606,7 +610,7 @@ mod tests {
     fn application_choices_separate_recent_apps_in_recency_order() {
         let choice = |app: &str, name: &str| ProfileChoice {
             app: app.to_string(),
-            launch_target: format!("/Applications/{name}.app"),
+            launch_target: Some(format!("/Applications/{name}.app")),
             name: name.to_string(),
             override_count: 0,
             persisted: false,
@@ -651,8 +655,8 @@ mod tests {
             let choices = application_choices(catalog, &recent, &paths);
             assert_eq!(choices.recent.len(), 1);
             assert_eq!(
-                choices.recent[0].launch_target,
-                "/Users/example/Tools/Portable.app"
+                choices.recent[0].launch_target.as_deref(),
+                Some("/Users/example/Tools/Portable.app")
             );
         }
     }
