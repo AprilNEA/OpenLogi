@@ -236,7 +236,7 @@ impl AppCatalogPicker {
                 }
                 Some(ProfileChoice {
                     app,
-                    launch_target: application.registration.to_string_lossy().into_owned(),
+                    launch_target: application_launch_target(application),
                     name: application.name.clone(),
                     override_count: 0,
                     persisted: false,
@@ -251,6 +251,20 @@ impl AppCatalogPicker {
         });
         CatalogPresentation::Ready(profiles)
     }
+}
+
+fn application_launch_target(application: &Application) -> Option<String> {
+    if application
+        .identities
+        .iter()
+        .any(|identity| identity.kind() == IdentityKind::MacBundleIdentifier)
+    {
+        return Some(application.registration.to_string_lossy().into_owned());
+    }
+    application
+        .executable
+        .as_deref()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn identity_for_application(
@@ -321,7 +335,38 @@ mod tests {
 
     use appcatalog::{Application, ApplicationIdentity, IdentityKind};
 
-    use super::identity_for_application;
+    use super::{application_launch_target, identity_for_application};
+
+    #[test]
+    fn launch_target_uses_bundle_on_macos_and_executable_elsewhere() {
+        let macos = Application {
+            name: "Editor".into(),
+            identities: vec![ApplicationIdentity::new(
+                IdentityKind::MacBundleIdentifier,
+                "org.example.Editor",
+            )],
+            executable: Some("/Applications/Editor.app/Contents/MacOS/Editor".into()),
+            registration: "/Applications/Editor.app".into(),
+            icon: None,
+        };
+        assert_eq!(
+            application_launch_target(&macos).as_deref(),
+            Some("/Applications/Editor.app")
+        );
+
+        let mut linux = application_with_identities(vec![ApplicationIdentity::new(
+            IdentityKind::LinuxDesktopId,
+            "org.example.Editor",
+        )]);
+        linux.executable = Some("/usr/bin/editor".into());
+        linux.registration = "/usr/share/applications/editor.desktop".into();
+        assert_eq!(
+            application_launch_target(&linux).as_deref(),
+            Some("/usr/bin/editor")
+        );
+        linux.executable = None;
+        assert_eq!(application_launch_target(&linux), None);
+    }
 
     #[test]
     fn observed_identity_wins_over_the_platform_default() {
