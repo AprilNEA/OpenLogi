@@ -132,8 +132,9 @@ pub struct MouseModelView {
 impl MouseModelView {
     /// Create the mouse model view.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let action_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("actions.search_actions")));
+        let action_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("actions.search_actions"))
+        });
         cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -230,7 +231,7 @@ impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::components::localize_placeholder(
             &self.action_search,
-            tr!("actions.search_actions"),
+            rust_i18n::t!("actions.search_actions").into(),
             window,
             cx,
         );
@@ -625,10 +626,10 @@ impl RenderOnce for LabelTrigger {
         let binding = self.binding.text;
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
-        let button_name = tr!(self.label.id.translation_key());
+        let button_name = rust_i18n::t!(self.label.id.translation_key());
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("actions.bind_control", name => button_name.clone()))
+            .accessibility_label(rust_i18n::t!("actions.bind_control", name => button_name.clone()))
             .aria_description(binding_description)
             .aria_selected(selected)
             .flex()
@@ -734,7 +735,7 @@ fn binding_label_for_control(
         .is_some_and(|button| gesture_buttons.contains(&button))
     {
         return BindingLabel {
-            text: tr!("actions.five_directions"),
+            text: rust_i18n::t!("actions.five_directions").into(),
             icon: Some(GESTURE_BUTTON_ICON),
         };
     }
@@ -761,12 +762,12 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
-                    text: tr!(preset.translation_key()),
+                    text: rust_i18n::t!(preset.translation_key()).into(),
                     icon: Some(preset.icon()),
                 }
             } else {
                 BindingLabel {
-                    text: tr!("common.custom"),
+                    text: rust_i18n::t!("common.custom").into(),
                     icon: Some("action-icons/chevrons-right.svg"),
                 }
             }
@@ -875,9 +876,9 @@ impl RenderOnce for HotspotTrigger {
 
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!(
+            .accessibility_label(rust_i18n::t!(
                 "actions.bind_control",
-                name => tr!(btn.translation_key())
+                name => rust_i18n::t!(btn.translation_key())
             ))
             .aria_selected(selected)
             .flex()

@@ -676,10 +676,11 @@ impl CameraControlsPanel {
             let existing = state.camera_profiles(&key);
             let mut n = existing.len() + 1;
             let mut name =
-                tr!("actions.custom_profile_number", number => n.to_string()).to_string();
+                rust_i18n::t!("actions.custom_profile_number", number => n.to_string()).to_string();
             while existing.contains_key(&name) {
                 n += 1;
-                name = tr!("actions.custom_profile_number", number => n.to_string()).to_string();
+                name = rust_i18n::t!("actions.custom_profile_number", number => n.to_string())
+                    .to_string();
             }
             state.save_camera_profile(&key, &name, snap);
             state.set_camera_active_profile(&key, Some(name));
@@ -716,7 +717,7 @@ impl Render for CameraControlsPanel {
             return div()
                 .text_body()
                 .text_color(pal.text_muted)
-                .child(tr!("camera.camera_controls_unavailable"));
+                .child(rust_i18n::t!("camera.camera_controls_unavailable"));
         }
 
         let lens: Vec<usize> = section_indices(&self.sliders, true);
@@ -724,13 +725,13 @@ impl Render for CameraControlsPanel {
 
         let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, cx));
         if !lens.is_empty() && !image.is_empty() {
-            panel = panel.child(section_label(tr!("camera.lens"), pal).mt_1());
+            panel = panel.child(section_label(rust_i18n::t!("camera.lens"), pal).mt_1());
         }
         for ix in lens {
             panel = panel.child(control_row(self, ix, cx));
         }
         if !image.is_empty() && self.sliders.len() != image.len() {
-            panel = panel.child(section_label(tr!("camera.image"), pal).mt_1());
+            panel = panel.child(section_label(rust_i18n::t!("camera.image"), pal).mt_1());
         }
         for ix in image {
             panel = panel.child(control_row(self, ix, cx));
@@ -792,7 +793,7 @@ fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
         );
     }
     row = row.child(
-        ProfileTab::new("camera-profile-save", tr!("common.new"))
+        ProfileTab::new("camera-profile-save", rust_i18n::t!("common.new"))
             .icon(IconName::Plus)
             .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
                 panel.save_profile(cx);
@@ -887,7 +888,7 @@ fn control_row(
             BaseButton::new((ElementId::from("camera-control-auto"), toggle.name()))
                 .role(Role::CheckBox)
                 .selected(on)
-                .accessibility_label(tr!("common.auto"))
+                .accessibility_label(rust_i18n::t!("common.auto"))
                 .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .px_1p5()
                 .py_0p5()
@@ -903,7 +904,7 @@ fn control_row(
                 })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
                 .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
-                .child(tr!("common.auto"))
+                .child(rust_i18n::t!("common.auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
                 })),
@@ -926,7 +927,7 @@ fn frequency_row(
     for (value, id, label) in [
         (1, 1_u32, SharedString::from("50 Hz")),
         (2, 2_u32, SharedString::from("60 Hz")),
-        (3, 3_u32, tr!("common.auto")),
+        (3, 3_u32, rust_i18n::t!("common.auto").into()),
     ]
     .into_iter()
     .filter(|(value, _, _)| slider.range.supports(*value))
@@ -1021,7 +1022,7 @@ fn binary_control_row(
             BaseButton::new("camera-low-light")
                 .role(Role::CheckBox)
                 .selected(on)
-                .accessibility_label(tr!("camera.low_light_compensation"))
+                .accessibility_label(rust_i18n::t!("camera.low_light_compensation"))
                 .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .px_1p5()
                 .py_0p5()
@@ -1038,9 +1039,9 @@ fn binary_control_row(
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
                 .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
                 .child(if on {
-                    tr!("common.on")
+                    rust_i18n::t!("common.on")
                 } else {
-                    tr!("common.off")
+                    rust_i18n::t!("common.off")
                 })
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -1065,7 +1066,7 @@ fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
     let pal = theme::palette(cx);
     h_flex().w_full().justify_end().child(
         BaseButton::new("camera-controls-reset")
-            .accessibility_label(tr!("camera.reset_to_defaults"))
+            .accessibility_label(rust_i18n::t!("camera.reset_to_defaults"))
             .px_2p5()
             .py_0p5()
             .rounded_md()
@@ -1076,7 +1077,7 @@ fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
             .focus_visible(|s| s.bg(pal.control_hover))
             .text_caption()
             .text_color(pal.text_muted)
-            .child(tr!("camera.reset_to_defaults"))
+            .child(rust_i18n::t!("camera.reset_to_defaults"))
             .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
                 panel.reset(window, cx);
             })),
@@ -1093,25 +1094,27 @@ fn chip_hover_fill(selected: bool, pal: Palette) -> gpui::Hsla {
 
 fn builtin_label(id: &str) -> SharedString {
     match id {
-        "streaming" => tr!("camera.streaming"),
-        "video_call" => tr!("camera.video_call"),
-        _ => tr!("common.default"),
+        "streaming" => rust_i18n::t!("camera.streaming").into(),
+        "video_call" => rust_i18n::t!("camera.video_call").into(),
+        _ => rust_i18n::t!("common.default").into(),
     }
 }
 
 fn control_label(control: CameraControl) -> SharedString {
     match control {
-        CameraControl::Zoom => tr!("common.zoom"),
-        CameraControl::Focus => tr!("camera.focus"),
-        CameraControl::Exposure => tr!("camera.exposure"),
-        CameraControl::PowerLineFrequency => tr!("camera.anti_flicker"),
-        CameraControl::LowLightCompensation => tr!("camera.low_light_compensation"),
-        CameraControl::Brightness => tr!("camera.brightness"),
-        CameraControl::Contrast => tr!("camera.contrast"),
-        CameraControl::Saturation => tr!("camera.saturation"),
-        CameraControl::Sharpness => tr!("camera.sharpness"),
-        CameraControl::WhiteBalance => tr!("camera.white_balance"),
-        CameraControl::Tint => tr!("camera.tint"),
+        CameraControl::Zoom => rust_i18n::t!("common.zoom").into(),
+        CameraControl::Focus => rust_i18n::t!("camera.focus").into(),
+        CameraControl::Exposure => rust_i18n::t!("camera.exposure").into(),
+        CameraControl::PowerLineFrequency => rust_i18n::t!("camera.anti_flicker").into(),
+        CameraControl::LowLightCompensation => {
+            rust_i18n::t!("camera.low_light_compensation").into()
+        }
+        CameraControl::Brightness => rust_i18n::t!("camera.brightness").into(),
+        CameraControl::Contrast => rust_i18n::t!("camera.contrast").into(),
+        CameraControl::Saturation => rust_i18n::t!("camera.saturation").into(),
+        CameraControl::Sharpness => rust_i18n::t!("camera.sharpness").into(),
+        CameraControl::WhiteBalance => rust_i18n::t!("camera.white_balance").into(),
+        CameraControl::Tint => rust_i18n::t!("camera.tint").into(),
     }
 }
 

@@ -17,16 +17,16 @@ use super::{
 /// tap list and the live event monitor polled by
 /// [`SettingsView`](super::SettingsView)'s task.
 pub(super) fn diagnostics_page() -> SettingPage {
-    SettingPage::new(tr!("diagnostics.diagnostics"))
+    SettingPage::new(rust_i18n::t!("diagnostics.diagnostics"))
         .icon(IconName::Info)
         .resettable(false)
         .group(
             SettingGroup::new().item(
                 SettingItem::new(
-                    tr!("diagnostics.input_interception"),
+                    rust_i18n::t!("diagnostics.input_interception"),
                     SettingField::render(move |_, _, cx| input_conflict_field(cx)),
                 )
-                .description(tr!(
+                .description(rust_i18n::t!(
                     "diagnostics.input_interception_description"
                 ))
                 // Vertical: the status + tap list are wide, multi-line content,
@@ -61,13 +61,20 @@ fn input_conflict_field(cx: &mut App) -> gpui::Div {
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!("diagnostics.no_other_app_is_intercepting_mouse_input")),
+                .child(rust_i18n::t!(
+                    "diagnostics.no_other_app_is_intercepting_mouse_input"
+                )),
         );
     } else {
-        col = col.child(div().text_body().text_color(pal.text_primary).child(tr!(
-            "diagnostics.input_interception_detected",
-            apps => conflicts.join(", ")
-        )));
+        col = col.child(
+            div()
+                .text_body()
+                .text_color(pal.text_primary)
+                .child(rust_i18n::t!(
+                    "diagnostics.input_interception_detected",
+                    apps => conflicts.join(", ")
+                )),
+        );
     }
 
     #[cfg(debug_assertions)]

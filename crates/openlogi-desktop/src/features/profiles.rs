@@ -252,9 +252,10 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
     });
     let override_count = state.editing_app_overrides().map_or(0, BTreeMap::len);
     let summary = profile_summary(editing_app.as_deref(), override_count);
-    let active = state
-        .active_profile_name()
-        .map_or_else(|| tr!("common.default"), gpui::SharedString::from);
+    let active = state.active_profile_name().map_or_else(
+        || rust_i18n::t!("common.default").into(),
+        gpui::SharedString::from,
+    );
 
     Some(
         h_flex()
@@ -270,29 +271,32 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
             .child(
                 div()
                     .flex_none()
-                    .child(tr!("profiles.active_profile_value", profile => active)),
+                    .child(rust_i18n::t!("profiles.active_profile_value", profile => active)),
             ),
     )
 }
 
 fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::SharedString {
     let Some(app) = editing_app else {
-        return tr!("profiles.default_bindings_description");
+        return rust_i18n::t!("profiles.default_bindings_description").into();
     };
     match override_count {
-        0 => tr!(
+        0 => rust_i18n::t!(
             "profiles.app_profile_no_overrides",
             app => app
-        ),
-        1 => tr!(
+        )
+        .into(),
+        1 => rust_i18n::t!(
             "profiles.app_profile_single_override",
             app => app
-        ),
-        count => tr!(
+        )
+        .into(),
+        count => rust_i18n::t!(
             "profiles.app_profile_override_count",
             app => app,
             count => count
-        ),
+        )
+        .into(),
     }
 }
 
@@ -301,12 +305,12 @@ fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
             .title(question.clone())
-            .description(tr!("profiles.remove_profile_description"))
+            .description(rust_i18n::t!("profiles.remove_profile_description"))
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("profiles.remove_profile"))
+                    .ok_text(rust_i18n::t!("profiles.remove_profile"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("common.cancel"))
+                    .cancel_text(rust_i18n::t!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
@@ -329,9 +333,9 @@ fn open_action_ring_remove_confirmation(
             .title(question.clone())
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("profiles.remove_profile"))
+                    .ok_text(rust_i18n::t!("profiles.remove_profile"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("common.cancel"))
+                    .cancel_text(rust_i18n::t!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
@@ -351,15 +355,17 @@ fn open_action_ring_remove_confirmation(
 
 fn remove_profile_question(profile: &ProfileChoice) -> gpui::SharedString {
     match profile.override_count {
-        1 => tr!(
+        1 => rust_i18n::t!(
             "profiles.remove_app_profile_single_override",
             app => profile.name.clone()
-        ),
-        count => tr!(
+        )
+        .into(),
+        count => rust_i18n::t!(
             "profiles.remove_app_profile_multiple_overrides",
             app => profile.name.clone(),
             count => count
-        ),
+        )
+        .into(),
     }
 }
 

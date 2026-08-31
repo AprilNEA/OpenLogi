@@ -76,8 +76,9 @@ impl AppCatalogPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx
-            .new(|cx| InputState::new(window, cx).placeholder(tr!("profiles.search_applications")));
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("profiles.search_applications"))
+        });
         let search_subscription = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();

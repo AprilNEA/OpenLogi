@@ -37,7 +37,7 @@ Two more things this crate is not:
 
 | Path | What lives there |
 |---|---|
-| `main.rs` | Process bootstrap **only** — logging, single-instance guard, config, locale, the IPC client, then `gpui::run`. It also defines the `tr!` macro above the `mod` declarations, which is why every submodule gets `tr!` without an import (textual macro scope). |
+| `main.rs` | Process bootstrap **only** — logging, single-instance guard, config, locale, the IPC client, then `gpui::run`. It also initializes the shared `rust-i18n` catalog backend used by direct `rust_i18n::t!` calls throughout the crate. |
 | `runtime.rs` | Everything the app does that isn't a render: one task, one `select!` arm per source that can change long-lived state (agent updates, camera scan, asset commands, finished downloads, `openlogi://` deeplinks). |
 | `app.rs`, `app/` | The main window's shell — home gallery, device detail, menu bar, status line, deeplink handling. |
 | `windows.rs`, `windows/` | The windows themselves plus the registry that keeps each a singleton. About and Updates are **pages inside Settings**, not windows of their own. |

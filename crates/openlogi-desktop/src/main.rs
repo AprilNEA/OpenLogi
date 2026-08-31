@@ -13,24 +13,6 @@
     windows_subsystem = "windows"
 )]
 
-/// Translate a stable semantic `key` to the current locale and wrap it as a
-/// [`gpui::SharedString`], ready for `.child(...)` / `.label(...)` / menu items.
-/// Forwards `rust_i18n` interpolation, e.g. `tr!("actions.bind_control", name => x)`.
-///
-/// Defined before the `mod` declarations so every submodule can use it without
-/// an import (textual macro scope). Pairs with the `rust_i18n::i18n!` below.
-macro_rules! tr {
-    ($($args:tt)*) => {
-        // `t!` yields `Cow<'static, str>`. A borrowed hit — the common case: a
-        // found translation or semantic-key fallback — wraps into a `SharedString`
-        // with no copy; only owned (interpolated) results allocate.
-        match ::rust_i18n::t!($($args)*) {
-            ::std::borrow::Cow::Borrowed(s) => ::gpui::SharedString::from(s),
-            ::std::borrow::Cow::Owned(s) => ::gpui::SharedString::from(s),
-        }
-    };
-}
-
 mod app;
 mod app_assets;
 mod features;
@@ -42,9 +24,9 @@ mod ui;
 mod windows;
 
 // Loads the Crowdin-managed `crates/openlogi-ui/locales/*.toml` files at compile
-// time and generates the `t!`/`tr!` lookup backend for this crate. `fallback =
-// "en"` matches the codes gpui-component ships, so the framework's own widgets
-// localize alongside ours.
+// time and generates the `rust_i18n::t!` lookup backend for this crate.
+// `fallback = "en"` matches the codes gpui-component ships, so the framework's
+// own widgets localize alongside ours.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 use anyhow::Result;

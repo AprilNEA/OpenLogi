@@ -88,7 +88,7 @@ paths:
   and the re-entrant read panics ("cannot read … while it is already being updated";
   the 0.8.0 language-switch crash). Run such side effects after the update returns,
   the way `runtime.rs` orders its rebuilds, or `cx.defer` them from within.
-- A `tr!` string stored in entity state goes stale on a live language switch: an
+- A `rust_i18n::t!` string stored in entity state goes stale on a live language switch: an
   `InputState` placeholder keeps the text it was constructed with, and a cached
   localized description keeps its old locale. Placeholders re-derive in the owning
   render via `ui::components::localize_placeholder` (guarded — never call

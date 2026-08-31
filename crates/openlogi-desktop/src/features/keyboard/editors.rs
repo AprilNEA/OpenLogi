@@ -55,7 +55,7 @@ impl PowerUserKind {
 
 pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
     match kind {
-        PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
+        PowerUserKind::TypeText => rust_i18n::t!("actions.type_text_placeholder").into(),
         PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
         PowerUserKind::RunShellCommand => "echo hello".into(),
         PowerUserKind::Workflow => "".into(),
@@ -93,7 +93,7 @@ pub fn editor_card(
             Some(state) => text_editor_card(trigger, kind, state, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
-                .child(title(tr!("keyboard.editor_unavailable"), pal)),
+                .child(title(rust_i18n::t!("keyboard.editor_unavailable"), pal)),
         },
     }
 }
@@ -107,13 +107,13 @@ fn text_editor_card(
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
-    let heading = tr!(kind.heading_key());
+    let heading = rust_i18n::t!(kind.heading_key());
     let key_name = trigger.to_string();
 
     compact_panel(pal)
         .w(px(300.))
         .child(title(
-            tr!("actions.action_key_summary", action => heading, key => key_name),
+            rust_i18n::t!("actions.action_key_summary", action => heading, key => key_name),
             pal,
         ))
         .child(divider(pal))
@@ -142,7 +142,7 @@ fn editor_action_row(
         .child(
             Button::new("editor-cancel")
                 .ghost()
-                .label(tr!("common.cancel"))
+                .label(rust_i18n::t!("common.cancel"))
                 .on_click(move |_e, _window, cx| {
                     view_cancel.update(cx, |v, vcx| v.close_editor(vcx));
                 }),
@@ -150,7 +150,7 @@ fn editor_action_row(
         .child(
             Button::new("editor-save")
                 .primary()
-                .label(tr!("common.save"))
+                .label(rust_i18n::t!("common.save"))
                 .on_click(move |_e, _window, cx| {
                     let text = view_save
                         .read(cx)
@@ -196,7 +196,7 @@ fn workflow_editor_card(
     compact_panel(pal)
         .w(px(320.))
         .child(title(
-            tr!("actions.workflow_key_summary", key => key_name),
+            rust_i18n::t!("actions.workflow_key_summary", key => key_name),
             pal,
         ))
         .child(divider(pal))
@@ -210,7 +210,7 @@ fn workflow_editor_card(
                     Button::new("wf-add-step")
                         .ghost()
                         .small()
-                        .label(tr!("actions.add_workflow_step"))
+                        .label(rust_i18n::t!("actions.add_workflow_step"))
                         .on_click({
                             let v = view.clone();
                             move |_e, _w, cx| {
@@ -226,7 +226,7 @@ fn workflow_editor_card(
                 .child(
                     Button::new("wf-save")
                         .primary()
-                        .label(tr!("actions.save_workflow"))
+                        .label(rust_i18n::t!("actions.save_workflow"))
                         .on_click({
                             let v = view.clone();
                             let trigger = trigger.clone();

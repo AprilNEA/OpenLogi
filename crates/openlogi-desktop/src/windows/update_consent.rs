@@ -85,7 +85,7 @@ impl Render for UpdateConsentView {
             // centred content sits in the flex-column below it. macOS / Windows
             // keep their native titlebar.
             .when(cfg!(target_os = "linux"), |this| {
-                this.child(windows::aux_title_bar(tr!("app.openlogi"), cx))
+                this.child(windows::aux_title_bar(rust_i18n::t!("app.openlogi"), cx))
             })
             .child(
                 v_flex()
@@ -98,7 +98,7 @@ impl Render for UpdateConsentView {
                     .child(
                         div()
                             .text_heading()
-                            .child(tr!("updates.check_for_updates_consent_title")),
+                            .child(rust_i18n::t!("updates.check_for_updates_consent_title")),
                     )
                     .child(
                         div()
@@ -106,7 +106,7 @@ impl Render for UpdateConsentView {
                             .text_body()
                             .text_center()
                             .text_color(pal.text_muted)
-                            .child(tr!("updates.update_consent_description")),
+                            .child(rust_i18n::t!("updates.update_consent_description")),
                     )
                     .child(
                         h_flex()
@@ -115,13 +115,13 @@ impl Render for UpdateConsentView {
                             .child(
                                 Button::new("update-consent-decline")
                                     .outline()
-                                    .label(tr!("common.not_now"))
+                                    .label(rust_i18n::t!("common.not_now"))
                                     .on_click(|_, window, cx| answer(false, window, cx)),
                             )
                             .child(
                                 Button::new("update-consent-accept")
                                     .primary()
-                                    .label(tr!("common.enable"))
+                                    .label(rust_i18n::t!("common.enable"))
                                     .on_click(|_, window, cx| answer(true, window, cx)),
                             ),
                     ),

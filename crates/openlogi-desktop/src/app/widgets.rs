@@ -26,7 +26,7 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
         .ghost()
         .small()
         .icon(IconName::ChevronLeft)
-        .label(tr!("device.devices"))
+        .label(rust_i18n::t!("device.devices"))
         .on_click(move |_, _, cx| view.update(cx, AppView::go_home))
 }
 
@@ -36,8 +36,8 @@ pub(super) fn settings_button() -> impl IntoElement {
     Button::new("home-settings")
         .outline()
         .icon(IconName::Settings)
-        .label(tr!("app.settings"))
-        .tooltip(tr!("app.settings"))
+        .label(rust_i18n::t!("app.settings"))
+        .tooltip(rust_i18n::t!("app.settings"))
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
@@ -47,8 +47,8 @@ pub(super) fn add_device_button() -> impl IntoElement {
     Button::new("header-add-device")
         .primary()
         .icon(IconName::Plus)
-        .label(tr!("pairing.add_device"))
-        .tooltip(tr!("pairing.add_device"))
+        .label(rust_i18n::t!("pairing.add_device"))
+        .tooltip(rust_i18n::t!("pairing.add_device"))
         .on_click(|_, _, cx| crate::windows::add_device::open(cx))
 }
 
@@ -67,9 +67,9 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
 
 pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
     let label = if online {
-        tr!("device.connected")
+        rust_i18n::t!("device.connected")
     } else {
-        tr!("device.offline")
+        rust_i18n::t!("device.offline")
     };
     h_flex()
         .gap_1()
@@ -111,30 +111,30 @@ pub(super) fn sidebar_action(
 
 pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     match route {
-        Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => tr!("device.unifying_receiver").to_string(),
+        Some(DeviceRoute::Bolt { .. }) => rust_i18n::t!("device.bolt_receiver").to_string(),
+        Some(DeviceRoute::Unifying { .. }) => rust_i18n::t!("device.unifying_receiver").to_string(),
         Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
-            tr!("device.direct_connection").to_string()
+            rust_i18n::t!("device.direct_connection").to_string()
         }
-        None => tr!("common.unavailable").to_string(),
+        None => rust_i18n::t!("common.unavailable").to_string(),
     }
 }
 
 pub(super) fn kind_label(kind: DeviceKind) -> String {
     match kind {
-        DeviceKind::Mouse => tr!("device.mouse").to_string(),
-        DeviceKind::Keyboard => tr!("device.keyboard").to_string(),
-        DeviceKind::Numpad => tr!("device.numpad").to_string(),
-        DeviceKind::Presenter => tr!("device.presenter").to_string(),
-        DeviceKind::Remote => tr!("device.remote").to_string(),
-        DeviceKind::Trackball => tr!("device.trackball").to_string(),
-        DeviceKind::Touchpad => tr!("device.touchpad").to_string(),
-        DeviceKind::Tablet => tr!("device.tablet").to_string(),
-        DeviceKind::Gamepad => tr!("device.gamepad").to_string(),
-        DeviceKind::Joystick => tr!("device.joystick").to_string(),
-        DeviceKind::Headset => tr!("device.headset").to_string(),
-        DeviceKind::Camera => tr!("camera.camera").to_string(),
-        DeviceKind::Unknown => tr!("device.device").to_string(),
-        DeviceKind::Light => tr!("device.lighting").to_string(),
+        DeviceKind::Mouse => rust_i18n::t!("device.mouse").to_string(),
+        DeviceKind::Keyboard => rust_i18n::t!("device.keyboard").to_string(),
+        DeviceKind::Numpad => rust_i18n::t!("device.numpad").to_string(),
+        DeviceKind::Presenter => rust_i18n::t!("device.presenter").to_string(),
+        DeviceKind::Remote => rust_i18n::t!("device.remote").to_string(),
+        DeviceKind::Trackball => rust_i18n::t!("device.trackball").to_string(),
+        DeviceKind::Touchpad => rust_i18n::t!("device.touchpad").to_string(),
+        DeviceKind::Tablet => rust_i18n::t!("device.tablet").to_string(),
+        DeviceKind::Gamepad => rust_i18n::t!("device.gamepad").to_string(),
+        DeviceKind::Joystick => rust_i18n::t!("device.joystick").to_string(),
+        DeviceKind::Headset => rust_i18n::t!("device.headset").to_string(),
+        DeviceKind::Camera => rust_i18n::t!("camera.camera").to_string(),
+        DeviceKind::Unknown => rust_i18n::t!("device.device").to_string(),
+        DeviceKind::Light => rust_i18n::t!("device.lighting").to_string(),
     }
 }

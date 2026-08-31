@@ -211,7 +211,7 @@ impl Render for LightPanel {
         }
 
         let device_name = record.as_ref().map_or_else(
-            || tr!("device.lighting").to_string(),
+            || rust_i18n::t!("device.lighting").to_string(),
             |record| record.display_name.clone(),
         );
         let online = record.as_ref().is_some_and(|record| record.online);
@@ -243,7 +243,7 @@ impl Render for LightPanel {
                     .native_for_percent(settings.brightness_percent)
                     .unwrap_or_else(|| range.min());
                 panel.child(control_well(
-                    tr!("camera.brightness"),
+                    rust_i18n::t!("camera.brightness").into(),
                     format_light_value(value, range.unit()),
                     format_range_endpoints(range),
                     Slider::new(slider).horizontal(),
@@ -255,7 +255,7 @@ impl Render for LightPanel {
                     .temperature_kelvin
                     .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin));
                 panel.child(control_well(
-                    tr!("lighting.colour_temperature"),
+                    rust_i18n::t!("lighting.colour_temperature").into(),
                     format_light_value(value, range.unit()),
                     format_range_endpoints(range),
                     Slider::new(slider).horizontal(),
@@ -373,13 +373,13 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
                     div()
                         .text_body()
                         .text_color(pal.text_primary)
-                        .child(tr!("lighting.auto_on_with_camera")),
+                        .child(rust_i18n::t!("lighting.auto_on_with_camera")),
                 )
                 .child(
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(tr!("lighting.camera_light_auto_description")),
+                        .child(rust_i18n::t!("lighting.camera_light_auto_description")),
                 ),
         )
         .child(
@@ -399,11 +399,11 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
 fn light_status(view: LightView, pal: Palette) -> impl IntoElement {
     let LightView { online, enabled } = view;
     let (label, color) = if !online {
-        (tr!("device.offline"), theme::STATUS_OFFLINE)
+        (rust_i18n::t!("device.offline"), theme::STATUS_OFFLINE)
     } else if enabled {
-        (tr!("common.on"), theme::STATUS_CONNECTED)
+        (rust_i18n::t!("common.on"), theme::STATUS_CONNECTED)
     } else {
-        (tr!("common.off"), theme::STATUS_OFFLINE)
+        (rust_i18n::t!("common.off"), theme::STATUS_OFFLINE)
     };
     h_flex()
         .gap_1p5()
@@ -483,15 +483,15 @@ fn round_u16(raw: f32) -> u16 {
 fn light_command_status(status: LightCommandStatus, pal: Palette) -> impl IntoElement {
     let (label, color) = match status {
         LightCommandStatus::Pending => (
-            tr!("lighting.applying_light_setting").to_string(),
+            rust_i18n::t!("lighting.applying_light_setting").to_string(),
             pal.text_muted,
         ),
         LightCommandStatus::Failed(error) => (
-            format!("{}: {error}", tr!("common.unavailable")),
+            format!("{}: {error}", rust_i18n::t!("common.unavailable")),
             Hsla::from(rgb(theme::STATUS_OFFLINE)),
         ),
         LightCommandStatus::Offline => (
-            tr!("device.offline").to_string(),
+            rust_i18n::t!("device.offline").to_string(),
             Hsla::from(rgb(theme::STATUS_OFFLINE)),
         ),
     };

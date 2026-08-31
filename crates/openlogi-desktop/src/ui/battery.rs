@@ -166,7 +166,7 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
 
 fn value_label(battery: &BatteryInfo) -> String {
     if battery_charging_no_reading(battery) {
-        tr!("device.charging").to_string()
+        rust_i18n::t!("device.charging").to_string()
     } else {
         format!("{}%", battery.percentage)
     }
@@ -177,12 +177,14 @@ fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
         None
     } else {
         match battery.status {
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow => Some(tr!("device.charging")),
-            BatteryStatus::Full => Some(tr!("device.full")),
-            BatteryStatus::Error => Some(tr!("device.battery_error")),
-            BatteryStatus::Discharging | BatteryStatus::Unknown => {
-                battery_needs_attention(battery).then(|| tr!("device.low_battery"))
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow => {
+                Some(rust_i18n::t!("device.charging").into())
             }
+            BatteryStatus::Full => Some(rust_i18n::t!("device.full").into()),
+            BatteryStatus::Error => Some(rust_i18n::t!("device.battery_error").into()),
+            BatteryStatus::Discharging | BatteryStatus::Unknown => battery_needs_attention(battery)
+                .then(|| rust_i18n::t!("device.low_battery"))
+                .map(Into::into),
         }
     }
 }
@@ -198,8 +200,11 @@ pub(crate) fn glance_hint(battery: &BatteryInfo, online: bool) -> String {
 
 fn context_label(battery: &BatteryInfo, online: bool) -> Option<String> {
     match (!online, secondary_label(battery)) {
-        (true, Some(status)) => Some(format!("{} · {status}", tr!("device.last_known_battery"))),
-        (true, None) => Some(tr!("device.last_known_battery").to_string()),
+        (true, Some(status)) => Some(format!(
+            "{} · {status}",
+            rust_i18n::t!("device.last_known_battery")
+        )),
+        (true, None) => Some(rust_i18n::t!("device.last_known_battery").to_string()),
         (false, Some(status)) => Some(status.to_string()),
         (false, None) => None,
     }
@@ -207,17 +212,19 @@ fn context_label(battery: &BatteryInfo, online: bool) -> Option<String> {
 
 fn summary_label(battery: &BatteryInfo) -> gpui::SharedString {
     if battery_charging_no_reading(battery) {
-        return tr!("device.battery");
+        return rust_i18n::t!("device.battery").into();
     }
     match battery.status {
-        BatteryStatus::Charging | BatteryStatus::ChargingSlow => tr!("device.charging"),
-        BatteryStatus::Full => tr!("device.full"),
-        BatteryStatus::Error => tr!("device.battery_error"),
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow => {
+            rust_i18n::t!("device.charging").into()
+        }
+        BatteryStatus::Full => rust_i18n::t!("device.full").into(),
+        BatteryStatus::Error => rust_i18n::t!("device.battery_error").into(),
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
             if battery_needs_attention(battery) {
-                tr!("device.low_battery")
+                rust_i18n::t!("device.low_battery").into()
             } else {
-                tr!("device.battery")
+                rust_i18n::t!("device.battery").into()
             }
         }
     }

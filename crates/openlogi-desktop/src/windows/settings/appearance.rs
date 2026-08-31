@@ -29,18 +29,20 @@ pub(super) fn appearance_page(
     // renders a page's groups as nested sidebar entries once there's more than
     // one and each is titled). Item titles stay distinct from their group title.
     let mut theme_group = SettingGroup::new()
-        .title(tr!("appearance.theme"))
+        .title(gpui::SharedString::from(rust_i18n::t!("appearance.theme")))
         .item(
             SettingItem::new(
-                tr!("appearance.appearance_mode"),
+                rust_i18n::t!("appearance.appearance_mode"),
                 SettingField::render(move |_, _, cx| mode_segment(cx)),
             )
             .layout(Axis::Vertical)
-            .description(tr!("appearance.appearance_mode_description")),
+            .description(gpui::SharedString::from(rust_i18n::t!(
+                "appearance.appearance_mode_description"
+            ))),
         )
         .item(
             SettingItem::new(
-                tr!("appearance.color_theme"),
+                rust_i18n::t!("appearance.color_theme"),
                 SettingField::render(move |_, _, cx| {
                     theme_picker(&view, &theme_search, filter, cx)
                 }),
@@ -53,11 +55,13 @@ pub(super) fn appearance_page(
     if cfg!(target_os = "macos") {
         theme_group = theme_group.item(
             SettingItem::new(
-                tr!("appearance.app_icon"),
+                rust_i18n::t!("appearance.app_icon"),
                 SettingField::render(move |_, _, cx| icon_picker(cx)),
             )
             .layout(Axis::Vertical)
-            .description(tr!("appearance.app_icon_description")),
+            .description(gpui::SharedString::from(rust_i18n::t!(
+                "appearance.app_icon_description"
+            ))),
         );
     }
 
@@ -66,28 +70,38 @@ pub(super) fn appearance_page(
             // Compact control → inline on the right of the label (HIG), unlike the
             // wide thumbnail/grid controls which stack below.
             SettingItem::new(
-                tr!("appearance.corner_radius"),
+                rust_i18n::t!("appearance.corner_radius"),
                 SettingField::render(move |_, _, cx| radius_segment(cx)),
             )
-            .description(tr!("appearance.roundness_of_buttons_cards_and_controls")),
+            .description(gpui::SharedString::from(rust_i18n::t!(
+                "appearance.roundness_of_buttons_cards_and_controls"
+            ))),
         )
         .item(
             SettingItem::new(
-                tr!("appearance.interface_scale"),
+                rust_i18n::t!("appearance.interface_scale"),
                 SettingField::render(move |_, _, cx| scale_segment(cx)),
             )
-            .description(tr!("appearance.scale_text_and_interface_spacing")),
+            .description(gpui::SharedString::from(rust_i18n::t!(
+                "appearance.scale_text_and_interface_spacing"
+            ))),
         );
 
-    let language_group = SettingGroup::new().title(tr!("appearance.language")).item(
-        SettingItem::new(
-            tr!("appearance.interface_language"),
-            SettingField::render(move |_, _, _| language_select_field(language_select.clone())),
-        )
-        .description(tr!("appearance.choose_the_interface_language")),
-    );
+    let language_group = SettingGroup::new()
+        .title(gpui::SharedString::from(rust_i18n::t!(
+            "appearance.language"
+        )))
+        .item(
+            SettingItem::new(
+                rust_i18n::t!("appearance.interface_language"),
+                SettingField::render(move |_, _, _| language_select_field(language_select.clone())),
+            )
+            .description(gpui::SharedString::from(rust_i18n::t!(
+                "appearance.choose_the_interface_language"
+            ))),
+        );
 
-    SettingPage::new(tr!("appearance.appearance"))
+    SettingPage::new(rust_i18n::t!("appearance.appearance"))
         .icon(IconName::Palette)
         .resettable(false)
         .group(language_group)
@@ -138,7 +152,7 @@ fn mode_segment(cx: &App) -> gpui::Div {
     h_flex().gap_4().items_start().children([
         mode_card(
             "mode-light",
-            tr!("common.light"),
+            gpui::SharedString::from(rust_i18n::t!("common.light")),
             ModePreview::Light,
             current == Appearance::Light,
             accent,
@@ -147,7 +161,7 @@ fn mode_segment(cx: &App) -> gpui::Div {
         ),
         mode_card(
             "mode-dark",
-            tr!("appearance.dark"),
+            gpui::SharedString::from(rust_i18n::t!("appearance.dark")),
             ModePreview::Dark,
             current == Appearance::Dark,
             accent,
@@ -156,7 +170,7 @@ fn mode_segment(cx: &App) -> gpui::Div {
         ),
         mode_card(
             "mode-system",
-            tr!("appearance.follow_system"),
+            gpui::SharedString::from(rust_i18n::t!("appearance.follow_system")),
             ModePreview::Auto,
             current == Appearance::System,
             accent,
@@ -380,17 +394,17 @@ fn radius_segment(cx: &App) -> ButtonGroup {
         .outline()
         .child(
             Button::new("radius-sharp")
-                .label(tr!("common.sharp"))
+                .label(rust_i18n::t!("common.sharp"))
                 .selected(current == Some(0)),
         )
         .child(
             Button::new("radius-default")
-                .label(tr!("common.default"))
+                .label(rust_i18n::t!("common.default"))
                 .selected(current.is_none()),
         )
         .child(
             Button::new("radius-round")
-                .label(tr!("appearance.round"))
+                .label(rust_i18n::t!("appearance.round"))
                 .selected(current == Some(12)),
         )
         .on_click(move |clicks, _, cx| {
@@ -466,7 +480,7 @@ fn theme_picker(
         .when(no_matches, |grid| {
             grid.text_body()
                 .text_color(pal.text_muted)
-                .child(tr!("appearance.no_themes_match_query", query => query))
+                .child(rust_i18n::t!("appearance.no_themes_match_query", query => query))
         })
         .when(!no_matches, |grid| {
             grid.flex()
@@ -499,7 +513,7 @@ fn theme_picker(
                         .child(filter_chip(
                             view,
                             "filter-all",
-                            tr!("common.all"),
+                            gpui::SharedString::from(rust_i18n::t!("common.all")),
                             ThemeFilter::All,
                             filter,
                             pal,
@@ -507,7 +521,7 @@ fn theme_picker(
                         .child(filter_chip(
                             view,
                             "filter-light",
-                            tr!("common.light"),
+                            gpui::SharedString::from(rust_i18n::t!("common.light")),
                             ThemeFilter::Light,
                             filter,
                             pal,
@@ -515,7 +529,7 @@ fn theme_picker(
                         .child(filter_chip(
                             view,
                             "filter-dark",
-                            tr!("appearance.dark"),
+                            gpui::SharedString::from(rust_i18n::t!("appearance.dark")),
                             ThemeFilter::Dark,
                             filter,
                             pal,
@@ -632,9 +646,9 @@ fn theme_card(
                         .text_size(px(9.))
                         .text_color(pal.text_muted)
                         .child(if dark {
-                            tr!("appearance.dark")
+                            rust_i18n::t!("appearance.dark")
                         } else {
-                            tr!("common.light")
+                            rust_i18n::t!("common.light")
                         }),
                 ),
         )

@@ -208,7 +208,7 @@ pub(super) fn build_device_list(
                 .map(|a| a.display_name.clone())
                 .or_else(|| paired.codename.as_deref().map(prettify_codename))
                 .unwrap_or_else(|| {
-                    tr!("device.receiver_slot_number", number => paired.slot.to_string())
+                    rust_i18n::t!("device.receiver_slot_number", number => paired.slot.to_string())
                         .to_string()
                 });
             let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));

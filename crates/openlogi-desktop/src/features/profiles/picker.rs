@@ -45,7 +45,7 @@ pub(super) fn add_app_popover(
             control_button(format!("{id_base}:add-app-profile"))
                 .outline()
                 .icon(IconName::Plus)
-                .label(tr!("profiles.add_app")),
+                .label(rust_i18n::t!("profiles.add_app")),
         )
         .on_open_change(move |open, window, cx| {
             if *open {
@@ -56,7 +56,7 @@ pub(super) fn add_app_popover(
             let search = catalog.read(cx).search();
             crate::ui::components::localize_placeholder(
                 &search,
-                tr!("profiles.search_applications"),
+                rust_i18n::t!("profiles.search_applications").into(),
                 window,
                 cx,
             );
@@ -115,7 +115,7 @@ fn add_app_content(
 
     compact_panel(pal)
         .w(px(320.))
-        .child(title(tr!("profiles.add_app_profile"), pal))
+        .child(title(rust_i18n::t!("profiles.add_app_profile"), pal))
         .child(divider(pal))
         .child(
             control_input(&search)
@@ -130,7 +130,7 @@ fn add_app_content(
                     .pb_1()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!("profiles.recent_applications")),
+                    .child(rust_i18n::t!("profiles.recent_applications")),
             )
         })
         .children(recent_rows)
@@ -143,13 +143,18 @@ fn add_app_content(
         ))
         .when(
             show_applications && matches!(&choices.catalog, CatalogPresentation::Loading),
-            |card| card.child(catalog_message(tr!("profiles.loading_applications"), pal)),
+            |card| {
+                card.child(catalog_message(
+                    rust_i18n::t!("profiles.loading_applications").into(),
+                    pal,
+                ))
+            },
         )
         .when(
             show_applications && matches!(&choices.catalog, CatalogPresentation::Failed),
             |card| {
                 card.child(catalog_message(
-                    tr!("profiles.application_catalog_unavailable"),
+                    rust_i18n::t!("profiles.application_catalog_unavailable").into(),
                     pal,
                 ))
             },
@@ -166,7 +171,10 @@ fn add_app_content(
             ))
         })
         .when(show_applications && no_matches, |card| {
-            card.child(catalog_message(tr!("profiles.no_applications_found"), pal))
+            card.child(catalog_message(
+                rust_i18n::t!("profiles.no_applications_found").into(),
+                pal,
+            ))
         })
 }
 
@@ -270,7 +278,7 @@ fn applications_toggle(
                     .size_4(),
                 ),
         )
-        .child(tr!("profiles.all_applications"))
+        .child(rust_i18n::t!("profiles.all_applications"))
         .on_click(move |_event, _window, cx| {
             catalog.update(cx, AppCatalogPicker::toggle_expanded);
         })

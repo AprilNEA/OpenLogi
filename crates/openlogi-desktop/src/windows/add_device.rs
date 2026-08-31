@@ -80,7 +80,7 @@ pub fn open(cx: &mut App) {
 /// The window's native title — one definition for open and the live-language
 /// retitle ([`windows::retitle_open`]), so the two cannot drift.
 pub(crate) fn window_title() -> SharedString {
-    tr!("pairing.add_device")
+    rust_i18n::t!("pairing.add_device").into()
 }
 
 /// Show the agent's pairing session. `None` is no session — including after a
@@ -115,34 +115,42 @@ pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
 fn pairing_failure_text(failure: &PairingFailure) -> String {
     match failure {
         PairingFailure::Hid { message } => {
-            tr!("pairing.hid_transport_error", message => message.clone()).to_string()
+            rust_i18n::t!("pairing.hid_transport_error", message => message.clone()).to_string()
         }
-        PairingFailure::ReceiverNotFound => tr!("pairing.pairing_receiver_not_found").to_string(),
+        PairingFailure::ReceiverNotFound => {
+            rust_i18n::t!("pairing.pairing_receiver_not_found").to_string()
+        }
         PairingFailure::Register { message } => {
-            tr!("pairing.receiver_register_error", message => message.clone()).to_string()
+            rust_i18n::t!("pairing.receiver_register_error", message => message.clone()).to_string()
         }
-        PairingFailure::Timeout => tr!("pairing.pairing_timed_out").to_string(),
-        PairingFailure::Device { code } => tr!(
+        PairingFailure::Timeout => rust_i18n::t!("pairing.pairing_timed_out").to_string(),
+        PairingFailure::Device { code } => rust_i18n::t!(
             "pairing.receiver_pairing_error",
             code => format!("0x{code:02x}"),
         )
         .to_string(),
-        PairingFailure::Cancelled => tr!("pairing.pairing_was_cancelled").to_string(),
+        PairingFailure::Cancelled => rust_i18n::t!("pairing.pairing_was_cancelled").to_string(),
         PairingFailure::ReceiverBusy => {
-            tr!("pairing.the_receiver_is_busy_try_pairing_again").to_string()
+            rust_i18n::t!("pairing.the_receiver_is_busy_try_pairing_again").to_string()
         }
-        PairingFailure::WatcherUnavailable => tr!("pairing.pairing_agent_not_ready").to_string(),
-        PairingFailure::AgentRestarted => tr!("agent.agent_restarted_during_pairing").to_string(),
+        PairingFailure::WatcherUnavailable => {
+            rust_i18n::t!("pairing.pairing_agent_not_ready").to_string()
+        }
+        PairingFailure::AgentRestarted => {
+            rust_i18n::t!("agent.agent_restarted_during_pairing").to_string()
+        }
         PairingFailure::ReceiverAccessUnavailable => {
-            tr!("pairing.pairing_receiver_access_unrecorded").to_string()
+            rust_i18n::t!("pairing.pairing_receiver_access_unrecorded").to_string()
         }
         PairingFailure::AlreadyActive => {
-            tr!("pairing.a_pairing_session_is_already_active").to_string()
+            rust_i18n::t!("pairing.a_pairing_session_is_already_active").to_string()
         }
         PairingFailure::UnknownDevice => {
-            tr!("pairing.pairing_device_no_longer_available").to_string()
+            rust_i18n::t!("pairing.pairing_device_no_longer_available").to_string()
         }
-        PairingFailure::NoActiveSession => tr!("pairing.no_pairing_session_is_active").to_string(),
+        PairingFailure::NoActiveSession => {
+            rust_i18n::t!("pairing.no_pairing_session_is_active").to_string()
+        }
     }
 }
 
@@ -201,7 +209,7 @@ impl Render for AddDeviceView {
             // padded content sits in the flex-column below it. macOS / Windows
             // keep their native titlebar.
             .when(cfg!(target_os = "linux"), |this| {
-                this.child(windows::aux_title_bar(tr!("pairing.add_device"), cx))
+                this.child(windows::aux_title_bar(rust_i18n::t!("pairing.add_device"), cx))
             })
             .child(
                 v_flex()
@@ -212,7 +220,7 @@ impl Render for AddDeviceView {
                     .child(
                         div()
                             .text_heading()
-                            .child(tr!("pairing.add_device")),
+                            .child(rust_i18n::t!("pairing.add_device")),
                     )
                     .child(AddDeviceBody { state }),
             )
@@ -237,24 +245,28 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
     match state {
         PairingUi::Idle => {
             col = col
-                .child(hint(tr!("pairing.pairing_mode_description"), pal))
+                .child(hint(rust_i18n::t!("pairing.pairing_mode_description"), pal))
                 .child(
-                    action_button("ad-search", tr!("pairing.search_for_devices"), true)
-                        .on_click(|_, _, cx| start_search(cx)),
+                    action_button(
+                        "ad-search",
+                        rust_i18n::t!("pairing.search_for_devices"),
+                        true,
+                    )
+                    .on_click(|_, _, cx| start_search(cx)),
                 );
         }
         PairingUi::Searching => {
             col = col
-                .child(status_line(tr!("pairing.searching_for_devices")))
-                .child(hint(tr!("pairing.pairing_search_hint"), pal))
+                .child(status_line(rust_i18n::t!("pairing.searching_for_devices")))
+                .child(hint(rust_i18n::t!("pairing.pairing_search_hint"), pal))
                 .child(cancel_button());
         }
         PairingUi::Found(devices) => {
-            col = col.child(status_line(tr!("pairing.searching_for_devices")));
+            col = col.child(status_line(rust_i18n::t!("pairing.searching_for_devices")));
             if devices.is_empty() {
-                col = col.child(hint(tr!("pairing.no_devices_found_yet"), pal));
+                col = col.child(hint(rust_i18n::t!("pairing.no_devices_found_yet"), pal));
             } else {
-                col = col.child(hint(tr!("pairing.select_a_device_to_pair"), pal));
+                col = col.child(hint(rust_i18n::t!("pairing.select_a_device_to_pair"), pal));
                 for device in &devices {
                     col = col.child(device_row(device, pal));
                 }
@@ -263,9 +275,9 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
         }
         PairingUi::Pairing => {
             col = col
-                .child(status_line(tr!("pairing.pairing")))
+                .child(status_line(rust_i18n::t!("pairing.pairing")))
                 .child(hint(
-                    tr!("pairing.follow_the_instructions_on_your_device"),
+                    rust_i18n::t!("pairing.follow_the_instructions_on_your_device"),
                     pal,
                 ))
                 .child(cancel_button());
@@ -280,14 +292,14 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
                     div()
                         .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
-                        .child(tr!("pairing.device_paired")),
+                        .child(rust_i18n::t!("pairing.device_paired")),
                 )
                 .child(hint(
-                    tr!("pairing.paired_receiver_slot", slot => slot.to_string()),
+                    rust_i18n::t!("pairing.paired_receiver_slot", slot => slot.to_string()),
                     pal,
                 ))
                 .child(
-                    action_button("ad-done", tr!("common.done"), false)
+                    action_button("ad-done", rust_i18n::t!("common.done"), false)
                         .on_click(|_, _, cx| send(cx, Command::CancelPairing)),
                 );
         }
@@ -297,15 +309,15 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
                     div()
                         .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
-                        .child(tr!("pairing.pairing_failed")),
+                        .child(rust_i18n::t!("pairing.pairing_failed")),
                 )
                 .child(hint(pairing_failure_text(&failure), pal))
                 .when(
                     matches!(failure, PairingFailure::ReceiverNotFound),
-                    |this| this.child(hint(tr!("device.device_connection_help"), pal)),
+                    |this| this.child(hint(rust_i18n::t!("device.device_connection_help"), pal)),
                 )
                 .child(
-                    action_button("ad-retry", tr!("common.try_again"), true)
+                    action_button("ad-retry", rust_i18n::t!("common.try_again"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
@@ -342,14 +354,14 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
     match method {
         PasskeyMethod::Keyboard(digits) => {
             col = col
-                .child(status_line(tr!(
+                .child(status_line(rust_i18n::t!(
                     "pairing.keyboard_pairing_passkey_instructions"
                 )))
                 .child(div().text_title().child(SharedString::from(digits.clone())));
         }
         PasskeyMethod::Pointer { clicks, .. } => {
             col = col
-                .child(status_line(tr!(
+                .child(status_line(rust_i18n::t!(
                     "pairing.mouse_pairing_passkey_instructions"
                 )))
                 .child(
@@ -393,8 +405,8 @@ fn spoken_click_sequence(clicks: &[Click]) -> String {
         .enumerate()
         .map(|(step, click)| {
             let label = match click {
-                Click::Left => tr!("actions.left_click"),
-                Click::Right => tr!("actions.right_click"),
+                Click::Left => rust_i18n::t!("actions.left_click"),
+                Click::Right => rust_i18n::t!("actions.right_click"),
             };
             format!("{}. {label}", step + 1)
         })
@@ -424,6 +436,6 @@ fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool
 }
 
 fn cancel_button() -> impl IntoElement {
-    action_button("ad-cancel", tr!("common.cancel"), false)
+    action_button("ad-cancel", rust_i18n::t!("common.cancel"), false)
         .on_click(|_, _, cx| send(cx, Command::CancelPairing))
 }

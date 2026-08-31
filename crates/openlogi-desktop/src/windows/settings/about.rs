@@ -19,12 +19,12 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPag
         div()
             .text_caption()
             .text_color(pal.text_muted)
-            .child(tr!("about.trademark_notice"))
+            .child(rust_i18n::t!("about.trademark_notice"))
     }));
-    SettingPage::new(tr!("about.about"))
+    SettingPage::new(rust_i18n::t!("about.about"))
         .icon(IconName::Info)
         .resettable(false)
-        .description(tr!("about.about_tagline"))
+        .description(rust_i18n::t!("about.about_tagline"))
         .group(hero)
         .group(config)
         .group(footer)
@@ -35,9 +35,9 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPag
 fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
     let diag_label = if copied {
-        tr!("common.copied")
+        rust_i18n::t!("common.copied")
     } else {
-        tr!("about.copy_diagnostics")
+        rust_i18n::t!("about.copy_diagnostics")
     };
     let view = view.clone();
 
@@ -69,25 +69,25 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                         .child(link_button(
                             "about-repo",
                             Icon::new(IconName::Github),
-                            tr!("about.github"),
+                            rust_i18n::t!("about.github").into(),
                             REPO_URL,
                         ))
                         .child(link_button(
                             "about-changelog",
                             Icon::empty().path("action-icons/scroll-text.svg"),
-                            tr!("about.changelog"),
+                            rust_i18n::t!("about.changelog").into(),
                             RELEASES_URL,
                         ))
                         .child(link_button(
                             "about-docs",
                             Icon::new(IconName::BookOpen),
-                            tr!("about.documentation"),
+                            rust_i18n::t!("about.documentation").into(),
                             HELP_URL,
                         ))
                         .child(link_button(
                             "about-issue",
                             Icon::empty().path("action-icons/bug.svg"),
-                            tr!("about.report_an_issue"),
+                            rust_i18n::t!("about.report_an_issue").into(),
                             format!("{REPO_URL}/issues"),
                         ))
                         .child(div().w(px(1.)).h(px(16.)).mx_1().bg(pal.border))
@@ -160,7 +160,7 @@ fn about_config(cx: &App) -> gpui::Div {
             div().flex_shrink_0().child(
                 Button::new("about-reveal-config")
                     .outline()
-                    .label(tr!("about.show_in_file_manager"))
+                    .label(rust_i18n::t!("about.show_in_file_manager"))
                     .on_click(|_, _, cx| {
                         if let Ok(dir) = openlogi_core::paths::config_dir()
                             && let Ok(url) = url::Url::from_file_path(&dir)

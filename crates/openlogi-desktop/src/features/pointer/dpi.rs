@@ -229,7 +229,7 @@ impl Render for DpiPanel {
                         div()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("pointer.dpi")),
+                            .child(rust_i18n::t!("pointer.dpi")),
                     )
                     .child(
                         div()
@@ -252,7 +252,7 @@ impl Render for DpiPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(tr!("common.presets")),
+                            .child(rust_i18n::t!("common.presets")),
                     )
                     .child(
                         h_flex()
@@ -282,7 +282,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             device_key: DeviceKey::default(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
-            status: DpiStatus::Unsupported(tr!("device.no_active_device").to_string()),
+            status: DpiStatus::Unsupported(rust_i18n::t!("device.no_active_device").to_string()),
             reachable: false,
         })
 }
@@ -298,12 +298,16 @@ fn dpi_range_label(status: &DpiStatus, reachable: bool) -> SharedString {
         )
         .into(),
         DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
-            tr!("pointer.dpi_range_device_offline")
+            rust_i18n::t!("pointer.dpi_range_device_offline").into()
         }
-        DpiStatus::Unknown | DpiStatus::Loading => tr!("pointer.loading_device_dpi_range"),
-        DpiStatus::Failed(message) => tr!("pointer.dpi_read_failed", message => message),
+        DpiStatus::Unknown | DpiStatus::Loading => {
+            rust_i18n::t!("pointer.loading_device_dpi_range").into()
+        }
+        DpiStatus::Failed(message) => {
+            rust_i18n::t!("pointer.dpi_read_failed", message => message).into()
+        }
         DpiStatus::Unsupported(message) => {
-            tr!("pointer.dpi_range_unavailable", message => message)
+            rust_i18n::t!("pointer.dpi_range_unavailable", message => message).into()
         }
     }
 }
@@ -319,7 +323,7 @@ fn slider_element(
         // A device with one supported DPI has nothing to drag — show the value.
         (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
             status_line(
-                tr!("pointer.fixed_dpi_value", dpi => info.capabilities.min()),
+                rust_i18n::t!("pointer.fixed_dpi_value", dpi => info.capabilities.min()),
                 pal,
             )
             .into_any_element()
@@ -328,19 +332,22 @@ fn slider_element(
             Slider::new(slider_state).horizontal().into_any_element()
         }
         (DpiStatus::Ready(_), None) => {
-            status_line(tr!("pointer.preparing_dpi_slider"), pal).into_any_element()
+            status_line(rust_i18n::t!("pointer.preparing_dpi_slider"), pal).into_any_element()
         }
-        (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => {
-            status_line(tr!("pointer.device_offline_dpi_is_unavailable"), pal).into_any_element()
-        }
+        (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => status_line(
+            rust_i18n::t!("pointer.device_offline_dpi_is_unavailable"),
+            pal,
+        )
+        .into_any_element(),
         (DpiStatus::Unknown | DpiStatus::Loading, _) => {
-            status_line(tr!("pointer.reading_supported_dpi_values"), pal).into_any_element()
+            status_line(rust_i18n::t!("pointer.reading_supported_dpi_values"), pal)
+                .into_any_element()
         }
         // Clickable: reselecting is a no-op for a single-device gallery, so the
         // retry must work in place.
         (DpiStatus::Failed(_), _) => retry_line(
             "dpi-retry",
-            tr!("pointer.couldnt_read_dpi_click_to_retry"),
+            rust_i18n::t!("pointer.couldnt_read_dpi_click_to_retry"),
             pal,
             move |cx| {
                 AppState::retry_dpi_read(cx, key.clone());
@@ -348,7 +355,7 @@ fn slider_element(
         )
         .into_any_element(),
         (DpiStatus::Unsupported(_), _) => {
-            status_line(tr!("pointer.adjustable_dpi_unsupported"), pal).into_any_element()
+            status_line(rust_i18n::t!("pointer.adjustable_dpi_unsupported"), pal).into_any_element()
         }
     }
 }
@@ -416,7 +423,7 @@ fn add_preset_chip() -> impl IntoElement {
         .outline()
         .h(px(CHIP_H))
         .icon(IconName::Plus)
-        .label(tr!("common.add"))
+        .label(rust_i18n::t!("common.add"))
         .on_click(|_event, _window, cx| {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value
