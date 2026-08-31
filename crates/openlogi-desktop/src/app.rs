@@ -228,7 +228,7 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
         let action_ring_panel =
-            cx.new(|cx| ActionRingPanel::new(app_catalog.clone(), profile_icons.clone(), cx));
+            cx.new(|cx| ActionRingPanel::new(profile_icons.clone(), window, cx));
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
