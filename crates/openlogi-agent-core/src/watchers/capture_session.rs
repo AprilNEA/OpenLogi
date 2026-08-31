@@ -2,10 +2,12 @@
 //!
 //! Gesture and keyboard capture deliberately keep separate manager loops: their
 //! event ordering, cardinality and dispatch state differ. This module shares
-//! only the invariant they have in common — one tracked hardware epoch stays
-//! authoritative until its asynchronous teardown reports completion.
+//! only the invariants they have in common: one tracked hardware epoch stays
+//! authoritative until its asynchronous teardown reports completion, and a
+//! running epoch is mutually exclusive with post-session recovery.
 
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::runtime::HidppSessionId;
 
@@ -44,6 +46,96 @@ pub(super) struct CaptureSession<Target, Dispatch> {
     target: Target,
     dispatch: Dispatch,
     phase: SessionPhase,
+}
+
+/// Firmware restoration and restart pacing retained after a capture task has
+/// completed. Both may be present after an unexpected completion.
+pub(super) struct CaptureRecovery<Restore> {
+    pub(super) pending_restore: Option<Restore>,
+    pub(super) restart_at: Option<Instant>,
+}
+
+impl<Restore> CaptureRecovery<Restore> {
+    pub(super) fn is_empty(&self) -> bool {
+        self.pending_restore.is_none() && self.restart_at.is_none()
+    }
+}
+
+/// One manager-owned hardware slot. A session remains in `Running` while it
+/// drains; only its matching ordered completion moves the slot to recovery.
+pub(super) enum CaptureSlot<Target, Dispatch, Restore> {
+    Running(CaptureSession<Target, Dispatch>),
+    Recovering(CaptureRecovery<Restore>),
+}
+
+impl<Target, Dispatch, Restore> CaptureSlot<Target, Dispatch, Restore> {
+    pub(super) fn running(session: CaptureSession<Target, Dispatch>) -> Self {
+        Self::Running(session)
+    }
+
+    pub(super) fn recovering(
+        pending_restore: Option<Restore>,
+        restart_at: Option<Instant>,
+    ) -> Self {
+        Self::Recovering(CaptureRecovery {
+            pending_restore,
+            restart_at,
+        })
+    }
+
+    pub(super) fn session(&self) -> Option<&CaptureSession<Target, Dispatch>> {
+        let Self::Running(session) = self else {
+            return None;
+        };
+        Some(session)
+    }
+
+    pub(super) fn session_mut(&mut self) -> Option<&mut CaptureSession<Target, Dispatch>> {
+        let Self::Running(session) = self else {
+            return None;
+        };
+        Some(session)
+    }
+
+    pub(super) fn recovery(&self) -> Option<&CaptureRecovery<Restore>> {
+        let Self::Recovering(recovery) = self else {
+            return None;
+        };
+        Some(recovery)
+    }
+
+    pub(super) fn recovery_mut(&mut self) -> Option<&mut CaptureRecovery<Restore>> {
+        let Self::Recovering(recovery) = self else {
+            return None;
+        };
+        Some(recovery)
+    }
+
+    /// Settle one ordered completion. Stale epochs and reports received after
+    /// the slot has already entered recovery leave the slot untouched.
+    pub(super) fn complete(
+        &mut self,
+        done_session: &HidppSessionId,
+        pending_restore: Option<Restore>,
+        restart_after_unexpected: Option<Instant>,
+    ) -> Option<(HidppSessionId, bool)> {
+        let Self::Running(session) = self else {
+            return None;
+        };
+        let CompletionAction::Remove { unexpected } = session.completion(done_session) else {
+            return None;
+        };
+        let dispatch_session = session.id().clone();
+        *self = Self::recovering(
+            pending_restore,
+            if unexpected {
+                restart_after_unexpected
+            } else {
+                None
+            },
+        );
+        Some((dispatch_session, unexpected))
+    }
 }
 
 impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
@@ -202,5 +294,73 @@ mod tests {
             session.owns(&queued),
             "queued task events remain attributable after a hot config rekey"
         );
+    }
+
+    #[test]
+    fn matching_completion_moves_the_active_slot_to_recovery() {
+        let mut slot = CaptureSlot::<_, _, ()>::running(session());
+        let restart_at = Instant::now();
+
+        let (_, unexpected) = slot
+            .complete(
+                &HidppSessionId::with_epoch("mouse-a", 7),
+                Some(()),
+                Some(restart_at),
+            )
+            .expect("the current epoch should complete");
+
+        assert!(unexpected);
+        assert!(
+            slot.session().is_none(),
+            "recovery cannot retain a running epoch"
+        );
+        let recovery = slot.recovery().expect("the slot should now be recovering");
+        assert!(
+            recovery.pending_restore.is_some(),
+            "firmware restoration remains pending"
+        );
+        assert_eq!(
+            recovery.restart_at,
+            Some(restart_at),
+            "restore and restart pacing may legitimately coexist"
+        );
+    }
+
+    #[test]
+    fn stale_completion_cannot_displace_the_running_epoch_or_recovery() {
+        let mut slot = CaptureSlot::<_, _, &'static str>::running(session());
+
+        assert!(
+            slot.complete(
+                &HidppSessionId::with_epoch("mouse-a", 6),
+                Some("stale"),
+                Some(Instant::now()),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            slot.session().map(CaptureSession::id),
+            Some(&HidppSessionId::with_epoch("mouse-a", 7))
+        );
+
+        assert!(
+            slot.complete(
+                &HidppSessionId::with_epoch("mouse-a", 7),
+                Some("current"),
+                None,
+            )
+            .is_some()
+        );
+        assert!(
+            slot.complete(
+                &HidppSessionId::with_epoch("mouse-a", 7),
+                Some("duplicate"),
+                Some(Instant::now()),
+            )
+            .is_none()
+        );
+        let recovery = slot.recovery().expect("the original recovery must remain");
+        assert_eq!(recovery.pending_restore, Some("current"));
+        assert_eq!(recovery.restart_at, None);
     }
 }
