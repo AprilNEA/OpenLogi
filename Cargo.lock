@@ -5552,7 +5552,6 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
- "shellexpand",
  "swr-core",
  "swr-gpui",
  "sys-locale",
@@ -5703,7 +5702,6 @@ name = "openlogi-overlay"
 version = "0.8.3"
 dependencies = [
  "anyhow",
- "appcatalog",
  "block2 0.6.2",
  "core-graphics 0.25.0",
  "embed-resource",
@@ -5711,13 +5709,11 @@ dependencies = [
  "gpui_platform",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
  "openlogi-core",
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-ui",
  "rust-i18n",
- "shellexpand",
  "succession",
  "tarpc",
  "tokio",
@@ -5743,7 +5739,11 @@ version = "0.8.3"
 dependencies = [
  "gpui",
  "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "openlogi-core",
+ "shellexpand",
 ]
 
 [[package]]

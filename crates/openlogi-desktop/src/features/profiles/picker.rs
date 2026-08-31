@@ -111,6 +111,7 @@ pub(crate) fn application_popover(
         .trigger(
             control_button(format!("{id_base}:application-picker"))
                 .outline()
+                .w_full()
                 .icon(IconName::Folder)
                 .label(tr!("profiles.add_app_dialog")),
         )
@@ -139,11 +140,24 @@ pub(crate) fn application_popover(
                 .iter()
                 .map(|(app, _)| app.clone())
                 .collect::<HashSet<_>>();
+            catalog.update(cx, |picker, cx| {
+                for (app, _) in &recent_apps {
+                    picker.ensure_application_path(app, cx);
+                }
+            });
+            let catalog_state = catalog.read(cx);
+            let application_paths = recent_apps
+                .iter()
+                .filter_map(|(app, _)| {
+                    catalog_state
+                        .application_path(app)
+                        .map(|path| (app.clone(), path.to_string()))
+                })
+                .collect::<HashMap<_, _>>();
             let choices = application_choices(
-                catalog
-                    .read(cx)
-                    .available_profiles(&observed, &HashSet::new()),
+                catalog_state.available_profiles(&observed, &HashSet::new()),
                 &recent_apps,
+                &application_paths,
             );
             add_app_content(
                 id_base,
@@ -268,29 +282,42 @@ fn add_app_content(
 fn application_choices(
     catalog: CatalogPresentation,
     recent_apps: &[(String, String)],
+    application_paths: &HashMap<String, String>,
 ) -> AddAppChoices {
-    let recent_by_id = recent_apps
-        .iter()
-        .enumerate()
-        .map(|(index, (app, name))| (app.as_str(), (index, name.as_str())))
-        .collect::<HashMap<_, _>>();
-    let CatalogPresentation::Ready(applications) = catalog else {
-        return AddAppChoices {
-            recent: Vec::new(),
-            catalog,
-        };
+    let (catalog_recent, catalog) = match catalog {
+        CatalogPresentation::Ready(applications) => {
+            let recent_ids = recent_apps
+                .iter()
+                .map(|(app, _)| app.as_str())
+                .collect::<HashSet<_>>();
+            let (recent, remaining) = applications
+                .into_iter()
+                .partition(|choice| recent_ids.contains(choice.app.as_str()));
+            (recent, CatalogPresentation::Ready(remaining))
+        }
+        catalog => (Vec::new(), catalog),
     };
-    let (mut recent, remaining): (Vec<_>, Vec<_>) = applications
+    let mut catalog_recent = catalog_recent
         .into_iter()
-        .partition(|choice| recent_by_id.contains_key(choice.app.as_str()));
-    for choice in &mut recent {
-        choice.name = recent_by_id[choice.app.as_str()].1.to_string();
-    }
-    recent.sort_by_key(|choice| recent_by_id[choice.app.as_str()].0);
-    AddAppChoices {
-        recent,
-        catalog: CatalogPresentation::Ready(remaining),
-    }
+        .map(|choice| (choice.app.clone(), choice))
+        .collect::<HashMap<_, _>>();
+    let recent = recent_apps
+        .iter()
+        .filter_map(|(app, name)| {
+            let mut choice = catalog_recent.remove(app).or_else(|| {
+                application_paths.get(app).map(|path| ProfileChoice {
+                    app: app.clone(),
+                    launch_target: path.clone(),
+                    name: name.clone(),
+                    override_count: 0,
+                    persisted: false,
+                })
+            })?;
+            choice.name.clone_from(name);
+            Some(choice)
+        })
+        .collect();
+    AddAppChoices { recent, catalog }
 }
 
 /// The scrollable catalog body: a `uniform_list` capped at six rows, with a
@@ -469,6 +496,7 @@ fn application_list_height(rows: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::rc::Rc;
 
     use gpui::{
@@ -593,6 +621,7 @@ mod tests {
                 ("app.beta".into(), "Beta Recent".into()),
                 ("app.alpha".into(), "Alpha Recent".into()),
             ],
+            &HashMap::new(),
         );
 
         assert_eq!(
@@ -608,5 +637,23 @@ mod tests {
         };
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].app, "app.gamma");
+    }
+
+    #[test]
+    fn application_choices_keep_resolved_recent_apps_without_the_catalog() {
+        let recent = [("app.portable".into(), "Portable".into())];
+        let paths = HashMap::from([(
+            "app.portable".into(),
+            "/Users/example/Tools/Portable.app".into(),
+        )]);
+
+        for catalog in [CatalogPresentation::Loading, CatalogPresentation::Failed] {
+            let choices = application_choices(catalog, &recent, &paths);
+            assert_eq!(choices.recent.len(), 1);
+            assert_eq!(
+                choices.recent[0].launch_target,
+                "/Users/example/Tools/Portable.app"
+            );
+        }
     }
 }
