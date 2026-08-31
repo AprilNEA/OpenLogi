@@ -15,6 +15,7 @@ use openlogi_core::binding::{
 
 use super::action_icons::action_icon_path;
 use crate::features::mouse::picker::editor_section;
+use crate::features::profiles::{AppCatalogPicker, ProfileIconCache, application_popover};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
@@ -26,6 +27,7 @@ pub(super) fn action_library(
     application_input: &Entity<InputState>,
     shortcut_input: &Entity<InputState>,
     library_scroll: &ScrollHandle,
+    app_resources: (&Entity<AppCatalogPicker>, &ProfileIconCache),
     pal: Palette,
 ) -> impl IntoElement {
     let current_action = current.map(ActionRingEntry::action).cloned();
@@ -85,7 +87,13 @@ pub(super) fn action_library(
                     ))
                 })
                 .child(shortcut_editor(slot, shortcut_input, pal))
-                .child(path_editor(slot, application_input, pal))
+                .child(path_editor(
+                    slot,
+                    application_input,
+                    app_resources.0,
+                    app_resources.1,
+                    pal,
+                ))
                 .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
         ))
@@ -163,7 +171,7 @@ fn shortcut_editor(
 ) -> impl IntoElement {
     let submit_input = input.clone();
     v_flex()
-        .gap_1()
+        .gap_2()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
             h_flex()
@@ -188,7 +196,13 @@ fn shortcut_editor(
         )
 }
 
-fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -> impl IntoElement {
+fn path_editor(
+    slot: ActionRingSlot,
+    input: &Entity<InputState>,
+    app_catalog: &Entity<AppCatalogPicker>,
+    app_icons: &ProfileIconCache,
+    pal: Palette,
+) -> impl IntoElement {
     let submit_input = input.clone();
     v_flex()
         .gap_1()
@@ -217,6 +231,17 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                         }),
                 ),
         )
+        .child(application_popover(
+            "ring-action",
+            app_catalog.clone(),
+            app_icons.clone(),
+            move |path, name, cx| {
+                if let Ok(target) = ApplicationTarget::new(path, name) {
+                    commit_action(slot, Action::OpenApplication(target), cx);
+                }
+            },
+            pal,
+        ))
 }
 
 fn action_sections(
