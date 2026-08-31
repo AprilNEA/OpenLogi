@@ -359,6 +359,8 @@ async fn drive(
                 let Some(note) = parse_notification(sub_id, device_index, payload) else {
                     continue;
                 };
+                // Discovery is phase-bound: a late DeviceFound would move the
+                // event owner back from Pairing to Found after selection.
                 match note {
                     Notification::DiscoveryInfo { counter, kind, address, authentication } => {
                         let SessionState::BoltDiscovery(discovery) = state else {

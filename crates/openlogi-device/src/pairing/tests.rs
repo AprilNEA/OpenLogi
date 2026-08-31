@@ -83,6 +83,84 @@ fn session_state_keeps_bolt_phases_separate_from_unifying() {
 }
 
 #[tokio::test]
+async fn queued_discovery_notifications_after_selection_do_not_emit_device_found() {
+    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
+        panic!("mock must support HID++");
+    };
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    let (notification_tx, mut notifications) = mpsc::unbounded_channel();
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    let late_address = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02];
+
+    let exchange = async {
+        for _ in 0..2 {
+            written_reports
+                .recv()
+                .await
+                .expect("notification and discovery setup reports");
+        }
+        assert!(matches!(events.recv().await, Some(PairingEvent::Searching)));
+
+        command_tx
+            .send(PairingCommand::Pair(DiscoveredDevice {
+                address: late_address,
+                authentication: 0x00,
+                kind: BoltDeviceKind::Mouse,
+                name: "Selected Mouse".into(),
+            }))
+            .expect("pair command");
+        let pair = written_reports.recv().await.expect("Bolt pair report");
+        assert_eq!(
+            &pair[..5],
+            &[
+                LONG_REPORT_ID,
+                RECEIVER_INDEX,
+                u8::from(MessageType::SetLongRegister),
+                BOLT_PAIRING,
+                0x01,
+            ]
+        );
+
+        notification_tx
+            .send(discovery_info(7, late_address, 0x00))
+            .expect("late discovery info");
+        notification_tx
+            .send(discovery_name(7, "Late Mouse"))
+            .expect("late discovery name");
+        notification_tx
+            .send(pairing_succeeded(3))
+            .expect("pairing completion");
+    };
+
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            run_session(
+                &channel,
+                ReceiverFamily::Bolt,
+                &mut commands,
+                &mut notifications,
+                &event_tx,
+            ),
+            exchange,
+        )
+    })
+    .await;
+    let Ok((result, ())) = result else {
+        panic!("pairing session did not terminate");
+    };
+    result.expect("pairing completion must end the session successfully");
+    assert!(matches!(
+        events.recv().await,
+        Some(PairingEvent::Paired { slot: 3 })
+    ));
+    assert!(
+        events.try_recv().is_err(),
+        "late discovery notifications must not emit DeviceFound during Bolt pairing"
+    );
+}
+
+#[tokio::test]
 async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
     let (raw, mut written_reports) = EchoRawHidChannel::new();
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
@@ -310,6 +388,42 @@ async fn failed_bolt_pair_write_cancels_bolt_pairing() {
         "a failed pair write must cancel the Bolt pairing register, not discovery"
     );
     assert!(reports[3][5..].iter().all(|byte| *byte == 0));
+}
+
+fn discovery_info(counter: u16, address: [u8; 6], authentication: u8) -> HidppMessage {
+    let mut data = [0u8; LONG_REPORT_LENGTH - 1];
+    let [counter_low, counter_high] = counter.to_le_bytes();
+    data[0] = RECEIVER_INDEX;
+    data[1] = notification::id::DEVICE_DISCOVERY;
+    data[2] = counter_low;
+    data[3] = counter_high;
+    data[4] = 0x00;
+    data[6] = 0x02;
+    data[9..15].copy_from_slice(&address);
+    data[17] = authentication;
+    HidppMessage::Long(data)
+}
+
+fn discovery_name(counter: u16, name: &str) -> HidppMessage {
+    let mut data = [0u8; LONG_REPORT_LENGTH - 1];
+    let [counter_low, counter_high] = counter.to_le_bytes();
+    data[0] = RECEIVER_INDEX;
+    data[1] = notification::id::DEVICE_DISCOVERY;
+    data[2] = counter_low;
+    data[3] = counter_high;
+    data[4] = 0x01;
+    data[5] = u8::try_from(name.len()).expect("test device name length fits in one byte");
+    data[6..6 + name.len()].copy_from_slice(name.as_bytes());
+    HidppMessage::Long(data)
+}
+
+fn pairing_succeeded(slot: u8) -> HidppMessage {
+    let mut data = [0u8; LONG_REPORT_LENGTH - 1];
+    data[0] = RECEIVER_INDEX;
+    data[1] = notification::id::PAIRING_STATUS;
+    data[2] = 0x02;
+    data[10] = slot;
+    HidppMessage::Long(data)
 }
 
 struct EchoRawHidChannel {
