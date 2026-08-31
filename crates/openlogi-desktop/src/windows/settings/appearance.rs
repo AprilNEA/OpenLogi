@@ -496,10 +496,11 @@ fn theme_toolbar(
     filter: ThemeFilter,
     pal: Palette,
 ) -> impl IntoElement {
-    // Translated chip labels may wrap so the fixed-width search and actions
-    // remain available in narrower Settings windows.
+    // Let the whole toolbar wrap so fixed-width controls stay accessible when
+    // translated labels or a narrow window exhaust the first row.
     h_flex()
         .w_full()
+        .flex_wrap()
         .items_center()
         .justify_between()
         .gap_3()
