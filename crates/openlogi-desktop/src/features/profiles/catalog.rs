@@ -25,7 +25,7 @@ pub(crate) struct ProfileIconCache {
 }
 
 impl ProfileIconCache {
-    pub(super) fn state(&self, app: &str) -> AppIconState {
+    pub(crate) fn state(&self, app: &str) -> AppIconState {
         match self.icons.borrow().get(app) {
             Some(Some(icon)) => AppIconState::Ready(icon.clone()),
             Some(None) => AppIconState::Missing,
@@ -37,7 +37,7 @@ impl ProfileIconCache {
 /// One application icon as the UI sees it right now. The two icon-less states
 /// render differently so an in-flight resolve does not look like a permanent
 /// missing icon.
-pub(super) enum AppIconState {
+pub(crate) enum AppIconState {
     Ready(Arc<RenderImage>),
     Loading,
     Missing,
@@ -149,7 +149,7 @@ impl AppCatalogPicker {
     /// Start a background resolve for `app`'s icon unless one already
     /// finished or is in flight. Each application resolves independently and
     /// repaints on arrival, so a slow icon never holds up the rest.
-    pub(super) fn ensure_icon(&mut self, app: &str, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_icon(&mut self, app: &str, cx: &mut Context<Self>) {
         if self.icons.icons.borrow().contains_key(app) || self.icon_tasks.contains_key(app) {
             return;
         }
@@ -200,6 +200,7 @@ impl AppCatalogPicker {
                 }
                 Some(ProfileChoice {
                     app,
+                    launch_target: application.registration.to_string_lossy().into_owned(),
                     name: application.name.clone(),
                     override_count: 0,
                     persisted: false,

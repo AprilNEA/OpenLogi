@@ -29,7 +29,7 @@ use tracing_subscriber::EnvFilter;
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
-use crate::ring::{RingView, ring_window_options};
+use crate::ring::{ApplicationIconCache, RingView, ring_window_options};
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
 fn main() -> Result<()> {
@@ -53,6 +53,7 @@ fn main() -> Result<()> {
     app.run(move |cx| {
         platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
+        let application_icons = ApplicationIconCache::default();
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         cx.spawn(async move |cx| {
             while let Some(observed) = invocations.recv().await {
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
+                    application_icons.ensure(&invocation, cx);
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
@@ -76,8 +78,11 @@ fn main() -> Result<()> {
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
+                    let application_icons = application_icons.clone();
                     match cx.open_window(options, |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands, &live_session))
+                        cx.new(|_| {
+                            RingView::new(invocation, application_icons, commands, &live_session)
+                        })
                     }) {
                         Ok(handle) => {
                             platform::configure_windows();

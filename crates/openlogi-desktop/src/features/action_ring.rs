@@ -6,7 +6,7 @@ mod editor;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    Subscription, Window, div, img, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -14,12 +14,13 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    Action, ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
+use crate::features::profiles::{AppCatalogPicker, AppIconState, ProfileIconCache};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -32,13 +33,19 @@ pub struct ActionRingPanel {
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
+    app_catalog: Entity<AppCatalogPicker>,
+    app_icons: ProfileIconCache,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
 
 impl ActionRingPanel {
     /// Create the editor and repaint it after any config/device change.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_catalog: Entity<AppCatalogPicker>,
+        app_icons: ProfileIconCache,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
             let relevant = match event {
                 StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
@@ -57,8 +64,39 @@ impl ActionRingPanel {
             application_input: None,
             shortcut_input: None,
             library_scroll: ScrollHandle::new(),
+            app_catalog,
+            app_icons,
             state_obs,
         }
+    }
+
+    fn ensure_application_icons(&mut self, layout: &ActionRingLayout, cx: &mut Context<Self>) {
+        for entry in layout.slots.values() {
+            if let Some(target) = application_icon_target(entry) {
+                self.app_catalog
+                    .update(cx, |catalog, cx| catalog.ensure_icon(target, cx));
+            }
+        }
+    }
+
+    fn editor_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<InputState>, Entity<InputState>) {
+        let application = editor_input(
+            &mut self.application_input,
+            tr!("action_ring.application_folder_path_or_url"),
+            window,
+            cx,
+        );
+        let shortcut = editor_input(
+            &mut self.shortcut_input,
+            tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"),
+            window,
+            cx,
+        );
+        (application, shortcut)
     }
 }
 
@@ -72,19 +110,9 @@ impl Render for ActionRingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let (ring, layout) = action_ring_editor_state(cx);
+        self.ensure_application_icons(&layout, cx);
         let haptics_supported = current_device_supports_haptics(cx);
-        let application_input = editor_input(
-            &mut self.application_input,
-            tr!("action_ring.application_folder_path_or_url"),
-            window,
-            cx,
-        );
-        let shortcut_input = editor_input(
-            &mut self.shortcut_input,
-            tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"),
-            window,
-            cx,
-        );
+        let (application_input, shortcut_input) = self.editor_inputs(window, cx);
         let view = cx.entity();
 
         v_flex()
@@ -113,13 +141,20 @@ impl Render for ActionRingPanel {
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                    .child(ring_preview(
+                        &layout,
+                        self.selected_slot,
+                        &view,
+                        &self.app_icons,
+                        pal,
+                    ))
                     .child(action_library(
                         self.selected_slot,
                         layout.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
                         &self.library_scroll,
+                        (&self.app_catalog, &self.app_icons),
                         pal,
                     )),
             )
@@ -252,6 +287,7 @@ fn ring_preview(
     layout: &ActionRingLayout,
     selected_slot: ActionRingSlot,
     view: &Entity<ActionRingPanel>,
+    app_icons: &ProfileIconCache,
     pal: Palette,
 ) -> impl IntoElement {
     div()
@@ -289,6 +325,7 @@ fn ring_preview(
                 layout.slots.get(&slot),
                 selected_slot == slot,
                 view,
+                app_icons,
                 pal,
             )
         }))
@@ -299,6 +336,7 @@ fn slot_button(
     entry: Option<&ActionRingEntry>,
     selected: bool,
     view: &Entity<ActionRingPanel>,
+    app_icons: &ProfileIconCache,
     pal: Palette,
 ) -> impl IntoElement {
     let index = slot.index();
@@ -307,12 +345,24 @@ fn slot_button(
         || tr!("action_ring.empty_slot").to_string(),
         |entry| localized_action_label(entry.action()).to_string(),
     );
-    let icon_path = entry.map(|entry| {
-        entry.custom_icon().map_or_else(
-            || action_icon_path(entry.action()),
-            ActionRingIcon::asset_path,
-        )
-    });
+    let application_icon =
+        entry
+            .and_then(application_icon_target)
+            .and_then(|target| match app_icons.state(target) {
+                AppIconState::Ready(icon) => Some(icon),
+                AppIconState::Loading | AppIconState::Missing => None,
+            });
+    let icon_path = if application_icon.is_some() {
+        None
+    } else {
+        entry.map(|entry| {
+            entry.custom_icon().map_or_else(
+                || action_icon_path(entry.action()),
+                ActionRingIcon::asset_path,
+            )
+        })
+    };
+    let show_plus = application_icon.is_none() && icon_path.is_none();
     let accessible_label = label.clone();
     let selected_view = view.clone();
 
@@ -345,6 +395,9 @@ fn slot_button(
         .cursor_pointer()
         .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+        .when_some(application_icon, |button, icon| {
+            button.child(img(icon).size(px(28.0)).flex_none())
+        })
         .when_some(icon_path, |button, path| {
             button.child(svg().path(path).size(px(20.0)).text_color(if selected {
                 pal.text_primary
@@ -352,7 +405,7 @@ fn slot_button(
                 pal.text_muted
             }))
         })
-        .when(icon_path.is_none(), |button| {
+        .when(show_plus, |button| {
             button.child(Icon::new(IconName::Plus).size_4())
         })
         .hover(move |button| {
@@ -377,4 +430,46 @@ fn slot_button(
                 cx.notify();
             });
         })
+}
+
+fn application_icon_target(entry: &ActionRingEntry) -> Option<&str> {
+    if entry.custom_icon().is_some() {
+        return None;
+    }
+    match entry.action() {
+        Action::OpenApplication(target) => Some(target.path()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::{ApplicationTarget, RingAction};
+
+    use super::*;
+
+    #[test]
+    fn settings_preview_uses_native_icons_only_without_an_override() {
+        let target = ApplicationTarget::new("/Applications/Safari.app", "Safari")
+            .expect("test application target must be valid");
+        let mut layout = ActionRingLayout::default();
+        layout.set_action(
+            ActionRingSlot::Top,
+            Some(
+                RingAction::new(Action::OpenApplication(target))
+                    .expect("open application is valid in the ring"),
+            ),
+        );
+
+        assert_eq!(
+            application_icon_target(&layout.slots[&ActionRingSlot::Top]),
+            Some("/Applications/Safari.app")
+        );
+
+        layout.set_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
+        assert_eq!(
+            application_icon_target(&layout.slots[&ActionRingSlot::Top]),
+            None
+        );
+    }
 }

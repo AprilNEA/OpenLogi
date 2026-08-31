@@ -101,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -229,11 +229,12 @@ fn action_ring_types() {
                     label: "Cut".to_string(),
                     literal: false,
                     icon: ActionRingIcon::Keyboard,
+                    application_icon: Some("/Applications/Safari.app".to_string()),
                 },
             )]),
             language: Some("fr".to_string()),
         },
-        "2a010003437574000701026672",
+        "2a010003437574000701182f4170706c69636174696f6e732f5361666172692e61707001026672",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(
@@ -241,8 +242,9 @@ fn action_ring_types() {
             label: "Cut".to_string(),
             literal: true,
             icon: ActionRingIcon::Keyboard,
+            application_icon: None,
         },
-        "034375740107",
+        "03437574010700",
     );
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");
