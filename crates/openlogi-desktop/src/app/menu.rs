@@ -11,7 +11,6 @@
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
 use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
-use rust_i18n::t;
 use url::Url;
 
 use crate::state::AppState;
@@ -139,10 +138,10 @@ fn menus(cx: &App) -> Vec<Menu> {
             name: "OpenLogi".into(),
             disabled: false,
             items: vec![
-                MenuItem::action(t!("about.about_openlogi"), OpenAbout),
-                MenuItem::action(t!("updates.check_for_updates_dialog"), CheckForUpdates),
+                MenuItem::action(tr!("about.about_openlogi"), OpenAbout),
+                MenuItem::action(tr!("updates.check_for_updates_dialog"), CheckForUpdates),
                 MenuItem::separator(),
-                MenuItem::action(t!("app.settings_dialog"), OpenSettings),
+                MenuItem::action(tr!("app.settings_dialog"), OpenSettings),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
@@ -150,85 +149,85 @@ fn menus(cx: &App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action(t!("app.hide_openlogi"), Hide),
+                MenuItem::action(tr!("app.hide_openlogi"), Hide),
                 #[cfg(target_os = "macos")]
-                MenuItem::action(t!("app.hide_others"), HideOthers),
+                MenuItem::action(tr!("app.hide_others"), HideOthers),
                 #[cfg(target_os = "macos")]
-                MenuItem::action(t!("common.show_all"), ShowAll),
+                MenuItem::action(tr!("common.show_all"), ShowAll),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
-                MenuItem::action(t!("app.quit_openlogi"), Quit),
+                MenuItem::action(tr!("app.quit_openlogi"), Quit),
             ],
         },
         Menu {
-            name: t!("common.edit").into(),
+            name: tr!("common.edit"),
             disabled: false,
             items: vec![
                 MenuItem::os_action(
-                    t!("common.undo"),
+                    tr!("common.undo"),
                     gpui_component::input::Undo,
                     OsAction::Undo,
                 ),
                 MenuItem::os_action(
-                    t!("common.redo"),
+                    tr!("common.redo"),
                     gpui_component::input::Redo,
                     OsAction::Redo,
                 ),
                 MenuItem::separator(),
-                MenuItem::os_action(t!("common.cut"), gpui_component::input::Cut, OsAction::Cut),
+                MenuItem::os_action(tr!("common.cut"), gpui_component::input::Cut, OsAction::Cut),
                 MenuItem::os_action(
-                    t!("common.copy"),
+                    tr!("common.copy"),
                     gpui_component::input::Copy,
                     OsAction::Copy,
                 ),
                 MenuItem::os_action(
-                    t!("common.paste"),
+                    tr!("common.paste"),
                     gpui_component::input::Paste,
                     OsAction::Paste,
                 ),
                 MenuItem::separator(),
                 MenuItem::os_action(
-                    t!("common.select_all"),
+                    tr!("common.select_all"),
                     gpui_component::input::SelectAll,
                     OsAction::SelectAll,
                 ),
             ],
         },
         Menu {
-            name: t!("common.view").into(),
+            name: tr!("common.view"),
             disabled: false,
             items: vec![
-                MenuItem::action(t!("app.settings_dialog"), OpenSettings),
-                MenuItem::action(t!("about.about_openlogi"), OpenAbout),
+                MenuItem::action(tr!("app.settings_dialog"), OpenSettings),
+                MenuItem::action(tr!("about.about_openlogi"), OpenAbout),
                 MenuItem::separator(),
-                MenuItem::action(t!("app.open_configuration_folder"), OpenConfigFolder),
+                MenuItem::action(tr!("app.open_configuration_folder"), OpenConfigFolder),
             ],
         },
         Menu {
-            name: t!("device.device").into(),
+            name: tr!("device.device"),
             disabled: false,
             items: device_menu_items(cx),
         },
         Menu {
-            name: t!("app.window").into(),
+            name: tr!("app.window"),
             disabled: false,
             items: vec![
-                MenuItem::action(t!("common.close_window"), CloseWindow),
+                MenuItem::action(tr!("common.close_window"), CloseWindow),
                 MenuItem::separator(),
-                MenuItem::action(t!("common.minimize"), Minimize),
-                MenuItem::action(t!("common.zoom"), Zoom),
+                MenuItem::action(tr!("common.minimize"), Minimize),
+                MenuItem::action(tr!("common.zoom"), Zoom),
                 MenuItem::separator(),
-                MenuItem::action(t!("app.bring_all_to_front"), BringAllToFront),
+                MenuItem::action(tr!("app.bring_all_to_front"), BringAllToFront),
             ],
         },
         Menu {
-            name: t!("common.help").into(),
+            name: tr!("common.help"),
             disabled: false,
             items: vec![
-                MenuItem::action(t!("about.openlogi_help"), OpenHelp),
+                MenuItem::action(tr!("about.openlogi_help"), OpenHelp),
                 MenuItem::separator(),
-                MenuItem::action(t!("about.open_github_repository"), OpenRepository),
-                MenuItem::action(t!("about.latest_release"), OpenLatestRelease),
+                MenuItem::action(tr!("about.open_github_repository"), OpenRepository),
+                MenuItem::action(tr!("about.latest_release"), OpenLatestRelease),
             ],
         },
     ]
@@ -236,7 +235,7 @@ fn menus(cx: &App) -> Vec<Menu> {
 
 fn device_menu_items(cx: &App) -> Vec<MenuItem> {
     let mut items = vec![
-        MenuItem::action(rust_i18n::t!("pairing.add_device_dialog"), OpenAddDevice),
+        MenuItem::action(tr!("pairing.add_device_dialog"), OpenAddDevice),
         MenuItem::separator(),
     ];
 
@@ -246,11 +245,7 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
             for record in state.devices() {
                 let title = match &record.battery {
                     Some(battery) if battery_charging_no_reading(battery) => {
-                        format!(
-                            "{} · {}",
-                            record.display_name,
-                            rust_i18n::t!("device.charging")
-                        )
+                        format!("{} · {}", record.display_name, tr!("device.charging"))
                     }
                     Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),
                     None => record.display_name.clone(),
@@ -260,8 +255,7 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
         }
         _ => {
             items.push(
-                MenuItem::action(rust_i18n::t!("device.no_devices_connected"), gpui::NoAction)
-                    .disabled(true),
+                MenuItem::action(tr!("device.no_devices_connected"), gpui::NoAction).disabled(true),
             );
         }
     }

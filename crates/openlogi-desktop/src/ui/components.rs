@@ -46,7 +46,7 @@ pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
 ///
 /// Placeholders are stored inside [`InputState`] at construction, so a live
 /// language switch leaves them stale — the owning view calls this from render
-/// with a fresh `rust_i18n::t!` string to keep them current. Guarded, because
+/// with a fresh `tr!` string to keep them current. Guarded, because
 /// `set_placeholder` notifies unconditionally and a bare per-render call would
 /// re-render forever.
 pub(crate) fn localize_placeholder(
@@ -153,9 +153,9 @@ impl RenderOnce for Toggle {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let label = self.label.unwrap_or_else(|| {
             if self.selected {
-                rust_i18n::t!("common.on").into()
+                tr!("common.on")
             } else {
-                rust_i18n::t!("common.off").into()
+                tr!("common.off")
             }
         });
         let mut toggle = Switch::new(self.id)
@@ -479,7 +479,7 @@ impl RenderOnce for ProfileTab {
                 tab.child(
                     BaseButton::new(id)
                         .accessibility_label(
-                            rust_i18n::t!("common.remove_named_item", name => label.to_string()),
+                            tr!("common.remove_named_item", name => label.to_string()),
                         )
                         .px_0p5()
                         .rounded_full()

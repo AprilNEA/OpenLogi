@@ -11,32 +11,26 @@ use openlogi_core::binding::Action;
 pub(crate) fn localized_action_label(action: &Action) -> SharedString {
     match action {
         Action::SetDpiPreset(index) => {
-            rust_i18n::t!("pointer.dpi_preset", index => (index + 1).to_string()).into()
+            tr!("pointer.dpi_preset", index => (index + 1).to_string())
         }
         Action::CustomShortcut(combo) => combo.rendered_label().into(),
         Action::HoldShortcut(combo) => {
-            rust_i18n::t!("actions.hold_shortcut", chord => combo.rendered_label()).into()
+            tr!("actions.hold_shortcut", chord => combo.rendered_label())
         }
-        Action::TypeText(text) => {
-            rust_i18n::t!("actions.type_text_action", text => text.clone()).into()
-        }
-        Action::RunAppleScript(_) => rust_i18n::t!("actions.run_applescript_heading").into(),
-        Action::RunShellCommand(_) => rust_i18n::t!("actions.run_shell_command_heading").into(),
+        Action::TypeText(text) => tr!("actions.type_text_action", text => text.clone()),
+        Action::RunAppleScript(_) => tr!("actions.run_applescript_heading"),
+        Action::RunShellCommand(_) => tr!("actions.run_shell_command_heading"),
         Action::Workflow(steps) if steps.len() == 1 => {
-            rust_i18n::t!("actions.workflow_step_count_singular").into()
+            tr!("actions.workflow_step_count_singular")
         }
         Action::Workflow(steps) => {
-            rust_i18n::t!("actions.workflow_step_count_plural", count => steps.len().to_string())
-                .into()
+            tr!("actions.workflow_step_count_plural", count => steps.len().to_string())
         }
         Action::OpenApplication(target) => {
-            rust_i18n::t!("actions.open_named_target", name => target.display_name()).into()
+            tr!("actions.open_named_target", name => target.display_name())
         }
-        _ => rust_i18n::t!(
-            action
-                .translation_key()
-                .expect("every payload-free action has a translation key")
-        )
-        .into(),
+        _ => tr!(action
+            .translation_key()
+            .expect("every payload-free action has a translation key")),
     }
 }

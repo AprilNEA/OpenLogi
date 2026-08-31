@@ -16,7 +16,7 @@ use crate::ui::theme::{Palette, Typography as _};
 const ROW_H: f32 = 28.;
 
 /// A muted, non-interactive status line — "Reading…", "offline", "unsupported".
-/// The text is pre-localized by the caller (panels use their own `rust_i18n::t!` keys).
+/// The text is pre-localized by the caller (panels hold their own `tr!` keys).
 pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
     div()
         .h(px(ROW_H))

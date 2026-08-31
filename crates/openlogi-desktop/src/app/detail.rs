@@ -18,7 +18,6 @@ use gpui_component::{
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
-use rust_i18n::t;
 
 use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
@@ -58,7 +57,7 @@ pub(super) fn detail_header(
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     let name = record.map_or_else(
-        || rust_i18n::t!("device.device").to_string(),
+        || tr!("device.device").to_string(),
         |r| r.display_name.clone(),
     );
     let online = record.map(|r| r.online);
@@ -154,7 +153,7 @@ pub(super) fn detail_content(
                     .text_caption()
                     .text_color(pal.text_muted)
                     .child(Icon::new(IconName::Info).size_4())
-                    .child(rust_i18n::t!("device.device_offline_changes_pending")),
+                    .child(tr!("device.device_offline_changes_pending")),
             )
         })
         .child(
@@ -321,7 +320,7 @@ fn pointer_tab(
             .flex_wrap()
             .child(pointer_grid_card(
                 PanelCard::new(
-                    rust_i18n::t!("device.pointer_tuning"),
+                    tr!("device.pointer_tuning"),
                     Icon::empty().path("action-icons/gauge.svg"),
                     dpi_panel.clone().into_any_element(),
                 )
@@ -329,7 +328,7 @@ fn pointer_tab(
             ))
             .child(pointer_grid_card(
                 PanelCard::new(
-                    rust_i18n::t!("pointer.smartshift"),
+                    tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
                     smartshift_panel.clone().into_any_element(),
                 )
@@ -405,9 +404,9 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         },
     });
     let inversion_description = if inversion_supported {
-        t!("pointer.scroll_direction_description")
+        tr!("pointer.scroll_direction_description")
     } else {
-        t!("pointer.scroll_inversion_unsupported")
+        tr!("pointer.scroll_inversion_unsupported")
     };
     let inversion_row = h_flex()
         .justify_between()
@@ -419,7 +418,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     div()
                         .text_body()
                         .text_color(pal.text_primary)
-                        .child(t!("pointer.invert_scroll_direction")),
+                        .child(tr!("pointer.invert_scroll_direction")),
                 )
                 .child(
                     div()
@@ -432,11 +431,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             Toggle::new("invert-scroll-toggle")
                 .selected(inverted)
                 .disabled(!inversion_supported)
-                .label(
-                    (!inversion_supported)
-                        .then(|| t!("common.unavailable"))
-                        .map(Into::into),
-                )
+                .label((!inversion_supported).then(|| tr!("common.unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::update(cx, |state, cx| {
                         let key = state.current_record().map(DeviceRecord::device_key);
@@ -449,14 +444,16 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         );
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
-            None => t!("pointer.wheel_resolution_device_default_description"),
-            Some(ScrollResolution::Low) => {
-                t!("pointer.scrolls_once_per_physical_ratchet_step")
+            None => tr!("pointer.wheel_resolution_device_default_description"),
+            Some(ScrollResolution::Low) => tr!("pointer.scrolls_once_per_physical_ratchet_step"),
+            Some(ScrollResolution::High) => {
+                tr!("pointer.high_resolution_scrolling_description")
             }
-            Some(ScrollResolution::High) => t!("pointer.high_resolution_scrolling_description"),
         },
-        HiresWheel::Elsewhere => t!("pointer.wheel_resolution_other_connection"),
-        HiresWheel::Nowhere => t!("pointer.wheel_resolution_unsupported"),
+        HiresWheel::Elsewhere => {
+            tr!("pointer.wheel_resolution_other_connection")
+        }
+        HiresWheel::Nowhere => tr!("pointer.wheel_resolution_unsupported"),
     };
     let resolution_row = v_flex()
         .gap_2()
@@ -466,7 +463,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     div()
                         .text_body()
                         .text_color(pal.text_primary)
-                        .child(t!("pointer.wheel_resolution")),
+                        .child(tr!("pointer.wheel_resolution")),
                 )
                 .child(
                     div()
@@ -480,7 +477,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             hires == HiresWheel::Here,
         ));
     PanelCard::new(
-        t!("pointer.scrolling"),
+        tr!("pointer.scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
         v_flex().gap_4().child(inversion_row).child(resolution_row),
     )
@@ -499,19 +496,19 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
         .child(
             Button::new("wheel-resolution-default")
                 .flex_1()
-                .label(rust_i18n::t!("pointer.device_default"))
+                .label(tr!("pointer.device_default"))
                 .selected(selected.is_none()),
         )
         .child(
             Button::new("wheel-resolution-low")
                 .flex_1()
-                .label(rust_i18n::t!("pointer.standard"))
+                .label(tr!("pointer.standard"))
                 .selected(selected == Some(ScrollResolution::Low)),
         )
         .child(
             Button::new("wheel-resolution-high")
                 .flex_1()
-                .label(rust_i18n::t!("pointer.high_resolution"))
+                .label(tr!("pointer.high_resolution"))
                 .selected(selected == Some(ScrollResolution::High)),
         )
         .on_click(move |indices, _window, cx| {
@@ -535,7 +532,7 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
     tab_body(
         ContentWidth::Small,
         PanelCard::new(
-            rust_i18n::t!("device.lighting"),
+            tr!("device.lighting"),
             Icon::new(IconName::Palette),
             lighting_panel.clone().into_any_element(),
         ),
@@ -565,7 +562,7 @@ fn camera_tab(
                     .w(CAMERA_PREVIEW_W)
                     .flex_shrink_0()
                     .child(PanelCard::new(
-                        rust_i18n::t!("camera.camera"),
+                        tr!("camera.camera"),
                         Icon::new(IconName::Eye),
                         camera_preview.clone().into_any_element(),
                     )),
@@ -575,7 +572,7 @@ fn camera_tab(
                     .w(CAMERA_CONTROLS_W)
                     .flex_shrink_0()
                     .child(PanelCard::new(
-                        rust_i18n::t!("camera.camera_controls"),
+                        tr!("camera.camera_controls"),
                         Icon::new(IconName::Settings),
                         camera_controls.clone().into_any_element(),
                     )),
@@ -626,7 +623,7 @@ fn light_tab(
                     .w(LIGHT_CONTROLS_W)
                     .min_w(LIGHT_CONTROLS_MIN_W)
                     .child(PanelCard::new(
-                        rust_i18n::t!("device.lighting"),
+                        tr!("device.lighting"),
                         Icon::new(IconName::Sun),
                         light_panel.clone().into_any_element(),
                     )),
@@ -656,7 +653,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                 div()
                     .text_body()
                     .text_color(pal.text_muted)
-                    .child(rust_i18n::t!("device.no_active_device"))
+                    .child(tr!("device.no_active_device"))
                     .into_any_element()
             },
             |record| {
@@ -678,7 +675,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
         );
 
     PanelCard::new(
-        rust_i18n::t!("device.device_details"),
+        tr!("device.device_details"),
         Icon::new(IconName::Info),
         content,
     )
@@ -698,14 +695,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         .unwrap_or(true);
     let (binding_count, gesture_count, preset_count, app_profile) = AppState::try_read(cx)
         .map_or_else(
-            || {
-                (
-                    0,
-                    0,
-                    0,
-                    rust_i18n::t!("profiles.default_profile").to_string(),
-                )
-            },
+            || (0, 0, 0, tr!("profiles.default_profile").to_string()),
             |state| {
                 (
                     state.button_bindings().len(),
@@ -714,7 +704,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     state.device_gesture_binding_count(),
                     state.dpi_presets().len(),
                     state.active_profile_name().map_or_else(
-                        || rust_i18n::t!("profiles.default_profile").to_string(),
+                        || tr!("profiles.default_profile").to_string(),
                         str::to_owned,
                     ),
                 )
@@ -729,16 +719,12 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .items_center()
                 .child(
                     v_flex()
-                        .child(
-                            div()
-                                .text_body()
-                                .child(rust_i18n::t!("device.manage_this_device")),
-                        )
+                        .child(div().text_body().child(tr!("device.manage_this_device")))
                         .child(
                             div()
                                 .text_caption()
                                 .text_color(pal.text_muted)
-                                .child(rust_i18n::t!("actions.native_controls_when_disabled")),
+                                .child(tr!("actions.native_controls_when_disabled")),
                         ),
                 )
                 .child(
@@ -763,29 +749,18 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .columns(1)
                 .label_width(px(118.))
                 .bordered(false)
+                .child(DescriptionItem::new(tr!("profiles.active_profile")).value(app_profile))
                 .child(
-                    DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!(
-                        "profiles.active_profile"
-                    )))
-                    .value(app_profile),
+                    DescriptionItem::new(tr!("profiles.button_bindings"))
+                        .value(binding_count.to_string()),
                 )
                 .child(
-                    DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!(
-                        "profiles.button_bindings"
-                    )))
-                    .value(binding_count.to_string()),
+                    DescriptionItem::new(tr!("profiles.gesture_bindings"))
+                        .value(gesture_count.to_string()),
                 )
                 .child(
-                    DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!(
-                        "profiles.gesture_bindings"
-                    )))
-                    .value(gesture_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!(
-                        "pointer.dpi_presets"
-                    )))
-                    .value(preset_count.to_string()),
+                    DescriptionItem::new(tr!("pointer.dpi_presets"))
+                        .value(preset_count.to_string()),
                 ),
         )
         .child(
@@ -795,13 +770,13 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .child(sidebar_action(
                     "right-panel-settings",
                     IconName::Settings,
-                    gpui::SharedString::from(rust_i18n::t!("app.settings")),
+                    tr!("app.settings"),
                     |_event, _window, cx| crate::windows::settings::open(cx),
                 ))
                 .child(sidebar_action(
                     "right-panel-config-folder",
                     IconName::Folder,
-                    gpui::SharedString::from(rust_i18n::t!("profiles.config_folder")),
+                    tr!("profiles.config_folder"),
                     |_event, _window, cx| {
                         if let Ok(path) = openlogi_core::paths::config_dir()
                             && let Some(url) = file_url(&path)
@@ -813,7 +788,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         );
 
     PanelCard::new(
-        rust_i18n::t!("device.configuration"),
+        tr!("device.configuration"),
         Icon::new(IconName::Folder),
         content,
     )
@@ -855,32 +830,21 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     // a synthetic 0 that would only mislead next to real receiver slots.
     let is_camera = matches!(record.kind, DeviceKind::Camera);
     let connection = if is_camera {
-        rust_i18n::t!("device.usb").to_string()
+        tr!("device.usb").to_string()
     } else {
         route_label(record.route.as_ref())
     };
-    let mut items = vec![
-        DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!("device.connection")))
-            .value(connection),
-    ];
+    let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
     if matches!(
         record.route,
         Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
     ) {
-        items.push(
-            DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!("device.channel")))
-                .value(record.slot.to_string()),
-        );
+        items.push(DescriptionItem::new(tr!("device.channel")).value(record.slot.to_string()));
     }
-    items.push(
-        DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!("device.device_key")))
-            .value(elided_key(&record.config_key)),
-    );
+    items
+        .push(DescriptionItem::new(tr!("device.device_key")).value(elided_key(&record.config_key)));
     if let Some(serial) = record.serial_number {
-        items.push(
-            DescriptionItem::new(gpui::SharedString::from(rust_i18n::t!("device.serial")))
-                .value(serial),
-        );
+        items.push(DescriptionItem::new(tr!("device.serial")).value(serial));
     }
 
     DescriptionList::new()

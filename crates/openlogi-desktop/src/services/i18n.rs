@@ -8,7 +8,7 @@
 //! change — `openlogi-ui`'s parity test enforces a key-for-key match. Crowdin
 //! improves non-English values over time and the workflow downloads only real
 //! translations (`skip_untranslated_strings`). Call sites use
-//! `rust_i18n::t!` with product-domain keys such as
+//! [`tr!`](crate::tr) / `rust_i18n::t!` with product-domain keys such as
 //! `device.connected`. Missing keys render as the key, so catalogs must not lag.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it

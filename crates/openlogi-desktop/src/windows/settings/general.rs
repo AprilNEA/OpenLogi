@@ -29,23 +29,19 @@ pub(super) fn general_page(
         .item(smooth_scrolling_item())
         .item(
             SettingItem::new(
-                rust_i18n::t!("pointer.vertical_scroll_sensitivity"),
+                tr!("pointer.vertical_scroll_sensitivity"),
                 SettingField::render(move |_, _, cx| {
                     vertical_scroll_sensitivity_field(&vertical_scroll, cx)
                 }),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "pointer.vertical_scroll_sensitivity_description"
-            ))),
+            .description(tr!("pointer.vertical_scroll_sensitivity_description")),
         )
         .item(
             SettingItem::new(
-                rust_i18n::t!("pointer.thumb_wheel_sensitivity"),
+                tr!("pointer.thumb_wheel_sensitivity"),
                 SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "pointer.thumbwheel_sensitivity_description"
-            ))),
+            .description(tr!("pointer.thumbwheel_sensitivity_description")),
         )
         .item(launch_at_login_item());
 
@@ -65,9 +61,9 @@ pub(super) fn general_page(
     let group = group.item(
         SettingItem::new(
             if cfg!(target_os = "macos") {
-                rust_i18n::t!("app.show_in_menu_bar")
+                tr!("app.show_in_menu_bar")
             } else {
-                rust_i18n::t!("app.show_in_the_notification_area")
+                tr!("app.show_in_the_notification_area")
             },
             SettingField::switch(
                 |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().show_in_menu_bar),
@@ -80,13 +76,13 @@ pub(super) fn general_page(
             ),
         )
         .description(if cfg!(target_os = "macos") {
-            rust_i18n::t!("app.menu_bar_visibility_description")
+            tr!("app.menu_bar_visibility_description")
         } else {
-            rust_i18n::t!("app.notification_area_visibility_description")
+            tr!("app.notification_area_visibility_description")
         }),
     );
 
-    SettingPage::new(rust_i18n::t!("app.general"))
+    SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
@@ -95,7 +91,7 @@ pub(super) fn general_page(
 /// The smooth-scrolling switch.
 fn smooth_scrolling_item() -> SettingItem {
     SettingItem::new(
-        rust_i18n::t!("pointer.smooth_scrolling"),
+        tr!("pointer.smooth_scrolling"),
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
             |enabled, cx| {
@@ -106,9 +102,7 @@ fn smooth_scrolling_item() -> SettingItem {
             },
         ),
     )
-    .description(gpui::SharedString::from(rust_i18n::t!(
-        "pointer.smooth_scrolling_description"
-    )))
+    .description(tr!("pointer.smooth_scrolling_description"))
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
@@ -169,7 +163,7 @@ fn sensitivity_field(
 /// (the sunk switch); the setter never unregisters.
 fn launch_at_login_item() -> SettingItem {
     SettingItem::new(
-        rust_i18n::t!("app.launch_at_login"),
+        tr!("app.launch_at_login"),
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().launch_at_login),
             |enabled, cx| {
@@ -180,23 +174,21 @@ fn launch_at_login_item() -> SettingItem {
             },
         ),
     )
-    .description(gpui::SharedString::from(if cfg!(target_os = "macos") {
-        rust_i18n::t!("app.launch_at_login_macos_description")
+    .description(if cfg!(target_os = "macos") {
+        tr!("app.launch_at_login_macos_description")
     } else {
-        rust_i18n::t!("app.launch_at_login_description")
-    }))
+        tr!("app.launch_at_login_description")
+    })
 }
 
 /// The `RequiresApproval` notice: with the direct-launch fallback gone, the
 /// switched-off login item stops the agent entirely, whatever the preference.
 fn login_item_approval_notice() -> SettingItem {
     SettingItem::new(
-        rust_i18n::t!("app.login_item_disabled_in_system_settings"),
+        tr!("app.login_item_disabled_in_system_settings"),
         SettingField::render(|_, _, cx| open_login_items_button(cx)),
     )
-    .description(gpui::SharedString::from(rust_i18n::t!(
-        "app.login_item_disabled_description"
-    )))
+    .description(tr!("app.login_item_disabled_description"))
 }
 
 /// Deep link to System Settings › Login Items — the only place that can
@@ -204,7 +196,7 @@ fn login_item_approval_notice() -> SettingItem {
 fn open_login_items_button(cx: &App) -> BaseButton {
     let pal = theme::palette(cx);
     BaseButton::new("open-login-items")
-        .accessibility_label(rust_i18n::t!("app.open_login_items"))
+        .accessibility_label(tr!("app.open_login_items"))
         .px_2()
         .py_1()
         .rounded(pal.control_radius)
@@ -215,6 +207,6 @@ fn open_login_items_button(cx: &App) -> BaseButton {
         .bg(pal.control)
         .hover(move |s| s.bg(pal.control_hover))
         .focus_visible(move |s| s.bg(pal.control_hover))
-        .child(rust_i18n::t!("app.open_login_items"))
+        .child(tr!("app.open_login_items"))
         .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())
 }

@@ -147,13 +147,13 @@ impl DetailTab {
 
     fn label(self) -> gpui::SharedString {
         match self {
-            Self::Buttons => rust_i18n::t!("device.buttons").into(),
-            Self::ActionsRing => rust_i18n::t!("action_ring.actions_ring").into(),
-            Self::Keys => rust_i18n::t!("device.keys").into(),
-            Self::Pointer => rust_i18n::t!("device.pointer").into(),
-            Self::Lighting | Self::Light => rust_i18n::t!("device.lighting").into(),
-            Self::Camera => rust_i18n::t!("camera.camera").into(),
-            Self::Device => rust_i18n::t!("device.device").into(),
+            Self::Buttons => tr!("device.buttons"),
+            Self::ActionsRing => tr!("action_ring.actions_ring"),
+            Self::Keys => tr!("device.keys"),
+            Self::Pointer => tr!("device.pointer"),
+            Self::Lighting | Self::Light => tr!("device.lighting"),
+            Self::Camera => tr!("camera.camera"),
+            Self::Device => tr!("device.device"),
         }
     }
 }
@@ -387,57 +387,47 @@ impl AppView {
                     .size_8()
                     .text_color(rgb(theme::STATUS_CONNECTING)),
             )
-            .child(div().text_title().child(rust_i18n::t!(
-                "permissions.accessibility_permission_required"
-            )))
             .child(
                 div()
-                    .max_w(ContentWidth::Narrow.rems())
-                    .text_body()
-                    .text_color(pal.text_muted)
-                    .child(rust_i18n::t!(
-                        "permissions.accessibility_permission_description"
-                    )),
+                    .text_title()
+                    .child(tr!("permissions.accessibility_permission_required")),
             )
             .child(
                 div()
                     .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
-                    .child(rust_i18n::t!(
-                        "permissions.accessibility_agent_instructions"
-                    )),
+                    .child(tr!("permissions.accessibility_permission_description")),
+            )
+            .child(
+                div()
+                    .max_w(ContentWidth::Narrow.rems())
+                    .text_body()
+                    .text_color(pal.text_muted)
+                    .child(tr!("permissions.accessibility_agent_instructions")),
             )
             .child(
                 Button::new("open-accessibility")
                     .primary()
                     .icon(IconName::Settings)
-                    .label(rust_i18n::t!(
-                        "permissions.open_system_settings_to_grant_access"
-                    ))
+                    .label(tr!("permissions.open_system_settings_to_grant_access"))
                     .on_click(|_, _, cx| request_accessibility(cx)),
             )
             .child(
                 div()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(rust_i18n::t!(
-                        "permissions.permission_applies_without_restart"
-                    )),
+                    .child(tr!("permissions.permission_applies_without_restart")),
             )
             .child(
                 BaseButton::new("skip-accessibility")
-                    .accessibility_label(rust_i18n::t!(
-                        "permissions.not_now_use_dpi_and_other_features_only"
-                    ))
+                    .accessibility_label(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .text_caption()
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
                     .focus_visible(|s| s.text_color(pal.text_primary))
-                    .child(rust_i18n::t!(
-                        "permissions.not_now_use_dpi_and_other_features_only"
-                    ))
+                    .child(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;
                         cx.notify();

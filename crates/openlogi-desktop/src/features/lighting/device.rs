@@ -132,7 +132,7 @@ impl Render for LightingPanel {
                         div()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(rust_i18n::t!("device.lighting")),
+                            .child(tr!("device.lighting")),
                     )
                     .child(
                         Toggle::new("light-toggle")
@@ -159,7 +159,7 @@ impl Render for LightingPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(rust_i18n::t!("camera.brightness")),
+                            .child(tr!("camera.brightness")),
                     )
                     .child(
                         div()
@@ -180,7 +180,7 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         .selected(selected)
         .accessibility_label(format!(
             "{} #{:06X}",
-            rust_i18n::t!("device.lighting"),
+            tr!("device.lighting"),
             color.packed()
         ))
         .aria_toggled(if selected {

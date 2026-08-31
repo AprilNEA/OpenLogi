@@ -95,25 +95,25 @@ pub(super) fn binding_inspector(
 
 fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui::Div {
     let summary = match (app, override_count) {
-        (Some(app), 0) => rust_i18n::t!(
+        (Some(app), 0) => tr!(
             "profiles.app_profile_no_overrides",
             app => app.to_string()
         ),
-        (Some(app), 1) => rust_i18n::t!(
+        (Some(app), 1) => tr!(
             "profiles.app_profile_single_override",
             app => app.to_string()
         ),
-        (Some(app), count) => rust_i18n::t!(
+        (Some(app), count) => tr!(
             "profiles.app_profile_override_count",
             app => app.to_string(),
             count => count.to_string()
         ),
-        (None, _) => rust_i18n::t!("profiles.select_device_button_description"),
+        (None, _) => tr!("profiles.select_device_button_description"),
     };
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            rust_i18n::t!("actions.button_inspector").into(),
+            tr!("actions.button_inspector"),
             None,
             pal,
         ))
@@ -153,10 +153,10 @@ fn button_inspector(
         overridden,
         action == default_binding(button),
     ) {
-        (Some(app), true, _) => rust_i18n::t!("actions.overridden_in_app", app => app.to_string()),
-        (Some(_), false, _) => rust_i18n::t!("profiles.inherited_from_default"),
-        (None, _, true) => rust_i18n::t!("pointer.device_default"),
-        (None, _, false) => rust_i18n::t!("profiles.customized"),
+        (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false, _) => tr!("profiles.inherited_from_default"),
+        (None, _, true) => tr!("pointer.device_default"),
+        (None, _, false) => tr!("profiles.customized"),
     };
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -170,8 +170,8 @@ fn button_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            rust_i18n::t!(button.translation_key()).into(),
-            Some(status.into()),
+            tr!(button.translation_key()),
+            Some(status),
             pal,
         ))
         .child(current_action_card(&action, picker, pal))
@@ -181,7 +181,7 @@ fn button_inspector(
                 control_button("inspector-use-default")
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(rust_i18n::t!("profiles.use_the_default_profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.clear_app_binding(button);
@@ -202,7 +202,7 @@ fn button_inspector(
                     control_button("inspector-use-gestures")
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(rust_i18n::t!("actions.use_gestures"))
+                        .label(tr!("actions.use_gestures"))
                         .on_click(move |_, _, cx| {
                             AppState::update_bindings(cx, |state| {
                                 state.commit_gesture_mode(button, true);
@@ -246,25 +246,20 @@ fn inherited_gesture_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            rust_i18n::t!(button.translation_key()).into(),
-            Some(rust_i18n::t!("profiles.inherited_from_default").into()),
+            tr!(button.translation_key()),
+            Some(tr!("profiles.inherited_from_default")),
             pal,
         ))
         .child(gesture_summary_card(picker, pal))
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(rust_i18n::t!(
-                    "actions.app_profile_action_replaces_gestures",
-                    app => app.to_string()
-                )),
-        )
+        .child(div().text_caption().text_color(pal.text_muted).child(tr!(
+            "actions.app_profile_action_replaces_gestures",
+            app => app.to_string()
+        )))
         .child(
             Button::new("inspector-edit-default-gestures")
                 .small()
                 .w_full()
-                .label(rust_i18n::t!("actions.edit_default_gestures"))
+                .label(tr!("actions.edit_default_gestures"))
                 .on_click(move |_, _, cx| {
                     AppState::update_bindings(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
@@ -310,8 +305,8 @@ fn gesture_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            rust_i18n::t!(button.translation_key()).into(),
-            Some(rust_i18n::t!("actions.five_directions").into()),
+            tr!(button.translation_key()),
+            Some(tr!("actions.five_directions")),
             pal,
         ))
         .child(gesture_directions(
@@ -325,7 +320,7 @@ fn gesture_inspector(
         .child(
             control_button("inspector-single-action")
                 .w_full()
-                .label(rust_i18n::t!("actions.use_a_single_action"))
+                .label(tr!("actions.use_a_single_action"))
                 .on_click(move |_, _, cx| {
                     AppState::update_bindings(cx, |state| {
                         state.commit_gesture_mode(button, false);
@@ -357,7 +352,7 @@ fn gesture_directions(
 ) -> impl IntoElement {
     v_flex()
         .gap_1()
-        .child(editor_section(rust_i18n::t!("actions.direction"), pal))
+        .child(editor_section(tr!("actions.direction"), pal))
         .children(
             GestureDirection::ALL
                 .into_iter()
@@ -384,7 +379,7 @@ fn gesture_directions(
                                         .child(
                                             div()
                                                 .text_body()
-                                                .child(rust_i18n::t!(direction.translation_key())),
+                                                .child(tr!(direction.translation_key())),
                                         )
                                         .child(
                                             div()
@@ -437,13 +432,13 @@ fn thumbwheel_inspector(
             || overrides.contains_key(&ButtonId::ThumbwheelScrollUp)
     });
     let status = match (editing_app, is_overridden) {
-        (Some(app), true) => rust_i18n::t!("actions.overridden_in_app", app => app.to_string()),
-        (Some(_), false) => rust_i18n::t!("profiles.inherited_from_default"),
-        (None, _) => rust_i18n::t!("profiles.default_profile"),
+        (Some(app), true) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false) => tr!("profiles.inherited_from_default"),
+        (None, _) => tr!("profiles.default_profile"),
     };
     let current_label = current.map_or_else(
-        || rust_i18n::t!("common.custom"),
-        |preset| rust_i18n::t!(preset.translation_key()),
+        || tr!("common.custom"),
+        |preset| tr!(preset.translation_key()),
     );
     let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
     let observer = picker.view.clone();
@@ -451,15 +446,15 @@ fn thumbwheel_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            rust_i18n::t!("pointer.thumb_wheel").into(),
-            Some(status.into()),
+            tr!("pointer.thumb_wheel"),
+            Some(status),
             pal,
         ))
         .child(selection_card(
             "inspector-current-thumbwheel-preset",
-            rust_i18n::t!("common.preset").into(),
+            tr!("common.preset"),
             current_icon,
-            current_label.into(),
+            current_label,
             picker,
             pal,
         ))
@@ -467,7 +462,7 @@ fn thumbwheel_inspector(
             panel.child(
                 v_flex()
                     .gap_1()
-                    .child(editor_section(rust_i18n::t!("common.preset"), pal))
+                    .child(editor_section(tr!("common.preset"), pal))
                     .children(ThumbwheelPreset::ALL.into_iter().enumerate().map(
                         |(index, preset)| {
                             let selected = current == Some(preset);
@@ -485,9 +480,7 @@ fn thumbwheel_inspector(
                                                 .size_4()
                                                 .text_color(pal.text_muted),
                                         )
-                                        .child(
-                                            div().child(rust_i18n::t!(preset.translation_key())),
-                                        ),
+                                        .child(div().child(tr!(preset.translation_key()))),
                                 )
                                 .when(selected, |row| {
                                     row.child(
@@ -516,7 +509,7 @@ fn thumbwheel_inspector(
                     .small()
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(rust_i18n::t!("profiles.use_the_default_profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.clear_app_thumbwheel();
@@ -553,7 +546,7 @@ fn current_action_card(
 ) -> impl IntoElement {
     selection_card(
         "inspector-current-action",
-        rust_i18n::t!("actions.current_action").into(),
+        tr!("actions.current_action"),
         action_icon_path(action),
         localized_action_label(action),
         picker,
@@ -564,9 +557,9 @@ fn current_action_card(
 fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
-        rust_i18n::t!("actions.current_action").into(),
+        tr!("actions.current_action"),
         GESTURE_BUTTON_ICON,
-        rust_i18n::t!("actions.five_directions").into(),
+        tr!("actions.five_directions"),
         picker,
         pal,
     )
@@ -659,7 +652,7 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(editor_section(rust_i18n::t!("actions.actions"), pal))
+        .child(editor_section(tr!("actions.actions"), pal))
         .child(control_input(action_search).cleanable(true))
         .child(
             v_flex()
@@ -670,7 +663,7 @@ fn action_library(
                             .py_3()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(rust_i18n::t!("actions.no_actions_found")),
+                            .child(tr!("actions.no_actions_found")),
                     )
                 })
                 .children(rows),

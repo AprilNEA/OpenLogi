@@ -6,7 +6,6 @@ use super::{
     StateEvent, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px, v_flex,
 };
 use crate::ui::theme::Typography as _;
-use rust_i18n::t;
 
 /// The Updates page: a hero card with the running build, its update status, and
 /// the contextual check / install / restart action; the opt-in auto-check and
@@ -19,7 +18,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
     let toggles = SettingGroup::new()
         .item(
             SettingItem::new(
-                rust_i18n::t!("app.check_for_updates_setting"),
+                tr!("app.check_for_updates_setting"),
                 SettingField::switch(
                     |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().check_for_updates),
                     |enabled, cx| {
@@ -30,13 +29,11 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                     },
                 ),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "app.update_check_frequency_description"
-            ))),
+            .description(tr!("app.update_check_frequency_description")),
         )
         .item(
             SettingItem::new(
-                rust_i18n::t!("updates.automatically_download_and_install"),
+                tr!("updates.automatically_download_and_install"),
                 SettingField::switch(
                     |cx| {
                         AppState::try_read(cx)
@@ -50,16 +47,14 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                     },
                 ),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "updates.automatic_update_description"
-            ))),
+            .description(tr!("updates.automatic_update_description")),
         );
 
     let source = SettingGroup::new().item(SettingItem::render(move |_, _, cx| update_source(cx)));
-    SettingPage::new(rust_i18n::t!("updates.updates"))
+    SettingPage::new(tr!("updates.updates"))
         .icon(IconName::ArrowDown)
         .resettable(false)
-        .description(rust_i18n::t!("updates.update_network_privacy_description"))
+        .description(tr!("updates.update_network_privacy_description"))
         .group(hero)
         .group(toggles)
         .group(source)
@@ -74,28 +69,28 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
     // A short status tag for the settled states (semantic colours from the theme);
     // transient states carry their detail in the message line instead.
     let pill = match &status {
-        UpdateStatus::UpToDate => Some(Tag::success().child(t!("updates.up_to_date"))),
-        UpdateStatus::Available(_) => Some(Tag::info().child(t!("updates.update_available"))),
-        UpdateStatus::Staged(_) => Some(Tag::success().child(t!("updates.update_ready"))),
-        UpdateStatus::Errored(_) => Some(Tag::danger().child(t!("updates.update_failed"))),
+        UpdateStatus::UpToDate => Some(Tag::success().child(tr!("updates.up_to_date"))),
+        UpdateStatus::Available(_) => Some(Tag::info().child(tr!("updates.update_available"))),
+        UpdateStatus::Staged(_) => Some(Tag::success().child(tr!("updates.update_ready"))),
+        UpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("updates.update_failed"))),
         _ => None,
     };
 
     let message = match &status {
         UpdateStatus::Idle | UpdateStatus::UpToDate => None,
-        UpdateStatus::Checking => Some(t!("updates.checking_for_updates")),
-        UpdateStatus::Available(v) => Some(t!("updates.update_version_available", version => v)),
+        UpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
+        UpdateStatus::Available(v) => Some(tr!("updates.update_version_available", version => v)),
         UpdateStatus::Downloading { downloaded, total } => Some(match total {
             Some(t) if *t > 0 => {
-                t!("updates.update_downloading_percent", percent => (*downloaded * 100 / *t).to_string())
+                tr!("updates.update_downloading_percent", percent => (*downloaded * 100 / *t).to_string())
             }
             _ => {
-                t!("updates.update_downloading_size", size => (*downloaded / 1_048_576).to_string())
+                tr!("updates.update_downloading_size", size => (*downloaded / 1_048_576).to_string())
             }
         }),
-        UpdateStatus::Installing => Some(t!("updates.installing")),
-        UpdateStatus::Staged(v) => Some(t!("updates.update_version_ready", version => v)),
-        UpdateStatus::Errored(e) => Some(t!("updates.update_failed_message", error => e.clone())),
+        UpdateStatus::Installing => Some(tr!("updates.installing")),
+        UpdateStatus::Staged(v) => Some(tr!("updates.update_version_ready", version => v)),
+        UpdateStatus::Errored(e) => Some(tr!("updates.update_failed_message", error => e.clone())),
     };
 
     let busy = matches!(
@@ -108,19 +103,19 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
         match &status {
             UpdateStatus::Available(_) => Button::new("update-install")
                 .outline()
-                .label(t!("updates.download_install"))
+                .label(tr!("updates.download_install"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, Updater::download_and_install);
                 }),
             UpdateStatus::Staged(_) => Button::new("update-restart")
                 .outline()
-                .label(t!("updates.restart_to_update"))
+                .label(tr!("updates.restart_to_update"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, |u, cx| u.restart(cx));
                 }),
             _ => Button::new("update-check")
                 .outline()
-                .label(t!("updates.check_for_updates_action"))
+                .label(tr!("updates.check_for_updates_action"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, Updater::check);
                 }),
@@ -164,7 +159,7 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                                 .text_caption()
                                 .text_color(pal.text_muted)
                                 .truncate()
-                                .child(message.unwrap_or_else(|| t!("updates.stable_channel"))),
+                                .child(message.unwrap_or_else(|| tr!("updates.stable_channel"))),
                         ),
                 ),
         )
@@ -193,7 +188,7 @@ fn update_source(cx: &App) -> gpui::Div {
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(rust_i18n::t!("updates.update_source")),
+                                .child(tr!("updates.update_source")),
                         )
                         .child(
                             div()
@@ -208,7 +203,7 @@ fn update_source(cx: &App) -> gpui::Div {
                         Button::new("update-changelog")
                             .ghost()
                             .icon(IconName::ExternalLink)
-                            .label(rust_i18n::t!("updates.view_changelog"))
+                            .label(tr!("updates.view_changelog"))
                             .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
                     ),
                 ),
@@ -217,6 +212,6 @@ fn update_source(cx: &App) -> gpui::Div {
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(rust_i18n::t!("updates.update_connection_policy")),
+                .child(tr!("updates.update_connection_policy")),
         )
 }

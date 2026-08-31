@@ -23,9 +23,7 @@ impl SelectItem for AssetSourceOption {
 
     fn title(&self) -> SharedString {
         match self.source {
-            AssetSourcePreference::Automatic => {
-                gpui::SharedString::from(rust_i18n::t!("assets.automatic_recommended"))
-            }
+            AssetSourcePreference::Automatic => tr!("assets.automatic_recommended"),
             AssetSourcePreference::OpenLogi => SharedString::from("OpenLogi"),
             AssetSourcePreference::Cloudflare => SharedString::from("Cloudflare"),
             AssetSourcePreference::Fastly => SharedString::from("Fastly"),
@@ -69,18 +67,16 @@ pub(super) fn assets_page(
     let group = SettingGroup::new()
         .item(
             SettingItem::new(
-                rust_i18n::t!("assets.asset_source"),
+                tr!("assets.asset_source"),
                 SettingField::render(move |_, _, _| {
                     asset_source_select_field(asset_source_select.clone())
                 }),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "assets.asset_source_description"
-            ))),
+            .description(tr!("assets.asset_source_description")),
         )
         .item(
             SettingItem::new(
-                rust_i18n::t!("assets.automatically_download_device_images"),
+                tr!("assets.automatically_download_device_images"),
                 SettingField::switch(
                     |cx| {
                         AppState::try_read(cx).is_none_or(|s| s.app_settings().auto_download_assets)
@@ -98,79 +94,58 @@ pub(super) fn assets_page(
                     },
                 ),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "assets.automatic_device_images_description"
-            ))),
+            .description(tr!("assets.automatic_device_images_description")),
         )
         .item(
             SettingItem::new(
-                rust_i18n::t!("assets.refresh_assets"),
+                tr!("assets.refresh_assets"),
                 SettingField::render(move |_, _, cx| {
                     let view = refresh_view.clone();
                     let pal = crate::ui::theme::palette(cx);
-                    action_button(
-                        "assets-refresh",
-                        gpui::SharedString::from(rust_i18n::t!("common.refresh")),
-                        pal,
-                        move |cx| {
-                            send_asset_command(cx, AssetCommand::Refresh);
-                            // Give the spawned sync a moment to land small fetches,
-                            // then re-quote the size row so the click visibly did
-                            // something. Best-effort — a longer sync is caught by
-                            // the next action or window reopen.
-                            refresh_cache_desc_after(&view, Duration::from_secs(2), cx);
-                        },
-                    )
+                    action_button("assets-refresh", tr!("common.refresh"), pal, move |cx| {
+                        send_asset_command(cx, AssetCommand::Refresh);
+                        // Give the spawned sync a moment to land small fetches,
+                        // then re-quote the size row so the click visibly did
+                        // something. Best-effort — a longer sync is caught by
+                        // the next action or window reopen.
+                        refresh_cache_desc_after(&view, Duration::from_secs(2), cx);
+                    })
                 }),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "assets.refresh_device_images_description"
-            ))),
+            .description(tr!("assets.refresh_device_images_description")),
         )
         .item(
             SettingItem::new(
-                rust_i18n::t!("assets.clear_cache"),
+                tr!("assets.clear_cache"),
                 SettingField::render(move |_, _, cx| {
                     let view = view.clone();
                     let pal = crate::ui::theme::palette(cx);
-                    action_button(
-                        "assets-clear",
-                        gpui::SharedString::from(rust_i18n::t!("common.clear")),
-                        pal,
-                        move |cx| {
-                            send_asset_command(cx, AssetCommand::ClearCache);
-                            // The wipe runs on the main loop's channel arm, not
-                            // synchronously here — without a recompute the row
-                            // keeps quoting the pre-Clear size until the window
-                            // reopens, which reads as the button doing nothing.
-                            refresh_cache_desc_after(&view, Duration::from_millis(750), cx);
-                        },
-                    )
+                    action_button("assets-clear", tr!("common.clear"), pal, move |cx| {
+                        send_asset_command(cx, AssetCommand::ClearCache);
+                        // The wipe runs on the main loop's channel arm, not
+                        // synchronously here — without a recompute the row
+                        // keeps quoting the pre-Clear size until the window
+                        // reopens, which reads as the button doing nothing.
+                        refresh_cache_desc_after(&view, Duration::from_millis(750), cx);
+                    })
                 }),
             )
             .description(cache_desc),
         )
         .item(
             SettingItem::new(
-                rust_i18n::t!("assets.cache_location"),
+                tr!("assets.cache_location"),
                 SettingField::render(move |_, _, cx| {
                     let pal = crate::ui::theme::palette(cx);
-                    action_button(
-                        "assets-open",
-                        gpui::SharedString::from(rust_i18n::t!("common.open")),
-                        pal,
-                        |_| {
-                            crate::services::assets::reveal_cache_in_file_manager();
-                        },
-                    )
+                    action_button("assets-open", tr!("common.open"), pal, |_| {
+                        crate::services::assets::reveal_cache_in_file_manager();
+                    })
                 }),
             )
-            .description(gpui::SharedString::from(rust_i18n::t!(
-                "assets.show_downloaded_images_description"
-            ))),
+            .description(tr!("assets.show_downloaded_images_description")),
         );
 
-    SettingPage::new(rust_i18n::t!("assets.assets"))
+    SettingPage::new(tr!("assets.assets"))
         .icon(IconName::HardDrive)
         .resettable(false)
         .group(group)
@@ -219,9 +194,7 @@ pub(super) fn cache_size_description() -> SharedString {
                   and this is a display-only size"
     )]
     let mb = crate::services::assets::cache_size_bytes() as f64 / 1024.0 / 1024.0;
-    gpui::SharedString::from(
-        rust_i18n::t!("assets.downloaded_images_size", size => format!("{mb:.1} MB")),
-    )
+    tr!("assets.downloaded_images_size", size => format!("{mb:.1} MB"))
 }
 
 /// A small bordered text button matching the permission rows' "Open" control.

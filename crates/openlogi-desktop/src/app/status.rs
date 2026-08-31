@@ -66,11 +66,7 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, cx: &Ap
 /// stays unreachable, the IPC client downgrades the link and
 /// [`unreachable_body`] replaces this frame.
 pub(super) fn connecting_body(cx: &App) -> Div {
-    loading_body(
-        rust_i18n::t!("agent.connecting_to_the_background_service").into(),
-        cx,
-    )
-    .size_full()
+    loading_body(tr!("agent.connecting_to_the_background_service"), cx).size_full()
 }
 
 /// Whole-window frame once the agent has been unreachable well past startup:
@@ -78,8 +74,8 @@ pub(super) fn connecting_body(cx: &App) -> Div {
 /// keeps running underneath, and the first snapshot swaps the real UI back in.
 pub(super) fn unreachable_body(cx: &App) -> Div {
     notice_body(
-        rust_i18n::t!("agent.cant_reach_the_background_service").into(),
-        rust_i18n::t!("agent.agent_connection_retry").into(),
+        tr!("agent.cant_reach_the_background_service"),
+        tr!("agent.agent_connection_retry"),
         cx,
     )
     .size_full()
@@ -91,35 +87,35 @@ pub(super) fn unreachable_body(cx: &App) -> Div {
 /// window would keep showing live-looking but frozen state.
 pub(super) fn outdated_gui_body(cx: &App) -> Div {
     notice_body(
-        rust_i18n::t!("agent.openlogi_was_updated").into(),
-        rust_i18n::t!("agent.updated_window_requires_relaunch").into(),
+        tr!("agent.openlogi_was_updated"),
+        tr!("agent.updated_window_requires_relaunch"),
         cx,
     )
     .size_full()
     .child(
         Button::new("relaunch-gui")
             .primary()
-            .label(rust_i18n::t!("agent.relaunch_openlogi"))
+            .label(tr!("agent.relaunch_openlogi"))
             .on_click(|_, _, cx| cx.restart()),
     )
 }
 
 /// Fail-closed frame for config load/save/conflict/reload failures.
 pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
-    notice_body(rust_i18n::t!("device.configuration").into(), message, cx)
+    notice_body(tr!("device.configuration"), message, cx)
         .size_full()
         .child(
             h_flex()
                 .gap_2()
                 .child(
                     Button::new("open-config-folder")
-                        .label(rust_i18n::t!("app.open_configuration_folder"))
+                        .label(tr!("app.open_configuration_folder"))
                         .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
                 )
                 .child(
                     Button::new("restart-after-config-error")
                         .primary()
-                        .label(rust_i18n::t!("agent.relaunch_openlogi"))
+                        .label(tr!("agent.relaunch_openlogi"))
                         .on_click(|_, _, cx| cx.restart()),
                 ),
         )
@@ -152,9 +148,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
     use gpui_base::Button as BaseButton;
 
     BaseButton::new("footer-accessibility")
-        .accessibility_label(rust_i18n::t!(
-            "permissions.accessibility_not_granted_click_to_grant"
-        ))
+        .accessibility_label(tr!("permissions.accessibility_not_granted_click_to_grant"))
         .flex()
         .gap_2()
         .items_center()
@@ -169,9 +163,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
                 .rounded_full()
                 .bg(rgb(theme::STATUS_CONNECTING)),
         )
-        .child(div().child(rust_i18n::t!(
-            "permissions.accessibility_not_granted_click_to_grant"
-        )))
+        .child(div().child(tr!("permissions.accessibility_not_granted_click_to_grant")))
         .on_click(|_, _, cx| super::request_accessibility(cx))
 }
 

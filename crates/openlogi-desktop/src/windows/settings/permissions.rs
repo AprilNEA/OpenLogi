@@ -22,7 +22,7 @@ use openlogi_permissions as permissions;
     )
 )]
 pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
-    let page = SettingPage::new(rust_i18n::t!("permissions.permissions"))
+    let page = SettingPage::new(tr!("permissions.permissions"))
         .icon(IconName::Info)
         .resettable(false);
 
@@ -31,8 +31,8 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
         let mut group = SettingGroup::new()
             .item(permission_item(
                 "perm-accessibility",
-                rust_i18n::t!("permissions.accessibility"),
-                rust_i18n::t!("permissions.accessibility_permission_requirement"),
+                tr!("permissions.accessibility"),
+                tr!("permissions.accessibility_permission_requirement"),
                 Permission::Accessibility,
                 |cx| {
                     // The agent owns the hook, so this is *its* grant,
@@ -51,8 +51,8 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
             .item(input_monitoring_item())
             .item(permission_item(
                 "perm-bluetooth",
-                rust_i18n::t!("permissions.bluetooth"),
-                rust_i18n::t!("permissions.bluetooth_permission_description"),
+                tr!("permissions.bluetooth"),
+                tr!("permissions.bluetooth_permission_description"),
                 Permission::Bluetooth,
                 |_| permissions::bluetooth(),
             ));
@@ -62,8 +62,8 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
         if has_camera {
             group = group.item(permission_item(
                 "perm-camera",
-                rust_i18n::t!("camera.camera"),
-                rust_i18n::t!("permissions.camera_permission_description"),
+                tr!("camera.camera"),
+                tr!("permissions.camera_permission_description"),
                 Permission::Camera,
                 |_| permissions::camera(),
             ));
@@ -79,7 +79,7 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
         // Description is only shown when access is not yet granted — no noise
         // when everything is already working.
         SettingItem::new(
-            rust_i18n::t!("permissions.input_device_access"),
+            tr!("permissions.input_device_access"),
             SettingField::render(move |_, _, cx| {
                 let pal = theme::palette(cx);
                 let status = permissions::input_device_access();
@@ -87,12 +87,12 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
                     .gap_1()
                     .child(status_badge(status, pal));
                 let hint = match status {
-                    PermissionStatus::Denied => Some(rust_i18n::t!(
-                        "permissions.linux_input_access_denied_description"
-                    )),
-                    PermissionStatus::Unknown => Some(rust_i18n::t!(
-                        "permissions.linux_input_access_unknown_description"
-                    )),
+                    PermissionStatus::Denied => {
+                        Some(tr!("permissions.linux_input_access_denied_description"))
+                    }
+                    PermissionStatus::Unknown => {
+                        Some(tr!("permissions.linux_input_access_unknown_description"))
+                    }
                     PermissionStatus::Granted => None,
                 };
                 if let Some(text) = hint {
@@ -110,7 +110,7 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
 #[cfg(target_os = "macos")]
 fn input_monitoring_item() -> SettingItem {
     SettingItem::new(
-        rust_i18n::t!("permissions.input_monitoring"),
+        tr!("permissions.input_monitoring"),
         SettingField::render(move |_, _, cx| {
             let status = AppState::try_global(cx)
                 .map(|state| state.read(cx))
@@ -139,18 +139,14 @@ fn input_monitoring_item() -> SettingItem {
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(rust_i18n::t!(
-                            "permissions.input_monitoring_granted_but_unavailable"
-                        )),
+                        .child(tr!("permissions.input_monitoring_granted_but_unavailable")),
                 )
             } else {
                 field
             }
         }),
     )
-    .description(rust_i18n::t!(
-        "permissions.input_monitoring_permission_description"
-    ))
+    .description(tr!("permissions.input_monitoring_permission_description"))
 }
 
 #[cfg(target_os = "macos")]
@@ -172,17 +168,11 @@ fn permission_item(
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
     let (label, color) = match status {
-        PermissionStatus::Granted => (
-            rust_i18n::t!("permissions.granted"),
-            theme::STATUS_CONNECTED,
-        ),
-        PermissionStatus::Denied => (
-            rust_i18n::t!("permissions.not_granted"),
-            theme::STATUS_CONNECTING,
-        ),
-        PermissionStatus::Unknown => (rust_i18n::t!("permissions.unknown"), theme::STATUS_OFFLINE),
+        PermissionStatus::Granted => (tr!("permissions.granted"), theme::STATUS_CONNECTED),
+        PermissionStatus::Denied => (tr!("permissions.not_granted"), theme::STATUS_CONNECTING),
+        PermissionStatus::Unknown => (tr!("permissions.unknown"), theme::STATUS_OFFLINE),
     };
-    badge(label.into(), color, pal)
+    badge(label, color, pal)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -210,19 +200,15 @@ fn permission_field(
     let never_requested = matches!(status, PermissionStatus::Unknown)
         && matches!(permission, Permission::Bluetooth | Permission::Camera);
     let status_el = if never_requested {
-        badge(
-            rust_i18n::t!("permissions.not_requested"),
-            theme::STATUS_OFFLINE,
-            pal,
-        )
+        badge(tr!("permissions.not_requested"), theme::STATUS_OFFLINE, pal)
     } else {
         status_badge(status, pal)
     };
     let prompts_here = never_requested && matches!(permission, Permission::Camera);
     let action_label = if prompts_here {
-        rust_i18n::t!("permissions.grant")
+        tr!("permissions.grant")
     } else {
-        rust_i18n::t!("common.open")
+        tr!("common.open")
     };
 
     h_flex()

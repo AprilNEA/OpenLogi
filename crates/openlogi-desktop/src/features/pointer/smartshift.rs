@@ -205,12 +205,12 @@ impl SmartShiftPanel {
 
         let mode_row = v_flex()
             .gap_2()
-            .child(section_label(rust_i18n::t!("pointer.wheel_mode"), pal))
+            .child(section_label(tr!("pointer.wheel_mode"), pal))
             .child(
                 h_flex()
                     .gap_2()
                     .child(mode_pill(
-                        rust_i18n::t!("pointer.free_spin").into(),
+                        tr!("pointer.free_spin"),
                         !ratchet,
                         SmartShiftStatus {
                             mode: SmartShiftMode::Free,
@@ -218,7 +218,7 @@ impl SmartShiftPanel {
                         },
                     ))
                     .child(mode_pill(
-                        rust_i18n::t!("pointer.ratchet").into(),
+                        tr!("pointer.ratchet"),
                         ratchet,
                         // `committed`, not the current setting: when the cached value is
                         // `0xFF` (permanent ratchet) this resolves to the last
@@ -243,7 +243,7 @@ impl SmartShiftPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(section_label(rust_i18n::t!("pointer.sensitivity"), pal))
+                    .child(section_label(tr!("pointer.sensitivity"), pal))
                     .child(
                         div()
                             .text_body()
@@ -259,7 +259,7 @@ impl SmartShiftPanel {
                 div()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(rust_i18n::t!("pointer.smartshift_sensitivity_description")),
+                    .child(tr!("pointer.smartshift_sensitivity_description")),
             );
 
         let wheel_row = self.wheel_sensitivity_row(window, cx);
@@ -302,10 +302,7 @@ impl SmartShiftPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(section_label(
-                        rust_i18n::t!("pointer.thumb_wheel_sensitivity"),
-                        pal,
-                    ))
+                    .child(section_label(tr!("pointer.thumb_wheel_sensitivity"), pal))
                     .child(
                         div()
                             .text_body()
@@ -336,27 +333,24 @@ impl Render for SmartShiftPanel {
         let show_write_status = matches!(status, SmartShiftLoad::Ready(_));
         let content: AnyElement = match status {
             SmartShiftLoad::Ready(s) => self.ready_body(*s, window, cx).into_any_element(),
-            SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => status_line(
-                rust_i18n::t!("pointer.device_offline_smartshift_is_unavailable"),
-                pal,
-            )
-            .into_any_element(),
-            SmartShiftLoad::Loading | SmartShiftLoad::Unknown => {
-                status_line(rust_i18n::t!("pointer.reading_smartshift_settings"), pal)
+            SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
+                status_line(tr!("pointer.device_offline_smartshift_is_unavailable"), pal)
                     .into_any_element()
+            }
+            SmartShiftLoad::Loading | SmartShiftLoad::Unknown => {
+                status_line(tr!("pointer.reading_smartshift_settings"), pal).into_any_element()
             }
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
-                rust_i18n::t!("pointer.couldnt_read_smartshift_click_to_retry"),
+                tr!("pointer.couldnt_read_smartshift_click_to_retry"),
                 pal,
                 retry_smartshift_closure(key.clone()),
             )
             .into_any_element(),
-            SmartShiftLoad::Unsupported(_) => status_line(
-                rust_i18n::t!("pointer.this_device_does_not_support_smartshift"),
-                pal,
-            )
-            .into_any_element(),
+            SmartShiftLoad::Unsupported(_) => {
+                status_line(tr!("pointer.this_device_does_not_support_smartshift"), pal)
+                    .into_any_element()
+            }
         };
 
         let feedback = show_write_status
@@ -381,17 +375,16 @@ fn smartshift_write_feedback(
     pal: Palette,
 ) -> Option<AnyElement> {
     match status {
-        Some(SmartShiftWriteStatus::Applying { .. }) => Some(
-            status_line(rust_i18n::t!("pointer.reading_smartshift_settings"), pal)
-                .into_any_element(),
-        ),
+        Some(SmartShiftWriteStatus::Applying { .. }) => {
+            Some(status_line(tr!("pointer.reading_smartshift_settings"), pal).into_any_element())
+        }
         Some(SmartShiftWriteStatus::Confirmed) => {
-            Some(status_line(rust_i18n::t!("common.done"), pal).into_any_element())
+            Some(status_line(tr!("common.done"), pal).into_any_element())
         }
         Some(SmartShiftWriteStatus::Failed) => Some(
             retry_line(
                 "smartshift-confirm-retry",
-                rust_i18n::t!("pointer.couldnt_read_smartshift_click_to_retry"),
+                tr!("pointer.couldnt_read_smartshift_click_to_retry"),
                 pal,
                 retry_smartshift_closure(key),
             )
@@ -414,15 +407,12 @@ fn permanent_row(
         .items_center()
         .child(
             v_flex()
-                .child(section_label(
-                    rust_i18n::t!("pointer.permanent_ratchet"),
-                    pal,
-                ))
+                .child(section_label(tr!("pointer.permanent_ratchet"), pal))
                 .child(
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(rust_i18n::t!("pointer.never_auto_switch_to_free_spin")),
+                        .child(tr!("pointer.never_auto_switch_to_free_spin")),
                 ),
         )
         .child(

@@ -29,10 +29,9 @@ pub(super) fn action_library(
     pal: Palette,
 ) -> impl IntoElement {
     let current_action = current.map(ActionRingEntry::action).cloned();
-    let current_label = current_action.as_ref().map_or_else(
-        || rust_i18n::t!("action_ring.empty_slot").into(),
-        localized_action_label,
-    );
+    let current_label = current_action
+        .as_ref()
+        .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
         .flex_1()
@@ -58,12 +57,12 @@ pub(super) fn action_library(
                         .child(
                             div()
                                 .text_subheading()
-                                .child(rust_i18n::t!("action_ring.actions_ring")),
+                                .child(tr!("action_ring.actions_ring")),
                         )
                         .child(
                             Button::new("ring-clear-slot")
                                 .compact()
-                                .label(rust_i18n::t!("action_ring.clear_slot"))
+                                .label(tr!("action_ring.clear_slot"))
                                 .on_click(move |_, _, cx| commit_slot(slot, None, cx)),
                         ),
                 )
@@ -114,7 +113,7 @@ fn icon_editor(
     let default = icon_button(
         "ring-default-icon",
         default_path,
-        rust_i18n::t!("action_ring.use_action_icon"),
+        tr!("action_ring.use_action_icon"),
         current.is_none(),
         pal,
     )
@@ -122,7 +121,7 @@ fn icon_editor(
 
     v_flex()
         .gap_1()
-        .child(editor_section(rust_i18n::t!("action_ring.icon"), pal))
+        .child(editor_section(tr!("action_ring.icon"), pal))
         .child(
             h_flex().flex_wrap().gap_1().child(default).children(
                 ActionRingIcon::ALL
@@ -165,10 +164,7 @@ fn shortcut_editor(
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(
-            rust_i18n::t!("action_ring.custom_shortcut"),
-            pal,
-        ))
+        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -181,7 +177,7 @@ fn shortcut_editor(
                 .child(
                     Button::new("ring-add-shortcut")
                         .compact()
-                        .label(rust_i18n::t!("common.add"))
+                        .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
                             if let Ok(combo) = shortcut.parse::<KeyCombo>() {
@@ -197,7 +193,7 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
     v_flex()
         .gap_1()
         .child(editor_section(
-            rust_i18n::t!("action_ring.open_application_or_folder"),
+            tr!("action_ring.open_application_or_folder"),
             pal,
         ))
         .child(
@@ -212,7 +208,7 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                 .child(
                     Button::new("ring-add-path")
                         .compact()
-                        .label(rust_i18n::t!("common.add"))
+                        .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let path = submit_input.read(cx).value().to_string();
                             if let Ok(target) = ApplicationTarget::new(path, "") {

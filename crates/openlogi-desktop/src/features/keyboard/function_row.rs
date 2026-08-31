@@ -677,7 +677,7 @@ fn key_click_target(
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
-        None => rust_i18n::t!("common.off").into(),
+        None => tr!("common.off"),
     }
 }
 
@@ -850,7 +850,7 @@ fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
                 .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
-                .child(rust_i18n::t!("actions.bind_control", name => key_name)),
+                .child(tr!("actions.bind_control", name => key_name)),
         )
 }
 
@@ -889,10 +889,7 @@ fn panel_action_rows(
 
     children.push(
         v_flex()
-            .child(editor_section(
-                rust_i18n::t!("actions.power_user").to_string(),
-                *pal,
-            ))
+            .child(editor_section(tr!("actions.power_user").to_string(), *pal))
             .children(power_user_actions.iter().enumerate().map(
                 |(idx, (kind, label, icon_path))| {
                     let kind = *kind;
@@ -1164,7 +1161,7 @@ fn image_or_fallback(
             .items_center()
             .justify_center()
             .text_color(pal.text_muted)
-            .child(rust_i18n::t!("keyboard.no_keyboard_image_available"))
+            .child(tr!("keyboard.no_keyboard_image_available"))
             .into_any_element(),
     }
 }
