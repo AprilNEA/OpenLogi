@@ -443,11 +443,10 @@ const PIXELS_PER_WHEEL_TICK: f64 = 10.0;
 /// `delta` is the frame's travel expressed in [`ScrollDelta`]'s wheel
 /// convention but computed for content-following ("natural") fingers, because
 /// the host, not the device, now owns the stroke: streaming a pad's raw
-/// reports switches its firmware out of scroll translation. The frame is
-/// wheel-class — no scroll phase — which apps clamp at document boundaries
-/// instead of rubber-banding the way an in-progress drag does; that is the
-/// shape the pad's own firmware uses for its native scrolling and glide, and
-/// the only synthesized shape macOS 27 was observed to scroll at all.
+/// reports switches its firmware out of scroll translation. The frame carries
+/// no scroll phase, which apps clamp at document boundaries instead of
+/// rubber-banding the way an in-progress drag does. On macOS it posts as a
+/// bare pixel event at the session tap (see the macOS module for why).
 ///
 /// macOS re-orients the delta by the user's natural-scrolling preference,
 /// which the system applies only to device-generated events. The Linux and

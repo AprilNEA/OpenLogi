@@ -8,12 +8,13 @@
 //! showed as a jolt — and a physical-velocity gate keeps deliberate slow
 //! scrolls dead in place.
 //!
-//! The tail posts phase-less wheel deltas — on-session probing showed macOS
+//! The tail posts phase-less pixel deltas — on-session probing showed macOS
 //! 27 ignores synthesized events that carry a momentum phase (four injection
 //! recipes, including Mac Mouse Fix's production one, all inert), while the
 //! pad's own firmware "momentum" is simply more unphased wheel deltas after
-//! lift. Plain deltas are the one shape proven to scroll, and a wheel-class
-//! stream needs no closure event: it ends by stopping.
+//! lift. Plain deltas are the one shape proven to scroll, and through the
+//! session tap they land as exact per-pixel values. A wheel-class stream
+//! needs no closure event: it ends by stopping.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

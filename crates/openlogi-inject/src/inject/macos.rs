@@ -672,6 +672,10 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
 
 /// Synthesise one frame of a touchpad scroll after honouring the user's
 /// natural-scrolling preference (see [`super::post_touchpad_scroll`]).
+///
+/// Bare pixels at the session tap: the HID tap rewrites device-class scroll
+/// into 8px-grid line deltas, and any extra field set here — point, line, or
+/// fixed-point — drops Chromium-family apps onto that coarse path.
 pub(super) fn post_touchpad_scroll(delta: ScrollDelta) {
     let delta = orient_by_scroll_preference(delta);
     let Ok(mut quantizer) = TOUCHPAD_SCROLL_QUANTIZER.lock() else {
@@ -683,7 +687,19 @@ pub(super) fn post_touchpad_scroll(delta: ScrollDelta) {
     if delta == QuantizedScroll::default() {
         return;
     }
-    post_continuous_scroll(delta, None);
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for touchpad scroll");
+        return;
+    };
+    // The session tap negates both axes on delivery; the tuning's y
+    // convention absorbs that, its x convention does not.
+    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, delta.y, -delta.x, 0)
+    else {
+        tracing::warn!("CGEvent::new_scroll_event failed for touchpad scroll");
+        return;
+    };
+    tag_synthetic(&ev);
+    ev.post(CGEventTapLocation::Session);
 }
 
 fn post_continuous_scroll(delta: QuantizedScroll, phase: Option<SmoothScrollPhase>) {
