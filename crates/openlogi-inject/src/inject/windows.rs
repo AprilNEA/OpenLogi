@@ -284,7 +284,7 @@ fn post_custom_shortcut(combo: &KeyCombo) {
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
-        modifiers.push(VK_CONTROL);
+        modifiers.push(VK_LWIN);
     }
     if combo.has_shift() {
         modifiers.push(VK_SHIFT);
