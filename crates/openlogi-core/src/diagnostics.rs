@@ -4,7 +4,10 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::device::{BatteryInfo, BatteryStatus, Capabilities, DeviceKind, DeviceTransports};
+use crate::device::{
+    BatteryInfo, BatteryStatus, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
+};
+use crate::hid::DeviceRoute;
 
 /// Where the resolver found the bundled device renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +35,48 @@ pub enum ConnectionKind {
     Wired,
     /// The route could not be classified from the announced transports.
     Unknown,
+}
+
+impl ConnectionKind {
+    /// Classify the active connection from its route and HID++ model information.
+    #[must_use]
+    pub fn for_device(route: Option<&DeviceRoute>, model: Option<&DeviceModelInfo>) -> Self {
+        match route {
+            Some(DeviceRoute::Bolt { .. }) => Self::BoltReceiver,
+            Some(DeviceRoute::Unifying { .. }) => Self::UnifyingReceiver,
+            Some(DeviceRoute::Direct { product_id, .. }) => {
+                model.map_or(Self::Unknown, |model| direct_connection(*product_id, model))
+            }
+            Some(DeviceRoute::RawHid { .. }) => Self::Wired,
+            None => Self::Unknown,
+        }
+    }
+}
+
+fn direct_connection(product_id: u16, model: &DeviceModelInfo) -> ConnectionKind {
+    let candidates = [
+        (model.transports.bluetooth, ConnectionKind::BluetoothDirect),
+        (model.transports.btle, ConnectionKind::BluetoothDirect),
+        (model.transports.equad, ConnectionKind::Unknown),
+        (model.transports.usb, ConnectionKind::Wired),
+    ];
+    let mut model_ids = model.model_ids.into_iter();
+    let mut matched = None;
+    for (supported, kind) in candidates {
+        if !supported {
+            continue;
+        }
+        if model_ids
+            .next()
+            .is_some_and(|pid| pid != 0 && pid == product_id)
+        {
+            if matched.is_some() {
+                return ConnectionKind::Unknown;
+            }
+            matched = Some(kind);
+        }
+    }
+    matched.unwrap_or(ConnectionKind::Unknown)
 }
 
 /// Whether a curated render resolved, or the device fell back to the silhouette.
