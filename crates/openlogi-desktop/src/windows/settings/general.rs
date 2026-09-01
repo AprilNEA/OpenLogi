@@ -71,7 +71,13 @@ pub(super) fn general_page(
             } else {
                 tr!("Show in the notification area")
             },
-            SettingField::switch(
+            super::setting_toggle(
+                "show-in-menu-bar",
+                if cfg!(target_os = "macos") {
+                    tr!("Show in menu bar")
+                } else {
+                    tr!("Show in the notification area")
+                },
                 |cx| {
                     AppState::try_read(cx)
                         .is_some_and(|s| s.app_settings().show_in_menu_bar)
@@ -103,7 +109,9 @@ pub(super) fn general_page(
 fn smooth_scrolling_item() -> SettingItem {
     SettingItem::new(
         tr!("Smooth scrolling"),
-        SettingField::switch(
+        super::setting_toggle(
+            "smooth-scrolling",
+            tr!("Smooth scrolling"),
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
             |enabled, cx| {
                 AppState::update(cx, move |state, cx| {
@@ -124,6 +132,7 @@ fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> g
         slider,
         value.to_string(),
         value == ThumbwheelSensitivity::DEFAULT,
+        tr!("Thumb wheel sensitivity"),
         cx,
     )
 }
@@ -134,6 +143,7 @@ fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App)
         slider,
         value.to_string(),
         value == VerticalScrollSensitivity::DEFAULT,
+        tr!("Vertical scroll sensitivity"),
         cx,
     )
 }
@@ -142,6 +152,7 @@ fn sensitivity_field(
     slider: &Entity<SliderState>,
     value: String,
     is_default: bool,
+    label: gpui::SharedString,
     cx: &mut App,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
@@ -152,7 +163,11 @@ fn sensitivity_field(
             h_flex()
                 .items_center()
                 .gap_3()
-                .child(div().w(px(180.)).child(Slider::new(slider)))
+                .child(
+                    div()
+                        .w(px(180.))
+                        .child(Slider::new(slider).accessibility_label(label)),
+                )
                 .child(
                     div()
                         .w(px(72.))
@@ -177,7 +192,9 @@ fn sensitivity_field(
 fn launch_at_login_item() -> SettingItem {
     SettingItem::new(
         tr!("Launch at login"),
-        SettingField::switch(
+        super::setting_toggle(
+            "launch-at-login",
+            tr!("Launch at login"),
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().launch_at_login),
             |enabled, cx| {
                 AppState::update(cx, move |state, cx| {

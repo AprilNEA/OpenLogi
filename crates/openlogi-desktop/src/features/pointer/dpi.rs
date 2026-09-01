@@ -10,17 +10,17 @@ use gpui::{
     Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
-    IconName, Selectable as _, Sizable as _,
+    IconName, Selectable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
 use crate::state::{AppState, DeviceKey, DeviceRecord, DpiStatus, StateEvent};
-use crate::ui::components::PresetChip;
+use crate::ui::components::{AccessibleSlider, PresetChip};
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -324,9 +324,10 @@ fn slider_element(
             )
             .into_any_element()
         }
-        (DpiStatus::Ready(_), Some(slider_state)) => {
-            Slider::new(slider_state).horizontal().into_any_element()
-        }
+        (DpiStatus::Ready(_), Some(slider_state)) => AccessibleSlider::new(slider_state)
+            .horizontal()
+            .accessibility_label(tr!("DPI"))
+            .into_any_element(),
         (DpiStatus::Ready(_), None) => {
             status_line(tr!("Preparing DPI slider…"), pal).into_any_element()
         }
@@ -391,10 +392,14 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
                 }),
         )
         .child(
-            Button::new(("dpi-preset-remove", idx))
-                .xsmall()
-                .ghost()
-                .icon(IconName::Close)
+            gpui_base::Button::new(("dpi-preset-remove", idx))
+                .accessibility_label(tr!(
+                    "Remove %{name}",
+                    name => format!("{value} DPI preset")
+                ))
+                .size(px(24.))
+                .rounded(px(12.))
+                .child(gpui_component::Icon::new(IconName::Close).size_3())
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {

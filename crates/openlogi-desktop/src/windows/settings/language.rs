@@ -74,6 +74,8 @@ pub(super) fn language_select_field(
     // of letting it consume the whole Settings item row.
     div().flex_shrink_0().w(px(220.)).h_6().child(
         control_select(&language_select)
+            .accessibility_label(tr!("Language"))
+            .title_prefix(format!("{}: ", tr!("Language")))
             .w(px(220.))
             .menu_width(px(220.)),
     )

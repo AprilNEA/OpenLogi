@@ -120,6 +120,7 @@ fn add_app_content(
         .child(
             control_input(&search)
                 .cleanable(true)
+                .aria_label(tr!("Search applications…"))
                 .prefix(IconName::Search),
         )
         .when(!recent_rows.is_empty(), |card| {
@@ -223,6 +224,7 @@ fn applications_toggle(
 ) -> impl IntoElement {
     BaseButton::new(format!("{id_base}:all-applications-toggle"))
         .role(Role::Button)
+        .aria_label(tr!("All applications"))
         .aria_expanded(expanded)
         .w_full()
         .flex()
@@ -290,10 +292,13 @@ fn application_row(
     pal: Palette,
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
+    let accessible_label = format!("{} ({})", choice.name, choice.app);
+    let name = choice.name.clone();
     let app = choice.app.clone();
     div().h(px(APP_ROW_H)).child(
         MenuRow::new(format!("{id_base}:catalog-app:{}", choice.app))
             .role(Role::MenuItem)
+            .aria_label(accessible_label)
             .child(
                 h_flex()
                     .min_w_0()
@@ -303,7 +308,7 @@ fn application_row(
                     .child(
                         v_flex()
                             .min_w_0()
-                            .child(div().truncate().text_body().child(choice.name))
+                            .child(div().truncate().text_body().child(name))
                             .child(
                                 div()
                                     .truncate()

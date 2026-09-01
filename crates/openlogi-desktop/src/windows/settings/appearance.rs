@@ -6,10 +6,10 @@ use openlogi_core::config::AppIcon;
 
 use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
-    IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
-    Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
-    StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
-    ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
+    IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, Role,
+    SelectState, Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView,
+    SharedString, StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig,
+    ThemeFilter, ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
 use crate::platform::app_icon;
 use crate::ui::choice_card::ChoiceCard;
@@ -135,39 +135,45 @@ fn set_scale(cx: &mut App, scale: UiScale) {
 
 /// The Light / Dark / Follow-system appearance picker — three macOS-style
 /// preview thumbnails, each with a radio + label, mirroring System Settings.
-fn mode_segment(cx: &App) -> gpui::Div {
+fn mode_segment(cx: &App) -> gpui::Stateful<gpui::Div> {
     let pal = theme::palette(cx);
     let current = appearance_of(cx);
     let accent = cx.theme().primary;
-    h_flex().gap_4().items_start().children([
-        mode_card(
-            "mode-light",
-            tr!("Light"),
-            ModePreview::Light,
-            current == Appearance::Light,
-            accent,
-            pal,
-            Appearance::Light,
-        ),
-        mode_card(
-            "mode-dark",
-            tr!("Dark"),
-            ModePreview::Dark,
-            current == Appearance::Dark,
-            accent,
-            pal,
-            Appearance::Dark,
-        ),
-        mode_card(
-            "mode-system",
-            tr!("Follow system"),
-            ModePreview::Auto,
-            current == Appearance::System,
-            accent,
-            pal,
-            Appearance::System,
-        ),
-    ])
+    h_flex()
+        .id("appearance-mode-group")
+        .role(Role::RadioGroup)
+        .aria_label(tr!("Appearance mode"))
+        .gap_4()
+        .items_start()
+        .children([
+            mode_card(
+                "mode-light",
+                tr!("Light"),
+                ModePreview::Light,
+                current == Appearance::Light,
+                accent,
+                pal,
+                Appearance::Light,
+            ),
+            mode_card(
+                "mode-dark",
+                tr!("Dark"),
+                ModePreview::Dark,
+                current == Appearance::Dark,
+                accent,
+                pal,
+                Appearance::Dark,
+            ),
+            mode_card(
+                "mode-system",
+                tr!("Follow system"),
+                ModePreview::Auto,
+                current == Appearance::System,
+                accent,
+                pal,
+                Appearance::System,
+            ),
+        ])
 }
 
 /// Which scheme a mode card's thumbnail paints.
@@ -242,12 +248,15 @@ fn mode_card(
 /// The app-icon picker: one card per icon, each showing a render of the
 /// compiled icon rather than its artwork, so the choice looks like what macOS
 /// will draw.
-fn icon_picker(cx: &App) -> gpui::Div {
+fn icon_picker(cx: &App) -> gpui::Stateful<gpui::Div> {
     let pal = theme::palette(cx);
     let current =
         AppState::try_read(cx).map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
     let accent = cx.theme().primary;
     h_flex()
+        .id("app-icon-group")
+        .role(Role::RadioGroup)
+        .aria_label(tr!("App icon"))
         .gap_4()
         .items_start()
         .children(AppIcon::ALL.map(|icon| icon_card(icon, current == icon, accent, pal)))
@@ -377,56 +386,72 @@ fn radio_dot(selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
 /// `None` — defer to the active theme's own radius — rather than a fixed 6px, so
 /// it neither mis-highlights under themes with a different radius nor traps the
 /// user away from the theme default.
-fn radius_segment(cx: &App) -> ButtonGroup {
+fn radius_segment(cx: &App) -> gpui::Stateful<gpui::Div> {
     let current = AppState::try_read(cx).and_then(|s| s.app_settings().ui_radius);
     let options: [Option<u8>; 3] = [Some(0), None, Some(12)];
-    ButtonGroup::new("corner-radius")
-        .outline()
+    div()
+        .id("corner-radius-group")
+        .role(Role::RadioGroup)
+        .aria_label(tr!("Corner radius"))
         .child(
-            Button::new("radius-sharp")
-                .label(tr!("Sharp"))
-                .selected(current == Some(0)),
+            ButtonGroup::new("corner-radius")
+                .outline()
+                .child(
+                    Button::new("radius-sharp")
+                        .role(Role::RadioButton)
+                        .label(tr!("Sharp"))
+                        .selected(current == Some(0)),
+                )
+                .child(
+                    Button::new("radius-default")
+                        .role(Role::RadioButton)
+                        .label(tr!("Default"))
+                        .selected(current.is_none()),
+                )
+                .child(
+                    Button::new("radius-round")
+                        .role(Role::RadioButton)
+                        .label(tr!("Round"))
+                        .selected(current == Some(12)),
+                )
+                .on_click(move |clicks, _, cx| {
+                    if let Some(&ix) = clicks.first() {
+                        set_radius(cx, options[ix]);
+                    }
+                }),
         )
-        .child(
-            Button::new("radius-default")
-                .label(tr!("Default"))
-                .selected(current.is_none()),
-        )
-        .child(
-            Button::new("radius-round")
-                .label(tr!("Round"))
-                .selected(current == Some(12)),
-        )
-        .on_click(move |clicks, _, cx| {
-            if let Some(&ix) = clicks.first() {
-                set_radius(cx, options[ix]);
-            }
-        })
 }
 
 /// The supported interface-scale presets. Keeping this finite makes every
 /// layout state reviewable and avoids arbitrary values that can render a
 /// window unusable.
-fn scale_segment(cx: &App) -> ButtonGroup {
+fn scale_segment(cx: &App) -> gpui::Stateful<gpui::Div> {
     let current =
         AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
-    ButtonGroup::new("interface-scale")
-        .outline()
-        .children(UiScale::ALL.map(|scale| {
-            Button::new(("interface-scale", u32::from(scale.percent())))
-                .label(format!("{}%", scale.percent()))
-                .selected(current == scale)
-        }))
-        .on_click(|clicks, _, cx| {
-            let Some(scale) = clicks
-                .first()
-                .and_then(|index| UiScale::ALL.get(*index))
-                .copied()
-            else {
-                return;
-            };
-            set_scale(cx, scale);
-        })
+    div()
+        .id("interface-scale-group")
+        .role(Role::RadioGroup)
+        .aria_label(tr!("Interface scale"))
+        .child(
+            ButtonGroup::new("interface-scale")
+                .outline()
+                .children(UiScale::ALL.map(|scale| {
+                    Button::new(("interface-scale", u32::from(scale.percent())))
+                        .role(Role::RadioButton)
+                        .label(format!("{}%", scale.percent()))
+                        .selected(current == scale)
+                }))
+                .on_click(|clicks, _, cx| {
+                    let Some(scale) = clicks
+                        .first()
+                        .and_then(|index| UiScale::ALL.get(*index))
+                        .copied()
+                    else {
+                        return;
+                    };
+                    set_scale(cx, scale);
+                }),
+        )
 }
 
 /// Filter chips + the theme grid. Each card previews the theme's own colours
@@ -467,6 +492,9 @@ fn theme_picker(
 
     let no_matches = themes.is_empty();
     let grid = div()
+        .id("color-theme-group")
+        .role(Role::RadioGroup)
+        .aria_label(tr!("Color theme"))
         .when(no_matches, |grid| {
             grid.text_body()
                 .text_color(pal.text_muted)
@@ -496,6 +524,9 @@ fn theme_picker(
                     // yield (wrapping onto a second line if it must) so the
                     // fixed-width search input is never pushed out of view.
                     h_flex()
+                        .id("theme-filter-group")
+                        .role(Role::RadioGroup)
+                        .aria_label(tr!("Filter themes…"))
                         .gap_2()
                         .flex_1()
                         .min_w_0()
@@ -529,6 +560,7 @@ fn theme_picker(
                     div().w(px(200.)).flex_shrink_0().child(
                         control_input(theme_search)
                             .cleanable(true)
+                            .aria_label(tr!("Search themes"))
                             .prefix(IconName::Search),
                     ),
                 ),

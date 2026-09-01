@@ -1,5 +1,12 @@
 # OpenLogi GUI translations. Managed by Crowdin; edit source text there when possible.
 _version: 1
+"Device name": "Device name"
+"Previous": "Previous"
+"Next": "Next"
+"Navigate": "Navigate"
+"Search themes": "Search themes"
+"Vertical scroll sensitivity": "Vertical scroll sensitivity"
+"Thumb wheel sensitivity": "Thumb wheel sensitivity"
 "No devices connected": "Ei yhdistettyä laitetta"
 "Devices": "Laitteet"
 "%{count} devices": "%{count} laitetta"

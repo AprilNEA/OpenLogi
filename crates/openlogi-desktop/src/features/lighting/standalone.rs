@@ -1,7 +1,7 @@
 //! Controls for standalone lights.
 
 use crate::state::{AppState, DeviceRecord, LightCommandStatus, StateEvent};
-use crate::ui::components::Toggle;
+use crate::ui::components::{AccessibleSlider, Toggle};
 
 use super::visual::LightView;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_core::{
@@ -246,7 +246,9 @@ impl Render for LightPanel {
                     tr!("Brightness"),
                     format_light_value(value, range.unit()),
                     format_range_endpoints(range),
-                    Slider::new(slider).horizontal(),
+                    AccessibleSlider::new(slider)
+                        .horizontal()
+                        .accessibility_label(tr!("Brightness")),
                     pal,
                 ))
             })
@@ -258,7 +260,9 @@ impl Render for LightPanel {
                     tr!("Colour temperature"),
                     format_light_value(value, range.unit()),
                     format_range_endpoints(range),
-                    Slider::new(slider).horizontal(),
+                    AccessibleSlider::new(slider)
+                        .horizontal()
+                        .accessibility_label(tr!("Colour temperature")),
                     pal,
                 ))
             })
@@ -294,6 +298,7 @@ fn light_hero(device_name: &str, view: LightView, pal: Palette) -> impl IntoElem
         .child(
             Toggle::new("standalone-light-toggle")
                 .selected(effective_enabled)
+                .accessibility_label(tr!("Light"))
                 .icon(if effective_enabled {
                     IconName::Sun
                 } else {
@@ -382,6 +387,7 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
         .child(
             Toggle::new("standalone-light-camera-automation")
                 .selected(current.auto_camera)
+                .accessibility_label(tr!("Auto-on with camera"))
                 .min_width(px(72.))
                 .on_change(|auto_camera, _window, cx| {
                     update_light(cx, |state| {

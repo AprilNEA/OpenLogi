@@ -1,7 +1,7 @@
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    MouseButton, NavigationDirection, ParentElement, Render, Role, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, div, prelude::FluentBuilder as _, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -196,14 +196,20 @@ impl Focusable for AppView {
 
 impl AppView {
     /// Construct the root view and its child entities.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the root view wires all feature entities in one lifecycle boundary"
+    )]
     pub fn new(
         _inventories: &[DeviceInventory],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let cache = AssetResolver::new();
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        let focus_handle = cx.focus_handle().tab_stop(false);
+        window.on_next_frame(|window, _| {
+            window.on_next_frame(Window::focus_next);
+        });
         // `AppState` is installed as an entity by `main` (with the IPC command
         // sender) before any window opens, so there is no fallback state here.
 
@@ -493,6 +499,7 @@ impl Render for AppView {
             .text_color(pal.text_primary)
             .tab_group()
             .track_focus(&self.focus_handle)
+            .tab_stop(false)
             .key_context(APP_KEY_CONTEXT)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
@@ -504,7 +511,10 @@ impl Render for AppView {
             .when(cfg!(target_os = "linux"), |this| {
                 this.child(app_title_bar(cx))
             });
-        let root = Self::with_back_navigation(root, cx);
+        let root = Self::with_back_navigation(root, cx)
+            .id("app-root")
+            .role(Role::Application)
+            .aria_label("OpenLogi");
 
         let config_issue = AppState::try_global(cx)
             .map(|state| state.read(cx))

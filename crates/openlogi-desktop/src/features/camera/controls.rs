@@ -20,7 +20,7 @@ use gpui::{
 use gpui_base::Button as BaseButton;
 use gpui_component::{
     IconName, Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_camera::{AutoToggle, CameraControl, CameraState, ControlRange};
@@ -28,7 +28,7 @@ use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::{AppState, StateEvent};
-use crate::ui::components::ProfileTab;
+use crate::ui::components::{AccessibleSlider, ProfileTab};
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
@@ -858,7 +858,11 @@ fn control_row(
                 // Dimmed while auto owns the value, but still draggable —
                 // grabbing the slider takes the control over to manual.
                 .when(dimmed, |s| s.opacity(0.55))
-                .child(Slider::new(&slider.state).horizontal()),
+                .child(
+                    AccessibleSlider::new(&slider.state)
+                        .horizontal()
+                        .accessibility_label(slider.label.clone()),
+                ),
         )
         .child(
             div()

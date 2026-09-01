@@ -23,13 +23,10 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
     RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, rems,
+    prelude::FluentBuilder as _, px, rems,
 };
-use gpui_component::{
-    Disableable as _, IconName, Sizable as _, Size,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
-};
+use gpui_base::Button as BaseButton;
+use gpui_component::{IconName, Size, h_flex, v_flex};
 
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 type ItemRenderer = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static>;
@@ -209,11 +206,24 @@ fn arrow(
     size: Size,
     on_select: Option<SelectHandler>,
 ) -> impl IntoElement {
-    Button::new(id)
-        .icon(icon)
-        .ghost()
-        .with_size(size)
+    let label = match icon {
+        IconName::ChevronLeft => tr!("Previous"),
+        IconName::ChevronRight => tr!("Next"),
+        _ => tr!("Navigate"),
+    };
+    let edge = match size {
+        Size::XSmall => px(20.),
+        Size::Small => px(24.),
+        Size::Medium => px(32.),
+        Size::Large => px(40.),
+        Size::Size(edge) => edge,
+    };
+    BaseButton::new(id)
+        .accessibility_label(label)
+        .size(edge)
+        .rounded(edge / 2.)
         .disabled(disabled)
+        .child(gpui_component::Icon::new(icon).size_4())
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
             this.on_click(move |_, window, cx| handler(&target, window, cx))
         })

@@ -17,12 +17,12 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Sizable as _, WindowExt as _,
+    Icon, IconName, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
     input::InputState,
-    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    menu::{PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
     v_flex,
 };
@@ -39,7 +39,7 @@ use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
-use crate::ui::components::control_input;
+use crate::ui::components::{accessible_dropdown_menu, control_input};
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
@@ -399,12 +399,18 @@ pub(super) fn device_menu(
 /// The card corner's ellipsis button, opening the same menu the card offers
 /// on right-click.
 pub(super) fn device_menu_button(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
-    Button::new((ElementId::from("device-menu"), record.record_key()))
-        .ghost()
-        .xsmall()
-        .text_color(pal.text_muted)
-        .icon(IconName::Ellipsis)
-        .dropdown_menu_with_anchor(Anchor::TopRight, device_menu(record))
+    let id = (ElementId::from("device-menu"), record.record_key());
+    accessible_dropdown_menu(
+        id.clone(),
+        BaseButton::new(id)
+            .accessibility_label(tr!("Manage this device"))
+            .size(px(24.))
+            .rounded(px(12.))
+            .text_color(pal.text_muted)
+            .child(Icon::new(IconName::Ellipsis).size_3()),
+        Anchor::TopRight,
+        device_menu(record),
+    )
 }
 
 /// Confirm before forgetting a device: the record, its custom name, and its
@@ -455,12 +461,15 @@ fn open_rename_dialog(
             .w(px(420.))
             .title(tr!("Rename device"))
             .child(
-                v_flex().gap_2().child(control_input(&input)).child(
-                    div()
-                        .text_caption()
-                        .text_color(theme::palette(cx).text_muted)
-                        .child(tr!("Leave blank to use the model name.")),
-                ),
+                v_flex()
+                    .gap_2()
+                    .child(control_input(&input).aria_label(tr!("Device name")))
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(theme::palette(cx).text_muted)
+                            .child(tr!("Leave blank to use the model name.")),
+                    ),
             )
             .button_props(
                 DialogButtonProps::default()

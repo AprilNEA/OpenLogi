@@ -2,8 +2,8 @@
 
 use super::{
     App, AppState, Button, ButtonVariants, Disableable, Entity, FontWeight, IconName,
-    ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem, SettingPage, Sizable,
-    StateEvent, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px, v_flex,
+    ParentElement, RELEASES_URL, SettingGroup, SettingItem, SettingPage, Sizable, StateEvent,
+    Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
@@ -19,7 +19,9 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         .item(
             SettingItem::new(
                 tr!("Check for updates"),
-                SettingField::switch(
+                super::setting_toggle(
+                    "check-for-updates",
+                    tr!("Check for updates"),
                     |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().check_for_updates),
                     |enabled, cx| {
                         AppState::update(cx, move |state, cx| {
@@ -36,7 +38,9 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         .item(
             SettingItem::new(
                 tr!("Automatically download and install"),
-                SettingField::switch(
+                super::setting_toggle(
+                    "auto-install-updates",
+                    tr!("Automatically download and install"),
                     |cx| {
                         AppState::try_read(cx)
                             .is_some_and(|s| s.app_settings().auto_install_updates)

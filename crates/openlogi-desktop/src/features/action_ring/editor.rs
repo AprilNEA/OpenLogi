@@ -143,13 +143,15 @@ fn icon_button(
     label: impl Into<gpui::SharedString>,
     selected: bool,
     pal: Palette,
-) -> Button {
-    Button::new(id)
+) -> gpui_base::Button {
+    let id = id.into();
+    let label = label.into();
+    gpui_base::Button::new(id)
+        .accessibility_label(label)
         .size(px(32.0))
         .rounded(px(16.0))
         .selected(selected)
-        .icon(Icon::empty().path(path).text_color(pal.text_muted))
-        .tooltip(label)
+        .child(Icon::empty().path(path).text_color(pal.text_muted).size_4())
 }
 
 fn shortcut_editor(
@@ -165,10 +167,11 @@ fn shortcut_editor(
             h_flex()
                 .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(control_input(input).cleanable(true)),
+                    div().flex_1().min_w_0().child(
+                        control_input(input)
+                            .cleanable(true)
+                            .aria_label(tr!("Custom shortcut")),
+                    ),
                 )
                 .child(
                     Button::new("ring-add-shortcut")
@@ -193,10 +196,11 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
             h_flex()
                 .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(control_input(input).cleanable(true)),
+                    div().flex_1().min_w_0().child(
+                        control_input(input)
+                            .cleanable(true)
+                            .aria_label(tr!("Open application or folder")),
+                    ),
                 )
                 .child(
                     Button::new("ring-add-path")

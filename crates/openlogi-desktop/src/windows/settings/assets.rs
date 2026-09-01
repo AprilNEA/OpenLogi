@@ -79,7 +79,9 @@ pub(super) fn assets_page(
         .item(
             SettingItem::new(
                 tr!("Automatically download device images"),
-                SettingField::switch(
+                super::setting_toggle(
+                    "auto-download-assets",
+                    tr!("Automatically download device images"),
                     |cx| {
                         AppState::try_read(cx)
                             .is_none_or(|s| s.app_settings().auto_download_assets)
@@ -166,6 +168,8 @@ fn asset_source_select_field(
 ) -> impl IntoElement {
     div().flex_shrink_0().w(px(220.)).h_6().child(
         control_select(&asset_source_select)
+            .accessibility_label(tr!("Asset source"))
+            .title_prefix(format!("{}: ", tr!("Asset source")))
             .w(px(220.))
             .menu_width(px(220.)),
     )

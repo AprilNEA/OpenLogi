@@ -4,18 +4,26 @@
 //! render time, so callers do not have to thread colours through free-function
 //! builders.
 
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, Axis, ClickEvent, Context, DismissEvent, ElementId, Entity, Focusable,
+    InteractiveElement, Interactivity, IntoElement, Orientation, ParentElement, Pixels, RenderOnce,
+    Role, SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div,
+    prelude::FluentBuilder as _, px, relative, rgb,
 };
-use gpui_base::Button as BaseButton;
+use gpui_base::slider::SliderState;
+use gpui_base::{
+    AxisExt, Button as BaseButton, SliderIndicator, SliderThumb, SliderTrack, StyledExt as _,
+    Switch as BaseSwitch, SwitchThumb, SwitchTrack,
+};
 use gpui_component::{
     Disableable, Icon, IconName, Selectable, Sizable, Size, h_flex,
     input::{Input, InputState},
+    menu::PopupMenu,
+    popover::Popover,
     searchable_list::SearchableListDelegate,
     select::{Select, SelectState},
-    switch::Switch,
     v_flex,
 };
 
@@ -67,6 +75,11 @@ pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
     Select::new(state).small().min_h(px(theme::CONTROL_H))
 }
 
+#[derive(Default)]
+struct AccessibleDropdownBuilderState {
+    menu: Option<Entity<PopupMenu>>,
+}
+
 /// A controlled on/off switch with a compact state label.
 #[derive(IntoElement)]
 pub(crate) struct Toggle {
@@ -75,12 +88,316 @@ pub(crate) struct Toggle {
     disabled: bool,
     size: Size,
     label: Option<SharedString>,
+    accessibility_label: Option<SharedString>,
     icon: Option<IconName>,
     min_width: Option<Pixels>,
     on_change: Option<SwitchHandler>,
 }
 
 type SwitchHandler = std::rc::Rc<dyn Fn(&bool, &mut Window, &mut App)>;
+
+/// A slider with an explicit UI Automation name.
+///
+/// `gpui_component::Slider` exposes the value/role through its base slider,
+/// but has no way for an application to provide the control's name. That
+/// leaves NVDA with only "slider". This small themed wrapper keeps the same
+/// visuals while putting the name on the actual `Role::Slider` node.
+#[derive(IntoElement)]
+pub(crate) struct AccessibleSlider {
+    state: Entity<SliderState>,
+    axis: Axis,
+    disabled: bool,
+    accessibility_label: Option<SharedString>,
+}
+
+/// A dropdown trigger whose icon-only button still carries a real UIA name.
+///
+/// `DropdownMenuPopover` only accepts gpui-component's `Button`, whose
+/// accessibility name is tied to its visible label. This variant keeps the
+/// trigger as a `gpui_base::Button` and mirrors the package's menu lifecycle,
+/// including focus transfer into the popup and dismissal cleanup.
+pub(crate) fn accessible_dropdown_menu(
+    id: impl Into<ElementId>,
+    trigger: BaseButton,
+    anchor: impl Into<Anchor>,
+    builder: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+) -> impl IntoElement {
+    let id = id.into();
+    let state_id: ElementId = format!("accessible-dropdown:{id:?}").into();
+    let builder = Rc::new(builder);
+    // The keyed state lives in the window, just like gpui-component's native
+    // DropdownMenuPopover, so each trigger owns exactly one PopupMenu entity.
+    let anchor = anchor.into();
+    let menu_state = state_id.clone();
+    Popover::new(state_id)
+        .appearance(false)
+        .overlay_closable(false)
+        .anchor(anchor)
+        .trigger(trigger)
+        .content(move |_popover, window, cx| {
+            let menu_holder = window.use_keyed_state(menu_state.clone(), cx, |_, _| {
+                AccessibleDropdownBuilderState { menu: None }
+            });
+            let menu = if let Some(menu) = menu_holder.read(cx).menu.clone() {
+                menu
+            } else {
+                let builder = builder.clone();
+                let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+                    builder(menu, window, cx)
+                });
+                menu_holder.update(cx, |state, _| state.menu = Some(menu.clone()));
+                menu.focus_handle(cx).focus(window, cx);
+                let popover_state = cx.entity();
+                window
+                    .subscribe(&menu, cx, {
+                        let menu_holder = menu_holder.clone();
+                        move |_, _: &DismissEvent, window, cx| {
+                            popover_state.update(cx, |state, cx| state.dismiss(window, cx));
+                            menu_holder.update(cx, |state, _| state.menu = None);
+                        }
+                    })
+                    .detach();
+                menu
+            };
+            menu.into_any_element()
+        })
+}
+
+impl AccessibleSlider {
+    pub(crate) fn new(state: &Entity<SliderState>) -> Self {
+        Self {
+            state: state.clone(),
+            axis: Axis::Horizontal,
+            disabled: false,
+            accessibility_label: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn horizontal(mut self) -> Self {
+        self.axis = Axis::Horizontal;
+        self
+    }
+
+    #[must_use]
+    #[expect(dead_code, reason = "reserved for vertical camera/control sliders")]
+    pub(crate) fn vertical(mut self) -> Self {
+        self.axis = Axis::Vertical;
+        self
+    }
+
+    #[must_use]
+    #[expect(dead_code, reason = "reserved for conditionally disabled sliders")]
+    pub(crate) fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+}
+
+impl RenderOnce for AccessibleSlider {
+    #[expect(
+        clippy::too_many_lines,
+        clippy::let_and_return,
+        reason = "the slider's semantic root and themed track must be assembled together"
+    )]
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let axis = self.axis;
+        let disabled = self.disabled;
+        let entity_id = self.state.entity_id();
+        let focus_handle = window
+            .use_keyed_state(("accessible-slider-focus", entity_id), cx, |_, cx| {
+                cx.focus_handle()
+            })
+            .read(cx)
+            .clone()
+            .tab_stop(true);
+        let (percentage, value, min, max, step, is_range) = {
+            let state = self.state.read(cx);
+            (
+                state.percentage(),
+                state.value().end(),
+                state.min_value(),
+                state.max_value(),
+                state.step_value(),
+                state.value().is_range(),
+            )
+        };
+        let label = self
+            .accessibility_label
+            .unwrap_or_else(|| tr!("Sensitivity"));
+        let bar_color = rgb(ACCENT_BLUE);
+        let track_color = theme::palette(cx).border;
+        let thumb_color = theme::palette(cx).text_primary;
+        let thumb = |position: gpui::DefiniteLength, start: bool| {
+            SliderThumb::new(&self.state)
+                .axis(axis)
+                .start(start)
+                .disabled(disabled)
+                .when(!disabled, |this| {
+                    this.absolute()
+                        .when(axis.is_horizontal(), |this| {
+                            this.top(px(-5.)).left(position).ml(-px(8.))
+                        })
+                        .when(axis.is_vertical(), |this| {
+                            this.bottom(position).left(px(-5.)).mb(-px(8.))
+                        })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(bar_color.opacity(0.5))
+                        .size_4()
+                        .p(px(1.))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .size_full()
+                                .rounded_full()
+                                .bg(thumb_color),
+                        )
+                })
+        };
+
+        let root = div()
+            .id(("accessible-slider", entity_id))
+            .role(Role::Slider)
+            .aria_label(label)
+            .aria_numeric_value(f64::from(value))
+            .aria_min_numeric_value(f64::from(min))
+            .aria_max_numeric_value(f64::from(max))
+            .aria_numeric_value_step(f64::from(step))
+            .aria_orientation(if axis.is_vertical() {
+                Orientation::Vertical
+            } else {
+                Orientation::Horizontal
+            })
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .when(axis.is_vertical(), |this| this.h(px(120.)))
+            .when(axis.is_horizontal(), gpui::Styled::w_full)
+            .when(!disabled, |this| this.track_focus(&focus_handle))
+            .when(!disabled, |this| {
+                this.on_a11y_action(gpui::AccessibleAction::Increment, {
+                    let state = self.state.clone();
+                    move |_, window, cx| {
+                        adjust_slider(&state, SliderAdjustment::Step(1.), window, cx);
+                    }
+                })
+                .on_a11y_action(gpui::AccessibleAction::Decrement, {
+                    let state = self.state.clone();
+                    move |_, window, cx| {
+                        adjust_slider(&state, SliderAdjustment::Step(-1.), window, cx);
+                    }
+                })
+                .on_key_down({
+                    let state = self.state.clone();
+                    move |event, window, cx| {
+                        let adjustment = match event.keystroke.key.as_str() {
+                            "right" | "up" => Some(SliderAdjustment::Step(1.)),
+                            "left" | "down" => Some(SliderAdjustment::Step(-1.)),
+                            "pageup" => Some(SliderAdjustment::Step(10.)),
+                            "pagedown" => Some(SliderAdjustment::Step(-10.)),
+                            "home" => Some(SliderAdjustment::Minimum),
+                            "end" => Some(SliderAdjustment::Maximum),
+                            _ => None,
+                        };
+                        if let Some(adjustment) = adjustment {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            adjust_slider(&state, adjustment, window, cx);
+                        }
+                    }
+                })
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    window.listener_for(&self.state, |state, _, _, cx| {
+                        state.handle_release(cx);
+                    }),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    window.listener_for(&self.state, |state, _, _, cx| {
+                        state.handle_release(cx);
+                    }),
+                )
+            })
+            .child(
+                SliderTrack::new(&self.state)
+                    .axis(axis)
+                    .disabled(disabled)
+                    .flex()
+                    .when(axis.is_horizontal(), |this| {
+                        this.items_center().h_6().w_full()
+                    })
+                    .when(axis.is_vertical(), |this| {
+                        this.justify_center().w_6().h_full()
+                    })
+                    .flex_shrink_0()
+                    .child(
+                        SliderIndicator::new(&self.state)
+                            .relative()
+                            .when(axis.is_horizontal(), |this| this.w_full().h_1p5())
+                            .when(axis.is_vertical(), |this| this.h_full().w_1p5())
+                            .bg(track_color)
+                            .active(|this| this.bg(track_color))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .when(axis.is_horizontal(), |this| {
+                                        this.h_full()
+                                            .left(relative(percentage.start))
+                                            .right(relative(1. - percentage.end))
+                                    })
+                                    .when(axis.is_vertical(), |this| {
+                                        this.w_full()
+                                            .bottom(relative(percentage.start))
+                                            .top(relative(1. - percentage.end))
+                                    })
+                                    .bg(bar_color)
+                                    .rounded_full(),
+                            )
+                            .when(is_range, |this| {
+                                this.child(thumb(relative(percentage.start), true))
+                            })
+                            .child(thumb(relative(percentage.end), false)),
+                    ),
+            );
+        root
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SliderAdjustment {
+    Step(f32),
+    Minimum,
+    Maximum,
+}
+
+fn adjust_slider(
+    state: &Entity<SliderState>,
+    adjustment: SliderAdjustment,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        let next = match adjustment {
+            SliderAdjustment::Step(steps) => state.value().end() + state.step_value() * steps,
+            SliderAdjustment::Minimum => state.min_value(),
+            SliderAdjustment::Maximum => state.max_value(),
+        }
+        .clamp(state.min_value(), state.max_value());
+        state.set_value(next, window, cx);
+    });
+}
 
 impl Toggle {
     pub(crate) fn new(id: impl Into<ElementId>) -> Self {
@@ -90,6 +407,7 @@ impl Toggle {
             disabled: false,
             size: Size::Small,
             label: None,
+            accessibility_label: None,
             icon: None,
             min_width: None,
             on_change: None,
@@ -99,6 +417,16 @@ impl Toggle {
     #[must_use]
     pub(crate) fn label(mut self, label: impl Into<Option<SharedString>>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    /// Set the name exposed to screen readers. This is deliberately separate
+    /// from [`Toggle::label`]: the latter is the compact visual state text
+    /// ("On"/"Off"), while UI Automation needs the setting's purpose
+    /// (for example, "Invert scroll direction").
+    #[must_use]
+    pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -151,17 +479,62 @@ impl Sizable for Toggle {
 
 impl RenderOnce for Toggle {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let label = self
+        let selected = self.selected;
+        let disabled = self.disabled;
+        let state_label = self
             .label
-            .unwrap_or_else(|| if self.selected { tr!("On") } else { tr!("Off") });
-        let mut toggle = Switch::new(self.id)
-            .checked(self.selected)
-            .disabled(self.disabled)
-            .with_size(self.size)
-            .label(label)
-            .color(rgb(ACCENT_BLUE));
+            .unwrap_or_else(|| if selected { tr!("On") } else { tr!("Off") });
+        let accessibility_label = self
+            .accessibility_label
+            .unwrap_or_else(|| state_label.clone());
+        let (track_w, track_h, thumb_w) = match self.size {
+            Size::XSmall | Size::Small => (px(28.), px(16.), px(12.)),
+            _ => (px(36.), px(20.), px(16.)),
+        };
+        let inset = px(2.);
+        let radius = track_h;
+        let checked_bg = rgb(ACCENT_BLUE);
+        let unchecked_bg = rgb(0x006b_7280);
+        let thumb_bg = rgb(0x00ff_ffff);
+        let mut toggle = BaseSwitch::new(self.id.clone())
+            .checked(selected)
+            .disabled(disabled)
+            .accessibility_label(accessibility_label)
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                SwitchTrack::new((self.id.clone(), "track"))
+                    .checked(selected)
+                    .disabled(disabled)
+                    .w(track_w)
+                    .h(track_h)
+                    .rounded(radius)
+                    .flex()
+                    .items_center()
+                    .border(inset)
+                    .border_color(gpui::transparent_white())
+                    .when(!selected, |track| track.bg(unchecked_bg))
+                    .styles(|styles| {
+                        styles
+                            .checked(|style| style.bg(checked_bg))
+                            .disabled(|style| style.opacity(0.5))
+                    })
+                    .child(
+                        SwitchThumb::new(selected)
+                            .disabled(disabled)
+                            .rounded(radius)
+                            .size(thumb_w)
+                            .when(!selected, |thumb| thumb.left(px(0.)))
+                            .when(selected, |thumb| thumb.left(track_w - thumb_w - inset * 2.))
+                            .bg(thumb_bg),
+                    ),
+            )
+            .child(div().text_caption().child(state_label));
         if let Some(handler) = self.on_change {
-            toggle = toggle.on_click(move |selected, window, cx| handler(selected, window, cx));
+            toggle = toggle.on_change(move |selected, _event, window, cx| {
+                handler(&selected, window, cx);
+            });
         }
         h_flex()
             .items_center()
@@ -567,6 +940,19 @@ mod tests {
         parent_clicks: Rc<Cell<usize>>,
     }
 
+    struct SliderHarness {
+        state: Entity<SliderState>,
+    }
+
+    impl Render for SliderHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .tab_group()
+                .size(px(200.))
+                .child(AccessibleSlider::new(&self.state).accessibility_label("Brightness"))
+        }
+    }
+
     impl Render for ToggleHarness {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let changes = self.changes.clone();
@@ -720,6 +1106,43 @@ mod tests {
 
         assert_eq!(changes.get(), None);
         assert_eq!(parent_clicks.get(), 0);
+    }
+
+    #[gpui::test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "slider keyboard steps are exact test fixtures"
+    )]
+    fn accessible_slider_is_tab_focusable_and_keyboard_operable(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let state = cx.update(|cx| {
+            cx.new(|_| {
+                SliderState::new()
+                    .min(0.)
+                    .max(100.)
+                    .step(5.)
+                    .default_value(50.)
+            })
+        });
+        let (_, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| SliderHarness { state }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        cx.update(Window::focus_next);
+        cx.update(|window, cx| assert!(window.focused(cx).is_some()));
+
+        activate_key(cx, "right");
+        state.update(cx, |state, _| assert_eq!(state.value().end(), 55.));
+        activate_key(cx, "pageup");
+        state.update(cx, |state, _| assert_eq!(state.value().end(), 100.));
+        activate_key(cx, "home");
+        state.update(cx, |state, _| assert_eq!(state.value().end(), 0.));
+        activate_key(cx, "end");
+        state.update(cx, |state, _| assert_eq!(state.value().end(), 100.));
     }
 
     #[gpui::test]

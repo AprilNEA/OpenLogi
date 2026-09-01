@@ -356,6 +356,7 @@ fn gesture_directions(
                     MenuRow::new(("inspector-direction", index))
                         .selected(selected)
                         .role(Role::Button)
+                        .aria_label(tr!(direction.label()))
                         .child(
                             h_flex()
                                 .min_w_0()
@@ -447,6 +448,7 @@ fn thumbwheel_inspector(
                             MenuRow::new(("inspector-thumbwheel", index))
                                 .selected(selected)
                                 .role(Role::Button)
+                                .aria_label(tr!(preset.label()))
                                 .child(
                                     h_flex()
                                         .items_center()
@@ -630,7 +632,11 @@ fn action_library(
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("Actions"), pal))
-        .child(control_input(action_search).cleanable(true))
+        .child(
+            control_input(action_search)
+                .cleanable(true)
+                .aria_label(tr!("Search actions…")),
+        )
         .child(
             v_flex()
                 .gap_0p5()

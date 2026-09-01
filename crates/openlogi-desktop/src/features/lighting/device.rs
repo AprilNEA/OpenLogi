@@ -12,14 +12,14 @@ use gpui::{
 use gpui_base::Button as BaseButton;
 use gpui_component::{
     Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::{AppState, DeviceRecord, StateEvent};
-use crate::ui::components::Toggle;
+use crate::ui::components::{AccessibleSlider, Toggle};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 const SWATCH: f32 = 28.;
@@ -137,6 +137,7 @@ impl Render for LightingPanel {
                     .child(
                         Toggle::new("light-toggle")
                             .selected(lighting.enabled)
+                            .accessibility_label(tr!("Lighting"))
                             .on_change(|enabled, _window, cx| {
                                 AppState::update(cx, |state, cx| {
                                     let key = state.current_record().map(DeviceRecord::device_key);
@@ -168,7 +169,11 @@ impl Render for LightingPanel {
                             .child(format!("{}%", lighting.brightness)),
                     ),
             )
-            .child(Slider::new(&self.brightness).horizontal())
+            .child(
+                AccessibleSlider::new(&self.brightness)
+                    .horizontal()
+                    .accessibility_label(tr!("Brightness")),
+            )
     }
 }
 

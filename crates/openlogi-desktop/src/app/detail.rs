@@ -12,7 +12,6 @@ use gpui_component::{
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
-    switch::Switch,
     v_flex,
 };
 use openlogi_core::config::ScrollResolution;
@@ -430,6 +429,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             Toggle::new("invert-scroll-toggle")
                 .selected(inverted)
                 .disabled(!inversion_supported)
+                .accessibility_label(tr!("Invert scroll direction"))
                 .label((!inversion_supported).then(|| tr!("Unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::update(cx, |state, cx| {
@@ -715,9 +715,10 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         ))),
                 )
                 .child(
-                    Switch::new("device-enabled")
-                        .checked(device_enabled)
-                        .on_click(|checked, _window, cx| {
+                    Toggle::new("device-enabled")
+                        .selected(device_enabled)
+                        .accessibility_label(tr!("Manage this device"))
+                        .on_change(|checked, _window, cx| {
                             let enabled = *checked;
                             AppState::update(cx, |state, cx| {
                                 let record = state

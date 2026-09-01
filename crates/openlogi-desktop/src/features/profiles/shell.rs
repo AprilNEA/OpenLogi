@@ -5,13 +5,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    popover::Popover,
-    spinner::Spinner,
-};
+use gpui_component::{Icon, IconName, Sizable as _, h_flex, popover::Popover, spinner::Spinner};
 
 use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
 use super::picker::add_app_popover;
@@ -252,10 +246,11 @@ fn profile_options_popover(
         // a second padded, differently-rounded box.
         .appearance(false)
         .trigger(
-            Button::new(format!("{id_base}:profile-options"))
-                .ghost()
-                .xsmall()
-                .icon(IconName::Ellipsis),
+            BaseButton::new(format!("{id_base}:profile-options"))
+                .accessibility_label(tr!("Profile options"))
+                .size(px(24.))
+                .rounded(px(12.))
+                .child(Icon::new(IconName::Ellipsis).size_3()),
         )
         .content(move |_state, _window, cx| {
             let popover = cx.entity().downgrade();
@@ -268,6 +263,10 @@ fn profile_options_popover(
                 .child(
                     MenuRow::new(format!("{id_base}:remove-profile"))
                         .role(Role::MenuItem)
+                        .aria_label(tr!(
+                            "Remove %{name}",
+                            name => profile.name.clone()
+                        ))
                         .child(
                             h_flex()
                                 .items_center()

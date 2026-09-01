@@ -16,8 +16,9 @@
 
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
-    ParentElement as _, Render, RenderOnce, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
+    ParentElement as _, Render, RenderOnce, Role, SharedString, Size,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -169,8 +170,10 @@ pub struct AddDeviceView {
 
 impl AddDeviceView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        let focus_handle = cx.focus_handle().tab_stop(false);
+        window.on_next_frame(|window, _| {
+            window.on_next_frame(Window::focus_next);
+        });
         let state_obs = cx.observe_global::<PairingUi>(|_, cx| cx.notify());
         Self {
             focus_handle,
@@ -193,10 +196,14 @@ impl Render for AddDeviceView {
         let state = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
 
         v_flex()
+            .id("add-device-root")
+            .role(Role::Dialog)
+            .aria_label(tr!("Add Device"))
             .size_full()
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
+            .tab_stop(false)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

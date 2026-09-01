@@ -13,7 +13,7 @@ pub(super) use std::rc::Rc;
 
 pub(super) use gpui::{
     App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
+    InteractiveElement, IntoElement, ParentElement, Render, Role, SharedString, Size,
     StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
     rgb,
 };
@@ -26,7 +26,7 @@ pub(super) use gpui_component::{
     input::{InputEvent, InputState},
     select::{SelectEvent, SelectItem, SelectState},
     setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{SliderEvent, SliderState},
     tag::Tag,
     theme::ThemeConfig,
     v_flex,
@@ -40,7 +40,32 @@ pub(super) use openlogi_core::config::{
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
+pub(super) use crate::ui::components::AccessibleSlider as Slider;
+pub(super) use crate::ui::components::Toggle;
 pub(super) use crate::ui::theme::{self, Palette};
+
+/// Build a settings switch whose accessible name is the setting title.
+/// gpui-component's `SettingField::switch` renders an unnamed switch next to
+/// the row label, so UI Automation exposes only "switch". The title is
+/// duplicated into the control's semantic name here while remaining the
+/// visible row heading owned by `SettingItem`.
+pub(super) fn setting_toggle(
+    id: &'static str,
+    label: SharedString,
+    value: impl Fn(&App) -> bool + 'static,
+    set_value: impl Fn(bool, &mut App) + 'static,
+) -> SettingField<SharedString> {
+    let value = Rc::new(value);
+    let set_value = Rc::new(set_value);
+    SettingField::render(move |_, _, cx| {
+        let checked = value(cx);
+        let set_value = set_value.clone();
+        Toggle::new(id)
+            .selected(checked)
+            .accessibility_label(label.clone())
+            .on_change(move |next, _, cx| set_value(*next, cx))
+    })
+}
 #[cfg(target_os = "macos")]
 pub(super) use openlogi_permissions::Permission;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -152,9 +177,15 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "settings initialization wires page state, observers, and host snapshots"
+    )]
     fn new(initial_page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        let focus_handle = cx.focus_handle().tab_stop(false);
+        window.on_next_frame(|window, _| {
+            window.on_next_frame(Window::focus_next);
+        });
         // Reuse the app-wide shared updater installed at launch, so a launch-time
         // check result is already visible. Fall back to a fresh one if it somehow
         // wasn't installed.
@@ -522,11 +553,15 @@ impl Render for SettingsView {
         let settings = settings.page(diagnostics::diagnostics_page());
 
         div()
+            .id("settings-root")
+            .role(Role::Dialog)
+            .aria_label(tr!("Settings"))
             .size_full()
             .relative()
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
+            .tab_stop(false)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

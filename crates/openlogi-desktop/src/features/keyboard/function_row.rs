@@ -30,6 +30,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, point,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
@@ -530,11 +531,12 @@ impl RenderOnce for KeyCallout {
         let view_hover = self.view.clone();
         let view_click = self.view;
         let binding = self.slot.binding;
+        let accessible_binding = binding.clone();
         let binding_icon = self.slot.binding_icon;
         let highlighted = self.highlighted;
 
-        v_flex()
-            .id(("key-callout", idx))
+        BaseButton::new(("key-callout", idx))
+            .accessibility_label(format!("{} ({})", self.slot.label, accessible_binding))
             .absolute()
             .top(px(top))
             .left(px(left))
@@ -631,6 +633,10 @@ fn key_click_target(
     let left = key_target_left_px(x_frac, img_w, KEY_TARGET_W);
     let top = key_target_top_px(y_frac, img_h, KEY_TARGET_H);
 
+    // This is the transparent pointer hit target over the device image. The
+    // adjacent named callout is the one keyboard and assistive-technology
+    // users operate; keeping this node presentational avoids exposing every
+    // key twice in UI Automation.
     div()
         .id(("key-target", idx))
         .absolute()
@@ -893,6 +899,7 @@ fn panel_action_rows(
             .children(power_user_actions.iter().enumerate().map(
                 |(idx, (kind, label, icon_path))| {
                     let kind = *kind;
+                    let accessible_label = tr!(*label);
                     let view = view.clone();
                     let selected = matches!(
                         (current, kind),
@@ -910,6 +917,7 @@ fn panel_action_rows(
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
                         .role(Role::MenuItem)
+                        .aria_label(accessible_label)
                         .child(
                             h_flex()
                                 .items_center()

@@ -8,8 +8,9 @@
 
 use crate::ui::theme::Typography as _;
 use gpui::{
-    App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Size,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Role,
+    Size, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -30,8 +31,10 @@ pub struct UpdateConsentView {
 
 impl UpdateConsentView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        let focus_handle = cx.focus_handle().tab_stop(false);
+        window.on_next_frame(|window, _| {
+            window.on_next_frame(Window::focus_next);
+        });
         Self {
             focus_handle,
             appearance_obs: None,
@@ -74,10 +77,14 @@ impl Render for UpdateConsentView {
         let pal = theme::palette(cx);
 
         v_flex()
+            .id("update-consent-root")
+            .role(Role::Dialog)
+            .aria_label(tr!("Check for updates?"))
             .size_full()
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
+            .tab_stop(false)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

@@ -15,7 +15,8 @@
 )]
 
 use gpui::{
-    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, svg,
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -121,7 +122,13 @@ fn text_editor_card(
             v_flex()
                 .p_2()
                 .gap_2()
-                .child(div().child(control_input(&text_state).cleanable(true)))
+                .child(
+                    div().child(
+                        control_input(&text_state)
+                            .cleanable(true)
+                            .aria_label(heading),
+                    ),
+                )
                 .child(editor_action_row(trigger, kind, view)),
         )
 }
@@ -265,6 +272,7 @@ impl RenderOnce for WorkflowStepRow {
         let view_remove = self.view;
 
         MenuRow::new(("wf-step", self.idx))
+            .aria_label(tr!(type_label))
             .child(
                 h_flex()
                     .w_full()

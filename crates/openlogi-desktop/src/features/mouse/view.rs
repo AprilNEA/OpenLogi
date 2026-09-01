@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
+    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
@@ -338,6 +338,9 @@ fn workspace_layout(
     focus_handle: &FocusHandle,
 ) -> impl IntoElement {
     h_flex()
+        .id("mouse-workspace")
+        .role(Role::Region)
+        .aria_label(tr!("Buttons"))
         .flex_1()
         .min_h_0()
         .w_full()

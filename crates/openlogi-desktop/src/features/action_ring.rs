@@ -5,14 +5,11 @@ mod editor;
 
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
-    v_flex,
-};
+use gpui_component::{Icon, IconName, h_flex, input::InputState, tooltip::Tooltip, v_flex};
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
 };
@@ -87,6 +84,9 @@ impl Render for ActionRingPanel {
         let view = cx.entity();
 
         v_flex()
+            .id("action-ring-panel")
+            .role(Role::Region)
+            .aria_label(tr!("Actions Ring"))
             .w_full()
             .gap_4()
             .tab_group()
@@ -219,10 +219,24 @@ fn toggle_button(
     id: &'static str,
     enabled: bool,
     commit: impl Fn(&mut AppState, bool) + 'static,
-) -> Button {
-    Button::new(id)
-        .compact()
-        .label(if enabled { tr!("On") } else { tr!("Off") })
+) -> BaseButton {
+    let label = match id {
+        "ring-enabled" => tr!("Show Actions Ring"),
+        "ring-haptics" => tr!("Haptic feedback"),
+        _ => tr!("Actions Ring"),
+    };
+    BaseButton::new(id)
+        .role(Role::CheckBox)
+        .accessibility_label(label)
+        .aria_toggled(if enabled {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .px_2()
+        .py_1()
+        .rounded(px(6.))
+        .child(if enabled { tr!("On") } else { tr!("Off") })
         .selected(enabled)
         .on_click(move |_, _, cx| {
             AppState::update(cx, |state, cx| {

@@ -21,7 +21,7 @@ use gpui_component::{
     Disableable as _, Selectable as _,
     button::Button,
     h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{SliderEvent, SliderState},
     v_flex,
 };
 use openlogi_core::config::{
@@ -32,7 +32,7 @@ use openlogi_core::hid::{
 };
 
 use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus, StateEvent};
-use crate::ui::components::Toggle;
+use crate::ui::components::{AccessibleSlider, Toggle};
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -252,7 +252,11 @@ impl SmartShiftPanel {
                     ),
             )
             .when(sensitivity_enabled, |row| {
-                row.child(Slider::new(&self.threshold).horizontal())
+                row.child(
+                    AccessibleSlider::new(&self.threshold)
+                        .horizontal()
+                        .accessibility_label(tr!("SmartShift")),
+                )
             })
             .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
             .child(div().text_caption().text_color(pal.text_muted).child(tr!(
@@ -307,7 +311,11 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
-            .child(Slider::new(&self.wheel_sensitivity).horizontal())
+            .child(
+                AccessibleSlider::new(&self.wheel_sensitivity)
+                    .horizontal()
+                    .accessibility_label(tr!("Thumb Wheel Sensitivity")),
+            )
     }
 }
 
@@ -414,6 +422,7 @@ fn permanent_row(
             Toggle::new("smartshift-permanent")
                 .selected(permanent)
                 .disabled(!ratchet)
+                .accessibility_label(tr!("Permanent ratchet"))
                 .on_change(move |permanent, _window, cx| {
                     let auto_disengage = if *permanent {
                         SmartShiftAutoDisengage::Permanent
