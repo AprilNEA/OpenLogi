@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn lightspeed_receiver_has_its_own_display_name() {
+    fn receiver_families_have_their_own_display_names() {
         // 0xc539 is the receiver bundled with the G502 LIGHTSPEED and the
         // G Pro Wireless. It routes through the Unifying code path, but it is
         // Lightspeed hardware and says so in its own USB product string, so it
@@ -265,6 +265,8 @@ mod tests {
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc537), "Nano Receiver");
+        assert_eq!(receiver_display_name(0xc548), "Logi Bolt Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
         assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }
