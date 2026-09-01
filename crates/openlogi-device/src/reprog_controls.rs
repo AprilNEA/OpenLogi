@@ -55,6 +55,16 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
 pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
 
+/// Control ID of the "Virtual Gesture Button" — the dedicated gesture source
+/// on devices with no physical MX-line gesture button, such as the Lift
+/// Vertical Ergonomic Mouse (`0x00d7` on that model's control table, the only
+/// control there flagged `force-raw-xy`). Delivers the same
+/// `divertedButtonsEvent` / raw-XY pair as [`GESTURE_BUTTON_CID`] — devices
+/// expose exactly one of the two, never both.
+///
+/// The typed source of truth is [`control_ids::VIRTUAL_GESTURE_BUTTON`].
+pub const VIRTUAL_GESTURE_BUTTON_CID: u16 = control_ids::VIRTUAL_GESTURE_BUTTON.0;
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX
