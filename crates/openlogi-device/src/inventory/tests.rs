@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hidpp::protocol::v10::{Message, MessageHeader};
 use hidpp::receiver::unifying::{Event as UnifyingEvent, decode_notification};
@@ -9,28 +10,30 @@ use openlogi_core::device::{
 };
 
 use super::cache::{
-    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
-    keep_known_capabilities,
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_INTERVAL, backfill_identity,
+    is_stale, keep_known_capabilities,
 };
+use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
 use super::probe::{
-    NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
-    preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
+    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
 };
 use super::{
-    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
-    one_shot_should_stop, retained_nodes, routes_for_inventories, settle_unhealthy_node,
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
+    UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories, settle_unhealthy_node,
 };
 use crate::channel::scripted::{
     ScriptedBackend, ScriptedNode, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
 };
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
-fn cache_entry(probed_tick: u64) -> Cached {
+fn cache_entry() -> Cached {
     Cached {
         probe: ProbedFeatures::default(),
         battery: None,
-        probed_tick,
+        events: EventFeatureIndices::default(),
+        probed_at: Instant::now(),
     }
 }
 
@@ -53,7 +56,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
         receiver_uid: "DA2699E1".into(),
         slot: 1,
     };
-    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry(0))]);
+    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry())]);
     assert!(
         !e.cache_dirty,
         "non-persistable fresh probe dirtied the cache"
@@ -71,7 +74,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
     let bolt = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
-    e.apply_outcomes(vec![CacheOutcome::Fresh(bolt, cache_entry(0))]);
+    e.apply_outcomes(vec![CacheOutcome::Fresh(bolt, cache_entry())]);
     assert!(
         e.cache_dirty,
         "persistable fresh probe must dirty the cache"
@@ -84,7 +87,7 @@ fn cache_entry_survives_grace_then_evicts() {
     let key = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
-    e.cache.insert(key.clone(), cache_entry(0));
+    e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
     // Missing for the whole grace window: kept.
     for _ in 0..CACHE_MISS_GRACE {
@@ -106,7 +109,7 @@ fn cache_entry_survives_grace_then_evicts() {
 fn being_seen_resets_the_miss_counter() {
     let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
     let key = CacheKey::Bolt { unit_id: [9; 4] };
-    e.cache.insert(key.clone(), cache_entry(0));
+    e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
     let seen: HashSet<CacheKey> = std::iter::once(key.clone()).collect();
     e.evict_unseen(&nobody); // miss 1
@@ -121,37 +124,39 @@ fn being_seen_resets_the_miss_counter() {
 }
 
 #[test]
-fn cached_probe_is_reused_until_refresh_ticks() {
+fn cached_probe_is_reused_until_refresh_interval() {
+    let probed_at = Instant::now();
     let cached = Cached {
         probe: ProbedFeatures::default(),
         battery: None,
-        probed_tick: 10,
+        events: EventFeatureIndices::default(),
+        probed_at,
     };
-    assert!(!is_stale(&cached, 10), "same tick is fresh");
+    assert!(!is_stale(&cached, probed_at), "same instant is fresh");
     assert!(
-        !is_stale(&cached, 10 + REFRESH_TICKS - 1),
+        !is_stale(&cached, probed_at + Duration::from_secs(29)),
         "just under the window is still fresh"
     );
     assert!(
-        is_stale(&cached, 10 + REFRESH_TICKS),
+        is_stale(&cached, probed_at + REFRESH_INTERVAL),
         "at the window the probe is refreshed"
     );
 }
 
 #[test]
 fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
-    let cached = cache_entry(10);
+    let cached = cache_entry();
     assert_eq!(
-        unifying_probe_budget(Some(&cached), 10),
+        unifying_probe_budget(Some(&cached), cached.probed_at),
         UNIFYING_CACHED_SLOT_PROBE
     );
     assert_eq!(
-        unifying_probe_budget(Some(&cached), 10 + REFRESH_TICKS),
+        unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL),
         UNIFYING_SLOT_PROBE,
         "stale entries still get enough time for a full feature walk"
     );
     assert_eq!(
-        unifying_probe_budget(None, 10),
+        unifying_probe_budget(None, Instant::now()),
         UNIFYING_SLOT_PROBE,
         "first sight still gets the full feature-walk budget"
     );
@@ -179,7 +184,7 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
     let writes_before = handle.written_reports().len();
 
     let cache = HashMap::new();
-    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache, 0)
+    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache, Instant::now(), None)
         .await
         .expect("an offline slot still surfaces from its re-broadcast");
 
@@ -294,7 +299,7 @@ fn channel_cache_retires_and_defers_reopen_until_a_later_tick() {
     let channel = Arc::new(());
     cache.insert(1, Arc::clone(&channel));
 
-    assert!(cache.retire_node(&1).is_some());
+    assert!(cache.retire_node(&1));
     assert!(cache.get(&1).is_none());
     assert!(!cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1));
 
@@ -317,9 +322,8 @@ fn absent_channels_retire_and_quiescent_absent_retirement_is_reaped() {
     cache.insert(1, Arc::new(()));
     cache.insert(2, Arc::new(()));
 
-    let mut retired = 0;
-    cache.retire_absent(&HashSet::from([2]), |_| retired += 1);
-    assert_eq!(retired, 1, "the retire hook fires once per retired channel");
+    let retired = cache.retire_absent(&HashSet::from([2]));
+    assert_eq!(retired, 1, "one absent channel retires once");
     assert!(cache.is_retiring(&1));
     assert!(cache.get(&2).is_some());
 
@@ -369,9 +373,16 @@ fn retiring_node_inventory_expires_after_the_existing_ledger_grace() {
 #[test]
 fn one_shot_retry_stops_when_first_attempt_is_complete() {
     let current = inventory(&[1, 2]);
+    let scan = OneShotScan::new();
 
     assert!(
-        one_shot_should_stop(None, &current, true, true, 1),
+        scan.is_settled(
+            &current,
+            ScanPass {
+                complete: true,
+                healthy: true
+            }
+        ),
         "complete inventories keep the one-pass happy path"
     );
 }
@@ -380,17 +391,24 @@ fn one_shot_retry_stops_when_first_attempt_is_complete() {
 fn one_shot_retry_waits_for_healthy_incomplete_inventory_to_stabilize() {
     let partial = inventory(&[1]);
     let full = inventory(&[1, 2]);
+    let healthy = ScanPass {
+        complete: false,
+        healthy: true,
+    };
+    let mut scan = OneShotScan::new();
 
     assert!(
-        !one_shot_should_stop(None, &partial, false, true, 1),
+        !scan.is_settled(&partial, healthy),
         "the first incomplete pass has no previous inventory to compare"
     );
+    scan.advance(partial, healthy);
     assert!(
-        !one_shot_should_stop(Some(partial.as_slice()), &full, false, true, 2),
+        !scan.is_settled(&full, healthy),
         "a changed inventory should get another retry window"
     );
+    scan.advance(full.clone(), healthy);
     assert!(
-        one_shot_should_stop(Some(full.as_slice()), &full, false, true, 3),
+        scan.is_settled(&full, healthy),
         "once the returned inventory stabilizes, retrying stops"
     );
 }
@@ -398,9 +416,15 @@ fn one_shot_retry_waits_for_healthy_incomplete_inventory_to_stabilize() {
 #[test]
 fn one_shot_retry_stops_on_unchanged_incomplete_inventory() {
     let partial = inventory(&[1]);
+    let healthy = ScanPass {
+        complete: false,
+        healthy: true,
+    };
+    let mut scan = OneShotScan::new();
 
+    scan.advance(partial.clone(), healthy);
     assert!(
-        one_shot_should_stop(Some(partial.as_slice()), &partial, false, true, 2),
+        scan.is_settled(&partial, healthy),
         "stable partial inventories should not burn every retry attempt"
     );
 }
@@ -408,26 +432,48 @@ fn one_shot_retry_stops_on_unchanged_incomplete_inventory() {
 #[test]
 fn one_shot_retry_keeps_unchanged_inventory_after_unhealthy_probe() {
     let partial = inventory(&[1]);
+    let mut scan = OneShotScan::new();
 
+    // The replayed snapshot arrived from an earlier healthy pass…
+    scan.advance(
+        partial.clone(),
+        ScanPass {
+            complete: false,
+            healthy: true,
+        },
+    );
+    // …but this pass failed, so the unchanged replay is not stability
+    // evidence.
     assert!(
-        !one_shot_should_stop(Some(partial.as_slice()), &partial, false, false, 2),
+        !scan.is_settled(
+            &partial,
+            ScanPass {
+                complete: false,
+                healthy: false
+            }
+        ),
         "unchanged replay after a failed probe must keep retrying before the cap"
     );
 }
 
 #[test]
 fn one_shot_retry_stops_at_attempt_cap_when_inventory_keeps_changing() {
-    let previous = inventory(&[1]);
-    let current = inventory(&[1, 2]);
+    let unhealthy = ScanPass {
+        complete: false,
+        healthy: false,
+    };
+    let mut scan = OneShotScan::new();
 
+    while scan.attempt < ONESHOT_ATTEMPTS {
+        let changing = inventory(&[scan.attempt]);
+        assert!(
+            !scan.is_settled(&changing, unhealthy),
+            "attempts below the cap keep retrying"
+        );
+        scan.advance(changing, unhealthy);
+    }
     assert!(
-        one_shot_should_stop(
-            Some(previous.as_slice()),
-            &current,
-            false,
-            false,
-            ONESHOT_ATTEMPTS
-        ),
+        scan.is_settled(&inventory(&[1, 2]), unhealthy),
         "the retry loop must remain bounded even if the inventory changes every time"
     );
 }
@@ -480,8 +526,11 @@ fn bolt_probe_is_complete_when_count_matches_readable_slots() {
         Some(2),
         vec![bolt_slot(1), bolt_slot(2)],
     );
-    assert!(probe.complete, "count matches the readable slots");
-    assert!(probe.healthy, "a complete Bolt walk is authoritative");
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Healthy { complete: true },
+        "a count matching the readable slots is authoritative and complete"
+    );
     assert_eq!(paired_slots(&probe), vec![1, 2], "slots surface in order");
     assert_eq!(
         probe.outcomes.len(),
@@ -502,9 +551,9 @@ fn bolt_probe_is_incomplete_when_a_counted_slot_is_unreadable() {
         vec![1],
         "only the readable slot surfaces"
     );
-    assert!(!probe.complete, "a count shortfall is not complete");
-    assert!(
-        !probe.healthy,
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Failed,
         "an incomplete Bolt walk is not authoritative"
     );
 }
@@ -516,11 +565,11 @@ fn bolt_probe_is_incomplete_when_the_count_register_is_unanswered() {
     // truth, so it stays incomplete and the ledger keeps the prior snapshot.
     let probe = assemble_bolt_probe(bolt_receiver_info(), None, vec![bolt_slot(1), bolt_slot(2)]);
     assert_eq!(paired_slots(&probe), vec![1, 2]);
-    assert!(
-        !probe.complete,
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Failed,
         "no count register means we couldn't fully check"
     );
-    assert!(!probe.healthy);
 }
 
 fn model(unit_id: [u8; 4], serial: Option<&str>) -> DeviceModelInfo {
@@ -544,7 +593,7 @@ fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> Pro
 }
 
 /// A control-table read that fails half way reads exactly like "no haptic
-/// panel", and the answer is memoized for `REFRESH_TICKS` — so the Actions Ring
+/// panel", and the answer is memoized for `REFRESH_INTERVAL` — so the Actions Ring
 /// binding would vanish from the GUI for half a minute on a device that has it.
 #[test]
 fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {

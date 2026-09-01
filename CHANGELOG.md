@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-30
+
+### Fixed
+
+- *(ci)* repair focused i18n gate and agent guidance ([#1138](https://github.com/AprilNEA/OpenLogi/pull/1138))
+- make Actions Ring selectable in action pickers ([#958](https://github.com/AprilNEA/OpenLogi/pull/958))
+- *(ci)* align agent guidance with current contracts ([#1139](https://github.com/AprilNEA/OpenLogi/pull/1139))
+
 ## [0.8.0] - 2026-08-25
 
 ### Added

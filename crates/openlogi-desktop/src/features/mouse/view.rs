@@ -16,8 +16,8 @@ use gpui_component::{
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
-    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, labels_from_hotspots,
+    LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
+    asset_hotspots_for_png, default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
@@ -25,7 +25,7 @@ use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as pain
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profile_scope::{friendly_app_name, profile_canvas_status};
+use crate::features::profiles::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
@@ -33,7 +33,6 @@ use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
-const LABEL_H: f32 = 56.;
 const LABEL_GUTTER: f32 = LABEL_W + SIDE_GAP;
 const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
 
@@ -134,7 +133,7 @@ impl MouseModelView {
     /// Create the mouse model view.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let action_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search actions…")));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("actions.search_actions")));
         cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -229,6 +228,12 @@ fn set_control_hovered(
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::components::localize_placeholder(
+            &self.action_search,
+            tr!("actions.search_actions"),
+            window,
+            cx,
+        );
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
@@ -266,7 +271,7 @@ impl Render for MouseModelView {
         } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
         let canvas_h = mouse_h;
 
-        let highlight = self.hovered.or(active);
+        let highlight = self.hovered.or(active).or(self.selected);
         let view = cx.entity();
         let hovered = self.hovered;
         let profile_status = profile_canvas_status(cx);
@@ -620,10 +625,10 @@ impl RenderOnce for LabelTrigger {
         let binding = self.binding.text;
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
-        let button_name = tr!(self.label.id.label());
+        let button_name = tr!(self.label.id.translation_key());
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("Bind %{name}", name => button_name.clone()))
+            .accessibility_label(tr!("actions.bind_control", name => button_name.clone()))
             .aria_description(binding_description)
             .aria_selected(selected)
             .flex()
@@ -729,7 +734,7 @@ fn binding_label_for_control(
         .is_some_and(|button| gesture_buttons.contains(&button))
     {
         return BindingLabel {
-            text: tr!("5 directions"),
+            text: tr!("actions.five_directions"),
             icon: Some(GESTURE_BUTTON_ICON),
         };
     }
@@ -756,12 +761,12 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
-                    text: tr!(preset.label()),
+                    text: tr!(preset.translation_key()),
                     icon: Some(preset.icon()),
                 }
             } else {
                 BindingLabel {
-                    text: tr!("Custom"),
+                    text: tr!("common.custom"),
                     icon: Some("action-icons/chevrons-right.svg"),
                 }
             }
@@ -870,7 +875,10 @@ impl RenderOnce for HotspotTrigger {
 
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("Bind %{name}", name => tr!(btn.label())))
+            .accessibility_label(tr!(
+                "actions.bind_control",
+                name => tr!(btn.translation_key())
+            ))
             .aria_selected(selected)
             .flex()
             .items_center()

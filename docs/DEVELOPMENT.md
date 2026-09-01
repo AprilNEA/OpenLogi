@@ -92,13 +92,16 @@ icon is generated on demand. The runner is a transparent passthrough for
 everything else (the CLI, tests); set `OPENLOGI_DEV_BUNDLE=0` to launch the raw
 `openlogi-desktop` binary instead.
 
-Each run also stops the dev agent and overlay left behind by the previous one.
-They are launched through LaunchServices so they get their own TCC identity,
-which also means they are not children of the GUI: closing its window or
-pressing Ctrl-C ends only the GUI, and a surviving dev agent relaunches itself
-~20 s later once its watcher notices the rewritten binary. Set
-`OPENLOGI_DEV_AGENT=0` to run against an
-agent you started yourself — nothing is stopped, built, or embedded then.
+Each run also stops the dev agent and overlay left behind by the previous one,
+then starts the freshly built agent and waits for its IPC socket before the
+GUI launches — so the window connects immediately instead of sitting on its
+connecting frame while the GUI's production fallback re-spawns the agent.
+The helpers are launched through LaunchServices so they get their own TCC
+identity, which also means they are not children of the GUI: closing its
+window or pressing Ctrl-C ends only the GUI, and a surviving dev agent
+relaunches itself ~20 s later once its watcher notices the rewritten binary.
+Set `OPENLOGI_DEV_AGENT=0` to run against an agent you started yourself —
+nothing is stopped, built, embedded, or started then.
 
 Packaged local dev bundles (`cargo run` and
 `cargo run -p xtask -- macos bundle`) use `-dev` bundle identifiers and the
@@ -225,6 +228,8 @@ lint (shellcheck + shfmt) are separate CI jobs. Reproduce those with
 
 ```sh
 cargo run -p xtask -- macos package    # → target/release/OpenLogi.dmg
+# Cross-compile a distribution DMG (aarch64 or x86_64):
+cargo run -p xtask -- macos package --target x86_64-apple-darwin
 ```
 
 Environment overrides:
@@ -311,7 +316,7 @@ cargo run -p xtask -- release latest-json \
 `.github/workflows/crowdin.yml` syncs GUI locales with
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when a **real** translation value improved — nightly, and on master pushes that
-touch English sources (`en.yml`), `.config/crowdin.yml`, the Crowdin workflow,
+touch English sources (`en.toml`), `.config/crowdin.yml`, the Crowdin workflow,
 the merge script under `.github/scripts/i18n/`, or the shared GitHub App token
 action.
 
@@ -319,15 +324,17 @@ action.
 
 | | Role |
 |--|--|
-| `en.yml` (git) | English source of truth — English text is the key |
-| All `locales/*.yml` in git | Same keys as `en.yml` (parity test); seed Crowdin per language |
+| `en.toml` (git) | English source of truth; stable semantic keys grouped by product-domain tables |
+| All `locales/*.toml` in git | Same keys as `en.toml` (parity test); seed Crowdin per language |
 | Crowdin project | Where people improve non-English **values** |
 | Merge script | Applies only values ≠ English; restores keys sparse exports omit |
 | Bot PR (`crowdin/i18n`) | Only when a non-English value actually changed |
 
-Feature PRs add new keys to **every** locale file in the same change. Crowdin
-does not invent translations; it only stores and syncs them. A raw Crowdin
-download is unsafe: untranslated strings come back as English (#549), and
+Call sites use stable keys such as `device.connected`. Feature PRs add
+new keys to **every** locale file in the same change. English wording can change
+without renaming the key or updating call sites. Crowdin does not invent
+translations; it only stores and syncs them. A raw Crowdin download is unsafe:
+untranslated strings come back as English (#549), and
 `skip_untranslated_strings` overwrites catalogs with sparse files that delete
 keys (#552). The workflow always **snapshots → download → merge** via
 `.github/scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
@@ -335,8 +342,8 @@ translations land in git.
 
 Each run:
 
-1. Snapshots every `locales/*.yml`.
-2. Uploads `en.yml` **sources**.
+1. Snapshots every `locales/*.toml`.
+2. Uploads `en.toml` **sources**.
 3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
 4. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
@@ -361,7 +368,7 @@ OpenLogi project:
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key parity test (every catalog must match
-`en.yml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+`en.toml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
 mint a short-lived token for pushing its translation branch and opening the PR;
 the default `GITHUB_TOKEN` remains read-only. Checkout runs with
 `persist-credentials: false` and the origin remote is rewritten to the app token
@@ -370,7 +377,7 @@ so git push does not inherit the read-only Actions credential.
 Local helpers (with Crowdin credentials configured):
 
 ```sh
-devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
+devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 ```

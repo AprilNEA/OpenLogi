@@ -24,7 +24,7 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
     PairingCommandError, PairingUpdate, RingObservation,
 };
@@ -53,10 +53,14 @@ pub struct AgentServer {
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
+    /// Forwards each connection's [`ClientKind`] declaration to the
+    /// dormancy gate.
+    pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
 }
 
 impl AgentServer {
     /// Build a server and start the coalescing Actions Ring haptic worker.
+    /// The second return is the demand channel the dormancy gate drains.
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedRuntime,
@@ -65,18 +69,23 @@ impl AgentServer {
         event_monitor: SharedEventMonitor,
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
-    ) -> Self {
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
-        Self {
-            orchestrator,
-            shared,
-            observable,
-            pairing,
-            event_monitor,
-            action_ring,
-            dispatcher,
-            ring_haptics,
-        }
+        let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Self {
+                orchestrator,
+                shared,
+                observable,
+                pairing,
+                event_monitor,
+                action_ring,
+                dispatcher,
+                ring_haptics,
+                demand,
+            },
+            declarations,
+        )
     }
 }
 
@@ -112,15 +121,23 @@ impl Agent for AgentServer {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
+                let language = config.app_settings.language.clone();
                 self.orchestrator.lock().await.reload_config(config);
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
-                crate::launch_agent::reconcile(launch_at_login);
+                crate::autostart::reconcile(launch_at_login);
                 // So does the app icon, and the menu-bar item is ours to
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_icon(app_icon);
+                // And the interface language: re-resolve the process locale
+                // (the Windows popup rebuilds per show and picks it up alone)
+                // and rebuild the macOS menu, whose titles were stamped at
+                // install.
+                openlogi_core::locale::activate(language.as_deref());
+                #[cfg(target_os = "macos")]
+                crate::tray::relocalize();
                 Ok(())
             }
             Err(error) => {
@@ -235,7 +252,7 @@ impl Agent for AgentServer {
         command: LightCommand,
     ) -> Result<(), WriteError> {
         hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&route, command).await
+        hardware::apply_light(&self.shared.device_io, &route, command).await
     }
 
     async fn set_light_manual_power(
@@ -245,7 +262,7 @@ impl Agent for AgentServer {
         enabled: bool,
     ) -> Result<(), WriteError> {
         hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&route, LightCommand::Power(enabled)).await?;
+        hardware::apply_light(&self.shared.device_io, &route, LightCommand::Power(enabled)).await?;
         if !self
             .orchestrator
             .lock()
@@ -265,6 +282,12 @@ impl Agent for AgentServer {
 
     async fn observe_action_ring(self, _: Context, since: Generation) -> RingObservation {
         self.action_ring.observe(since).await
+    }
+
+    async fn declare_client(self, _: Context, kind: ClientKind) {
+        // A failed send is the designed steady state: the gate drops its
+        // receiver at arming, and an armed agent no longer cares.
+        let _ = self.demand.send(kind);
     }
 
     async fn action_ring_hover(
@@ -352,7 +375,7 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
             shared
                 .device(route)
                 .run(HidppOperation::PlayHaptic, |c| async move {
-                    openlogi_hid::ensure_haptics_armed_on(&shared.channel_registry, &c).await
+                    openlogi_hid::ensure_haptics_armed_on(&c).await
                 }),
         )
         .await
@@ -401,7 +424,7 @@ async fn play_within_budget(
             shared
                 .device(route)
                 .run(HidppOperation::PlayHaptic, |c| async move {
-                    openlogi_hid::play_haptic_on(&shared.channel_registry, &c, waveform).await
+                    openlogi_hid::play_haptic_on(&c, waveform).await
                 }),
         )
         .await

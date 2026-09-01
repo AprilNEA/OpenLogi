@@ -4,7 +4,7 @@
 //! shape and none of them can see the others: `openlogi-hook` reads it from the
 //! window server, `openlogi-agent-core` holds it, and `openlogi-ipc` puts it on
 //! the wire. That last one makes this a wire type — see
-//! `.claude/rules/ipc-protocol.md`.
+//! `crates/openlogi-ipc/AGENTS.md`.
 
 use serde::{Deserialize, Serialize};
 

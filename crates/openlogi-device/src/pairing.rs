@@ -319,6 +319,9 @@ async fn drive(
 
             cmd = commands.recv() => match cmd {
                 Some(PairingCommand::Pair(device)) => {
+                    if family != ReceiverFamily::Bolt {
+                        return Err(PairingError::UnsupportedCommand);
+                    }
                     pairing_auth = Some(device.authentication);
                     if *phase == PairingPhase::BoltDiscovery {
                         *phase = PairingPhase::BoltPairing;

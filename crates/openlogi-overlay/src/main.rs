@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    openlogi_ui::locale::activate(None);
+    openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let Ipc {
@@ -67,9 +67,8 @@ fn main() -> Result<()> {
                     });
                     continue;
                 };
-                openlogi_ui::locale::activate(invocation.language.as_deref());
+                openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
-                    live_session.clear();
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
@@ -78,10 +77,9 @@ fn main() -> Result<()> {
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
                     match cx.open_window(options, |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands))
+                        cx.new(|_| RingView::new(invocation, commands, &live_session))
                     }) {
                         Ok(handle) => {
-                            live_session.set(session_id);
                             platform::configure_windows();
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
@@ -106,18 +104,4 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-
-    /// The catalog this binary translates against lives in `openlogi-ui` and is
-    /// reached by the relative path in the `i18n!` at the top. A wrong path
-    /// there does **not** fail the build — `rust_i18n` compiles it to an empty
-    /// catalog, and every ring label silently renders as its English key in all
-    /// 20 locales. Pin one action label in a non-English locale so that
-    /// breakage is loud.
-    #[test]
-    fn the_shared_catalog_is_wired_up() {
-        rust_i18n::set_locale("zh-CN");
-        assert_eq!(rust_i18n::t!("Left Click"), "左键单击");
-        rust_i18n::set_locale("en");
-    }
-}
+mod tests;

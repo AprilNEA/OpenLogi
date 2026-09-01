@@ -36,10 +36,7 @@ pub use dpi::{
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{set_fn_lock, set_fn_lock_on};
-pub(crate) use haptic::clear_haptic_feature_cache_for;
-pub use haptic::{
-    clear_haptic_feature_cache, ensure_haptics_armed_on, play_haptic, play_haptic_on,
-};
+pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,

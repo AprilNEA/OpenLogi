@@ -48,8 +48,7 @@ pub enum DeviceKind {
     Headset,
     /// Logitech webcam (UVC), configured through `openlogi-camera`.
     Camera,
-    /// Not classified by any source — also the "no asset opinion" value
-    /// [`DeviceKind::from_registry_type`] returns for unmodelled strings.
+    /// Not classified by any source.
     Unknown,
     /// Standalone light or other illumination device controlled outside HID++.
     ///
@@ -62,26 +61,27 @@ impl DeviceKind {
     /// Parse the OpenLogi asset registry's `type` string into a [`DeviceKind`].
     ///
     /// The registry field is free-form and case-inconsistent (both `"mouse"`
-    /// and `"MOUSE"` ship), so we case-fold before matching. Values we don't
-    /// model map to [`DeviceKind::Unknown`], which callers treat as "no asset
-    /// opinion" and fall back to the HID++ classification.
+    /// and `"MOUSE"` ship), so we case-fold before matching. `None` for values
+    /// we don't model — "no asset opinion", typed as the absence of one rather
+    /// than overloading [`DeviceKind::Unknown`], which stays a real wire value
+    /// a live device can carry.
     #[must_use]
-    pub fn from_registry_type(raw: &str) -> Self {
+    pub fn from_registry_type(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "mouse" => Self::Mouse,
-            "keyboard" => Self::Keyboard,
-            "numpad" => Self::Numpad,
-            "presenter" => Self::Presenter,
-            "remote" | "remotecontrol" => Self::Remote,
-            "trackball" => Self::Trackball,
-            "touchpad" | "trackpad" => Self::Touchpad,
-            "tablet" => Self::Tablet,
-            "gamepad" => Self::Gamepad,
-            "joystick" => Self::Joystick,
-            "headset" => Self::Headset,
-            "camera" => Self::Camera,
-            "light" | "lighting" | "illumination_light" => Self::Light,
-            _ => Self::Unknown,
+            "mouse" => Some(Self::Mouse),
+            "keyboard" => Some(Self::Keyboard),
+            "numpad" => Some(Self::Numpad),
+            "presenter" => Some(Self::Presenter),
+            "remote" | "remotecontrol" => Some(Self::Remote),
+            "trackball" => Some(Self::Trackball),
+            "touchpad" | "trackpad" => Some(Self::Touchpad),
+            "tablet" => Some(Self::Tablet),
+            "gamepad" => Some(Self::Gamepad),
+            "joystick" => Some(Self::Joystick),
+            "headset" => Some(Self::Headset),
+            "camera" => Some(Self::Camera),
+            "light" | "lighting" | "illumination_light" => Some(Self::Light),
+            _ => None,
         }
     }
 }
@@ -509,22 +509,25 @@ mod tests {
     fn registry_type_is_case_folded() {
         // The registry ships both `"mouse"` and `"MOUSE"`; both must resolve so
         // the asset cross-check can't silently miss a depot.
-        assert_eq!(DeviceKind::from_registry_type("mouse"), DeviceKind::Mouse);
-        assert_eq!(DeviceKind::from_registry_type("MOUSE"), DeviceKind::Mouse);
+        assert_eq!(
+            DeviceKind::from_registry_type("mouse"),
+            Some(DeviceKind::Mouse)
+        );
+        assert_eq!(
+            DeviceKind::from_registry_type("MOUSE"),
+            Some(DeviceKind::Mouse)
+        );
         assert_eq!(
             DeviceKind::from_registry_type("  Keyboard "),
-            DeviceKind::Keyboard
+            Some(DeviceKind::Keyboard)
         );
     }
 
     #[test]
     fn unknown_registry_type_defers_to_the_caller() {
-        // Unmodelled / empty → Unknown, i.e. "no asset opinion".
-        assert_eq!(
-            DeviceKind::from_registry_type("webcam"),
-            DeviceKind::Unknown
-        );
-        assert_eq!(DeviceKind::from_registry_type(""), DeviceKind::Unknown);
+        // Unmodelled / empty → no asset opinion.
+        assert_eq!(DeviceKind::from_registry_type("webcam"), None);
+        assert_eq!(DeviceKind::from_registry_type(""), None);
     }
 
     #[test]

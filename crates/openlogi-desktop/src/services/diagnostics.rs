@@ -57,7 +57,7 @@ fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
         arch: arch_label().to_string(),
         system_locale: sys_locale::get_locale(),
         ui_language: state.and_then(AppState::language).map(str::to_string),
-        accessibility_granted: status.is_some_and(|s| s.accessibility_granted),
+        accessibility_granted: status.map(|s| s.accessibility_granted),
         hook_installed: status.map(|s| s.hook_installed),
         launch_at_login: status.map(|s| s.launch_at_login),
         show_in_menu_bar: settings.map(|s| s.show_in_menu_bar),

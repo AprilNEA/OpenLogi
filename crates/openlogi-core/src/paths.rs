@@ -53,15 +53,26 @@ fn xdg() -> Result<Xdg, PathsError> {
 }
 
 fn app_dir() -> &'static str {
-    static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
-    if *IS_DEV_PROFILE.get_or_init(is_dev_profile) {
+    if is_dev_profile() {
         DEV_APP_DIR
     } else {
         APP_DIR
     }
 }
 
-fn is_dev_profile() -> bool {
+/// Whether this process runs under the dev profile: forced by
+/// `OPENLOGI_PROFILE=dev`/`prod`, or (macOS) detected from the bundle the
+/// executable lives in carrying a dev identifier. Decides the
+/// [`APP_DIR`]/[`DEV_APP_DIR`] split for every directory below, and which
+/// launchd service label the GUI manages. Memoized — the answer cannot change
+/// within a process lifetime.
+#[must_use]
+pub fn is_dev_profile() -> bool {
+    static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
+    *IS_DEV_PROFILE.get_or_init(detect_dev_profile)
+}
+
+fn detect_dev_profile() -> bool {
     match std::env::var("OPENLOGI_PROFILE") {
         Ok(value) if value == "dev" => return true,
         Ok(value) if matches!(value.as_str(), "prod" | "production") => return false,

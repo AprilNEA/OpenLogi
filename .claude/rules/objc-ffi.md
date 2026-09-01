@@ -28,6 +28,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
+| `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
@@ -41,7 +42,7 @@ Spawning the agent under its own macOS TCC identity (so its Accessibility /
 Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the
 external [`disclaim`](https://crates.io/crates/disclaim) crate — `posix_spawn` +
 the private `responsibility_spawnattrs_setdisclaim`, not ObjC.
-`openlogi-desktop/src/services/ipc.rs`'s `spawn_agent` uses it; there is no
+`openlogi-desktop/src/services/ipc/launch.rs`'s `spawn_agent` uses it; there is no
 in-tree FFI for it. Likewise, installed-application discovery and icon
 rendering for per-app profiles live in the external
 [`appcatalog`](https://crates.io/crates/appcatalog) crate (`NSWorkspace` +
@@ -50,8 +51,8 @@ only wraps its PNG bytes into a `gpui::Image`.
 
 The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
 carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
-`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `launch_agent.rs` (plist
-via `std::fs`).
+`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `autostart/macos.rs`
+(legacy-plist cleanup via `std::fs`).
 
 ## Ownership: `Retained<T>`, never raw `id`
 
@@ -92,9 +93,11 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   the status item, its `MenuTarget` and the `ResumeTarget` are bound as locals
   that outlive `NSApplication::run()`. They must stay bound — menu items
   reference their target *weakly*, and the notification center does the same.
-- `openlogi-camera`'s frame delegate is deliberately the opposite: an ivar-less
-  `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on a
-  background dispatch queue.
+- `openlogi-camera`'s frame delegate is deliberately the opposite: an
+  `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on
+  a background dispatch queue. Its one ivar is the owning session's
+  `Arc<FrameSink>` (`Send + Sync`), so which session a frame belongs to is
+  carried by ownership instead of process-global statics.
 
 ## Privacy permissions (TCC): typed framework crates, never a hand-rolled `extern`
 
@@ -199,16 +202,20 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
   statics.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
-  `AXIsProcessTrusted[WithOptions]` and the two extern statics they need
-  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and `NSString::to_str(pool)`
-  (the borrow is tied to the pool).
+  the `NSWorkspace` activation-observer registration and typed notification
+  payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they
+  need (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and
+  `NSString::to_str(pool)` (the borrow is tied to the pool).
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
 - `overlay/platform.rs` — `NSEvent::removeMonitor` and the
   `CGGetActiveDisplayList` / `CGDisplayBounds` pair.
 - `desktop/platform/os.rs` — reading AppKit's `NSAppearanceName` statics to set
-  `NSApp.appearance`. That is the GUI's only `unsafe`.
+  `NSApp.appearance`.
+- `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
+  bindings are `unsafe fn`s) and the `SMAppServiceErrorDomain` extern static.
+  Together with `os.rs`, the GUI's entire `unsafe` surface.
 - `camera/{capture,uvc/iokit}.rs` — the AVFoundation capture FFI and the IOKit
   USB plug-in; `uvc/iokit.rs` deliberately concentrates every `unsafe` of the
   macOS UVC backend so the descriptor parser above it is ordinary safe code.
@@ -229,9 +236,11 @@ code on a bare thread does, because the framework still autoreleases internal
 temporaries. The three places that keep an explicit `objc2::rc::autoreleasepool`,
 and the only ones that should:
 
-- `openlogi-hook`'s `frontmost_application` — a watcher thread with no run loop,
-  and `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
-  localized name).
+- `openlogi-hook`'s frontmost-application reads and activation observer — the
+  watcher and notification callback may run on threads with no run loop, and
+  `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
+  localized name). Registration and removal use the same boundary so AppKit's
+  internal autoreleased temporaries are drained as well.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
@@ -247,8 +256,8 @@ bump it — restore with `cargo update -p gpui --precise <commit>`).
 
 Every ObjC / Core-framework crate is declared **once** in the workspace table —
 `objc2`, `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`,
-`objc2-core-graphics`, `objc2-application-services`, `objc2-io-kit`, `block2`,
-`core-graphics`, `core-foundation`. The header-gated ones carry
+`objc2-core-graphics`, `objc2-application-services`, `objc2-io-kit`,
+`objc2-service-management`, `block2`, `core-graphics`, `core-foundation`. The header-gated ones carry
 `default-features = false` there, and each member inherits with
 `workspace = true` and adds only the feature modules it uses. A new one belongs
 in that table too, never inline in a member manifest: the unified version is what

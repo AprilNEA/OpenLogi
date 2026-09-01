@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -61,6 +61,78 @@ impl Drop for MessageListenerGuard {
     }
 }
 
+/// A software id a request may carry: `1..=15`.
+///
+/// Id `0` is the wire's device-notification marker (event decoding treats
+/// `software_id == 0` as "not a response"), so a request sent with it would
+/// have its response indistinguishable from an event — made unrepresentable
+/// here by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestSwId(U4);
+
+impl RequestSwId {
+    /// The id as a request software id, or `None` for the reserved id `0`.
+    #[must_use]
+    pub fn new(id: U4) -> Option<Self> {
+        (id.to_lo() != 0).then_some(Self(id))
+    }
+
+    /// The nibble the wire carries.
+    #[must_use]
+    pub fn get(self) -> U4 {
+        self.0
+    }
+}
+
+/// How the channel assigns the software id each outgoing request carries.
+///
+/// One value instead of three cooperating fields (a rotate flag, the current
+/// id, an optional lease): the triple admitted states the wire cannot mean —
+/// rotation walking over ids other channels hold leases on, or a leased id
+/// different from the id actually sent. Constructed whole, those states are
+/// unrepresentable.
+pub enum SwIdPolicy {
+    /// Every request carries the same id.
+    Fixed(RequestSwId),
+    /// Walk `1..=15`, one id per request — eases mapping responses to
+    /// requests for a single exclusive user of a node. The counter is this
+    /// policy's own; the id `0` slot is skipped in the wrap.
+    Rotating(AtomicU8),
+    /// A fixed id owned process-wide: `free(id)` runs exactly once when this
+    /// policy is dropped, handing the lease back to the allocator — so
+    /// concurrent opens of one HID node never share a correlation id.
+    /// (OpenLogi local addition.)
+    Leased {
+        /// The leased id every request carries.
+        id: RequestSwId,
+        /// Returns the id to the allocator on drop.
+        free: fn(u8),
+    },
+}
+
+impl SwIdPolicy {
+    /// A fresh rotation, starting at id `1`.
+    #[must_use]
+    pub fn rotating() -> Self {
+        Self::Rotating(AtomicU8::new(0x01))
+    }
+}
+
+impl Default for SwIdPolicy {
+    /// Fixed id `1`, matching the protocol's conventional default.
+    fn default() -> Self {
+        Self::Fixed(RequestSwId(U4::from_lo(0x01)))
+    }
+}
+
+impl Drop for SwIdPolicy {
+    fn drop(&mut self) {
+        if let Self::Leased { id, free } = self {
+            free(id.get().to_lo());
+        }
+    }
+}
+
 /// Represents a HID communication channel supporting HID++.
 pub struct HidppChannel {
     /// Whether the channel supports short (7 bytes) HID++ messages.
@@ -78,11 +150,12 @@ pub struct HidppChannel {
     /// The underlying raw HID channel.
     raw_channel: Arc<dyn RawHidChannel>,
 
-    /// Whether to rotate the [`Self::software_id`].
-    rotate_software_id: AtomicBool,
-
-    /// The software ID to provide at the next call to [`Self::get_sw_id`].
-    software_id: AtomicU8,
+    /// The software-id policy for outgoing requests (see [`SwIdPolicy`]).
+    ///
+    /// This must remain after `raw_channel`: fields drop in declaration order,
+    /// so the final lease is returned only after channel shutdown has joined
+    /// the read thread and released the raw transport.
+    sw_id_policy: SwIdPolicy,
 
     /// All sent messages that are waiting for a response.
     pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
@@ -107,21 +180,10 @@ pub struct HidppChannel {
     /// The handle to the read thread. Should be joined after signaling
     /// [`Self::read_thread_close`].
     read_thread_hdl: Option<JoinHandle<()>>,
-
-    /// Optional process-wide software-id lease: `(id, free)` run on drop.
-    ///
-    /// OpenLogi leases a unique HID++ software id per open so concurrent
-    /// channels on the same physical HID node never share a correlation id
-    /// (software id `0` is reserved for device notifications). Local addition.
-    sw_id_lease: Option<(u8, fn(u8))>,
 }
 
 impl Drop for HidppChannel {
     fn drop(&mut self) {
-        if let Some((id, free)) = self.sw_id_lease.take() {
-            free(id);
-        }
-
         if let Some(read_thread_close) = self.read_thread_close.take() {
             // This only fails if the receiving end, which is owned by the read thread in
             // this case, is dropped.
@@ -131,9 +193,10 @@ impl Drop for HidppChannel {
         }
 
         if let Some(read_thread_hdl) = self.read_thread_hdl.take() {
-            // Joining is not politeness: it is what makes the OS handle closed
-            // by the time this returns, so a caller that drops a channel and
-            // reopens the same node never has two opens of it alive at once.
+            // Joining is not politeness: together with the subsequent
+            // `raw_channel` field drop, it makes the OS handle close before the
+            // software-id lease is returned. A caller can therefore drop a
+            // channel and reopen the same node without overlapping lifetimes.
             #[expect(
                 clippy::unwrap_used,
                 reason = "propagate a read-thread panic instead of ignoring a crashed background worker"
@@ -145,7 +208,7 @@ impl Drop for HidppChannel {
 
 /// Represents a message that was sent and is waiting for a response.
 struct PendingMessage {
-    /// Unique ID used to remove this request if it times out.
+    /// Unique ID used to remove this request when its waiter goes away.
     id: u64,
 
     /// The predicate that has to match for an incoming message to be classified
@@ -155,6 +218,52 @@ struct PendingMessage {
     /// The oneshot sender used to provide the response message to the receiving
     /// end.
     sender: oneshot::Sender<HidppMessage>,
+}
+
+/// One registered request and the receiver waiting for its response.
+///
+/// Dropping this value unregisters the request, including when an outer async
+/// deadline cancels [`HidppChannel::send_with_timeout`] during its write.
+struct PendingRequest {
+    id: u64,
+    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    receiver: oneshot::Receiver<HidppMessage>,
+}
+
+impl PendingRequest {
+    fn register(
+        id: u64,
+        pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = oneshot::channel();
+        let request = Self {
+            id,
+            pending_messages,
+            receiver,
+        };
+        lock(&request.pending_messages).push_back(PendingMessage {
+            id,
+            response_predicate: Box::new(response_predicate),
+            sender,
+        });
+        request
+    }
+
+    async fn receive(mut self) -> Result<HidppMessage, ChannelError> {
+        (&mut self.receiver)
+            .await
+            .map_err(|_| ChannelError::NoResponse)
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        let mut pending = lock(&self.pending_messages);
+        if let Some(pos) = pending.iter().position(|message| message.id == self.id) {
+            pending.remove(pos);
+        }
+    }
 }
 
 impl HidppChannel {
@@ -200,15 +309,13 @@ impl HidppChannel {
             vendor_id: raw_channel_rc.vendor_id(),
             product_id: raw_channel_rc.product_id(),
             raw_channel: raw_channel_rc,
-            rotate_software_id: AtomicBool::new(false),
-            software_id: AtomicU8::new(0x01),
+            sw_id_policy: SwIdPolicy::default(),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
             next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
-            sw_id_lease: None,
         })
     }
 
@@ -217,61 +324,40 @@ impl HidppChannel {
         self.raw_channel.is_connected()
     }
 
-    /// Sets the software ID that should be returned by the next call to
-    /// [`Self::get_sw_id`].
+    /// Replace the software-id policy for outgoing requests.
     ///
-    /// Using software ID `0` is highly discouraged as it is used for device
-    /// notifications.
-    pub fn set_sw_id(&self, sw_id: U4) {
-        self.software_id.store(sw_id.to_lo(), Ordering::SeqCst);
-    }
-
-    /// Sets whether the software ID returned by a call to [`Self::get_sw_id`]
-    /// should increment (and potentially wrap around) after each call.
-    ///
-    /// This comes in handy when trying to map responses to requests
-    /// consistently.
-    ///
-    /// Software ID `0` will be skipped in the rotation process as it is
-    /// reserved for device notifications.
-    pub fn set_rotating_sw_id(&self, enable: bool) {
-        self.rotate_software_id.store(enable, Ordering::SeqCst);
-    }
-
-    /// Lease software id `id` until this channel is dropped, then call `free(id)`.
-    ///
-    /// Replaces any previous lease. Used by OpenLogi so concurrent opens of the
-    /// same HID node hold distinct correlation ids for their full lifetime.
-    ///
-    /// OpenLogi local addition.
-    pub fn set_sw_id_lease(&mut self, id: u8, free: fn(u8)) {
-        self.sw_id_lease = Some((id, free));
+    /// `&mut self` on purpose: the policy is decided while the channel is
+    /// still exclusively owned (right after opening, before it is shared), so
+    /// no request can race a policy change. Replacing a [`SwIdPolicy::Leased`]
+    /// policy returns its lease before this method returns. The channel's final
+    /// lease is returned only after its read thread and raw transport stop.
+    pub fn set_sw_id_policy(&mut self, policy: SwIdPolicy) {
+        self.sw_id_policy = policy;
     }
 
     /// Provides a software ID that can be used to send a HID++ message across
     /// the channel.
     ///
-    /// This method should be called separately for every message to send as it
-    /// may rotate (as indicated by [`Self::set_rotating_sw_id`]).
+    /// This method should be called separately for every message to send, as a
+    /// [`SwIdPolicy::Rotating`] policy advances per call.
     pub fn get_sw_id(&self) -> U4 {
-        if self.rotate_software_id.load(Ordering::SeqCst) {
-            // The closure always returns `Some`, so `fetch_update` never
-            // reports `Err`; both arms carry the same pre-update value.
-            let previous =
-                match self
-                    .software_id
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+        match &self.sw_id_policy {
+            SwIdPolicy::Fixed(id) | SwIdPolicy::Leased { id, .. } => id.get(),
+            SwIdPolicy::Rotating(counter) => {
+                // The closure always returns `Some`, so `fetch_update` never
+                // reports `Err`; both arms carry the same pre-update value.
+                let previous =
+                    match counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
                         Some(if old & 0x0f == 0x0f {
                             0x01
                         } else {
                             old.wrapping_add(1)
                         })
                     }) {
-                    Ok(previous) | Err(previous) => previous,
-                };
-            U4::from_lo(previous)
-        } else {
-            U4::from_lo(self.software_id.load(Ordering::SeqCst))
+                        Ok(previous) | Err(previous) => previous,
+                    };
+                U4::from_lo(previous)
+            }
         }
     }
 
@@ -346,41 +432,29 @@ impl HidppChannel {
         let (dev, feat, func) = msg.header();
         trace!(dev, feat, func, "hidpp request");
 
-        let (sender, receiver) = oneshot::channel::<HidppMessage>();
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
-
-        {
-            let mut pending = lock(&self.pending_messages);
-            // Drop abandoned requests before queuing this one. Timeouts and
-            // write failures remove their entry eagerly below, but a caller
-            // cancelled mid-flight (an outer `timeout(..)` dropping the whole
-            // future) still leaves its `PendingMessage` behind. On a channel
-            // reused across inventory ticks those would accumulate unboundedly
-            // — and a late response could be mis-delivered to a recycled
-            // software id. `is_canceled()` is true once the receiver is gone,
-            // so this prunes exactly the give-ups.
-            pending.retain(|m| !m.sender.is_canceled());
-            pending.push_back(PendingMessage {
-                id: pending_id,
-                response_predicate: Box::new(response_predicate),
-                sender,
-            });
-        }
+        let pending_request = PendingRequest::register(
+            pending_id,
+            Arc::clone(&self.pending_messages),
+            response_predicate,
+        );
 
         // The deadline covers the write as well: `write_report` has no
         // bounded-time contract of its own, so a wedged device could otherwise
         // park `send` forever before the response wait even starts.
-        let mut request = std::pin::pin!(
-            async {
-                self.send_and_forget(msg).await?;
-                receiver.await.map_err(|_| ChannelError::NoResponse)
-            }
-            .fuse()
-        );
+        let result = {
+            let mut request = std::pin::pin!(
+                async move {
+                    self.send_and_forget(msg).await?;
+                    pending_request.receive().await
+                }
+                .fuse()
+            );
 
-        let result = select! {
-            result = request => result,
-            () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            select! {
+                result = request => result,
+                () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            }
         };
 
         match &result {
@@ -388,21 +462,7 @@ impl HidppChannel {
             Err(e) => trace!(dev, feat, error = ?e, "hidpp no response"),
         }
 
-        if result.is_err() {
-            // A timeout or write failure leaves the entry queued — remove it
-            // eagerly. After a matched response the read thread has already
-            // taken it, so this is a no-op then.
-            self.remove_pending_message(pending_id);
-        }
-
         result
-    }
-
-    fn remove_pending_message(&self, id: u64) {
-        let mut pending = lock(&self.pending_messages);
-        if let Some(pos) = pending.iter().position(|msg| msg.id == id) {
-            pending.remove(pos);
-        }
     }
 
     /// Sends a HID++ message across the channel and does not wait for a

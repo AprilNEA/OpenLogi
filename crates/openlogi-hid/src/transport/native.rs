@@ -11,11 +11,15 @@ use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
 
+use openlogi_device::DeviceIoGate;
 use openlogi_device::backend::{
     BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter,
 };
 
-use super::{enumerate_devices, is_hidpp_node, open_hidpp_channel, watch_nodes};
+use super::{
+    device_io_gate, device_io_suspended, enumerate_devices, is_hidpp_node, open_hidpp_channel,
+    watch_nodes,
+};
 
 /// One logical top-level collection exposed by an OS HID node.
 ///
@@ -65,7 +69,6 @@ pub(crate) fn native_backend() -> Arc<dyn HidBackend> {
 }
 
 /// [`HidBackend`] over `async-hid`.
-#[derive(Default)]
 pub(crate) struct NativeBackend {
     /// OS handles from the most recent enumeration, keyed by the node id and
     /// top-level usage pair that enumeration reported them under.
@@ -77,16 +80,32 @@ pub(crate) struct NativeBackend {
     /// than looking them up again. Held behind an `Arc` so an open can borrow
     /// one without keeping the map locked across its await.
     nodes: Mutex<HashMap<HandleKey, Arc<Device>>>,
+    device_io: DeviceIoGate,
+}
+
+impl Default for NativeBackend {
+    fn default() -> Self {
+        Self {
+            nodes: Mutex::new(HashMap::new()),
+            device_io: device_io_gate(),
+        }
+    }
 }
 
 impl NativeBackend {
     /// Enumerate the host's HID nodes and refresh the handle cache.
     async fn refresh(&self) -> Result<Vec<Arc<Device>>, BackendError> {
+        if !self.device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
         let devices: Vec<Arc<Device>> = enumerate_devices()
             .await?
             .into_iter()
             .map(Arc::new)
             .collect();
+        if !self.device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
         let handles = devices
             .iter()
             .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
@@ -128,17 +147,29 @@ impl HidBackend for NativeBackend {
     }
 
     async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+        if !self.device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
         let device = self.handle(node)?;
-        open_hidpp_channel(&device).await
+        open_hidpp_channel(&device, self.device_io.clone()).await
     }
 
     async fn open_raw_writer(&self, node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError> {
+        if !self.device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
         let (_reader, writer) = self
             .handle(node)?
             .open()
             .await
             .map_err(super::backend_error)?;
-        Ok(Box::new(NativeRawWriter(writer)))
+        if !self.device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
+        Ok(Box::new(NativeRawWriter {
+            writer,
+            device_io: self.device_io.clone(),
+        }))
     }
 
     fn watch(&self) -> Result<HotplugStream, BackendError> {
@@ -147,12 +178,18 @@ impl HidBackend for NativeBackend {
 }
 
 /// [`RawWriter`] over an `async-hid` output-report writer.
-struct NativeRawWriter(DeviceWriter);
+struct NativeRawWriter {
+    writer: DeviceWriter,
+    device_io: DeviceIoGate,
+}
 
 #[async_trait]
 impl RawWriter for NativeRawWriter {
     async fn write_output_report(&mut self, report: &[u8]) -> Result<(), BackendError> {
-        self.0
+        if !self.device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
+        self.writer
             .write_output_report(report)
             .await
             .map_err(super::backend_error)

@@ -863,9 +863,9 @@ fn app_settings_default_omits_block() {
 #[test]
 fn app_settings_launch_at_login_roundtrips() {
     let mut cfg = Config::default();
-    cfg.app_settings.launch_at_login = true;
+    cfg.app_settings.launch_at_login = false;
     let parsed = write_and_read(&cfg);
-    assert!(parsed.app_settings.launch_at_login);
+    assert!(!parsed.app_settings.launch_at_login);
 }
 
 #[test]
@@ -1044,6 +1044,144 @@ Click = \"Paste\"
     assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
     assert!(!body.contains("button_bindings"), "got: {body}");
     assert!(!body.contains("gesture_bindings"), "got: {body}");
+}
+
+#[test]
+fn migrates_pre_v7_thumbwheel_defaults_to_normalised_native_direction() {
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+}
+
+#[test]
+fn migrates_a_pre_v7_per_app_pair_that_was_effectively_default() {
+    // The app overrides only one half; the other old default comes from a
+    // custom global pair. The migration must materialise both new defaults in
+    // the app so it remains native without changing the custom global profile.
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"NextTab\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+
+[devices.\"unit:6be9d300\".per_app_bindings.\"com.example.Editor\"]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let app = cfg.effective_bindings("unit:6be9d300", Some("com.example.Editor"));
+    assert_eq!(
+        app.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+    assert_eq!(
+        app.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        cfg.bindings_for("unit:6be9d300")
+            .get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::NextTab)),
+        "the custom global pair must stay literal"
+    );
+}
+
+#[test]
+fn pre_v7_thumbwheel_migration_leaves_a_custom_pair_unchanged() {
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"NextTab\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::NextTab))
+    );
+}
+
+#[test]
+fn pre_v7_thumbwheel_migration_preserves_non_single_binding_shapes() {
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = { short = \"HorizontalScrollRight\", long = \"NextTab\" }
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    let Some(Binding::LongPress(up)) = bindings.get(&ButtonId::ThumbwheelScrollUp) else {
+        panic!("custom long-press binding must keep its shape");
+    };
+    assert_eq!(up.short(), &Action::HorizontalScrollRight);
+    assert_eq!(up.long(), &Action::NextTab);
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+}
+
+#[test]
+fn v7_reversed_thumbwheel_pair_survives_reload() {
+    let v7 = "\
+schema_version = 7
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v7).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v7");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
 }
 
 #[test]
@@ -1844,6 +1982,93 @@ Forward = "BrowserForward"
         device.links.contains_key("direct:046d:b034"),
         "both routes are indexed: {:?}",
         device.links
+    );
+}
+
+#[test]
+fn loading_hand_edited_duplicate_routes_keeps_the_first_device_key() {
+    let source = r#"
+schema_version = 6
+selected_device = "unit:ffffffff"
+
+[devices.keyboard]
+host_switch_targets = ["unit:ffffffff"]
+
+[devices."unit:11111111".links."receiver:82839805:slot:1".overrides]
+dpi = 800
+
+[devices."unit:ffffffff".links."receiver:82839805:slot:1".overrides]
+dpi = 1600
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, source).expect("write hand-edited config");
+
+    let config = Config::load_from_path(&path).expect("load");
+
+    assert_eq!(
+        config.devices["unit:11111111"].links["receiver:82839805:slot:1"]
+            .overrides
+            .dpi,
+        Some(Dpi::new(800)),
+        "the lexicographically first device key keeps its complete link"
+    );
+    assert!(
+        !config.devices["unit:ffffffff"]
+            .links
+            .contains_key("receiver:82839805:slot:1"),
+        "the later duplicate no longer indexes the route"
+    );
+    assert_eq!(config.selected_device.as_deref(), Some("unit:ffffffff"));
+    assert_eq!(
+        config.devices["keyboard"].host_switch_targets,
+        vec!["unit:ffffffff".to_string()],
+        "repairing an index does not rename the referenced device entry"
+    );
+}
+
+#[test]
+fn loading_v4_repairs_duplicate_routes_created_by_key_migration() {
+    let source = r#"
+schema_version = 4
+selected_device = "direct:046d:c08d:unit:11111111"
+
+[devices.keyboard]
+host_switch_targets = ["direct:046d:c08d:unit:11111111"]
+
+[devices."direct:046d:c08d:unit:11111111"]
+dpi = 1600
+
+[devices."unit:ffffffff".links."direct:046d:c08d".overrides]
+dpi = 800
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, source).expect("write v4 config");
+
+    let config = Config::load_from_path(&path).expect("load and migrate");
+
+    assert!(
+        config.devices["unit:11111111"]
+            .links
+            .contains_key("direct:046d:c08d"),
+        "the first post-migration device key owns the route"
+    );
+    assert!(
+        !config.devices["unit:ffffffff"]
+            .links
+            .contains_key("direct:046d:c08d"),
+        "the pre-existing duplicate is removed"
+    );
+    assert_eq!(
+        config.selected_device.as_deref(),
+        Some("unit:11111111"),
+        "selection follows the migrated device key"
+    );
+    assert_eq!(
+        config.devices["keyboard"].host_switch_targets,
+        vec!["unit:11111111".to_string()],
+        "host-switch references follow the migrated device key"
     );
 }
 

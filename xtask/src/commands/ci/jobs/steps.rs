@@ -160,7 +160,10 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
         Job::Wasm => wasm(job, sh),
         Job::I18n => Ok(Plan::run(
             job,
-            [Step::new("cargo").args(["test", "-p", "openlogi-desktop", "i18n"])],
+            [
+                Step::new("cargo").args(["test", "-p", "openlogi-ui", "locale"]),
+                Step::new("cargo").args(["test", "-p", "openlogi-desktop", "i18n"]),
+            ],
         )),
         Job::Wire => Ok(Plan::run(
             job,

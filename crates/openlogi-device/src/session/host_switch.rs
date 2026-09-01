@@ -26,7 +26,7 @@ use tokio::{
 use tracing::{debug, info};
 
 use crate::{
-    ChannelPool, DeviceRoute,
+    ChannelPool, DeviceIoGate, DeviceRoute,
     backend::BackendError,
     reprog_controls::{self, ReprogControlsV4},
 };
@@ -105,7 +105,13 @@ pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
     shutdown: oneshot::Receiver<HostSwitchStopReason>,
     channel_pool: ChannelPool,
+    mut device_io: DeviceIoGate,
 ) -> Result<Option<u8>, HostSwitchError> {
+    if !device_io.allows_io() {
+        return Err(HostSwitchError::Hid(BackendError::Backend(
+            "host device I/O is suspended".into(),
+        )));
+    }
     let channel = open_channel(&channel_pool, &keyboard, "opening keyboard channel")
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
@@ -160,7 +166,7 @@ pub async fn run_host_switch_session(
     };
 
     drop(listener);
-    if outcome.1 {
+    if outcome.1 && device_io.wait_until_allowed().await {
         restore_host_controls(&controls, armed).await;
     }
     Ok(outcome.0)
@@ -261,11 +267,7 @@ async fn arm_host_controls_inner(
             });
             match mode {
                 ReportingMode::Diverted => {
-                    timed_hidpp(
-                        "diverting host control",
-                        controls.set_cid_reporting(info.cid, true, false),
-                    )
-                    .await?;
+                    timed_hidpp("diverting host control", controls.divert_cid(info.cid)).await?;
                 }
                 ReportingMode::Analytics => {
                     timed_hidpp(
@@ -707,15 +709,17 @@ mod tests {
         assert!(!change.required);
     }
 
-    fn reporting(diverted: bool, raw_xy: bool, analytics_key_events: bool) -> CidReporting {
+    /// A reporting snapshot with unrelated bits deliberately set, so the
+    /// cleanup tests prove that only the bits they vary are restored.
+    fn noisy_reporting() -> CidReporting {
         CidReporting {
             cid: ControlId(0x00d3),
-            diverted,
+            diverted: false,
             persistently_diverted: true,
             force_raw_xy: true,
-            raw_xy,
+            raw_xy: false,
             remap: Some(ControlId(0x1234)),
-            analytics_key_events,
+            analytics_key_events: false,
             raw_wheel: true,
         }
     }
@@ -758,7 +762,7 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Analytics,
-            original: reporting(false, false, false),
+            original: noisy_reporting(),
         }];
         let mut events = [AnalyticsKeyEvent::default(); 5];
         events[0] = AnalyticsKeyEvent {
@@ -795,7 +799,11 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Diverted,
-            original: reporting(true, true, false),
+            original: CidReporting {
+                diverted: true,
+                raw_xy: true,
+                ..noisy_reporting()
+            },
         });
 
         assert_eq!(change.diverted, Some(true));
@@ -811,7 +819,10 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Analytics,
-            original: reporting(false, false, true),
+            original: CidReporting {
+                analytics_key_events: true,
+                ..noisy_reporting()
+            },
         });
 
         assert_eq!(change.analytics_key_events, Some(true));

@@ -12,16 +12,18 @@
 //! every answer is the complete state, a reconnect needs no resynchronisation:
 //! ask again with generation 0 and the next answer is the whole truth.
 //!
-//! What is left to time is failure. [`spawn_agent`] relaunches the binary when
-//! the socket stays down (no launchd dependency: `KeepAlive` only acts when the
-//! agent *exits*, and autostart may be off entirely), and a stretch without a
+//! What is left to time is failure. `launch::spawn_agent` brings the agent up
+//! when the socket stays down — gated by [`SpawnReflex`], which fires
+//! immediately for an agent that was never reachable but gives a lost
+//! connection [`SPAWN_AFTER_LOSS`] first (the deliberate quits and the
+//! supervised restarts announce themselves within that window) and never
+//! fires at a live agent newer than this GUI. A stretch without a
 //! usable connection longer than [`UNREACHABLE_AFTER`] is pushed to the GUI as
 //! [`GuiUpdate::Unreachable`] so the window can say so instead of waiting
 //! forever. A dead agent is noticed the moment the socket closes; a *hung* one
 //! is noticed when its hold window passes without an answer.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -30,17 +32,25 @@ use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Minimum gap between agent-launch attempts while the socket is unreachable.
 /// Long enough that a missing or crash-looping binary can't be respawned in a
 /// tight loop, short enough that a quit / crashed agent is recovered promptly.
 const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
+
+/// How long a *lost* connection must stay down before the spawn reflex may
+/// fire. Every cause of a warm loss has a better first responder — launchd's
+/// crash respawn, the agent's self-exec on update, the tray-Quit deep link —
+/// and the reflex is the responder of last resort, so it waits them out
+/// (~8 reconnect attempts). A connection that never existed has no first
+/// responder; the cold path fires on the first failed attempt.
+const SPAWN_AFTER_LOSS: Duration = Duration::from_secs(2);
 
 /// How long to wait before retrying a connect that failed. This is a retry
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
@@ -124,6 +134,11 @@ pub enum Command {
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
 /// sender for device commands. Pairing progress arrives through the same state
 /// updates as everything else.
+mod launch;
+
+pub use launch::mark_suite_quitting;
+use launch::spawn_agent;
+
 pub struct IpcClient {
     pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
@@ -171,21 +186,15 @@ async fn observe_loop(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
-    let mut client: Option<AgentClient> = None;
-    // The agent is normally started by launchd, but the GUI launches it if the
-    // socket is down — invaluable in dev (one `cargo run` of the GUI brings
-    // the whole system up) and a prod fallback. Retry while the socket stays
-    // down, but rate-limited (see SPAWN_RETRY_PERIOD) so a missing / failing
-    // binary can't become a tight respawn loop.
-    let mut last_spawn_attempt: Option<Instant> = None;
-    let started = Instant::now();
-    let mut connected_since: Option<Instant> = None;
+    let mut link: Option<LiveConnection> = None;
+    // Connect counter feeding `LiveConnection::id` — never reused, so a
+    // result from a replaced connection can always be told apart.
+    let mut conn_seq: u64 = 0;
+    // The agent is normally started by launchd, but the GUI brings it up when
+    // the socket is down (see `launch::spawn_agent`), gated by the reflex.
+    let mut reflex = SpawnReflex::new(Instant::now());
     let mut notified_unreachable = false;
     let mut notified_outdated = false;
-    // Generation 0 means "I have seen nothing", so the first answer is the
-    // agent's whole state rather than a wait for the next change. Reset on
-    // every disconnect: the replacement agent numbers its own generations.
-    let mut seen: Generation = 0;
     let mut inflight: Option<ObserveFuture> = None;
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
@@ -193,45 +202,64 @@ async fn observe_loop(
         // it while the others hand it back untouched.
         let mut pending = inflight.take();
         let woken = tokio::select! {
-            observed = maybe(pending.as_mut()) => Woken::Observed(observed),
+            (id, observed) = maybe(pending.as_mut()) => Woken::Observed(id, observed),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
             _ = retry.tick(), if pending.is_none() => Woken::Reconnect,
         };
         match woken {
-            // The poll answered: apply it and arm the next one. `pending` is
-            // finished, so it is deliberately not handed back.
-            Woken::Observed(Ok(observation)) => {
-                connected_since = Some(Instant::now());
-                notified_unreachable = false;
-                notified_outdated = false;
-                if observation.generation != seen {
-                    seen = observation.generation;
-                    let _ = update_tx.send(GuiUpdate::Snapshot(observation.snapshot));
+            // The poll answered. `pending` is finished, so it is deliberately
+            // not handed back — the arms below arm a successor instead.
+            Woken::Observed(id, observed) => match link.as_mut() {
+                Some(conn) if conn.id == id => {
+                    if let Ok(observation) = observed {
+                        reflex.connected();
+                        notified_unreachable = false;
+                        notified_outdated = false;
+                        if observation.generation != conn.seen {
+                            conn.seen = observation.generation;
+                            let _ = update_tx.send(GuiUpdate::Snapshot(observation.snapshot));
+                        }
+                        inflight = Some(observe(conn));
+                    } else {
+                        // The connection dropped (agent self-exec on update,
+                        // or a crash). Reconnecting re-reads the whole state,
+                        // so nothing is lost.
+                        link = None;
+                        reflex.lost(Instant::now());
+                    }
                 }
-                if let Some(client) = client.as_ref() {
-                    inflight = Some(observe(client, seen));
+                // A poll from a connection this loop no longer holds — a
+                // command reconnected while it was in flight, or the link is
+                // down. Its result, success or failure, says nothing about
+                // the live connection, so it must neither advance `seen` nor
+                // tear anything down. What it does mean: the live connection
+                // (created mid-command with the old poll still occupying the
+                // slot) has no observe yet — arm its first one.
+                _ => {
+                    if let Some(conn) = link.as_ref() {
+                        inflight = Some(observe(conn));
+                    }
                 }
-            }
-            // The connection dropped (agent self-exec on update, or a crash).
-            // Reconnecting re-reads the whole state, so nothing is lost.
-            Woken::Observed(Err(())) => {
-                client = None;
-                seen = 0;
-                connected_since = None;
-            }
+            },
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             Woken::Command(Some(cmd)) => {
                 inflight = pending;
-                if handle(&mut client, update_tx, cmd).await.is_err() {
-                    client = None;
-                    seen = 0;
-                    connected_since = None;
+                if handle(&mut link, &mut conn_seq, update_tx, cmd)
+                    .await
+                    .is_err()
+                {
+                    link = None;
+                    reflex.lost(Instant::now());
                 }
             }
-            Woken::Reconnect => match ensure(&mut client).await {
-                Ok(client) => inflight = Some(observe(client, seen)),
-                Err(ConnectFailure::Unreachable) => {}
+            Woken::Reconnect => match ensure(&mut link, &mut conn_seq).await {
+                Ok(conn) => {
+                    reflex.connected();
+                    inflight = Some(observe(conn));
+                }
+                Err(ConnectFailure::Unreachable) => reflex.agent_unreachable(),
                 Err(ConnectFailure::NewerAgent) => {
+                    reflex.newer_agent_running();
                     if !notified_outdated {
                         notified_outdated = true;
                         let _ = update_tx.send(GuiUpdate::OutdatedGui);
@@ -239,25 +267,132 @@ async fn observe_loop(
                 }
             },
         }
-        if client.is_none() {
-            let down_since = connected_since.unwrap_or(started);
-            if !notified_unreachable && down_since.elapsed() >= UNREACHABLE_AFTER {
+        let now = Instant::now();
+        if let Some(down_at) = reflex.down_since() {
+            if !notified_unreachable && now.saturating_duration_since(down_at) >= UNREACHABLE_AFTER
+            {
                 notified_unreachable = true;
                 let _ = update_tx.send(GuiUpdate::Unreachable);
             }
-            if last_spawn_attempt.is_none_or(|t| t.elapsed() >= SPAWN_RETRY_PERIOD) {
+            if reflex.should_fire(now) {
                 spawn_agent();
-                last_spawn_attempt = Some(Instant::now());
+                reflex.fired(now);
             }
         }
     }
 }
 
+/// The spawn reflex: what the loop knows about the agent link, and the rule
+/// for when `launch::spawn_agent` may fire — all timing, no I/O, driven by an
+/// explicit `now` so the tests can pin it.
+struct SpawnReflex {
+    link: Link,
+    /// The last connect attempt found a live agent *newer* than this GUI:
+    /// spawning cannot help (kickstart is a no-op on a running service and a
+    /// fresh copy exits as a duplicate) — only a GUI relaunch does.
+    agent_is_newer: bool,
+    last_fired: Option<Instant>,
+}
+
+/// The reflex's view of the agent link. `Cold` and `Lost` differ in who else
+/// might act: a connection that never existed has no first responder, while
+/// every cause of losing one has a better first responder than this GUI.
+enum Link {
+    /// A usable, version-matched connection exists.
+    Connected,
+    /// No connection has ever existed — down since process start.
+    Cold { since: Instant },
+    /// An established connection dropped at `since`: launchd's respawn, the
+    /// agent's self-exec, and the tray-Quit deep link all announce
+    /// themselves within [`SPAWN_AFTER_LOSS`].
+    Lost { since: Instant },
+}
+
+impl SpawnReflex {
+    fn new(now: Instant) -> Self {
+        Self {
+            link: Link::Cold { since: now },
+            agent_is_newer: false,
+            last_fired: None,
+        }
+    }
+
+    fn connected(&mut self) {
+        self.link = Link::Connected;
+        self.agent_is_newer = false;
+    }
+
+    /// An established connection dropped. A no-op while already down: the
+    /// original downtime keeps its start (and `Cold` stays cold — a
+    /// connection that came and went inside one command dispatch was never
+    /// established from the loop's point of view).
+    fn lost(&mut self, now: Instant) {
+        if matches!(self.link, Link::Connected) {
+            self.link = Link::Lost { since: now };
+        }
+    }
+
+    fn agent_unreachable(&mut self) {
+        self.agent_is_newer = false;
+    }
+
+    fn newer_agent_running(&mut self) {
+        self.agent_is_newer = true;
+    }
+
+    /// When the downtime started, `None` while connected — the unreachable
+    /// banner's clock.
+    fn down_since(&self) -> Option<Instant> {
+        match self.link {
+            Link::Connected => None,
+            Link::Cold { since } | Link::Lost { since } => Some(since),
+        }
+    }
+
+    /// The trigger rule: fire immediately while cold, wait out the first
+    /// responders after a loss, never at a newer agent, at most once per
+    /// [`SPAWN_RETRY_PERIOD`].
+    fn should_fire(&self, now: Instant) -> bool {
+        if self.agent_is_newer {
+            return false;
+        }
+        let waited = match self.link {
+            Link::Connected => return false,
+            Link::Cold { .. } => true,
+            Link::Lost { since } => now.saturating_duration_since(since) >= SPAWN_AFTER_LOSS,
+        };
+        waited
+            && self
+                .last_fired
+                .is_none_or(|t| now.saturating_duration_since(t) >= SPAWN_RETRY_PERIOD)
+    }
+
+    fn fired(&mut self, now: Instant) {
+        self.last_fired = Some(now);
+    }
+}
+
+/// A usable, declared connection, carrying everything that is true only *of
+/// this connection*: the identity that tags its in-flight poll, and the
+/// generation ledger — a replacement agent numbers its own generations, so
+/// `seen` lives and dies with the connection instead of being reset by
+/// discipline at every disconnect site.
+struct LiveConnection {
+    client: AgentClient,
+    /// This connection's slot in the connect sequence. A settled poll tagged
+    /// with another id belongs to a connection already gone, and is dropped.
+    id: u64,
+    /// Latest generation seen on this connection. Starts at 0 — "I have seen
+    /// nothing" — so the first answer is the agent's whole state.
+    seen: Generation,
+}
+
 /// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
 /// after the select ends rather than mutated from inside a borrowed arm.
 enum Woken {
-    /// The long-poll answered, or its connection dropped.
-    Observed(Result<Observation, ()>),
+    /// The long-poll answered, or its connection dropped — tagged with the
+    /// [`LiveConnection::id`] it was armed on.
+    Observed(u64, Result<Observation, ()>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
@@ -265,19 +400,23 @@ enum Woken {
 }
 
 /// A long-poll in flight. Boxed because it is stored across loop turns, and it
-/// owns a clone of the client so the loop can still replace its own `client`
-/// while the poll is outstanding.
-type ObserveFuture = Pin<Box<dyn Future<Output = Result<Observation, ()>> + Send>>;
+/// owns a clone of the client so the loop can still replace its own link
+/// while the poll is outstanding — which is why the output carries the
+/// connection id: the loop must be able to tell whose answer this is.
+type ObserveFuture = Pin<Box<dyn Future<Output = (u64, Result<Observation, ()>)> + Send>>;
 
-/// Ask for the next state newer than `seen`.
-fn observe(client: &AgentClient, seen: Generation) -> ObserveFuture {
-    let client = client.clone();
+/// Ask for the next state newer than what this connection has seen.
+fn observe(conn: &LiveConnection) -> ObserveFuture {
+    let client = conn.client.clone();
+    let id = conn.id;
+    let seen = conn.seen;
     Box::pin(async move {
         let mut ctx = context::current();
         ctx.deadline = Instant::now() + OBSERVE_DEADLINE;
-        client.observe(ctx, seen).await.map_err(|error| {
+        let observed = client.observe(ctx, seen).await.map_err(|error| {
             debug!(%error, "observe failed — reconnecting");
-        })
+        });
+        (id, observed)
     })
 }
 
@@ -300,110 +439,6 @@ fn ticker(period: Duration) -> tokio::time::Interval {
     interval
 }
 
-/// Launch the agent once when the socket is unreachable. Detached so it
-/// outlives the GUI (the agent is the always-on process); logs and moves on if
-/// the binary can't be found / started — the user may start it via launchd or by
-/// hand, and the poll loop keeps retrying the connection regardless.
-fn spawn_agent() {
-    let Some(path) = agent_binary_path() else {
-        warn!(
-            "agent not reachable and its binary wasn't found next to the GUI — \
-             start it via launchd or by hand"
-        );
-        return;
-    };
-    // Spawn the agent under its *own* macOS TCC identity, not the GUI's:
-    // otherwise it inherits the GUI's responsibility and the Accessibility /
-    // Input-Monitoring grants the user gave the agent look missing (#192, #214).
-    // The packaged helper goes through LaunchServices so it is its own TCC
-    // responsible process; everything else is a `disclaim` exec (a no-op
-    // pass-through to `std::process::Command` off macOS).
-    // "started", not "launched": on the packaged path success here only means
-    // `open` was handed the bundle — the waiter inside `launch_agent` reports
-    // the definitive outcome, so a LaunchServices rejection is not preceded by
-    // a success claim it then contradicts.
-    match launch_agent(&path) {
-        Ok(()) => info!(path = %path.display(), "agent not running — launch started"),
-        Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
-    }
-}
-
-/// Launch the agent binary at `path` under its own TCC identity.
-fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
-    // The packaged helper goes through LaunchServices so the agent is its own
-    // TCC responsible process; a direct exec attributes its Accessibility
-    // check to the parent GUI and the grant flips with the launch path (#192).
-    #[cfg(target_os = "macos")]
-    if let Some(bundle) = helper_bundle(path) {
-        let mut child = std::process::Command::new("/usr/bin/open")
-            .arg("-g")
-            .arg("-n")
-            .arg(bundle)
-            .spawn()?;
-        // `open` exits as soon as it hands the bundle to LaunchServices, and
-        // its exit status is the only signal that the handoff failed (damaged
-        // bundle, LaunchServices refusal) — a successful spawn alone proves
-        // nothing. Reap it off-thread and log the failure the spawn hides.
-        std::thread::spawn(move || match child.wait() {
-            Ok(status) if !status.success() => {
-                warn!(%status, "`open` could not launch the agent bundle");
-            }
-            Err(e) => warn!(error = %e, "could not reap the `open` helper"),
-            Ok(_) => {}
-        });
-        return Ok(());
-    }
-    // Any other layout (bare dev binary, Windows, Linux): exec the binary
-    // directly while disclaiming the GUI's TCC responsibility (#214).
-    disclaim::Command::new(path).spawn().map(|_| ())
-}
-
-/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
-#[cfg(target_os = "macos")]
-fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
-    let bundle = path.ancestors().nth(3)?;
-    (bundle.extension()? == "app").then_some(bundle)
-}
-
-/// Resolve the agent executable relative to the running GUI: a sibling in the
-/// cargo target dir (dev, and the flat Windows install layout), else the
-/// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
-fn agent_binary_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    // EXE_SUFFIX, or the Windows lookup misses `openlogi-agent.exe` and the
-    // spawn retry — the only thing that restarts an updated agent there, since
-    // Windows has no exec and the Run-key autostart only fires at login —
-    // silently never works.
-    let sibling = dir.join(format!("openlogi-agent{}", std::env::consts::EXE_SUFFIX));
-    if sibling.exists() {
-        return Some(sibling);
-    }
-    // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-desktop → the helper at
-    // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent
-    // Every family names its directory after the display name, so the privacy
-    // panes' filename fallback (used when bundle metadata is stale) shows the
-    // real name. The last entry keeps finding helpers in bundles built before
-    // the rename.
-    #[cfg(target_os = "macos")]
-    {
-        let contents = dir.parent()?;
-        for relative in [
-            "Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
-            "Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-            "Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        ] {
-            let helper = contents.join(relative);
-            if helper.exists() {
-                return Some(helper);
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "macos"))]
-    None
-}
-
 /// Why [`ensure`] couldn't produce a usable client.
 enum ConnectFailure {
     /// Socket down, handshake failed, or the agent is *older* than us — in
@@ -415,9 +450,12 @@ enum ConnectFailure {
     NewerAgent,
 }
 
-/// Ensure a live client, connecting on demand.
-async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, ConnectFailure> {
-    if client.is_none() {
+/// Ensure a live connection, connecting — and stamping a fresh id — on demand.
+async fn ensure<'a>(
+    link: &'a mut Option<LiveConnection>,
+    conn_seq: &mut u64,
+) -> Result<&'a LiveConnection, ConnectFailure> {
+    if link.is_none() {
         // The handshake happens before any real RPC: mismatched bincode layouts
         // would otherwise surface only as opaque RpcErrors and a silently empty
         // device list. Refuse with a clear log instead, and report the
@@ -428,7 +466,22 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
         })?;
         match connection.version {
             version if version == PROTOCOL_VERSION => {
-                *client = Some(connection.client);
+                // Declare before any other RPC: a dormant agent arms only on
+                // this — merely connecting no longer wakes it.
+                connection
+                    .client
+                    .declare_client(context::current(), ClientKind::Gui)
+                    .await
+                    .map_err(|error| {
+                        debug!(%error, "agent dropped during the declare handshake");
+                        ConnectFailure::Unreachable
+                    })?;
+                *conn_seq += 1;
+                *link = Some(LiveConnection {
+                    client: connection.client,
+                    id: *conn_seq,
+                    seen: 0,
+                });
                 debug!("connected to agent IPC socket");
             }
             version if version < PROTOCOL_VERSION => {
@@ -449,23 +502,25 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
             }
         }
     }
-    // `client` is `Some` here (just set, or already was); the `None` arm is
+    // `link` is `Some` here (just set, or already was); the `None` arm is
     // unreachable but keeps this `expect`-free.
-    client.as_ref().ok_or(ConnectFailure::Unreachable)
+    link.as_ref().ok_or(ConnectFailure::Unreachable)
 }
 
 /// Run one device command. `Err` signals a dropped connection so the caller
 /// reconnects; the command's own failure is reported back over its oneshot.
 async fn handle(
-    client: &mut Option<AgentClient>,
+    link: &mut Option<LiveConnection>,
+    conn_seq: &mut u64,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
-    // keep `client` None on connect failure; that's not a dropped live connection
-    let Ok(client) = ensure(client).await else {
+    // keep `link` None on connect failure; that's not a dropped live connection
+    let Ok(conn) = ensure(link, conn_seq).await else {
         reply_disconnected(update_tx, cmd);
         return Ok(());
     };
+    let client = &conn.client;
     let ctx = context::current();
     match cmd {
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
@@ -655,10 +710,50 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use std::path::Path;
-
     use super::*;
+
+    #[test]
+    fn a_never_reached_agent_is_spawned_immediately() {
+        let t0 = Instant::now();
+        let reflex = SpawnReflex::new(t0);
+        assert!(reflex.should_fire(t0));
+    }
+
+    #[test]
+    fn a_lost_connection_waits_out_the_first_responders() {
+        // A supervised restart, a self-exec, or the quit deep link announce
+        // themselves within the grace window; the reflex must not race them.
+        let t0 = Instant::now();
+        let mut reflex = SpawnReflex::new(t0);
+        reflex.connected();
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(120)));
+        reflex.lost(t0 + Duration::from_secs(120));
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(121)));
+        assert!(reflex.should_fire(t0 + Duration::from_secs(120) + SPAWN_AFTER_LOSS));
+    }
+
+    #[test]
+    fn a_live_newer_agent_is_never_spawned_at() {
+        // Kickstart would no-op and a fresh copy exits as a duplicate; only
+        // relaunching the GUI helps, so firing is pure churn.
+        let t0 = Instant::now();
+        let mut reflex = SpawnReflex::new(t0);
+        reflex.newer_agent_running();
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(120)));
+        // The newer agent going away (it was quit or replaced) re-arms the
+        // reflex on the next failed attempt.
+        reflex.agent_unreachable();
+        assert!(reflex.should_fire(t0 + Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn retries_are_rate_limited() {
+        let t0 = Instant::now();
+        let mut reflex = SpawnReflex::new(t0);
+        reflex.fired(t0);
+        assert!(!reflex.should_fire(t0 + Duration::from_secs(29)));
+        assert!(reflex.should_fire(t0 + SPAWN_RETRY_PERIOD));
+    }
 
     #[test]
     fn a_reload_that_never_reached_the_agent_is_reported() {
@@ -673,32 +768,5 @@ mod tests {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn helper_bundle_resolves_only_the_packaged_layout() {
-        let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(packaged),
-            Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
-            ))
-        );
-        let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(dev),
-            Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
-            ))
-        );
-        assert_eq!(
-            helper_bundle(Path::new("target/debug/openlogi-agent")),
-            None
-        );
     }
 }

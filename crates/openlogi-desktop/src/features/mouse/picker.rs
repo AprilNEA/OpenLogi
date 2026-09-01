@@ -7,8 +7,9 @@ use gpui::{
     Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category};
+use openlogi_core::binding::{Action, Category, GestureDirection};
 
+use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
@@ -39,6 +40,20 @@ pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
 
 /// Icon for a gesture-mode button's five-direction summary.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
+
+/// Icon for one gesture direction: an arrow away from the centre, or the
+/// centre itself for the click. Four come from gpui-component's bundled set
+/// and the dot is vendored, but all five are lucide at the same stroke weight
+/// as the action icons they sit above.
+pub(crate) fn gesture_direction_icon(direction: GestureDirection) -> Icon {
+    match direction {
+        GestureDirection::Up => Icon::new(IconName::ArrowUp),
+        GestureDirection::Down => Icon::new(IconName::ArrowDown),
+        GestureDirection::Left => Icon::new(IconName::ArrowLeft),
+        GestureDirection::Right => Icon::new(IconName::ArrowRight),
+        GestureDirection::Click => Icon::empty().path("action-icons/circle-dot.svg"),
+    }
+}
 
 /// Asset path of the vendored glyph for an action. Exhaustive so a new action
 /// must deliberately choose an icon.
@@ -115,7 +130,7 @@ pub(crate) fn action_rows_matching(
     let mut catalog_index = 0usize;
     let mut sections = Vec::new();
     for (category, actions) in grouped_catalog() {
-        let category_label = rust_i18n::t!(category.label());
+        let category_label = rust_i18n::t!(category.translation_key());
         let category_matches = category_label.to_lowercase().contains(&query);
         // Number the full catalog before filtering so typing in the search box
         // never changes an action row's element identity.
@@ -129,7 +144,7 @@ pub(crate) fn action_rows_matching(
             .filter(|(_, action)| {
                 query.is_empty()
                     || category_matches
-                    || rust_i18n::t!(action.label())
+                    || localized_action_label(action)
                         .to_lowercase()
                         .contains(&query)
                     || action.label().to_lowercase().contains(&query)
@@ -143,7 +158,7 @@ pub(crate) fn action_rows_matching(
                 .child(editor_section(category_label.into_owned(), pal))
                 .children(actions.into_iter().map(|(action_key, action)| {
                     let selected = current == Some(&action);
-                    let label = tr!(action.label());
+                    let label = localized_action_label(&action);
                     let accessible_label = label.clone();
                     let icon_path = action_icon_path(&action);
                     let on_pick = on_pick.clone();
@@ -219,4 +234,18 @@ pub(crate) fn editor_scroll_list(
         .max_h(px(EDITOR_LIST_MAX_H))
         .overflow_y_scroll()
         .children(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gesture_action_catalog_includes_actions_ring() {
+        let actions = grouped_catalog()
+            .into_iter()
+            .flat_map(|(_, actions)| actions)
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&Action::ShowActionsRing));
+    }
 }

@@ -21,6 +21,7 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
     legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
     map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
@@ -39,13 +40,23 @@ pub(super) struct ProbedFeatures {
     /// such as Windows Bluetooth's plain `"Mouse"`.
     pub(super) marketing_name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
+    ///
+    /// Invariant: `capabilities_incomplete` implies this is `Some`. The sole
+    /// non-test writer, [`probe_features`], returns `Default` when the feature
+    /// table is unavailable and only sets the qualifier after constructing the
+    /// capability set. The cache only replaces that set with another `Some`,
+    /// and persistence only round-trips probes produced here. If another writer
+    /// is added, preserve this proof or replace the pair with a sum type.
     pub(super) capabilities: Option<Capabilities>,
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
     /// the identity fields above may be missing data the device does have.
+    /// This is intentionally independent of `model_info`: `true` with `Some`
+    /// means only the serial-number read failed, while `true` with `None` means
+    /// the whole device-information read failed.
     pub(super) identity_incomplete: bool,
     /// A capability read *failed* (vs. the device not having the capability),
     /// so `capabilities` above understates what the device can do. Memoizing
-    /// that would hide a panel in the GUI for `REFRESH_TICKS`.
+    /// that would hide a panel in the GUI for `REFRESH_INTERVAL`.
     pub(super) capabilities_incomplete: bool,
 }
 
@@ -64,8 +75,8 @@ pub(super) enum BatteryProbe {
 /// Read just the battery by addressing its feature at the known runtime index —
 /// one round-trip, with no `Device::new` ping and no feature-table walk. This is
 /// both the full probe's battery read (the walk just produced the index) and the
-/// cheap per-tick refresh for cache hits. `None` when the device doesn't answer
-/// (asleep, switched hosts).
+/// cheap per-reconciliation refresh for cache hits. `None` when the device
+/// doesn't answer (asleep, switched hosts).
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
@@ -186,29 +197,45 @@ async fn read_marketing_identity(
 pub(super) async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
-) -> (ProbedFeatures, Option<BatteryProbe>) {
+    subscriptions: Option<&EventSubscriptionHandle>,
+) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            return (ProbedFeatures::default(), None);
+            return (
+                ProbedFeatures::default(),
+                None,
+                EventFeatureIndices::default(),
+            );
         }
     };
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
+    let mut event_features = EventFeatureIndices::default();
     let mut probe_haptic_controls = false;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
             battery_probe = battery_feature_index(ids.iter().copied());
+            event_features = EventFeatureIndices::from_feature_ids(&ids);
+            if let Some(subscriptions) = subscriptions {
+                // Register immediately after the table read, before the
+                // battery/identity snapshot that will be published.
+                subscriptions.register_device(slot, event_features);
+            }
             probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
         Err(e) => {
             debug!(slot, error = ?e, "enumerate_features failed");
-            return (ProbedFeatures::default(), None);
+            return (
+                ProbedFeatures::default(),
+                None,
+                EventFeatureIndices::default(),
+            );
         }
     };
     let mut capabilities_incomplete = false;
@@ -278,6 +305,7 @@ pub(super) async fn probe_features(
             capabilities_incomplete,
         },
         battery_probe,
+        event_features,
     )
 }
 
@@ -319,7 +347,7 @@ async fn probe_extra_capabilities(
 /// Whether the device exposes a divertable haptic panel, or `None` when a read
 /// failed part-way through the ~40-entry control walk.
 ///
-/// The distinction matters because the answer is memoized for `REFRESH_TICKS`:
+/// The distinction matters because the answer is memoized for `REFRESH_INTERVAL`:
 /// reporting a lost reply as `false` hides the Actions Ring binding for half a
 /// minute on a device that has the panel.
 async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {

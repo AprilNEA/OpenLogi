@@ -10,13 +10,16 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point,
     prelude::FluentBuilder as _, px, svg,
 };
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
+use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agent::OverlayCommand;
 use crate::platform;
+use crate::session::{ClickAwaySession, ShowingRing};
 
 pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
@@ -52,18 +55,23 @@ pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
+    /// Publishes click-away identity for exactly this view's lifetime.
+    _showing: ShowingRing,
 }
 
 impl RingView {
     /// Open a view on `invocation`, reporting interactions through `commands`.
-    pub(crate) const fn new(
+    pub(crate) fn new(
         invocation: ActionRingInvocation,
         commands: mpsc::UnboundedSender<OverlayCommand>,
+        live: &Arc<ClickAwaySession>,
     ) -> Self {
+        let showing = live.showing(invocation.session_id);
         Self {
             invocation,
             commands,
             hovered: None,
+            _showing: showing,
         }
     }
 
@@ -149,8 +157,10 @@ impl Render for RingView {
             // collide with a known key ("Copy" → "Copier" under fr).
             let label = if presentation.literal {
                 presentation.label.clone()
+            } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
+                rust_i18n::t!(key).into_owned()
             } else {
-                rust_i18n::t!(presentation.label.as_str()).into_owned()
+                presentation.label.clone()
             };
             Some(SharedString::from(label))
         });
@@ -187,9 +197,8 @@ impl Render for RingView {
                     .rounded_full()
                     .bg(CANCEL_RESTING)
                     .text_color(CANCEL_GLYPH)
-                    .text_lg()
                     .cursor_pointer()
-                    .child("×")
+                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });

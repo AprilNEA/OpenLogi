@@ -53,11 +53,9 @@ changes day to day:
 ### `expect` by default, `allow` only when `expect` would break
 
 `#[allow]` goes quiet the day it stops suppressing anything, so suppressions rot in
-place — an audit in 2026-08 found 20 dead ones, including three module-wide `dead_code`
-blankets that had been inert since their modules went `pub`. `#[expect]` reports itself
-unfulfilled instead, which `-D warnings` turns into a failure. `allow_attributes`
-enforces this — but only for outer `#[allow]`; a module-wide `#![allow(…)]`, the shape
-that rots worst, is invisible to it and is on you.
+place. `#[expect]` reports itself unfulfilled instead, which `-D warnings` turns into a
+failure. `allow_attributes` enforces this — but only for outer `#[allow]`; a module-wide
+`#![allow(…)]`, the shape that rots worst, is invisible to it and is on you.
 
 Three cases where `expect` is wrong and `allow` is correct. Each keeps its `allow` plus
 an `#[expect(clippy::allow_attributes, reason = "see above")]` and a comment saying which
@@ -92,10 +90,55 @@ Encode invariants in the type system instead of checking them at runtime:
 - Wire/firmware values get typed wrappers: `num_enum` for discriminants, `bitflags`
   (`from_bits_retain` when unknown bits are legal) for flag sets. Unknown wire values
   surface as **errors** (`UnsupportedResponse`-style), never as silent fallbacks.
+- Write-only protocol sentinels stay in the encoder. Read-side and domain types
+  exclude them with `Option`, `NonZero*`, or a validated newtype, converting to the
+  sentinel only at the serialization boundary.
 - Replace long parameter lists with Change/Params structs; make illegal combinations
   unrepresentable rather than validated.
+- One domain fact has one mutable owner and one transition authority. Flags,
+  `Option`s, caches, atomics, and loop locals may mirror it only as derived state
+  published by that same authority; callers never coordinate separate writers to
+  keep the mirrors aligned.
+- A `bool` parameter is boolean-blind at its call sites. When only a couple of
+  combinations are ever used, split into intent-named methods
+  (`divert_cid`/`undivert_cid`, not `set_cid_reporting(cid, bool, bool)`).
+  Otherwise name the facts: a struct with named fields when they are independent
+  (`ScanPass { complete, healthy }`), a sum type only when the erased
+  combinations are truly meaningless — checked against persisted state, not
+  just the current UI branches: `HiresWheel { Here, Elsewhere, Nowhere }`
+  collapses a display precedence, while collapsing
+  `(inversion_supported, inverted)` erased the configured-but-unsupported
+  state a disabled toggle must still show. An `Option<bool>` encoding a genuine
+  three-state is the same defect (`HidrawProbe { Accessible, Denied,
+  NonePresent }`). `struct_excessive_bools` firing is the signal to re-type,
+  not to `expect`.
+- When a loop scatters mutable locals that feed one free decision function, fold
+  the state and the rule into a sans-I/O object: events become named methods,
+  the decision method is pure and takes an explicit `now`, and all I/O stays in
+  the loop (`SpawnReflex`, `OneShotScan`; older precedents `RearmBudget`, the
+  haptics `Budget`, `QueryState`). Tests then drive real transitions and cannot
+  construct unreachable states; a total decision function earns one exhaustive
+  truth-table test rather than scattered single-case asserts.
+- A last-writer-wins slot (session, connection, request) carries its complete
+  publication identity, not just a shared payload pointer or per-owner counter.
+  Results and cleanup compare that identity before mutation; stale work must not clear
+  or overwrite its successor.
+- A representable but unreachable state is not alone a reason to refactor. Preserve
+  its single-constructor, single-writer, or ordering proof in a load-bearing test or
+  comment; re-type it when another constructor, writer, or lifecycle path appears.
+- Lifecycles are typestate: stages are types, transitions consume `self`
+  (`Booted::arm(self) -> Armed`), and a resource legal in only some stages
+  travels inside the stage that may hold it — a third consumer then cannot
+  exist by construction.
 - Ownership models resources (`Retained<T>` in the ObjC FFI) and thread affinity is
   proven by types (`MainThreadMarker`, `!Send` handles), not by runtime checks.
+- Caches and leases do not extend a lifecycle they merely borrow. Their cleanup is
+  RAII, and reusable leases return only after dependent workers and OS handles have
+  shut down.
+- Native events improve freshness but are not completeness proofs. When an event source
+  can be unavailable, coalesced, or dropped, keep bounded reconciliation, a timeout or
+  watchdog, or last-good replay as the liveness path; the reconciled probe remains the
+  authority.
 - Libraries return `thiserror` types; binaries may use `anyhow`.
 
 House style:
@@ -110,9 +153,26 @@ House style:
   the lock; restore with `cargo update -p gpui --precise <rev>`).
 - Module layout: a module with its own semantics is `foo.rs` (children in a sibling
   `foo/`); `foo/mod.rs` is only for pure namespace shells. Never both for one module.
-- Keep files reasonably sized (split around ~500 lines) into real modules — never
-  simulate structure with `// ---- section ----` banner comments. But don't
-  over-extract either: inline single-use helpers.
+- Sibling implementations that differ are an investigation signal, not proof that
+  either is wrong. Establish the semantic reason first; without one, reuse the proven
+  state shape instead of inventing an independent model.
+- Platform-divergent code: once more than one function diverges, use one module per
+  OS selected by a single `cfg` at the module declaration, with a thin facade owning
+  the shared types and dispatch — `inject.rs` → `inject/{macos,linux,windows}.rs`,
+  `autostart.rs` likewise — not a file interleaved with repeated
+  `#[cfg(target_os = …)]` arms. Each platform file implements the same function
+  names; a missing one fails that platform's compile, which is the same guarantee a
+  trait would give here. Reach for a trait only when implementations genuinely
+  coexist — runtime backend selection, test doubles, or a cross-crate seam
+  (`HidBackend`) — never as ceremony around a compile-time-exclusive choice. A
+  single small divergent function (`platform/os.rs`) stays inline. Splitting does
+  not lift the cross-platform rule: the non-host files are only ever compiled by
+  that platform's CI or a cross-lint, so `.claude/rules/cross-platform.md` applies
+  with full force.
+- File size, coverage percentage, and complexity scores are investigation signals, not
+  goals. Split a large file when it contains a coherent responsibility that deserves a
+  real module; never manufacture a single-use abstraction only to improve a metric.
+  Do not simulate structure with `// ---- section ----` banner comments.
 - rustdoc every public item. Comments state non-obvious constraints only.
 - Tests cover failure and edge paths, not just the happy path (state machines
   especially). No tautological tests that mirror the implementation; never weaken an

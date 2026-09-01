@@ -42,6 +42,24 @@ pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().min_h(px(theme::CONTROL_H))
 }
 
+/// Re-derive an input's placeholder from the current locale.
+///
+/// Placeholders are stored inside [`InputState`] at construction, so a live
+/// language switch leaves them stale — the owning view calls this from render
+/// with a fresh `tr!` string to keep them current. Guarded, because
+/// `set_placeholder` notifies unconditionally and a bare per-render call would
+/// re-render forever.
+pub(crate) fn localize_placeholder(
+    state: &Entity<InputState>,
+    text: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if *state.read(cx).presentation().placeholder() != text {
+        state.update(cx, |state, cx| state.set_placeholder(text, window, cx));
+    }
+}
+
 /// A select trigger at the house control height; see [`control_button`].
 pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
     state: &Entity<SelectState<D>>,
@@ -133,9 +151,13 @@ impl Sizable for Toggle {
 
 impl RenderOnce for Toggle {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let label = self
-            .label
-            .unwrap_or_else(|| if self.selected { tr!("On") } else { tr!("Off") });
+        let label = self.label.unwrap_or_else(|| {
+            if self.selected {
+                tr!("common.on")
+            } else {
+                tr!("common.off")
+            }
+        });
         let mut toggle = Switch::new(self.id)
             .checked(self.selected)
             .disabled(self.disabled)
@@ -324,6 +346,7 @@ impl RenderOnce for MenuRow {
 pub(crate) struct ProfileTab {
     base: BaseButton,
     label: SharedString,
+    icon: Option<Icon>,
     selected: bool,
     children: Vec<AnyElement>,
     on_click: Option<ClickHandler>,
@@ -335,11 +358,20 @@ impl ProfileTab {
         Self {
             base: BaseButton::new(id).role(Role::Tab),
             label: label.into(),
+            icon: None,
             selected: false,
             children: Vec::new(),
             on_click: None,
             delete: None,
         }
+    }
+
+    /// A mark before the label, for a tab that is an action rather than a
+    /// profile (the one that creates a new profile).
+    #[must_use]
+    pub(crate) fn icon(mut self, icon: impl Into<Icon>) -> Self {
+        self.icon = Some(icon.into());
+        self
     }
 
     #[must_use]
@@ -437,6 +469,7 @@ impl RenderOnce for ProfileTab {
                     })
                     .border_color(accent)
             })
+            .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
             .when_some(self.on_click, |tab, handler| {
@@ -445,13 +478,15 @@ impl RenderOnce for ProfileTab {
             .when_some(self.delete, |tab, (id, handler)| {
                 tab.child(
                     BaseButton::new(id)
-                        .accessibility_label(format!("{label} ×"))
+                        .accessibility_label(
+                            tr!("common.remove_named_item", name => label.to_string()),
+                        )
                         .px_0p5()
                         .rounded_full()
                         .text_color(pal.text_muted)
                         .hover(|style| style.text_color(pal.text_primary))
                         .focus_visible(|style| style.text_color(pal.text_primary))
-                        .child("×")
+                        .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
                             handler(event, window, cx);
@@ -521,254 +556,4 @@ impl RenderOnce for PresetChip {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{cell::Cell, rc::Rc};
-
-    use gpui::{
-        Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render, TestAppContext, point,
-    };
-
-    use super::*;
-
-    struct ToggleHarness {
-        selected: bool,
-        disabled: bool,
-        changes: Rc<Cell<Option<bool>>>,
-        parent_clicks: Rc<Cell<usize>>,
-    }
-
-    impl Render for ToggleHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let changes = self.changes.clone();
-            let parent_clicks = self.parent_clicks.clone();
-            div()
-                .id("toggle-parent")
-                .tab_group()
-                .size(px(100.))
-                .on_click(move |_, _, _| parent_clicks.set(parent_clicks.get() + 1))
-                .child(
-                    Toggle::new("keyboard-toggle")
-                        .selected(self.selected)
-                        .disabled(self.disabled)
-                        .on_change(move |selected, _, _| changes.set(Some(*selected))),
-                )
-        }
-    }
-
-    struct MenuRowHarness {
-        activations: Rc<Cell<usize>>,
-    }
-
-    impl Render for MenuRowHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let activations = self.activations.clone();
-            div().tab_group().size(px(100.)).child(
-                MenuRow::new("keyboard-menu-row")
-                    .role(Role::MenuItem)
-                    .child("Action")
-                    .on_click(move |_, _, _| activations.set(activations.get() + 1)),
-            )
-        }
-    }
-
-    struct PresetChipHarness {
-        applications: Rc<Cell<usize>>,
-        removals: Rc<Cell<usize>>,
-    }
-
-    impl Render for PresetChipHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let applications = self.applications.clone();
-            let removals = self.removals.clone();
-            div().tab_group().size(px(100.)).child(
-                PresetChip::new("keyboard-preset-chip")
-                    .selected(true)
-                    .child(
-                        BaseButton::new("keyboard-preset-apply")
-                            .child("800")
-                            .on_click(move |_, _, _| {
-                                applications.set(applications.get() + 1);
-                            }),
-                    )
-                    .child(
-                        BaseButton::new("keyboard-preset-remove")
-                            .child("×")
-                            .on_click(move |_, _, _| removals.set(removals.get() + 1)),
-                    ),
-            )
-        }
-    }
-
-    struct ProfileTabHarness {
-        applications: Rc<Cell<usize>>,
-        deletions: Rc<Cell<usize>>,
-    }
-
-    impl Render for ProfileTabHarness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let applications = self.applications.clone();
-            let deletions = self.deletions.clone();
-            div().tab_group().size(px(100.)).child(
-                ProfileTab::new("keyboard-profile-tab", "Custom")
-                    .on_click(move |_, _, _| applications.set(applications.get() + 1))
-                    .on_delete("keyboard-profile-delete", move |_, _, _| {
-                        deletions.set(deletions.get() + 1);
-                    }),
-            )
-        }
-    }
-
-    fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
-        let keystroke = Keystroke::parse(key).unwrap();
-        cx.simulate_event(KeyDownEvent {
-            keystroke: keystroke.clone(),
-            is_held: false,
-            prefer_character_input: false,
-        });
-        cx.simulate_event(KeyUpEvent { keystroke });
-    }
-
-    #[gpui::test]
-    fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let changes = Rc::new(Cell::new(None));
-        let parent_clicks = Rc::new(Cell::new(0));
-        let (view, cx) = cx.add_window_view({
-            let changes = changes.clone();
-            let parent_clicks = parent_clicks.clone();
-            move |_, _| ToggleHarness {
-                selected: false,
-                disabled: false,
-                changes,
-                parent_clicks,
-            }
-        });
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-        cx.update(Window::focus_next);
-        cx.update(|window, cx| assert!(window.focused(cx).is_some()));
-
-        activate_key(cx, "enter");
-        assert_eq!(changes.get(), Some(true));
-
-        view.update(cx, |view, cx| {
-            view.selected = true;
-            cx.notify();
-        });
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-        activate_key(cx, "space");
-        assert_eq!(changes.get(), Some(false));
-    }
-
-    #[gpui::test]
-    fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let changes = Rc::new(Cell::new(None));
-        let parent_clicks = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let changes = changes.clone();
-            let parent_clicks = parent_clicks.clone();
-            move |_, _| ToggleHarness {
-                selected: false,
-                disabled: true,
-                changes,
-                parent_clicks,
-            }
-        });
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-
-        cx.update(Window::focus_next);
-        cx.update(|window, cx| assert!(window.focused(cx).is_none()));
-        cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
-        activate_key(cx, "enter");
-        activate_key(cx, "space");
-
-        assert_eq!(changes.get(), None);
-        assert_eq!(parent_clicks.get(), 0);
-    }
-
-    #[gpui::test]
-    fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let activations = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let activations = activations.clone();
-            move |_, _| MenuRowHarness { activations }
-        });
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-        cx.update(Window::focus_next);
-        cx.update(|window, cx| assert!(window.focused(cx).is_some()));
-
-        activate_key(cx, "enter");
-        activate_key(cx, "space");
-
-        assert_eq!(activations.get(), 2);
-    }
-
-    #[gpui::test]
-    fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let applications = Rc::new(Cell::new(0));
-        let deletions = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let applications = applications.clone();
-            let deletions = deletions.clone();
-            move |_, _| ProfileTabHarness {
-                applications,
-                deletions,
-            }
-        });
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-
-        cx.update(Window::focus_next);
-        activate_key(cx, "enter");
-        activate_key(cx, "space");
-        assert_eq!(applications.get(), 2);
-        assert_eq!(deletions.get(), 0);
-
-        cx.update(Window::focus_next);
-        activate_key(cx, "enter");
-        activate_key(cx, "space");
-        assert_eq!(applications.get(), 2);
-        assert_eq!(deletions.get(), 2);
-    }
-
-    #[gpui::test]
-    fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let applications = Rc::new(Cell::new(0));
-        let removals = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let applications = applications.clone();
-            let removals = removals.clone();
-            move |_, _| PresetChipHarness {
-                applications,
-                removals,
-            }
-        });
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-
-        cx.update(Window::focus_next);
-        activate_key(cx, "enter");
-        activate_key(cx, "space");
-        assert_eq!(applications.get(), 2);
-        assert_eq!(removals.get(), 0);
-
-        cx.update(Window::focus_next);
-        activate_key(cx, "enter");
-        activate_key(cx, "space");
-        assert_eq!(applications.get(), 2);
-        assert_eq!(removals.get(), 2);
-    }
-}
+mod tests;

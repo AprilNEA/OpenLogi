@@ -51,15 +51,15 @@ impl GestureDirection {
         }
     }
 
-    /// Arrow glyph for compact list rendering.
+    /// Stable catalog key for the localized direction label.
     #[must_use]
-    pub fn glyph(self) -> &'static str {
+    pub fn translation_key(self) -> &'static str {
         match self {
-            GestureDirection::Up => "↑",
-            GestureDirection::Down => "↓",
-            GestureDirection::Left => "←",
-            GestureDirection::Right => "→",
-            GestureDirection::Click => "·",
+            GestureDirection::Up => "common.up",
+            GestureDirection::Down => "common.down",
+            GestureDirection::Left => "common.left",
+            GestureDirection::Right => "common.right",
+            GestureDirection::Click => "common.click",
         }
     }
 }

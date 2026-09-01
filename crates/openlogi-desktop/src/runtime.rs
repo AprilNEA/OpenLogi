@@ -119,6 +119,9 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // dead bytes. Off-thread so it never delays the first paint.
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
+        #[cfg(target_os = "macos")]
+        ensure_registration_at_startup(cx);
+
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
         let mut rt = Runtime::new(cams, sync_tx, swr);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
@@ -167,6 +170,29 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         }
     })
     .detach();
+}
+
+/// Ensure the agent's launchd service is registered, at startup: a fresh
+/// install registers on first GUI launch, an app update triggers the
+/// re-registration Apple requires for a changed executable. The spawn
+/// cascade in `services::ipc` also registers on demand — whichever runs
+/// first wins; this one still covers the update re-register while the agent
+/// is alive. Preference-independent (see `platform::registration`), so there
+/// is no stale input to stage around. On the background executor (XPC must
+/// not delay first paint); skipped for dev profiles, whose registration
+/// stays an explicit toggle.
+#[cfg(target_os = "macos")]
+fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
+    if openlogi_core::paths::is_dev_profile() {
+        return;
+    }
+    cx.background_executor()
+        .spawn(async {
+            if let Err(error) = crate::platform::registration::ensure_registered() {
+                tracing::warn!(error, "startup service registration failed");
+            }
+        })
+        .detach();
 }
 
 /// State the event loop carries between events.

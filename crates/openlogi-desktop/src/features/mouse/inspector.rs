@@ -17,6 +17,7 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 use super::hotspots::MouseControlId;
 use super::picker::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
+    gesture_direction_icon,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -95,23 +96,27 @@ pub(super) fn binding_inspector(
 fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui::Div {
     let summary = match (app, override_count) {
         (Some(app), 0) => tr!(
-            "No overrides yet. Select a button to customize for %{app}.",
+            "profiles.app_profile_no_overrides",
             app => app.to_string()
         ),
         (Some(app), 1) => tr!(
-            "%{app} overrides 1 button. Others inherit Default.",
+            "profiles.app_profile_single_override",
             app => app.to_string()
         ),
         (Some(app), count) => tr!(
-            "%{app} overrides %{count} buttons. Others inherit Default.",
+            "profiles.app_profile_override_count",
             app => app.to_string(),
             count => count.to_string()
         ),
-        (None, _) => tr!("Select a button on the device to change what it does."),
+        (None, _) => tr!("profiles.select_device_button_description"),
     };
     v_flex()
         .gap_3()
-        .child(inspector_heading(tr!("Button inspector"), None, pal))
+        .child(inspector_heading(
+            tr!("actions.button_inspector"),
+            None,
+            pal,
+        ))
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
@@ -148,10 +153,10 @@ fn button_inspector(
         overridden,
         action == default_binding(button),
     ) {
-        (Some(app), true, _) => tr!("Overridden in %{app}", app => app.to_string()),
-        (Some(_), false, _) => tr!("Inherited from Default"),
-        (None, _, true) => tr!("Device default"),
-        (None, _, false) => tr!("Customized"),
+        (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false, _) => tr!("profiles.inherited_from_default"),
+        (None, _, true) => tr!("pointer.device_default"),
+        (None, _, false) => tr!("profiles.customized"),
     };
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -164,7 +169,11 @@ fn button_inspector(
 
     v_flex()
         .gap_3()
-        .child(inspector_heading(tr!(button.label()), Some(status), pal))
+        .child(inspector_heading(
+            tr!(button.translation_key()),
+            Some(status),
+            pal,
+        ))
         .child(current_action_card(&action, picker, pal))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
@@ -172,7 +181,7 @@ fn button_inspector(
                 control_button("inspector-use-default")
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the default profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.clear_app_binding(button);
@@ -193,7 +202,7 @@ fn button_inspector(
                     control_button("inspector-use-gestures")
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("Use gestures"))
+                        .label(tr!("actions.use_gestures"))
                         .on_click(move |_, _, cx| {
                             AppState::update_bindings(cx, |state| {
                                 state.commit_gesture_mode(button, true);
@@ -237,20 +246,20 @@ fn inherited_gesture_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            tr!(button.label()),
-            Some(tr!("Inherited from Default")),
+            tr!(button.translation_key()),
+            Some(tr!("profiles.inherited_from_default")),
             pal,
         ))
         .child(gesture_summary_card(picker, pal))
         .child(div().text_caption().text_color(pal.text_muted).child(tr!(
-            "Choosing an action replaces the inherited gestures in %{app}.",
+            "actions.app_profile_action_replaces_gestures",
             app => app.to_string()
         )))
         .child(
             Button::new("inspector-edit-default-gestures")
                 .small()
                 .w_full()
-                .label(tr!("Edit Default gestures"))
+                .label(tr!("actions.edit_default_gestures"))
                 .on_click(move |_, _, cx| {
                     AppState::update_bindings(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
@@ -296,8 +305,8 @@ fn gesture_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            tr!(button.label()),
-            Some(tr!("5 directions")),
+            tr!(button.translation_key()),
+            Some(tr!("actions.five_directions")),
             pal,
         ))
         .child(gesture_directions(
@@ -311,7 +320,7 @@ fn gesture_inspector(
         .child(
             control_button("inspector-single-action")
                 .w_full()
-                .label(tr!("Use a single action"))
+                .label(tr!("actions.use_a_single_action"))
                 .on_click(move |_, _, cx| {
                     AppState::update_bindings(cx, |state| {
                         state.commit_gesture_mode(button, false);
@@ -343,7 +352,7 @@ fn gesture_directions(
 ) -> impl IntoElement {
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Direction"), pal))
+        .child(editor_section(tr!("actions.direction"), pal))
         .children(
             GestureDirection::ALL
                 .into_iter()
@@ -356,19 +365,29 @@ fn gesture_directions(
                         .selected(selected)
                         .role(Role::Button)
                         .child(
-                            v_flex()
+                            h_flex()
                                 .min_w_0()
-                                .child(div().text_body().child(format!(
-                                    "{}  {}",
-                                    direction.glyph(),
-                                    tr!(direction.label())
-                                )))
+                                .gap_2()
+                                // `.size_4()` is not decoration: a bare `Icon`
+                                // falls through to the current font size, which
+                                // would leave these a step under the 16px leading
+                                // column the action rows below use.
+                                .child(gesture_direction_icon(direction).size_4())
                                 .child(
-                                    div()
-                                        .truncate()
-                                        .text_caption()
-                                        .text_color(pal.text_muted)
-                                        .child(localized_action_label(&action)),
+                                    v_flex()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_body()
+                                                .child(tr!(direction.translation_key())),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_caption()
+                                                .text_color(pal.text_muted)
+                                                .child(localized_action_label(&action)),
+                                        ),
                                 ),
                         )
                         .when(selected, |row| {
@@ -388,6 +407,10 @@ fn gesture_directions(
         )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the thumb-wheel inspector is clearest as one declarative UI tree"
+)]
 fn thumbwheel_inspector(
     bindings: &BTreeMap<ButtonId, Action>,
     editing_app: Option<&str>,
@@ -409,20 +432,27 @@ fn thumbwheel_inspector(
             || overrides.contains_key(&ButtonId::ThumbwheelScrollUp)
     });
     let status = match (editing_app, is_overridden) {
-        (Some(app), true) => tr!("Overridden in %{app}", app => app.to_string()),
-        (Some(_), false) => tr!("Inherited from Default"),
-        (None, _) => tr!("Default profile"),
+        (Some(app), true) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false) => tr!("profiles.inherited_from_default"),
+        (None, _) => tr!("profiles.default_profile"),
     };
-    let current_label = current.map_or_else(|| tr!("Custom"), |preset| tr!(preset.label()));
+    let current_label = current.map_or_else(
+        || tr!("common.custom"),
+        |preset| tr!(preset.translation_key()),
+    );
     let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
     let observer = picker.view.clone();
 
     v_flex()
         .gap_3()
-        .child(inspector_heading(tr!("Thumb Wheel"), Some(status), pal))
+        .child(inspector_heading(
+            tr!("pointer.thumb_wheel"),
+            Some(status),
+            pal,
+        ))
         .child(selection_card(
             "inspector-current-thumbwheel-preset",
-            tr!("Preset"),
+            tr!("common.preset"),
             current_icon,
             current_label,
             picker,
@@ -432,7 +462,7 @@ fn thumbwheel_inspector(
             panel.child(
                 v_flex()
                     .gap_1()
-                    .child(editor_section(tr!("Preset"), pal))
+                    .child(editor_section(tr!("common.preset"), pal))
                     .children(ThumbwheelPreset::ALL.into_iter().enumerate().map(
                         |(index, preset)| {
                             let selected = current == Some(preset);
@@ -450,7 +480,7 @@ fn thumbwheel_inspector(
                                                 .size_4()
                                                 .text_color(pal.text_muted),
                                         )
-                                        .child(div().child(tr!(preset.label()))),
+                                        .child(div().child(tr!(preset.translation_key()))),
                                 )
                                 .when(selected, |row| {
                                     row.child(
@@ -479,7 +509,7 @@ fn thumbwheel_inspector(
                     .small()
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the default profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.clear_app_thumbwheel();
@@ -516,7 +546,7 @@ fn current_action_card(
 ) -> impl IntoElement {
     selection_card(
         "inspector-current-action",
-        tr!("Current action"),
+        tr!("actions.current_action"),
         action_icon_path(action),
         localized_action_label(action),
         picker,
@@ -527,9 +557,9 @@ fn current_action_card(
 fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
-        tr!("Current action"),
+        tr!("actions.current_action"),
         GESTURE_BUTTON_ICON,
-        tr!("5 directions"),
+        tr!("actions.five_directions"),
         picker,
         pal,
     )
@@ -622,7 +652,7 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(editor_section(tr!("Actions"), pal))
+        .child(editor_section(tr!("actions.actions"), pal))
         .child(control_input(action_search).cleanable(true))
         .child(
             v_flex()
@@ -633,7 +663,7 @@ fn action_library(
                             .py_3()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("No actions found")),
+                            .child(tr!("actions.no_actions_found")),
                     )
                 })
                 .children(rows),

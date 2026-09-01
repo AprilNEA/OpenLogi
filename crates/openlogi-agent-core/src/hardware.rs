@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -55,15 +55,7 @@ fn authoritative_channel(
         |channel| registry.is_current(channel),
         || registry.lookup(route),
     )
-    .ok_or_else(|| {
-        // Route resolution failing means every known channel for this route is
-        // gone — a cached haptic feature handle pinning one of them would
-        // deadlock the enumerator's reopen (it waits for the old channel's
-        // last Arc to drop) while itself never being invalidated, because no
-        // haptic I/O reaches the cache without a resolvable route.
-        openlogi_hid::clear_haptic_feature_cache();
-        WriteError::DeviceNotFound
-    })
+    .ok_or(WriteError::DeviceNotFound)
 }
 
 fn choose_authoritative<T>(
@@ -87,6 +79,7 @@ pub struct DeviceOp<'a> {
     capture: &'a CaptureChannel,
     registry: &'a ChannelRegistry,
     receiver_access: &'a ReceiverAccess,
+    device_io: &'a DeviceIoGate,
     route: DeviceRoute,
 }
 
@@ -95,12 +88,14 @@ impl<'a> DeviceOp<'a> {
         capture: &'a CaptureChannel,
         registry: &'a ChannelRegistry,
         receiver_access: &'a ReceiverAccess,
+        device_io: &'a DeviceIoGate,
         route: &DeviceRoute,
     ) -> Self {
         Self {
             capture,
             registry,
             receiver_access,
+            device_io,
             route: route.clone(),
         }
     }
@@ -110,6 +105,9 @@ impl<'a> DeviceOp<'a> {
     /// more than one write (the volatile-settings reapply sequence) resolve
     /// once up front through this instead of [`Self::run`]/[`Self::detach`].
     fn resolve(&self) -> Result<SharedChannel, WriteError> {
+        if !self.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
         authoritative_channel(Some(self.capture), self.registry, &self.route)
     }
 
@@ -131,6 +129,9 @@ impl<'a> DeviceOp<'a> {
         F: FnOnce(SharedChannel) -> Fut,
         Fut: Future<Output = Result<T, WriteError>>,
     {
+        if !self.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
         let _lease = self.receiver_access.acquire_for_io().await;
         let shared = self.resolve()?;
         timed(op, f(shared)).await
@@ -186,15 +187,26 @@ impl<'a> DeviceOp<'a> {
             return;
         };
         let receiver_access = self.receiver_access.clone();
+        let device_io = self.device_io.clone();
         std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
             let result = rt.block_on(async {
                 let _lease = receiver_access.acquire_for_io().await;
-                tokio::time::timeout(WRITE_BUDGET, f(shared)).await
+                if !device_io.allows_io() {
+                    return None;
+                }
+                Some(tokio::time::timeout(WRITE_BUDGET, f(shared)).await)
             });
-            log(result);
+            if let Some(result) = result {
+                log(result);
+            } else {
+                debug!(
+                    label,
+                    "host device I/O suspended — background write skipped"
+                );
+            }
         });
     }
 }
@@ -223,6 +235,7 @@ pub fn toggle_smartshift_in_background(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
+    device_io: &DeviceIoGate,
     target: Option<DeviceRoute>,
 ) {
     let Some(target) = target else {
@@ -230,7 +243,7 @@ pub fn toggle_smartshift_in_background(
         return;
     };
     let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+    DeviceOp::new(capture, registry, receiver_access, device_io, &target).spawn_write(
         "SmartShift toggle",
         |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
         move |result| match result {
@@ -290,6 +303,7 @@ pub fn reapply_mouse_volatile_in_background(
         return;
     };
     let receiver_access = op.receiver_access.clone();
+    let device_io = op.device_io.clone();
     let index = op.route.device_index();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
@@ -297,6 +311,13 @@ pub fn reapply_mouse_volatile_in_background(
         };
         rt.block_on(async {
             let _lease = receiver_access.acquire_for_io().await;
+            if !device_io.allows_io() {
+                debug!(
+                    index,
+                    "host device I/O suspended — volatile reapply skipped"
+                );
+                return;
+            }
             if resolution.is_some() || inverted.is_some() {
                 let result = tokio::time::timeout(WRITE_BUDGET, async {
                     apply_wheel_mode(&shared, resolution, inverted).await
@@ -394,6 +415,7 @@ pub fn write_dpi_in_background(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
+    device_io: &DeviceIoGate,
     target: Option<DeviceRoute>,
     dpi: Dpi,
 ) {
@@ -402,7 +424,7 @@ pub fn write_dpi_in_background(
         return;
     };
     let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+    DeviceOp::new(capture, registry, receiver_access, device_io, &target).spawn_write(
         "DPI write",
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
         move |result| match result {
@@ -528,6 +550,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use openlogi_hid::device_io_channel;
 
     #[test]
     fn current_capture_wins_without_consulting_the_registry_again() {
@@ -568,9 +591,8 @@ mod tests {
         }
     }
 
-    /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`],
-    /// the same path `authoritative_channel` uses to clear the haptic feature
-    /// cache) and must never invoke `f` — a route that can't be resolved has no
+    /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`])
+    /// and must never invoke `f` — a route that can't be resolved has no
     /// channel to hand it, so running the caller's write would be a bug, not a
     /// no-op.
     #[tokio::test]
@@ -578,11 +600,12 @@ mod tests {
         let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
         let route = unresolvable_route();
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        let result = DeviceOp::new(&capture, &registry, &receiver_access, &route)
+        let result = DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route)
             .run(HidppOperation::WriteDpi, move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);
                 async move { Ok::<(), WriteError>(()) }
@@ -596,6 +619,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_while_device_io_is_suspended_does_not_wait_for_a_receiver_or_call_f() {
+        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let called_for_closure = std::sync::Arc::clone(&called);
+        let _exclusive = receiver_access
+            .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+            .await;
+        assert!(device_io_signal.suspend());
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route).run(
+                HidppOperation::WriteDpi,
+                move |_shared| {
+                    called_for_closure.store(true, Ordering::SeqCst);
+                    async move { Ok::<(), WriteError>(()) }
+                },
+            ),
+        )
+        .await
+        .expect("a suspended operation must fail before waiting for receiver access");
+
+        assert!(matches!(result, Err(WriteError::DeviceNotFound)));
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "the write closure must not run while host device I/O is suspended",
+        );
+    }
+
     /// `DeviceOp::detach` resolves before spawning, so a registry miss must
     /// return synchronously (no thread, no lease wait) and never call `f`.
     #[tokio::test]
@@ -603,11 +660,12 @@ mod tests {
         let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
         let route = unresolvable_route();
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        DeviceOp::new(&capture, &registry, &receiver_access, &route).detach(
+        DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route).detach(
             "test write",
             move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);

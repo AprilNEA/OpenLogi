@@ -153,6 +153,21 @@ pub struct ThumbwheelInfo {
     pub supports_single_tap: bool,
 }
 
+impl ThumbwheelInfo {
+    /// Whether an un-inverted positive rotation is toward the front of the
+    /// device — the physical direction represented by
+    /// [`ButtonId::ThumbwheelScrollUp`](openlogi_core::binding::ButtonId::ThumbwheelScrollUp).
+    ///
+    /// HID++ `0x2150` defines `default_dir = 0` as positive toward left/back
+    /// and `1` as positive toward right/front. The value varies by model, so
+    /// captured input must consult it instead of assigning meaning to the raw
+    /// sign globally.
+    #[must_use]
+    pub fn positive_is_forward(self) -> bool {
+        self.default_dir == 1
+    }
+}
+
 /// A decoded `thumbwheelEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbwheelEvent {
@@ -258,16 +273,33 @@ impl Thumbwheel {
         })
     }
 
-    /// Enter (or leave) diverted reporting. `inv_dir` inverts the rotation sign
-    /// relative to `default_dir`. Set `diverted = false` on teardown to hand
-    /// native scrolling back to the firmware.
-    pub async fn set_reporting(&self, diverted: bool, inv_dir: bool) -> Result<(), Hidpp20Error> {
+    /// Enter diverted reporting; wheel events then arrive on this feature
+    /// index instead of moving the native scroll.
+    pub async fn divert(&self, direction: WheelDirection) -> Result<(), Hidpp20Error> {
         let mut params = [0u8; 16];
-        params[0] = if diverted { MODE_DIVERTED } else { MODE_NATIVE };
-        params[1] = u8::from(inv_dir);
+        params[0] = MODE_DIVERTED;
+        params[1] = u8::from(direction == WheelDirection::Inverted);
         self.call(FN_SET_REPORTING, params).await?;
         Ok(())
     }
+
+    /// Hand native scrolling back to the firmware.
+    pub async fn undivert(&self) -> Result<(), Hidpp20Error> {
+        let mut params = [0u8; 16];
+        params[0] = MODE_NATIVE;
+        self.call(FN_SET_REPORTING, params).await?;
+        Ok(())
+    }
+}
+
+/// Rotation sign for diverted wheel reports, relative to the wheel's
+/// `default_dir`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelDirection {
+    /// Report rotation with the wheel's default sign.
+    Default,
+    /// Invert the rotation sign.
+    Inverted,
 }
 
 #[cfg(test)]
@@ -322,6 +354,17 @@ mod tests {
             RotationStatus::Inactive,
             "an unrecognised value must not make the tap permanently undeliverable"
         );
+    }
+
+    #[test]
+    fn positive_direction_follows_the_device_report() {
+        let info = |default_dir| ThumbwheelInfo {
+            resolution: WheelResolution::UNKNOWN,
+            default_dir,
+            supports_single_tap: false,
+        };
+        assert!(!info(0).positive_is_forward());
+        assert!(info(1).positive_is_forward());
     }
 
     /// The roll's own `Stop` reports no rotation — it is the release — so

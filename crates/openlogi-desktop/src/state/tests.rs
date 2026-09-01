@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_camera::Camera;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+};
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
     VerticalScrollSensitivity,
@@ -18,6 +20,7 @@ use openlogi_core::hid::{
     Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, WriteError,
 };
 
+use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
 use openlogi_ipc::ForegroundApps;
 
@@ -27,8 +30,11 @@ use crate::services::assets::AssetResolver;
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
 use super::scroll::set_scroll_resolution_if_supported;
-use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
-use super::{AppState, ConfigPersistence, LightCommandStatus, Load, SmartShiftWriteStatus};
+use super::smartshift::{
+    ConfirmationOutcome, SmartShiftDeviceState, smartshift_read_is_current,
+    smartshift_write_outcome,
+};
+use super::{AppState, ConfigPersistence, LightCommandStatus, Load};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
@@ -85,6 +91,41 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 
     state.set_smooth_scroll(true);
     assert!(receiver.try_recv().is_err());
+}
+
+/// A live language switch runs inside `AppState::update`, and the menu rebuild
+/// it schedules reads the same entity (the Device menu lists devices). Rebuilt
+/// synchronously that read is re-entrant and panics ("cannot read … while it is
+/// already being updated"), which crashed 0.8.0 on every language change —
+/// `set_language` must defer the rebuild until the update returns the lease.
+#[gpui::test]
+fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock();
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    cx.update(|cx| {
+        AppState::set_global(cx.new(|_| state), cx);
+        AppState::update(cx, |state, cx| {
+            state.set_language(Some("zh-CN".into()), cx);
+        });
+    });
+
+    cx.read(|cx| {
+        assert_eq!(
+            AppState::try_read(cx).and_then(AppState::language),
+            Some("zh-CN")
+        );
+    });
 }
 
 #[test]
@@ -482,6 +523,82 @@ fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
     assert!(
         state.config.bindings_for(KNOWN_MOUSE_KEY).is_empty(),
         "the device's global bindings must be untouched"
+    );
+}
+
+fn ring_action(action: Action) -> RingAction {
+    RingAction::new(action).expect("test action must be valid in the Actions Ring")
+}
+
+#[test]
+fn an_unsaved_action_ring_profile_inherits_default_until_its_first_edit() {
+    let mut state = state_with_a_known_mouse();
+    let inherited = state.current_action_ring_layout();
+
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+
+    assert_eq!(state.current_action_ring_layout(), inherited);
+    assert!(
+        state.current_action_ring().per_app.is_empty(),
+        "selecting an application must not persist an unchanged layout"
+    );
+
+    state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
+
+    let ring = state.current_action_ring();
+    let safari = ring
+        .per_app
+        .get("com.apple.Safari")
+        .expect("the first edit creates the application layout");
+    assert_eq!(
+        ring.default, inherited,
+        "the default layout stays unchanged"
+    );
+    assert_eq!(safari.slots[&ActionRingSlot::Top].action(), &Action::NewTab);
+    assert_eq!(
+        safari.slots[&ActionRingSlot::Bottom],
+        inherited.slots[&ActionRingSlot::Bottom],
+        "the application profile starts as a complete copy of Default"
+    );
+}
+
+#[test]
+fn an_action_ring_icon_edit_targets_the_open_application_layout() {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+
+    state.commit_action_ring_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
+
+    let ring = state.current_action_ring();
+    assert_eq!(ring.default.slots[&ActionRingSlot::Top].custom_icon(), None);
+    assert_eq!(
+        ring.per_app["com.apple.Safari"].slots[&ActionRingSlot::Top].custom_icon(),
+        Some(ActionRingIcon::Keyboard)
+    );
+}
+
+#[test]
+fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_binding(ButtonId::Back, Action::Undo);
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+    state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
+
+    state.remove_editing_action_ring_profile();
+
+    assert_eq!(state.editing_action_ring_app(), None);
+    assert!(state.current_action_ring().per_app.is_empty());
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
+    );
+    assert_eq!(
+        state.editing_app(),
+        Some("com.apple.Safari"),
+        "the Buttons editor keeps its independent scope"
     );
 }
 
@@ -965,7 +1082,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
     assert_eq!(smartshift_write_outcome(expected, None), None);
     assert_eq!(
         smartshift_write_outcome(expected, Some(&Load::Ready(Arc::new(expected)))),
-        Some(SmartShiftWriteStatus::Confirmed)
+        Some(ConfirmationOutcome::Confirmed)
     );
     assert_eq!(
         smartshift_write_outcome(
@@ -977,7 +1094,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
                 ..expected
             }))),
         ),
-        Some(SmartShiftWriteStatus::Failed)
+        Some(ConfirmationOutcome::Failed)
     );
     assert_eq!(
         smartshift_write_outcome(
@@ -986,7 +1103,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
                 "timeout".to_string(),
             ))
         ),
-        Some(SmartShiftWriteStatus::Failed)
+        Some(ConfirmationOutcome::Failed)
     );
 }
 
@@ -997,18 +1114,20 @@ fn stale_smartshift_reads_do_not_resolve_newer_writes() {
         auto_disengage: SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(12.0)),
         tunable_torque: None,
     };
-    let applying = SmartShiftWriteStatus::Applying {
-        expected,
-        write_id: 2,
-    };
+    let mut write = SmartShiftDeviceState::default();
+    write.queue(expected, 2);
 
-    assert!(smartshift_read_is_current(Some(2), Some(&applying)));
-    assert!(!smartshift_read_is_current(Some(1), Some(&applying)));
-    assert!(!smartshift_read_is_current(None, Some(&applying)));
-    assert!(!smartshift_read_is_current(
-        Some(2),
-        Some(&SmartShiftWriteStatus::Confirmed)
-    ));
+    assert!(
+        !smartshift_read_is_current(Some(2), Some(&write)),
+        "a tagged read cannot land before its confirmation request starts"
+    );
+    assert!(!smartshift_read_is_current(None, Some(&write)));
+    assert_eq!(write.begin_confirmation(), Some(2));
+    assert!(smartshift_read_is_current(Some(2), Some(&write)));
+    assert!(!smartshift_read_is_current(Some(1), Some(&write)));
+    assert!(!smartshift_read_is_current(None, Some(&write)));
+    write.reset();
+    assert!(!smartshift_read_is_current(Some(2), Some(&write)));
     assert!(smartshift_read_is_current(None, None));
 }
 

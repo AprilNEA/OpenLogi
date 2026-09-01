@@ -614,6 +614,23 @@ fn plan_reapply_skips_a_followup_that_went_offline() {
     assert!(followup.is_empty());
 }
 
+#[test]
+fn orchestrator_exposes_only_the_bounded_confirmation_run() {
+    let mut orchestrator = orchestrator(Config::default());
+    let inventory = direct_inventory(Some("serial-1"), [1, 2, 3, 4]);
+
+    orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(orchestrator.needs_reapply_confirmation());
+
+    for confirmations_left in (0..VOLATILE_REAPPLY_CONFIRM_RETRIES).rev() {
+        orchestrator.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+        assert_eq!(
+            orchestrator.needs_reapply_confirmation(),
+            confirmations_left > 0
+        );
+    }
+}
+
 /// An *empty* snapshot still flips the health to `Ready`: the watcher only
 /// forwards completed enumerations, so "checked and found nothing" must not
 /// be reported as "still scanning" — that's the whole distinction the
@@ -869,18 +886,18 @@ fn config_reload_clears_override_when_camera_mode_changes() {
 
 /// The published capture plan's Back binding for the first device, if any.
 fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
-    orch.shared.capture_plans.read().ok().and_then(|plans| {
-        plans.first().and_then(|plan| {
-            plan.bindings
-                .get(&ButtonId::Back)
-                .map(Binding::click_action)
-        })
+    let plans = orch.shared.capture_plans.borrow();
+    plans.first().and_then(|plan| {
+        plan.dispatch
+            .bindings
+            .get(&ButtonId::Back)
+            .map(Binding::click_action)
     })
 }
 
 #[test]
 fn app_switch_republishes_capture_plans() {
-    // HID++ dispatch reads `plan.bindings` at event time, so a
+    // HID++ dispatch reads `plan.dispatch.bindings` at event time, so a
     // foreground-app change must republish the capture plans — their
     // binding maps and divert sets are per-app effective — or every
     // diverted button keeps firing the previous app's actions.
@@ -901,4 +918,121 @@ fn app_switch_republishes_capture_plans() {
     );
     orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+}
+
+#[test]
+fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+
+    {
+        let mut maps = orch.shared.hook_maps.write().expect("hook maps");
+        assert_eq!(maps.selected_device.as_deref(), Some("a"));
+        maps.thumbwheel_positive_is_forward
+            .insert("a".to_owned(), true);
+    }
+
+    // Config/app rebuilds replace binding maps but hardware observations must
+    // remain in the same atomically published snapshot.
+    orch.reload_config(Config::default());
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(maps.selected_device.as_deref(), Some("a"));
+    assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
+}
+
+#[test]
+fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+    let mut config = Config::default();
+    config.set_gesture_mode("a", ButtonId::Forward, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    let mut capture_plans = orch.shared.capture_plans.clone();
+    let _ = capture_plans.borrow_and_update();
+
+    let side_gesture_is_armed = |orch: &Orchestrator| {
+        orch.shared.capture_plans.borrow()[0]
+            .target
+            .spec
+            .divert_gesture_buttons
+            .iter()
+            .any(|&(_, button)| button == ButtonId::Forward)
+    };
+    assert!(
+        !side_gesture_is_armed(&orch),
+        "HID++ diversion must wait for the movement hook"
+    );
+
+    orch.set_os_mouse_hook_available(true);
+    assert_eq!(
+        capture_plans
+            .has_changed()
+            .expect("publication remains open"),
+        cfg!(target_os = "macos"),
+        "only a semantic capture-plan change should wake reconciliation"
+    );
+    let _ = capture_plans.borrow_and_update();
+    if cfg!(target_os = "macos") {
+        let hook_maps = orch
+            .shared
+            .hook_maps
+            .read()
+            .expect("hook maps should not be poisoned");
+        assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
+        assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(side_gesture_is_armed(&orch));
+    } else {
+        let hook_maps = orch
+            .shared
+            .hook_maps
+            .read()
+            .expect("hook maps should not be poisoned");
+        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(!side_gesture_is_armed(&orch));
+    }
+
+    orch.set_os_mouse_hook_available(false);
+    assert_eq!(
+        capture_plans
+            .has_changed()
+            .expect("publication remains open"),
+        cfg!(target_os = "macos"),
+        "only a semantic capture-plan change should wake reconciliation"
+    );
+    assert!(
+        !side_gesture_is_armed(&orch),
+        "revoking the movement hook must restore native HID++ controls"
+    );
+}
+
+#[test]
+fn equal_runtime_projection_does_not_wake_managers() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    let mut capture_plans = orch.shared.capture_plans.clone();
+    let mut keyboard_spec = orch.shared.keyboard_spec.clone();
+    let mut host_switch_links = orch.shared.host_switch_links.clone();
+    let _ = capture_plans.borrow_and_update();
+    let _ = keyboard_spec.borrow_and_update();
+    let _ = host_switch_links.borrow_and_update();
+
+    orch.publish_device_runtime();
+
+    assert!(
+        !capture_plans
+            .has_changed()
+            .expect("publication remains open")
+    );
+    assert!(
+        !keyboard_spec
+            .has_changed()
+            .expect("publication remains open")
+    );
+    assert!(
+        !host_switch_links
+            .has_changed()
+            .expect("publication remains open")
+    );
 }

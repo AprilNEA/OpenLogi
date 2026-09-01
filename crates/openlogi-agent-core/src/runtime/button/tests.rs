@@ -56,8 +56,8 @@ fn repress_replaces_the_old_press_with_a_new_identity() {
 #[test]
 fn cancellation_is_scoped_to_one_session() {
     let mut state = ButtonState::default();
-    let first_source = ButtonSource::Hidpp(HidppSessionId::new("mouse-a", 7));
-    let second_source = ButtonSource::Hidpp(HidppSessionId::new("mouse-b", 3));
+    let first_source = ButtonSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 7));
+    let second_source = ButtonSource::Hidpp(HidppSessionId::with_epoch("mouse-b", 3));
     let first = ActivePress {
         token: PressToken {
             id: PressId(1),
@@ -89,7 +89,7 @@ fn hook_cancellation_leaves_hidpp_presses_active() {
         token: PressToken {
             id: PressId(2),
             key: PressKey::new(
-                ButtonSource::Hidpp(HidppSessionId::new("mouse-a", 7)),
+                ButtonSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 7)),
                 ButtonId::Forward,
             ),
             generation: 0,
@@ -154,7 +154,7 @@ fn source_cancellation_invalidates_queued_gesture_work() {
     })
     .expect("button worker should start");
     let input = owner.input();
-    let session = HidppSessionId::new("mouse-a", 7);
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
     let token = input
         .try_hidpp_down(&session, ButtonId::Back, None)
         .expect("down should be queued");
@@ -274,7 +274,7 @@ fn pulse_has_an_immediate_balanced_lifecycle() {
     })
     .expect("button worker should start");
     let input = owner.input();
-    let session = HidppSessionId::new("mouse-a", 7);
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
     let binding = Binding::Single(Action::HoldShortcut(
         "Ctrl+Space".parse().expect("valid shortcut"),
     ));
@@ -419,7 +419,7 @@ fn pulse_degrades_long_press_to_its_short_action() {
     })
     .expect("button worker should start");
     let input = owner.input();
-    let session = HidppSessionId::new("keyboard-a", 4);
+    let session = HidppSessionId::with_epoch("keyboard-a", 4);
     let binding = long_press(Action::Copy, Action::Paste);
 
     assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));

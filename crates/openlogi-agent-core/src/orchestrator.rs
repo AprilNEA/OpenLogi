@@ -17,20 +17,23 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
-use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
+use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
+    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
-use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
+use crate::capture_plan::{
+    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+};
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -63,9 +66,9 @@ struct AgentDevice {
     online: bool,
 }
 
-/// The shared runtime handed to the hook and the gesture watcher. Every field
-/// is an `Arc`, so cloning is cheap; the orchestrator rewrites the inner values
-/// on each rebuild and the background threads observe them on their next read.
+/// Cheaply cloneable runtime handles handed to hooks and background managers.
+/// The orchestrator remains the sole producer for its watch-backed projections;
+/// consumers receive only read capabilities through this type.
 #[derive(Clone)]
 pub struct SharedRuntime {
     /// The OS-hook callback's single-action + gesture maps, behind one lock so a
@@ -86,6 +89,8 @@ pub struct SharedRuntime {
     pub capture_channel: CaptureChannel,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
+    /// Host-lifecycle gate shared by every producer of proactive device I/O.
+    pub device_io: DeviceIoGate,
     /// Shared transport pool used by long-running host-switch sessions.
     pub channel_pool: ChannelPool,
     /// The keyboard key-capture watcher's target + bindings, `None` while no
@@ -115,6 +120,7 @@ impl SharedRuntime {
             &self.capture_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -128,6 +134,7 @@ impl SharedRuntime {
             &self.keyboard_channel,
             &self.channel_registry,
             &self.receiver_access,
+            &self.device_io,
             route,
         )
     }
@@ -150,12 +157,12 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
-    /// Whether the last enumeration tick failed to open HID++ nodes; published
+    /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
-    /// Config keys of devices first sighted (or wake-flagged) recently, with
-    /// remaining confirming re-apply budget: the first write can race the
+    /// Config keys of devices first sighted (or targeted after wake) recently,
+    /// with remaining confirming re-apply budget: the first write can race the
     /// device's own boot or reconnect and be lost.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
@@ -164,6 +171,16 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
+    /// Whether the OS mouse hook is currently installed. Back/Forward gesture
+    /// motion comes from HID++, but diversion is published only while the
+    /// broader mouse-remapping path is available so losing the hook leaves the
+    /// side buttons native.
+    os_mouse_hook_available: bool,
+    /// Private producer halves for the read-only runtime projections in
+    /// `shared`, keeping the orchestrator's single-writer contract structural.
+    capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
+    keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
+    host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
     shared: SharedRuntime,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -186,14 +203,17 @@ enum InventoryState {
 }
 
 impl Orchestrator {
-    /// Build from a loaded config. Creates the shared `Arc`s and seeds them
-    /// from the config with no devices yet; the first inventory tick fills in
-    /// the routes and presets.
+    /// Build from a loaded config. Creates the shared runtime handles and seeds
+    /// them from the config with no devices yet; the first inventory tick fills
+    /// in the routes and presets.
     ///
     /// `observable` is the cell the IPC server answers from; the config facts
     /// it carries are seeded here.
     #[must_use]
     pub fn new(config: Config, observable: Arc<ObservableState>) -> Self {
+        let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
+        let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
+        let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -202,15 +222,16 @@ impl Orchestrator {
                 config.app_settings.vertical_scroll_sensitivity,
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
-            capture_plans: Arc::new(RwLock::new(Vec::new())),
+            capture_plans,
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
+            device_io: openlogi_hid::host::device_io_gate(),
             channel_pool: openlogi_hid::host::channel_pool(),
-            keyboard_spec: Arc::new(RwLock::new(None)),
+            keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
-            host_switch_links: Arc::new(RwLock::new(Vec::new())),
+            host_switch_links,
         };
         let orch = Self {
             config,
@@ -223,6 +244,10 @@ impl Orchestrator {
             reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
+            os_mouse_hook_available: false,
+            capture_plans_tx,
+            keyboard_spec_tx,
+            host_switch_links_tx,
             shared,
             observable,
         };
@@ -256,9 +281,39 @@ impl Orchestrator {
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
+        let mut bindings = button_bindings_for(&self.config, key, app);
+        let mut gestures = oshook_gestures_for(&self.config, key, app);
+        if let Some(key) = key {
+            for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
+                // HID++ owns both edges for these controls. Keeping their
+                // projected click or gesture map in the global hook would
+                // reintroduce a second, unattributed dispatch path.
+                bindings.remove(button);
+                gestures.remove(button);
+            }
+        }
         HookMaps {
-            bindings: button_bindings_for(&self.config, key, app),
-            gestures: oshook_gestures_for(&self.config, key, app),
+            bindings,
+            gestures,
+            selected_device: key.map(str::to_owned),
+            ..HookMaps::default()
+        }
+    }
+
+    /// Publish hook maps while preserving thumb-wheel polarities learned from
+    /// hardware capture sessions. Selection, polarity, and bindings share the
+    /// one lock the callback reads, so a device switch cannot combine facts
+    /// from two devices.
+    fn publish_hook_maps(&self, mut maps: HookMaps) {
+        match self.shared.hook_maps.write() {
+            Ok(mut current) => {
+                maps.thumbwheel_positive_is_forward =
+                    std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                *current = maps;
+            }
+            Err(error) => {
+                warn!(%error, lock = "hook_maps", "lock poisoned — keeping stale value");
+            }
         }
     }
 
@@ -307,13 +362,7 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
-        // One write publishes both hook maps atomically, so a button press during
-        // an owner switch can't observe a half-updated state.
-        write_value(
-            &self.shared.hook_maps,
-            self.hook_maps_for(key, self.current_app.as_deref()),
-            "hook_maps",
-        );
+        self.publish_hook_maps(self.hook_maps_for(key, self.current_app.as_deref()));
         self.publish_device_runtime();
     }
 
@@ -323,11 +372,7 @@ impl Orchestrator {
     /// forget the other — a waking device needs both its capture session and
     /// its DPI-cycle slot.
     fn publish_device_runtime(&self) {
-        write_value(
-            &self.shared.capture_plans,
-            self.capture_plans_for(),
-            "capture_plans",
-        );
+        self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
@@ -338,16 +383,15 @@ impl Orchestrator {
             self.config.keyboard.bindings.clone(),
             "keyboard_bindings",
         );
-        write_value(
-            &self.shared.host_switch_links,
+        publish_arc_if_changed(
+            &self.host_switch_links_tx,
             host_switch_links(&self.config, &self.devices),
-            "host_switch_links",
         );
-        write_value(
-            &self.shared.keyboard_spec,
-            self.keyboard_spec_for(),
-            "keyboard_spec",
-        );
+        publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+    }
+
+    fn publish_capture_plans(&self) {
+        publish_arc_if_changed(&self.capture_plans_tx, self.capture_plans_for());
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,
@@ -395,15 +439,33 @@ impl Orchestrator {
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
+                let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+                let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
+                    .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
                 Some(plan_for_device(
                     &self.config,
+                    physical_key,
                     &dev.config_key,
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
+                    self.os_mouse_hook_available,
                 ))
             })
             .collect()
+    }
+
+    /// Publish whether the OS movement hook is currently usable.
+    ///
+    /// HID++ Back/Forward diversion follows this state as a fail-open policy:
+    /// if the mouse-remapping hook is unavailable, side buttons remain native.
+    /// Other HID++-only controls remain captured independently.
+    pub fn set_os_mouse_hook_available(&mut self, available: bool) {
+        if self.os_mouse_hook_available == available {
+            return;
+        }
+        self.os_mouse_hook_available = available;
+        self.publish_capture_plans();
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -411,7 +473,7 @@ impl Orchestrator {
     /// altering the device *set*), but only re-picks the selection and rebuilds
     /// the shared maps when the device set or runtime selection changed —
     /// `rebuild()` is driven by `config_key` + route and resets the live
-    /// DPI-cycle index, so running it every 2s tick on a steady selection
+    /// DPI-cycle index, so running it on every steady reconciliation
     /// would snap DPI back to `preset[0]` (and burn three `RwLock` writes)
     /// for nothing.
     pub fn refresh_inventory(
@@ -478,6 +540,13 @@ impl Orchestrator {
         self.rebuild();
     }
 
+    /// Whether volatile-setting writes still need a delayed inventory pass to
+    /// confirm them after device boot or system resume.
+    #[must_use]
+    pub fn needs_reapply_confirmation(&self) -> bool {
+        !self.reapply_followup.is_empty()
+    }
+
     /// Force a volatile-settings re-apply for every online device on the next
     /// inventory refresh. Called on a detected system wake: the devices were
     /// likely power-cycled during the sleep, but the first post-wake snapshot
@@ -532,7 +601,12 @@ impl Orchestrator {
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
-            crate::hardware::set_light_in_background(Some(route), &light, capabilities);
+            crate::hardware::set_light_in_background(
+                &self.shared.device_io,
+                Some(route),
+                &light,
+                capabilities,
+            );
         }
     }
 
@@ -562,7 +636,12 @@ impl Orchestrator {
                 continue;
             };
             light.enabled = active;
-            crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
+            crate::hardware::set_light_in_background(
+                &self.shared.device_io,
+                dev.route.clone(),
+                &light,
+                capabilities,
+            );
             applied += 1;
         }
         info!(previous = ?previous, active, lights = applied, "applied camera-linked light state");
@@ -747,11 +826,7 @@ impl Orchestrator {
             return false;
         }
         self.current_app = id;
-        write_value(
-            &self.shared.hook_maps,
-            self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
-            "hook_maps",
-        );
+        self.publish_hook_maps(self.hook_maps_for(self.current_key(), self.current_app.as_deref()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
@@ -817,7 +892,12 @@ impl Orchestrator {
                 self.effective_light_settings(&dev.config_key),
                 dev.light_capabilities,
             ) {
-                crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
+                crate::hardware::set_light_in_background(
+                    &self.shared.device_io,
+                    dev.route.clone(),
+                    &light,
+                    capabilities,
+                );
             }
         }
     }
@@ -1018,13 +1098,13 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many inventory ticks a first-sighted or wake-flagged device keeps
-/// re-applying its volatile settings after the initial write. A cold restart
-/// leaves a Bolt/Unifying mouse slow to enumerate — and a system wake can
-/// enumerate a receiver whose mouse link is still re-establishing — so the
-/// first write (and a single confirm) can both time out against a
-/// still-booting device; retrying for ~8s at the 2s cadence lets the write
-/// land once it finishes booting.
+/// How many explicit confirmation passes a first-sighted or wake-targeted
+/// device keeps re-applying its volatile settings after the initial write. A
+/// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
+/// wake can enumerate a receiver whose mouse link is still re-establishing —
+/// so the first write (and a single confirm) can both time out against a
+/// still-booting device. Four confirmations are requested at two-second
+/// intervals; any intervening authoritative reconciliation satisfies one.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
@@ -1106,6 +1186,30 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
         Ok(mut guard) => *guard = value,
         Err(e) => warn!(error = %e, lock = name, "lock poisoned — keeping stale value"),
     }
+}
+
+/// Publish a fresh immutable snapshot only when its projected value changed.
+fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {
+    publication.send_if_modified(|current| {
+        if current.as_ref() == &value {
+            return false;
+        }
+        *current = Arc::new(value);
+        true
+    });
+}
+
+fn publish_optional_arc_if_changed<T: PartialEq>(
+    publication: &watch::Sender<Option<Arc<T>>>,
+    value: Option<T>,
+) {
+    publication.send_if_modified(|current| {
+        if current.as_deref() == value.as_ref() {
+            return false;
+        }
+        *current = value.map(Arc::new);
+        true
+    });
 }
 
 #[cfg(test)]

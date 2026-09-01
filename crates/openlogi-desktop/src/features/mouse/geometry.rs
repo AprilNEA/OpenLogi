@@ -13,6 +13,14 @@ use crate::services::assets::ResolvedAsset;
 /// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
 
+/// Height of a side-label card. The layout needs it to group related cards
+/// without allowing them to overlap at the minimum model height.
+pub(super) const LABEL_H: f32 = 56.;
+
+/// Empty space between the grouped Back and Forward cards when the viewport
+/// has enough room to pull them closer than the regular even spacing.
+const NAVIGATION_GROUP_GAP: f32 = 16.;
+
 /// Whether label cards occupy one or both sides of the device render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabelDistribution {
@@ -119,8 +127,9 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
 
 /// Lay labels out evenly down one or both sides of the mouse. A two-sided
 /// layout sends the leftmost half of the hotspots left and the rightmost half
-/// right, then orders each side by hotspot height so its leader lines do not
-/// cross.
+/// right, then orders each side by hotspot height. Back and Forward stay
+/// adjacent when both are on the same side because they form one navigation
+/// pair, even when another marker sits between them.
 #[expect(
     clippy::cast_precision_loss,
     reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
@@ -161,9 +170,32 @@ pub fn labels_from_hotspots(
             .filter_map(|(index, label)| (label.side == side).then_some(index))
             .collect();
         vertical_order.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
+        let back = vertical_order
+            .iter()
+            .position(|&index| labels[index].id == ButtonId::Back.into());
+        let forward = vertical_order
+            .iter()
+            .position(|&index| labels[index].id == ButtonId::Forward.into());
+        let navigation_pair = if let (Some(back), Some(forward)) = (back, forward) {
+            let first = back.min(forward);
+            let second = back.max(forward);
+            if second > first + 1 {
+                let navigation_button = vertical_order.remove(second);
+                vertical_order.insert(first + 1, navigation_button);
+            }
+            Some((vertical_order[first], vertical_order[first + 1]))
+        } else {
+            None
+        };
         let step = mouse_h / (vertical_order.len() as f32 + 1.);
         for (slot, index) in vertical_order.into_iter().enumerate() {
             labels[index].y = step * (slot as f32 + 1.);
+        }
+        if let Some((first, second)) = navigation_pair {
+            let grouped_step = step.min(LABEL_H + NAVIGATION_GROUP_GAP);
+            let adjustment = (step - grouped_step) / 2.;
+            labels[first].y += adjustment;
+            labels[second].y -= adjustment;
         }
     }
 
@@ -198,7 +230,9 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         }
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
         "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
-        "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
+        "SLOT_NAME_MODESHIFT_BUTTON" | "SLOT_NAME_DPI_BUTTON" => {
+            Some(MouseControlId::Button(ButtonId::DpiToggle))
+        }
         "SLOT_NAME_THUMBWHEEL" => Some(MouseControlId::ThumbwheelRotation),
         "SLOT_NAME_GESTURE_BUTTON" => Some(MouseControlId::Button(ButtonId::GestureButton)),
         // The MX Master 4 Haptic Sense Panel. Logi names the slot after its
@@ -239,6 +273,18 @@ mod tests {
     }
 
     #[test]
+    fn dpi_slot_names_map_to_dpi_toggle_button() {
+        assert_eq!(
+            map_slot_name("SLOT_NAME_MODESHIFT_BUTTON"),
+            Some(MouseControlId::Button(ButtonId::DpiToggle))
+        );
+        assert_eq!(
+            map_slot_name("SLOT_NAME_DPI_BUTTON"),
+            Some(MouseControlId::Button(ButtonId::DpiToggle))
+        );
+    }
+
+    #[test]
     fn wheel_tilt_slot_names_map_to_their_own_controls() {
         // MX Anywhere uses the longer names; MX Ergo uses the shorter aliases.
         for name in ["SLOT_NAME_LEFT_SCROLL_BUTTON", "SLOT_NAME_SCROLL_LEFT"] {
@@ -266,6 +312,50 @@ mod tests {
         ys.sort_by(f32::total_cmp);
         ys.dedup();
         assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
+    }
+
+    #[test]
+    fn navigation_labels_stay_together_when_haptic_marker_sits_between() {
+        let hotspots = [
+            Hotspot {
+                id: ButtonId::Forward.into(),
+                x: 0.,
+                y: 100.,
+                w: 10.,
+                h: 10.,
+            },
+            Hotspot {
+                id: ButtonId::HapticPanel.into(),
+                x: 0.,
+                y: 200.,
+                w: 10.,
+                h: 10.,
+            },
+            Hotspot {
+                id: ButtonId::Back.into(),
+                x: 0.,
+                y: 300.,
+                w: 10.,
+                h: 10.,
+            },
+        ];
+
+        let mut labels =
+            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
+        labels.sort_by(|a, b| a.y.total_cmp(&b.y));
+
+        assert_eq!(
+            labels.iter().map(|label| label.id).collect::<Vec<_>>(),
+            [
+                MouseControlId::Button(ButtonId::Forward),
+                MouseControlId::Button(ButtonId::Back),
+                MouseControlId::Button(ButtonId::HapticPanel),
+            ]
+        );
+        let navigation_gap = labels[1].y - labels[0].y;
+        let haptic_gap = labels[2].y - labels[1].y;
+        assert!(navigation_gap < haptic_gap);
+        assert!(navigation_gap >= LABEL_H);
     }
 
     #[test]

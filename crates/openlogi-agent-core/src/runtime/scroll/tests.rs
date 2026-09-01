@@ -8,7 +8,7 @@ fn source() -> ScrollSource {
 }
 
 fn hidpp_source(device_key: &str, epoch: u64) -> ScrollSource {
-    ScrollSource::Hidpp(HidppSessionId::new(device_key, epoch))
+    ScrollSource::Hidpp(HidppSessionId::with_epoch(device_key, epoch))
 }
 
 fn wheel(x: f64, y: f64) -> WheelDelta {

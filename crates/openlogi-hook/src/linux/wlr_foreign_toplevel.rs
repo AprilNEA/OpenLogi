@@ -22,17 +22,18 @@
 //!
 //! ## Dispatch model
 //!
-//! The protocol is event-driven, but the [`super::FrontmostSource`] contract is
-//! a synchronous poll (~1 Hz from the agent's foreground-app watcher). Two primitives
-//! bridge that gap:
+//! While an observer exists, one worker owns the connection and continuously
+//! drives its event queue. A toplevel's pending fields become observable only
+//! on the protocol's `done` commit. `Finished` and transport errors drop the
+//! session and schedule one reconnect attempt at [`super::RECONNECT_DELAY`];
+//! there is no steady-state timer.
 //!
-//! - **`drain_events`** (poll path) — flushes pending writes, then attempts a
+//! The idle snapshot path retains a bounded `drain_events`: it flushes pending
+//! writes, then attempts a
 //!   non-blocking `prepare_read` + `read` with a short 25 ms `poll(2)` cap.
 //!   If nothing arrives in time the last known state is returned unchanged;
-//!   millisecond-stale frontmost data is acceptable by design. A genuine
-//!   connection error here (as opposed to a timeout) marks the session
-//!   finished so the next poll reconnects, the same as an explicit
-//!   `Finished` event.
+//!   this is used only by explicit `frontmost_application()` reads when no
+//!   observer owns the transport.
 //!
 //! - **`timed_roundtrip`** (init path) — sends `wl_display.sync`, then loops
 //!   `flush` → `poll(2)` → `read` → `dispatch_pending` until the sync callback
@@ -45,10 +46,9 @@
 
 use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_callback;
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -60,7 +60,9 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_m
     self, ZwlrForeignToplevelManagerV1,
 };
 
-use super::FrontmostSource;
+use super::{
+    FrontmostSource, PollResult, PublishAppId, RECONNECT_DELAY, StopToken, poll_source_or_stop,
+};
 
 /// Highest protocol version this backend understands. The events it relies on
 /// (`app_id`, `state`, `done`, `closed`) exist since v1, so binding is capped
@@ -68,8 +70,8 @@ use super::FrontmostSource;
 const MANAGER_MAX_VERSION: u32 = 3;
 
 /// Deadline for the two `wl_display.sync` round-trips in `Session::open`.
-/// Mirrors `gnome_shell::METHOD_TIMEOUT`: both guard the `FRONTMOST_SOURCE`
-/// `LazyLock` initializer against a stalled compositor socket.
+/// Mirrors `gnome_shell::METHOD_TIMEOUT`: both keep backend selection and
+/// reconnect attempts from stalling indefinitely on a compositor socket.
 const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum time the poll-path drain will wait for new Wayland events. Stale
@@ -77,8 +79,9 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_CAP_MS: u64 = 25;
 
 /// Accumulated per-toplevel data. wlr sends individual property events and then
-/// a `done` marking a consistent snapshot, so updates are staged in `pending_*`
-/// and committed on `done`.
+/// a `done` marking a consistent snapshot. Despite their names, `pending_*`
+/// hold the latest protocol-reported values, not one-shot unconsumed events:
+/// properties omitted from a later batch retain their previous value.
 #[derive(Default)]
 struct Toplevel {
     app_id: Option<String>,
@@ -87,17 +90,39 @@ struct Toplevel {
     pending_activated: bool,
 }
 
+impl Toplevel {
+    fn commit_latest(&mut self) {
+        // `app_id` may arrive after an initial State + Done, so None means
+        // "not reported yet", not "clear the committed id". Do not `take`
+        // either pending field: Wayland may omit unchanged properties from
+        // later batches, and these fields are the latest known snapshot.
+        if self.pending_app_id.is_some() {
+            self.app_id = self.pending_app_id.clone();
+        }
+        self.activated = self.pending_activated;
+    }
+}
+
 /// Dispatch state: the bound manager plus the toplevels seen so far.
 #[derive(Default)]
 struct State {
     manager: Option<ZwlrForeignToplevelManagerV1>,
     toplevels: HashMap<ObjectId, Toplevel>,
-    /// Set when the compositor sends `finished`; triggers a reconnect on the
-    /// next poll instead of permanently disabling the backend.
+    /// Set when the compositor sends `finished`; the source drops this session
+    /// and reconnects instead of permanently disabling the backend.
     finished: bool,
     /// Flipped to `true` by the `wl_callback::Done` handler; used by
     /// `timed_roundtrip` to detect that the sync echo arrived.
     sync_done: bool,
+}
+
+impl State {
+    fn frontmost_app_id(&self) -> Option<String> {
+        self.toplevels
+            .values()
+            .find(|toplevel| toplevel.activated)
+            .and_then(|toplevel| toplevel.app_id.clone())
+    }
 }
 
 impl Dispatch<WlRegistry, ()> for State {
@@ -139,10 +164,10 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
             }
             zwlr_foreign_toplevel_manager_v1::Event::Finished => {
                 // The compositor is reloading or restarting. Mark the session
-                // finished; the next poll will reconnect automatically.
+                // finished so the owning source can reconnect.
                 warn!(
                     "wlr-foreign-toplevel: compositor sent Finished — \
-                     will reconnect on next poll"
+                     will reconnect"
                 );
                 state.finished = true;
                 state.manager = None;
@@ -184,16 +209,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
             }
             Event::Done => {
                 if let Some(toplevel) = state.toplevels.get_mut(&id) {
-                    // app_id is sent only when it changes, and a compositor may
-                    // emit State + Done before the first AppId. Committing
-                    // `pending_app_id` unconditionally would clobber a known id
-                    // (or the initial one) with None, so only overwrite when a
-                    // value is actually pending. `activated` defaults to false,
-                    // which is the correct state for a window that sent none.
-                    if toplevel.pending_app_id.is_some() {
-                        toplevel.app_id = toplevel.pending_app_id.clone();
-                    }
-                    toplevel.activated = toplevel.pending_activated;
+                    toplevel.commit_latest();
                 }
             }
             Event::Closed => {
@@ -325,17 +341,13 @@ fn timed_roundtrip(
     }
 }
 
-/// Drains pending compositor events without blocking longer than `POLL_CAP_MS`.
-/// Used on every frontmost poll. Stale data within the cap is acceptable by
-/// design; a genuine connection error (e.g. the compositor crashing and
-/// closing the socket, rather than sending a graceful `Finished`) marks
-/// `state.finished` so the caller reconnects on the next poll instead of
-/// returning stale state forever.
+/// Drains pending compositor events without blocking longer than `POLL_CAP_MS`
+/// for an explicit snapshot read while no observer owns the session. Stale data
+/// within the cap is acceptable; a genuine connection error marks the session
+/// finished so its next owner reconnects instead of returning stale state.
 fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
     if queue.flush().is_err() || queue.dispatch_pending(state).is_err() {
-        warn!(
-            "wlr-foreign-toplevel: connection error while draining — will reconnect on next poll"
-        );
+        warn!("wlr-foreign-toplevel: connection error while draining — will reconnect");
         state.finished = true;
         return;
     }
@@ -350,9 +362,7 @@ fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
             if poll_fd(fd, deadline)
                 && (guard.read().is_err() || queue.dispatch_pending(state).is_err())
             {
-                warn!(
-                    "wlr-foreign-toplevel: connection error while draining — will reconnect on next poll"
-                );
+                warn!("wlr-foreign-toplevel: connection error while draining — will reconnect");
                 state.finished = true;
             }
             // If poll timed out, guard is dropped here and we return stale state.
@@ -362,14 +372,19 @@ fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
 
 /// One live Wayland session: connection + event queue + dispatch state.
 ///
-/// Grouping all three behind a single mutex means the whole session can be
-/// dropped and rebuilt atomically when the compositor sends `Finished`.
+/// Keeping all three in the source's single-owner session means they are
+/// dropped and rebuilt together when the compositor sends `Finished`.
 struct Session {
     // Held for RAII — even though `Connection` is Arc-backed, keeping an
     // explicit handle here ensures the connection outlives the queue.
     _conn: Connection,
     queue: EventQueue<State>,
     state: State,
+}
+
+enum SessionOutcome {
+    Stopped,
+    Disconnected,
 }
 
 impl Session {
@@ -400,7 +415,7 @@ impl Session {
         }
 
         // Second round-trip: receive the initial toplevel list and properties,
-        // so the first poll already has the active window.
+        // so the first snapshot already has the active window.
         if !timed_roundtrip(&conn, &mut queue, &mut state, deadline) {
             debug!("wlr-foreign-toplevel: initial toplevel round-trip timed out or failed");
             return None;
@@ -412,53 +427,110 @@ impl Session {
             state,
         })
     }
+
+    /// Continuously dispatch native events until teardown or connection loss.
+    /// `open` subscribed before its synchronized snapshot; changes after that
+    /// snapshot remain queued on this same connection and cannot be missed.
+    fn observe(&mut self, stop: &StopToken, publish: &PublishAppId) -> SessionOutcome {
+        loop {
+            if self.queue.flush().is_err()
+                || self.queue.dispatch_pending(&mut self.state).is_err()
+                || self.state.finished
+            {
+                return SessionOutcome::Disconnected;
+            }
+            publish(self.state.frontmost_app_id());
+
+            let Some(guard) = self.queue.prepare_read() else {
+                continue;
+            };
+            let source_fd = guard.connection_fd().as_raw_fd();
+            match poll_source_or_stop(Some(source_fd), stop.wake_fd(), None) {
+                PollResult::SourceReady => {
+                    if guard.read().is_err() {
+                        return SessionOutcome::Disconnected;
+                    }
+                }
+                PollResult::StopRequested => return SessionOutcome::Stopped,
+                PollResult::Error => return SessionOutcome::Disconnected,
+                PollResult::DeadlineReached => {}
+            }
+        }
+    }
 }
 
-/// Wayland frontmost backend. Holds the session behind a mutex so the whole
-/// connection can be rebuilt on compositor restart without touching callers.
+/// Wayland frontmost backend. The selected session moves onto the observer
+/// worker and is dropped/rebuilt there after compositor restart.
 struct WlrForeignToplevelSource {
-    // Active session, or `None` when the last reconnect attempt failed.
-    // The mutex bridges the event-driven Wayland runtime to the synchronous
-    // poll contract; the session is only ever touched here, at ~1 Hz.
-    session: Mutex<Option<Session>>,
+    session: Option<Session>,
 }
 
 impl WlrForeignToplevelSource {
     fn connect() -> Option<Self> {
-        Session::open().map(|s| Self {
-            session: Mutex::new(Some(s)),
+        Session::open().map(|session| Self {
+            session: Some(session),
         })
     }
 }
 
 impl FrontmostSource for WlrForeignToplevelSource {
-    fn frontmost_app_id(&self) -> Option<String> {
-        let mut guard = self.session.lock().ok()?;
-
-        // Reconnect when the compositor sent `Finished` (compositor reload /
-        // restart) or when a prior reconnect attempt failed.
-        let needs_reconnect = guard.as_ref().is_none_or(|s| s.state.finished);
-        if needs_reconnect {
-            *guard = Session::open();
-            if guard.is_some() {
-                info!("wlr-foreign-toplevel: reconnected");
-            } else {
-                debug!("wlr-foreign-toplevel: reconnect pending, retrying next poll");
-            }
+    fn frontmost_app_id(&mut self) -> Option<String> {
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|session| session.state.finished)
+        {
+            self.session = Session::open();
         }
-
-        let Session { queue, state, .. } = guard.as_mut()?;
+        let Session { queue, state, .. } = self.session.as_mut()?;
         drain_events(queue, state);
         if state.finished {
-            // `Finished` arrived during this drain; reconnect on the next call.
+            self.session = None;
             return None;
         }
+        state.frontmost_app_id()
+    }
 
-        state
-            .toplevels
-            .values()
-            .find(|toplevel| toplevel.activated)
-            .and_then(|toplevel| toplevel.app_id.clone())
+    fn observe(
+        mut self: Box<Self>,
+        stop: StopToken,
+        publish: PublishAppId,
+    ) -> Box<dyn FrontmostSource> {
+        loop {
+            if self.session.is_none() {
+                if stop.is_requested() {
+                    return self;
+                }
+                self.session = Session::open();
+                if self.session.is_none() {
+                    publish(None);
+                    if stop.wait_timeout(RECONNECT_DELAY) {
+                        return self;
+                    }
+                    continue;
+                }
+                debug!("wlr-foreign-toplevel: reconnected");
+            }
+
+            let outcome = self
+                .session
+                .as_mut()
+                .map_or(SessionOutcome::Disconnected, |session| {
+                    session.observe(&stop, &publish)
+                });
+            // Dropping the session is the protocol unsubscribe and also makes
+            // the next idle snapshot/restart establish a fresh connection.
+            self.session = None;
+            match outcome {
+                SessionOutcome::Stopped => return self,
+                SessionOutcome::Disconnected => {
+                    publish(None);
+                    if stop.wait_timeout(RECONNECT_DELAY) {
+                        return self;
+                    }
+                }
+            }
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -475,7 +547,49 @@ pub(super) fn candidate() -> Option<Box<dyn FrontmostSource>> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::millis_until;
+    use super::{Toplevel, millis_until};
+
+    #[test]
+    fn done_reuses_latest_values_for_omitted_properties() {
+        let mut toplevel = Toplevel {
+            pending_app_id: Some("org.example.App".into()),
+            pending_activated: true,
+            ..Toplevel::default()
+        };
+
+        toplevel.commit_latest();
+        assert_eq!(toplevel.app_id.as_deref(), Some("org.example.App"));
+        assert!(toplevel.activated);
+
+        // A later Done with no new AppId or State event must preserve both
+        // latest values; pending means latest, not unconsumed.
+        toplevel.commit_latest();
+        assert_eq!(toplevel.app_id.as_deref(), Some("org.example.App"));
+        assert!(toplevel.activated);
+    }
+
+    #[test]
+    fn activation_changes_only_when_done_commits_pending_state() {
+        let mut toplevel = Toplevel {
+            pending_app_id: Some("org.example.App".into()),
+            pending_activated: true,
+            ..Toplevel::default()
+        };
+
+        assert_eq!(toplevel.app_id, None);
+        assert!(!toplevel.activated);
+        toplevel.commit_latest();
+        assert_eq!(toplevel.app_id.as_deref(), Some("org.example.App"));
+        assert!(toplevel.activated);
+
+        toplevel.pending_activated = false;
+        assert!(
+            toplevel.activated,
+            "pending state must not leak before Done"
+        );
+        toplevel.commit_latest();
+        assert!(!toplevel.activated);
+    }
 
     #[test]
     fn millis_until_elapsed_deadline_is_zero() {

@@ -8,7 +8,6 @@
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
-#[cfg(not(target_os = "windows"))]
 use std::error::Error;
 #[cfg(not(target_os = "windows"))]
 use std::sync::atomic::AtomicBool;
@@ -19,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter};
 use async_hid::{DeviceInfo, HidBackend};
 use futures_lite::{Stream, StreamExt as _};
-use hidpp::channel::HidppChannel;
+use hidpp::channel::{HidppChannel, RequestSwId, SwIdPolicy};
 use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use hidpp::{async_trait, channel::RawHidChannel};
@@ -30,6 +29,7 @@ use tracing::debug;
 use crate::LOGITECH_VENDOR_ID;
 use openlogi_device::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
 use openlogi_device::write::matches_litra;
+use openlogi_device::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 
 /// Collapses `async-hid`'s error taxonomy into the backend-agnostic
 /// [`BackendError`] every caller above this module sees.
@@ -46,6 +46,18 @@ fn backend_error(error: async_hid::HidError) -> BackendError {
         }
         other => BackendError::Backend(other.to_string()),
     }
+}
+
+fn device_io_suspended() -> BackendError {
+    BackendError::Backend("host device I/O is suspended".into())
+}
+
+fn device_io_error() -> Box<dyn Error + Send + Sync> {
+    std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        "host device I/O is suspended",
+    )
+    .into()
 }
 
 /// Classify a failed device open. On macOS `IOHIDDeviceOpen` denies silently —
@@ -106,7 +118,7 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
 /// queue but share the OS input report stream, so a shared software id lets a
 /// response satisfy the wrong open. Each channel leases one **fixed** id for its
 /// lifetime (no rotation — offset rotating sequences still collide across
-/// channels) and frees it on drop via [`HidppChannel::set_sw_id_lease`].
+/// channels) and frees it on drop via [`SwIdPolicy::Leased`].
 static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
 
 mod native;
@@ -185,12 +197,11 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// Process-wide HID backend, created once and reused for every enumeration.
 ///
 /// async-hid's macOS backend wraps an `IOHIDManager`; `HidBackend::default()`
-/// builds, schedules, and (on drop) cancels one. The inventory watcher
-/// enumerates every ~2 s, so building a fresh backend per call spun up and tore
-/// down an `IOHIDManager` on every tick — needless churn that kept the process
-/// busy and its heap dirty around the clock (issue #99). Reusing one long-lived
-/// backend is the usage async-hid intends, and keeps the device set warm between
-/// polls. `HidBackend` is `Arc`-backed, so this is shared, not copied.
+/// builds, schedules, and (on drop) cancels one. Building a fresh backend per
+/// reconciliation spun up and tore down an `IOHIDManager` repeatedly — needless
+/// churn (issue #99). Reusing one long-lived backend is the usage async-hid
+/// intends, and keeps the device set warm between event/recovery passes.
+/// `HidBackend` is `Arc`-backed, so this is shared, not copied.
 ///
 /// Inventory and route-addressed standalone operations may enumerate through
 /// this one backend concurrently. That is sound: async-hid declares the backend
@@ -198,6 +209,18 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// (`IOHIDManagerCopyDevices`), and sharing a single long-lived `IOHIDManager`
 /// across threads is the model hidapi uses too.
 static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
+
+/// One process-wide lifecycle authority for this host HID stack. Every native
+/// backend handle and open channel receives the corresponding read gate.
+static DEVICE_IO: LazyLock<(DeviceIoSignal, DeviceIoGate)> = LazyLock::new(device_io_channel);
+
+pub(crate) fn device_io_signal() -> DeviceIoSignal {
+    DEVICE_IO.0.clone()
+}
+
+pub(crate) fn device_io_gate() -> DeviceIoGate {
+    DEVICE_IO.1.clone()
+}
 
 /// Subscribe to the backend's node connect/disconnect events, restated as the
 /// backend-agnostic [`HotplugEvent`].
@@ -323,7 +346,7 @@ fn is_receiver_child_node(_id: &async_hid::DeviceId) -> bool {
 }
 
 /// Lease one free software id in `1..=15`, or `None` if all 15 are held.
-fn try_lease_sw_id() -> Option<u8> {
+fn try_lease_sw_id() -> Option<RequestSwId> {
     loop {
         let bits = SW_ID_LEASES.load(Ordering::Acquire);
         let free = (1u8..=15).find(|&id| bits & (1u16 << id) == 0)?;
@@ -332,7 +355,8 @@ fn try_lease_sw_id() -> Option<u8> {
             .compare_exchange(bits, next, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            return Some(free);
+            // `free` is `1..=15`, so the id-0 rejection can never fire here.
+            return RequestSwId::new(U4::from_lo(free));
         }
     }
 }
@@ -343,26 +367,37 @@ fn free_sw_id(id: u8) {
     }
 }
 
-/// Give `channel` a process-unique fixed software id for its lifetime.
+/// Give `channel` a process-unique fixed software id for its lifetime, or
+/// refuse when all 15 ids are leased.
 ///
-/// Software id `0` is reserved for device notifications and is never leased.
-/// Rotation stays off: concurrent channels that share a rotating `1..=15`
-/// sequence eventually reuse the same id and cross-match again.
-fn configure_channel_sw_ids(channel: &mut HidppChannel) {
-    let Some(id) = try_lease_sw_id() else {
-        // More than 15 simultaneous opens is unexpected; keep the default id
-        // rather than colliding with a live lease deliberately.
-        debug!("all HID++ software ids are leased; channel keeps default id 1");
-        return;
-    };
-    channel.set_sw_id(U4::from_lo(id));
-    channel.set_rotating_sw_id(false);
-    channel.set_sw_id_lease(id, free_sw_id);
+/// The `Leased` policy is fixed-id by construction — rotation cannot be
+/// combined with it, which is the point: concurrent channels that share a
+/// rotating `1..=15` sequence eventually reuse the same id and cross-match.
+/// Refusing on exhaustion is equally deliberate: with the pool empty, the
+/// default id 1 is by construction held by a live channel, so falling back to
+/// it would silently recreate the response cross-matching this allocator
+/// exists to prevent. A refused open surfaces as a failed probe, which the
+/// ledger replays and retries next tick.
+fn configure_channel_sw_ids(channel: &mut HidppChannel) -> Result<(), BackendError> {
+    let id = try_lease_sw_id().ok_or_else(|| {
+        BackendError::Backend(
+            "all 15 HID++ software ids are leased — refusing an open that would share one".into(),
+        )
+    })?;
+    channel.set_sw_id_policy(SwIdPolicy::Leased {
+        id,
+        free: free_sw_id,
+    });
+    Ok(())
 }
 
 pub(crate) async fn open_hidpp_channel(
     dev: &async_hid::Device,
+    device_io: DeviceIoGate,
 ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+    if !device_io.allows_io() {
+        return Err(device_io_suspended());
+    }
     // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value because
     // the channel keeps it for the lifetime of the open.
     let info: DeviceInfo = (**dev).clone();
@@ -372,12 +407,12 @@ pub(crate) async fn open_hidpp_channel(
     // both reports (or is long-only), handled by AsyncHidChannel.
     #[cfg(target_os = "windows")]
     {
-        let raw = WindowsHidppChannel::open(dev, info.clone())
+        let raw = WindowsHidppChannel::open(dev, info.clone(), device_io)
             .await
             .map_err(backend_error)?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
-                configure_channel_sw_ids(&mut c);
+                configure_channel_sw_ids(&mut c)?;
                 Arc::new(c)
             }
             Err(e) => {
@@ -391,13 +426,16 @@ pub(crate) async fn open_hidpp_channel(
     #[cfg(not(target_os = "windows"))]
     {
         let (reader, writer) = dev.open().await.map_err(open_error)?;
+        if !device_io.allows_io() {
+            return Err(device_io_suspended());
+        }
         // BLE-direct devices expose only the long HID++ report; flag the channel so
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
-        let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
+        let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only, device_io);
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
-                configure_channel_sw_ids(&mut c);
+                configure_channel_sw_ids(&mut c)?;
                 Arc::new(c)
             }
             Err(e) => {
@@ -406,8 +444,8 @@ pub(crate) async fn open_hidpp_channel(
             }
         };
         // Logged once per actual open. The inventory watcher reuses channels across
-        // ticks, so a steadily-connected device should log this on first sight (and
-        // on reconnect) only — not every ~2s tick.
+        // reconciliations, so a steadily-connected device should log this on first
+        // sight (and on reconnect) only — not every pass.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
         Ok(Some(channel))
     }
@@ -421,22 +459,23 @@ mod sw_id_lease_tests {
     fn leases_are_unique_until_freed() {
         // Leave any ids held by concurrent tests alone: lease two free slots,
         // check they differ, free them, and confirm the first id is reusable.
+        let free = |id: super::RequestSwId| free_sw_id(id.get().to_lo());
         let Some(a) = try_lease_sw_id() else {
             return;
         };
         let Some(b) = try_lease_sw_id() else {
-            free_sw_id(a);
+            free(a);
             return;
         };
         assert_ne!(a, b);
-        free_sw_id(a);
+        free(a);
         let Some(c) = try_lease_sw_id() else {
-            free_sw_id(b);
+            free(b);
             return;
         };
         assert_eq!(c, a);
-        free_sw_id(b);
-        free_sw_id(c);
+        free(b);
+        free(c);
     }
 }
 
@@ -446,6 +485,7 @@ pub(crate) struct AsyncHidChannel {
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
     connected: AtomicBool,
+    device_io: DeviceIoGate,
     /// Whether the device exposes only the long HID++ report (a BLE-direct
     /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
     /// `hidpp` channel up-converts outgoing short messages to long.
@@ -459,12 +499,14 @@ impl AsyncHidChannel {
         writer: DeviceWriter,
         info: DeviceInfo,
         long_only: bool,
+        device_io: DeviceIoGate,
     ) -> Self {
         Self {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
             info,
             connected: AtomicBool::new(true),
+            device_io,
             long_only,
         }
     }
@@ -488,7 +530,13 @@ impl RawHidChannel for AsyncHidChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        if !self.device_io.allows_io() {
+            return Err(device_io_error());
+        }
         let mut w = self.writer.lock().await;
+        if !self.device_io.allows_io() {
+            return Err(device_io_error());
+        }
         match w.write_output_report(src).await {
             Ok(()) => Ok(src.len()),
             Err(e) => {

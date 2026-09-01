@@ -3,6 +3,11 @@ paths:
   - "crates/openlogi-hook/**"
   - "crates/openlogi-inject/**"
   - "crates/openlogi-hid/**"
+  - "crates/openlogi-agent/src/autostart.rs"
+  - "crates/openlogi-agent/src/autostart/**"
+  - "crates/openlogi-agent/src/resume_windows.rs"
+  - "crates/openlogi-camera/**"
+  - "crates/openlogi-permissions/**"
 ---
 
 # Platform / cfg-gated code — macOS-green is a trap
@@ -20,9 +25,11 @@ When the diff touches any of:
 
 - `crates/openlogi-hook/src/linux.rs` / `windows.rs`
 - `crates/openlogi-inject/src/inject/linux.rs` / `windows.rs`
+- `crates/openlogi-agent/src/autostart/linux.rs` / `windows.rs`, or
+  `crates/openlogi-agent/src/resume_windows.rs`
 - `crates/openlogi-camera/src/capture_linux.rs`, `capture_windows.rs`,
   `com_windows.rs`, `uvc_windows.rs`, `uvc_linux.rs`, `linux.rs`
-- `crates/openlogi-hid/src/channel/transport.rs` (has `#[cfg]` branches)
+- `crates/openlogi-hid/src/transport.rs` or `transport/windows.rs`
 - any `#[cfg(target_os = …)]` block, in any crate
 
 you MUST either:

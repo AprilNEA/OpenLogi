@@ -3,7 +3,7 @@ use super::*;
 use std::{error::Error, io, time::Duration};
 
 use hidpp::{
-    channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel},
+    channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_ID},
     protocol::v10::MessageType,
 };
 
@@ -36,6 +36,80 @@ fn passkey_clicks_are_msb_first_10_bits() {
             Click::Left,
             Click::Right,
         ]
+    );
+}
+
+#[tokio::test]
+async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
+    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
+        panic!("mock must support HID++");
+    };
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    let (_notification_tx, mut notifications) = mpsc::unbounded_channel();
+    let (event_tx, _events) = mpsc::unbounded_channel();
+
+    assert!(
+        command_tx
+            .send(PairingCommand::Pair(DiscoveredDevice {
+                address: [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02],
+                authentication: 0x01,
+                kind: BoltDeviceKind::Keyboard,
+                name: "Test Keyboard".into(),
+            }))
+            .is_ok(),
+        "the pair command must reach the session's command receiver"
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_session(
+            &channel,
+            ReceiverFamily::Unifying,
+            &mut commands,
+            &mut notifications,
+            &event_tx,
+        ),
+    )
+    .await;
+    let Ok(result) = result else {
+        panic!("pairing session did not terminate");
+    };
+    assert!(matches!(result, Err(PairingError::UnsupportedCommand)));
+
+    let reports: Vec<_> = std::iter::from_fn(|| written_reports.try_recv().ok()).collect();
+    assert_eq!(
+        reports,
+        vec![
+            vec![
+                SHORT_REPORT_ID,
+                RECEIVER_INDEX,
+                u8::from(MessageType::SetRegister),
+                NOTIFICATIONS,
+                0x00,
+                0x09,
+                0x00,
+            ],
+            vec![
+                SHORT_REPORT_ID,
+                RECEIVER_INDEX,
+                u8::from(MessageType::SetRegister),
+                UNIFYING_PAIRING,
+                0x01,
+                0x00,
+                DISCOVERY_TIMEOUT,
+            ],
+            vec![
+                SHORT_REPORT_ID,
+                RECEIVER_INDEX,
+                u8::from(MessageType::SetRegister),
+                UNIFYING_PAIRING,
+                0x02,
+                0x00,
+                0x00,
+            ],
+        ],
+        "only notification setup, Unifying lock-open, and Unifying cancel may be written"
     );
 }
 

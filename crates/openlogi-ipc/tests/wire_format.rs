@@ -45,8 +45,8 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ConfigReloadError, ForegroundApps, FoundDevice, Identity,
-    InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
+    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
+    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
     PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::{Compat, Run};
@@ -101,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 28);
+    assert_eq!(PROTOCOL_VERSION, 29);
 }
 
 #[test]
@@ -188,6 +188,24 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Gui,
+        },
+        "1900",
+    );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Cli,
+        },
+        "1901",
+    );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Overlay,
+        },
+        "1902",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to

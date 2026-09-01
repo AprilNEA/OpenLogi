@@ -117,6 +117,10 @@ pub(crate) enum StateEvent {
     DeviceConfigChanged(DeviceKey),
     /// Application-wide preferences changed.
     SettingsChanged,
+    /// The interface language switched live. Views re-render localized strings
+    /// on the accompanying refresh; this event is for localized text *cached
+    /// in state*, which must be recomputed in the new locale.
+    LanguageChanged,
 }
 
 struct GlobalAppState(Entity<AppState>);
@@ -162,6 +166,8 @@ pub struct AppState {
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
+    /// Per-device Actions Ring profile open in this window's editor.
+    action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
@@ -261,6 +267,7 @@ impl AppState {
             agent: AgentSession::default(),
             devices: DeviceStore::new(device_list, current_device),
             bindings,
+            action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lighting: LightingState::default(),
             ipc_commands,

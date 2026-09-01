@@ -1298,25 +1298,25 @@ mod symbolic_hotkey {
         // SAFETY: resolved AppServices symbol called with its expected
         // signature.
         let was_enabled = unsafe { (cgs.is_enabled)(hotkey) };
-        if !was_enabled {
+        let _restore = if was_enabled {
+            None
+        } else {
             // SAFETY: resolved AppServices symbol called with its expected
             // signature.
             let err = unsafe { (cgs.set_enabled)(hotkey, true) };
             if err != 0 {
                 tracing::warn!(hotkey, err, "CGSSetSymbolicHotKeyEnabled(true) failed");
             }
-        }
+            // Restore even when the enable call reported an error: the SPI may
+            // have changed state before returning it, and this preserves the
+            // old unconditional best-effort disable behavior.
+            Some(HotkeyRestore {
+                hotkey,
+                set_enabled: cgs.set_enabled,
+            })
+        };
 
         post_key(virtual_key, modifiers);
-
-        if !was_enabled {
-            // SAFETY: resolved AppServices symbol called with its expected
-            // signature.
-            let err = unsafe { (cgs.set_enabled)(hotkey, false) };
-            if err != 0 {
-                tracing::warn!(hotkey, err, "CGSSetSymbolicHotKeyEnabled(false) failed");
-            }
-        }
     }
 
     fn post_key(vk: u16, modifiers: u32) {
@@ -1352,6 +1352,26 @@ mod symbolic_hotkey {
     type CgsIsSymbolicHotKeyEnabledFn = unsafe extern "C" fn(c_uint) -> bool;
     type CgsSetSymbolicHotKeyEnabledFn = unsafe extern "C" fn(c_uint, bool) -> c_int;
 
+    struct HotkeyRestore {
+        hotkey: u32,
+        set_enabled: CgsSetSymbolicHotKeyEnabledFn,
+    }
+
+    impl Drop for HotkeyRestore {
+        fn drop(&mut self) {
+            // SAFETY: this is the same resolved AppServices function and hotkey
+            // id used to open the temporary enable window.
+            let err = unsafe { (self.set_enabled)(self.hotkey, false) };
+            if err != 0 {
+                tracing::warn!(
+                    hotkey = self.hotkey,
+                    err,
+                    "CGSSetSymbolicHotKeyEnabled(false) failed"
+                );
+            }
+        }
+    }
+
     fn cgs_hotkey_api() -> Option<CgsHotkeyApi> {
         let get_value = app_services_symbol(c"CGSGetSymbolicHotKeyValue")?;
         let is_enabled = app_services_symbol(c"CGSIsSymbolicHotKeyEnabled")?;
@@ -1372,5 +1392,37 @@ mod symbolic_hotkey {
                 ),
             }
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use super::HotkeyRestore;
+
+        static RESTORED_HOTKEY: AtomicU32 = AtomicU32::new(0);
+
+        unsafe extern "C" fn record_restore(hotkey: u32, enabled: bool) -> i32 {
+            if !enabled {
+                RESTORED_HOTKEY.store(hotkey, Ordering::Relaxed);
+            }
+            0
+        }
+
+        #[test]
+        fn temporary_enable_is_restored_during_unwind() {
+            RESTORED_HOTKEY.store(0, Ordering::Relaxed);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let _restore = HotkeyRestore {
+                    hotkey: super::SPACE_LEFT,
+                    set_enabled: record_restore,
+                };
+                panic!("exercise unwind cleanup");
+            }));
+
+            assert!(result.is_err());
+            assert_eq!(RESTORED_HOTKEY.load(Ordering::Relaxed), super::SPACE_LEFT);
+        }
     }
 }
