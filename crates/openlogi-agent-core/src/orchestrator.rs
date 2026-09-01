@@ -920,7 +920,8 @@ fn configured_wheel_mode(
         .flatten();
     let inverted = capabilities
         .scroll_inversion
-        .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
+        .then(|| device.and_then(|d| d.configured_invert_scroll(&route_key)))
+        .flatten();
     (resolution, inverted)
 }
 

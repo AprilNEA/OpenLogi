@@ -377,6 +377,23 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
 }
 
 #[test]
+fn configured_wheel_mode_leaves_unset_inversion_unmanaged() {
+    // Regression for #1205: a device the user never touched must not have
+    // its native invert bit force-written to `false` on every reconnect —
+    // `invert_scroll` is a bare bool, so an untouched device and a
+    // deliberately-off one are otherwise indistinguishable.
+    let config = Config::default();
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: false,
+        scroll_inversion: true,
+        ..Capabilities::default()
+    });
+
+    assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+}
+
+#[test]
 fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
     let mut config = Config::default();
     config
