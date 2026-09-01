@@ -6,7 +6,7 @@ use openlogi_core::device::{
     LightValueRange, LightValueUnit,
 };
 use openlogi_core::diagnostics::ConnectionKind;
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
@@ -88,35 +88,51 @@ fn connection_icon_matches_route() {
     };
 
     assert_eq!(
-        connection_icon_path(Some(&bolt), None),
+        connection_icon_path(Some(&bolt), None, None),
         "action-icons/bolt.svg"
     );
     assert_eq!(
-        connection_icon_path(Some(&uni), None),
+        connection_icon_path(Some(&uni), None, None),
         "action-icons/unifying.svg"
     );
     assert_eq!(
-        ConnectionKind::for_device(Some(&wired_route), Some(&g915_x)),
+        ConnectionKind::for_device(Some(&uni), Some(ReceiverBrand::Nano), None),
+        ConnectionKind::NanoReceiver
+    );
+    assert_eq!(
+        connection_icon_path(Some(&uni), Some(ReceiverBrand::Nano), None),
+        "action-icons/unifying.svg"
+    );
+    assert_eq!(
+        ConnectionKind::for_device(Some(&uni), Some(ReceiverBrand::Lightspeed), None),
+        ConnectionKind::LightspeedReceiver
+    );
+    assert_eq!(
+        connection_icon_path(Some(&uni), Some(ReceiverBrand::Lightspeed), None),
+        "action-icons/unifying.svg"
+    );
+    assert_eq!(
+        ConnectionKind::for_device(Some(&wired_route), None, Some(&g915_x)),
         ConnectionKind::Wired
     );
     assert_eq!(
-        connection_icon_path(Some(&wired_route), Some(&g915_x)),
+        connection_icon_path(Some(&wired_route), None, Some(&g915_x)),
         "action-icons/usb.svg"
     );
     assert_eq!(
-        ConnectionKind::for_device(Some(&bluetooth_route), Some(&g915_x)),
+        ConnectionKind::for_device(Some(&bluetooth_route), None, Some(&g915_x)),
         ConnectionKind::BluetoothDirect
     );
     assert_eq!(
-        connection_icon_path(Some(&bluetooth_route), Some(&g915_x)),
+        connection_icon_path(Some(&bluetooth_route), None, Some(&g915_x)),
         "action-icons/bluetooth.svg"
     );
     assert_eq!(
-        connection_icon_path(Some(&wired_route), None),
+        connection_icon_path(Some(&wired_route), None, None),
         "action-icons/circle-dot.svg"
     );
     assert_eq!(
-        connection_icon_path(None, None),
+        connection_icon_path(None, None, None),
         "action-icons/circle-dot.svg"
     );
 }
@@ -138,6 +154,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind,
         capabilities,
