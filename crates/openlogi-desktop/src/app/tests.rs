@@ -11,6 +11,8 @@ use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 #[gpui::test]
 fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
     use gpui_component::{Root, WindowExt as _};
 
@@ -35,15 +37,20 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
         let view = cx.new(|cx| AppView::new(window, cx));
         Root::new(view, window, cx)
     });
+    let dialog_renders = Rc::new(Cell::new(0));
     cx.update(|window, cx| {
-        window.open_alert_dialog(cx, |alert, _, _| {
+        let renders = dialog_renders.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            renders.set(renders.get() + 1);
             alert.confirm().title(
                 div()
                     .debug_selector(|| "profile-confirmation".into())
                     .child("Remove Safari profile?"),
             )
         });
+        dialog_renders.set(0);
         window.draw(cx).clear(cx);
+        assert_eq!(dialog_renders.get(), 1, "mount the dialog once per frame");
     });
     assert!(
         cx.debug_bounds("profile-confirmation").is_some(),
