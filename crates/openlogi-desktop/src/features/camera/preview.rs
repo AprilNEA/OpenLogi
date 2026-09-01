@@ -40,16 +40,36 @@ const PREVIEW_H: f32 = 270.; // 16:9
 /// Live preview view. Holds the capture stream + its texture only while the
 /// parent points it at a camera via [`Self::set_target`].
 pub struct CameraPreview {
-    stream: Option<CameraStream>,
-    streaming_uid: Option<String>,
+    lifecycle: PreviewLifecycle,
     current_image: Option<Arc<RenderImage>>,
-    last_generation: u64,
-    /// Frame-rate repaint pump; exists only while streaming (dropping it cancels it).
-    repaint_task: Option<Task<()>>,
-    /// Target is set but the stream isn't running because Camera permission
-    /// wasn't granted yet; retried once access appears.
-    awaiting_access: bool,
     _permission_obs: Subscription,
+}
+
+enum PreviewLifecycle {
+    Stopped,
+    /// A target remains selected after opening its stream failed. Same-target
+    /// renders stay idempotent rather than retrying the open in a hot loop.
+    StartFailed(String),
+    /// A target is selected but waits for Camera permission before opening.
+    AwaitingAccess(String),
+    Streaming {
+        target: String,
+        stream: CameraStream,
+        last_generation: u64,
+        /// Dropping the streaming state cancels its frame-rate repaint pump.
+        _repaint_task: Task<()>,
+    },
+}
+
+impl PreviewLifecycle {
+    fn target(&self) -> Option<&str> {
+        match self {
+            Self::Stopped => None,
+            Self::StartFailed(target)
+            | Self::AwaitingAccess(target)
+            | Self::Streaming { target, .. } => Some(target),
+        }
+    }
 }
 
 impl CameraPreview {
@@ -60,20 +80,15 @@ impl CameraPreview {
                 if !matches!(event, StateEvent::CameraPermissionChanged) {
                     return;
                 }
-                if preview.awaiting_access && openlogi_camera::camera_access_granted() {
-                    preview.awaiting_access = false;
-                    preview.start_stream(cx);
+                if openlogi_camera::camera_access_granted() {
+                    preview.start_deferred_stream(cx);
                 }
                 cx.notify();
             },
         );
         Self {
-            stream: None,
-            streaming_uid: None,
+            lifecycle: PreviewLifecycle::Stopped,
             current_image: None,
-            last_generation: 0,
-            repaint_task: None,
-            awaiting_access: false,
             _permission_obs: permission_obs,
         }
     }
@@ -84,10 +99,8 @@ impl CameraPreview {
     /// target is unchanged, except that a stream deferred on missing Camera
     /// permission starts as soon as access is granted.
     pub fn set_target(&mut self, target: Option<String>, cx: &mut Context<Self>) {
-        if target == self.streaming_uid {
-            if self.awaiting_access && openlogi_camera::camera_access_granted() {
-                self.awaiting_access = false;
-                self.start_stream(cx);
+        if target.as_deref() == self.lifecycle.target() {
+            if openlogi_camera::camera_access_granted() && self.start_deferred_stream(cx) {
                 cx.notify();
             }
             return;
@@ -95,57 +108,73 @@ impl CameraPreview {
         // Stop the old stream first: drop the session (LED off), cancel the
         // repaint pump, and free the GPU texture immediately — not in `render`,
         // which stops running the moment the preview leaves the screen.
-        self.stream = None;
-        self.repaint_task = None;
-        self.last_generation = 0;
-        self.awaiting_access = false;
+        self.lifecycle = PreviewLifecycle::Stopped;
         if let Some(old) = self.current_image.take() {
             cx.drop_image(old, None);
         }
-        self.streaming_uid = target;
 
-        if self.streaming_uid.is_none() {
+        let Some(target) = target else {
             cx.notify();
             return;
-        }
+        };
         // Only open the camera when access is already granted, so selecting it
         // never blocks the UI thread on the permission dialog.
         if openlogi_camera::camera_access_granted() {
-            self.start_stream(cx);
+            self.start_stream(target, cx);
         } else {
-            self.awaiting_access = true;
+            self.lifecycle = PreviewLifecycle::AwaitingAccess(target);
         }
         cx.notify();
     }
 
-    fn start_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(uid) = self.streaming_uid.as_deref() else {
+    fn start_deferred_stream(&mut self, cx: &mut Context<Self>) -> bool {
+        let lifecycle = std::mem::replace(&mut self.lifecycle, PreviewLifecycle::Stopped);
+        let PreviewLifecycle::AwaitingAccess(target) = lifecycle else {
+            self.lifecycle = lifecycle;
+            return false;
+        };
+        self.start_stream(target, cx);
+        true
+    }
+
+    fn start_stream(&mut self, target: String, cx: &mut Context<Self>) {
+        let Ok(stream) = openlogi_camera::start_stream(&target) else {
+            self.lifecycle = PreviewLifecycle::StartFailed(target);
             return;
         };
-        self.stream = openlogi_camera::start_stream(uid).ok();
-        if self.stream.is_some() {
-            self.repaint_task = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(16))
-                        .await;
-                    // Repaint only when a *new* frame has arrived, so gpui isn't
-                    // re-rendering the window on idle ticks.
-                    let result = this.update(cx, |view, cx| {
-                        let has_new = view
-                            .stream
-                            .as_ref()
-                            .is_some_and(|s| s.frame_generation() != view.last_generation);
-                        if has_new {
-                            cx.notify();
-                        }
-                    });
-                    if result.is_err() {
-                        break;
+        let repaint_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                // Repaint only when a *new* frame has arrived, so gpui isn't
+                // re-rendering the window on idle ticks.
+                let result = this.update(cx, |view, cx| {
+                    let has_new = match &view.lifecycle {
+                        PreviewLifecycle::Streaming {
+                            stream,
+                            last_generation,
+                            ..
+                        } => stream.frame_generation() != *last_generation,
+                        PreviewLifecycle::Stopped
+                        | PreviewLifecycle::StartFailed(_)
+                        | PreviewLifecycle::AwaitingAccess(_) => false,
+                    };
+                    if has_new {
+                        cx.notify();
                     }
+                });
+                if result.is_err() {
+                    break;
                 }
-            }));
-        }
+            }
+        });
+        self.lifecycle = PreviewLifecycle::Streaming {
+            target,
+            stream,
+            last_generation: 0,
+            _repaint_task: repaint_task,
+        };
     }
 }
 
@@ -155,9 +184,14 @@ impl Render for CameraPreview {
         let granted = openlogi_camera::camera_access_granted();
 
         // Rebuild the texture only when a new frame arrived; free the old one.
-        if let Some(stream) = self.stream.as_ref() {
+        if let PreviewLifecycle::Streaming {
+            stream,
+            last_generation,
+            ..
+        } = &mut self.lifecycle
+        {
             let generation = stream.frame_generation();
-            if generation != self.last_generation
+            if generation != *last_generation
                 && let Some(image) = stream
                     .take_frame()
                     .and_then(|f| build_image(Arc::unwrap_or_clone(f)))
@@ -166,7 +200,7 @@ impl Render for CameraPreview {
                     let _ = window.drop_image(old);
                 }
                 self.current_image = Some(image);
-                self.last_generation = generation;
+                *last_generation = generation;
             }
         }
 
