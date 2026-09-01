@@ -6,7 +6,10 @@
 //! without panicking.
 
 use std::io;
-use std::sync::{LazyLock, Mutex};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
@@ -141,6 +144,21 @@ fn dispatch_media(key: MediaKey) {
 /// Dispatch a window-manager or power [`NativeAction`]. `action` is only
 /// used for its label in the "no Linux equivalent" debug log.
 fn dispatch_native(action: &Action, native: NativeAction) {
+    if hyprland_session() {
+        tracing::debug!(
+            desktop = std::env::var("XDG_CURRENT_DESKTOP")
+                .ok()
+                .as_deref()
+                .unwrap_or(""),
+            "Hyprland native table selected"
+        );
+        dispatch_hyprland_native(action, native);
+        return;
+    }
+    dispatch_generic_linux_native(action, native);
+}
+
+fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
     match native {
@@ -148,12 +166,7 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         NativeAction::MissionControl
         | NativeAction::AppExpose
         | NativeAction::ShowDesktop
-        | NativeAction::LaunchpadShow => {
-            tracing::debug!(
-                action = action.label(),
-                "no Linux equivalent — action skipped"
-            );
-        }
+        | NativeAction::LaunchpadShow => skip_unsupported_native(action),
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
         NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
         NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
@@ -167,6 +180,188 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
     }
+}
+
+fn dispatch_hyprland_native(action: &Action, native: NativeAction) {
+    match native {
+        NativeAction::MissionControl | NativeAction::AppExpose | NativeAction::ShowDesktop => {
+            skip_unsupported_native(action);
+        }
+        NativeAction::LaunchpadShow | NativeAction::PreviousDesktop | NativeAction::NextDesktop => {
+            if let Some((helper, fallback)) = hyprland_helper(native) {
+                run_helper_or_chord(helper, fallback);
+            }
+        }
+        NativeAction::LockScreen => lock_screen_hyprland(),
+        NativeAction::Screenshot | NativeAction::CaptureRegion => {
+            press_key(&[], KeyCode::KEY_SYSRQ);
+        }
+        NativeAction::Sleep => sleep_system(),
+    }
+}
+
+fn skip_unsupported_native(action: &Action) {
+    tracing::debug!(
+        action = action.label(),
+        "no Linux equivalent — action skipped"
+    );
+}
+
+/// Hyprland compositor session. Gate is the instance signature only —
+/// `XDG_CURRENT_DESKTOP` is logged for diagnostics and must not select the table.
+fn hyprland_session() -> bool {
+    hyprland_session_from_signature(std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref())
+}
+
+fn hyprland_session_from_signature(signature: Option<&str>) -> bool {
+    signature.is_some_and(|value| !value.is_empty())
+}
+
+const HELPER_PREFIXES: [&str; 2] = ["/usr/bin", "/usr/local/bin"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HelperSpec {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChordSpec {
+    modifiers: &'static [KeyCode],
+    key: KeyCode,
+}
+
+fn hyprland_helper(native: NativeAction) -> Option<(HelperSpec, ChordSpec)> {
+    match native {
+        NativeAction::LaunchpadShow => Some((
+            HelperSpec {
+                program: "omarchy-menu",
+                args: &["toggle"],
+            },
+            ChordSpec {
+                modifiers: &[KeyCode::KEY_LEFTMETA],
+                key: KeyCode::KEY_SPACE,
+            },
+        )),
+        NativeAction::NextDesktop => Some((
+            HelperSpec {
+                program: "hyprctl",
+                args: &["dispatch", "workspace", "e+1"],
+            },
+            ChordSpec {
+                modifiers: &[KeyCode::KEY_LEFTMETA],
+                key: KeyCode::KEY_TAB,
+            },
+        )),
+        NativeAction::PreviousDesktop => Some((
+            HelperSpec {
+                program: "hyprctl",
+                args: &["dispatch", "workspace", "e-1"],
+            },
+            ChordSpec {
+                modifiers: &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT],
+                key: KeyCode::KEY_TAB,
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn hyprland_lock_helper() -> HelperSpec {
+    HelperSpec {
+        program: "omarchy-system-lock",
+        args: &[],
+    }
+}
+
+fn hyprland_lock_fallback_chord() -> ChordSpec {
+    ChordSpec {
+        modifiers: &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL],
+        key: KeyCode::KEY_L,
+    }
+}
+
+fn generic_linux_lock_fallback_chord() -> ChordSpec {
+    ChordSpec {
+        modifiers: &[KeyCode::KEY_LEFTMETA],
+        key: KeyCode::KEY_L,
+    }
+}
+
+fn run_helper_or_chord(helper: HelperSpec, fallback: ChordSpec) {
+    run_helper_or_else(helper, &HELPER_PREFIXES, move || {
+        press_key(fallback.modifiers, fallback.key);
+    });
+}
+
+/// Resolve an allowlisted helper, then wait for it off the action/button
+/// worker. Missing helpers fall back on this thread (stat only); a helper
+/// that is slow or never exits must not stall remap dispatch.
+fn run_helper_or_else(
+    helper: HelperSpec,
+    prefixes: &[&str],
+    on_failure: impl Fn() + Send + Sync + 'static,
+) {
+    let Some(path) = resolve_allowlisted_under(helper.program, prefixes) else {
+        tracing::debug!(
+            program = helper.program,
+            "Hyprland helper not in /usr/bin or /usr/local/bin — using chord fallback"
+        );
+        on_failure();
+        return;
+    };
+    let args = helper.args;
+    let on_failure = Arc::new(on_failure);
+    let waiter_failure = Arc::clone(&on_failure);
+    match thread::Builder::new()
+        .name("openlogi-hypr-helper".into())
+        .spawn(move || {
+            if !run_resolved(&path, args) {
+                waiter_failure();
+            }
+        }) {
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                program = helper.program,
+                %error,
+                "failed to spawn Hyprland helper waiter — using chord fallback"
+            );
+            on_failure();
+        }
+    }
+}
+
+fn run_resolved(path: &Path, args: &[&str]) -> bool {
+    match Command::new(path).args(args).status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            tracing::debug!(
+                program = %path.display(),
+                %status,
+                "Hyprland helper exited unsuccessfully — using chord fallback"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                program = %path.display(),
+                %error,
+                "failed to spawn Hyprland helper — using chord fallback"
+            );
+            false
+        }
+    }
+}
+
+fn resolve_allowlisted_under(name: &str, prefixes: &[&str]) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    prefixes
+        .iter()
+        .map(|prefix| Path::new(prefix).join(name))
+        .find(|path| path.is_file())
 }
 
 fn dispatch_script(script: Script<'_>) {
@@ -268,7 +463,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
     KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
     KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
-    // Modifiers (KEY_LEFTMETA used by the LockScreen Super+L fallback)
+    // Modifiers (KEY_LEFTMETA used by LockScreen Super+L and Hyprland Super+Ctrl+L)
     KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
     // Function keys
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
@@ -603,32 +798,58 @@ static SYSTEM_BUS: LazyLock<Option<DbusConn>> = LazyLock::new(|| {
         .ok()
 });
 
+/// Lock the session identified by `$XDG_SESSION_ID` via logind. Returns
+/// `true` when the D-Bus call succeeded. Skips the bus entirely when the
+/// session id is unset so we never lock every session on the machine.
+fn try_logind_lock() -> bool {
+    let (Some(conn), Ok(id)) = (SYSTEM_BUS.as_ref(), std::env::var("XDG_SESSION_ID")) else {
+        return false;
+    };
+    match conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        Some("org.freedesktop.login1.Manager"),
+        "LockSession",
+        &(id.as_str(),),
+    ) {
+        Ok(_) => {
+            tracing::debug!("LockScreen via logind");
+            true
+        }
+        Err(e) => {
+            tracing::warn!("logind LockSession failed: {e}");
+            false
+        }
+    }
+}
+
 /// Lock the screen via logind `LockSession($XDG_SESSION_ID)` on the system
 /// bus, falling back to Super+L.
 ///
-/// Only the session identified by `$XDG_SESSION_ID` is locked; if the
-/// variable is unset the D-Bus path is skipped entirely to avoid locking
-/// all sessions on the machine. Super+L covers non-systemd systems and the
-/// no-session-id case.
+/// Super+L covers non-systemd systems and the no-session-id case on GNOME/KDE.
 fn lock_screen() {
-    if let (Some(conn), Ok(id)) = (SYSTEM_BUS.as_ref(), std::env::var("XDG_SESSION_ID")) {
-        match conn.call_method(
-            Some("org.freedesktop.login1"),
-            "/org/freedesktop/login1",
-            Some("org.freedesktop.login1.Manager"),
-            "LockSession",
-            &(id.as_str(),),
-        ) {
-            Ok(_) => {
-                tracing::debug!("LockScreen via logind");
-                return;
-            }
-            Err(e) => tracing::warn!("logind LockSession failed: {e}"),
-        }
+    if try_logind_lock() {
+        return;
     }
     // Super+L is the standard lock shortcut on GNOME and KDE.
     tracing::debug!("LockScreen via Super+L key combo");
-    press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
+    let chord = generic_linux_lock_fallback_chord();
+    press_key(chord.modifiers, chord.key);
+}
+
+/// Hyprland lock: `omarchy-system-lock`, then Super+Ctrl+L.
+///
+/// Do not call logind `LockSession` here. A successful D-Bus reply only
+/// signals the session; Hyprland does not listen, so treating OK as locked
+/// skips the Omarchy helper and leaves the screen unlocked. Never Super+L —
+/// that chord toggles workspace layout on Omarchy.
+fn lock_screen_hyprland() {
+    let helper = hyprland_lock_helper();
+    run_helper_or_else(helper, &HELPER_PREFIXES, || {
+        tracing::debug!("LockScreen via Super+Ctrl+L (Hyprland / Omarchy)");
+        let chord = hyprland_lock_fallback_chord();
+        press_key(chord.modifiers, chord.key);
+    });
 }
 
 /// Suspend the system via logind's `Suspend()` on the system bus. The
@@ -711,9 +932,14 @@ fn try_mpris_command(command: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use evdev::KeyCode;
-    use openlogi_core::binding::{KeyCombo, Shortcut};
+    use openlogi_core::binding::{KeyCombo, NativeAction, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use super::{
+        HELPER_PREFIXES, HelperSpec, combo, generic_linux_lock_fallback_chord, hid_usage_to_linux,
+        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
+        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes,
+        resolve_allowlisted_under, run_helper_or_else, syn,
+    };
     use crate::inject::KeyPhase;
 
     #[test]
@@ -786,5 +1012,185 @@ mod tests {
                 "{shortcut:?} table entry has no Linux keycode mapping"
             );
         }
+    }
+
+    #[test]
+    fn hyprland_gate_is_signature_only() {
+        assert!(!hyprland_session_from_signature(None));
+        assert!(!hyprland_session_from_signature(Some("")));
+        assert!(hyprland_session_from_signature(Some(
+            "wayland-1_1234567890_1111111111"
+        )));
+    }
+
+    #[test]
+    fn hyprland_launchpad_maps_to_absolute_omarchy_menu_toggle() {
+        let (helper, fallback) = hyprland_helper(NativeAction::LaunchpadShow)
+            .expect("LaunchpadShow must have a Hyprland helper");
+        assert_eq!(helper.program, "omarchy-menu");
+        assert_eq!(helper.args, ["toggle"]);
+        assert_eq!(HELPER_PREFIXES, ["/usr/bin", "/usr/local/bin"]);
+        assert_eq!(fallback.modifiers, [KeyCode::KEY_LEFTMETA]);
+        assert_eq!(fallback.key, KeyCode::KEY_SPACE);
+    }
+
+    #[test]
+    fn hyprland_desktops_map_to_hyprctl_workspace() {
+        let (next, next_fallback) = hyprland_helper(NativeAction::NextDesktop)
+            .expect("NextDesktop must have a Hyprland helper");
+        assert_eq!(next.program, "hyprctl");
+        assert_eq!(next.args, ["dispatch", "workspace", "e+1"]);
+        assert_eq!(next_fallback.modifiers, [KeyCode::KEY_LEFTMETA]);
+        assert_eq!(next_fallback.key, KeyCode::KEY_TAB);
+
+        let (prev, prev_fallback) = hyprland_helper(NativeAction::PreviousDesktop)
+            .expect("PreviousDesktop must have a Hyprland helper");
+        assert_eq!(prev.program, "hyprctl");
+        assert_eq!(prev.args, ["dispatch", "workspace", "e-1"]);
+        assert_eq!(
+            prev_fallback.modifiers,
+            [KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(prev_fallback.key, KeyCode::KEY_TAB);
+    }
+
+    #[test]
+    fn hyprland_mac_only_natives_stay_skipped() {
+        assert_eq!(hyprland_helper(NativeAction::MissionControl), None);
+        assert_eq!(hyprland_helper(NativeAction::AppExpose), None);
+        assert_eq!(hyprland_helper(NativeAction::ShowDesktop), None);
+        assert_eq!(hyprland_helper(NativeAction::LockScreen), None);
+        assert_eq!(hyprland_helper(NativeAction::Screenshot), None);
+    }
+
+    #[test]
+    fn hyprland_lock_uses_omarchy_helper_not_logind() {
+        let helper = hyprland_lock_helper();
+        assert_eq!(helper.program, "omarchy-system-lock");
+        assert_eq!(helper.args, [] as [&str; 0]);
+        assert_eq!(HELPER_PREFIXES, ["/usr/bin", "/usr/local/bin"]);
+    }
+
+    #[test]
+    fn hyprland_lock_fallback_is_never_super_l() {
+        let hyprland = hyprland_lock_fallback_chord();
+        assert_eq!(
+            hyprland.modifiers,
+            [KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL]
+        );
+        assert_eq!(hyprland.key, KeyCode::KEY_L);
+
+        let generic = generic_linux_lock_fallback_chord();
+        assert_eq!(generic.modifiers, [KeyCode::KEY_LEFTMETA]);
+        assert_eq!(generic.key, KeyCode::KEY_L);
+        assert_ne!(hyprland.modifiers, generic.modifiers);
+    }
+
+    #[test]
+    fn allowlisted_helpers_are_absolute_and_reject_path_escape() {
+        let dir =
+            std::env::temp_dir().join(format!("openlogi-inject-allowlist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp allowlist dir");
+        let helper = dir.join("omarchy-menu");
+        std::fs::write(&helper, []).expect("placeholder helper file");
+
+        let prefix = dir.to_str().expect("utf-8 temp path");
+        let resolved = resolve_allowlisted_under("omarchy-menu", &[prefix]);
+        assert_eq!(resolved.as_deref(), Some(helper.as_path()));
+        assert!(resolved.expect("resolved helper").is_absolute());
+        assert_eq!(
+            resolve_allowlisted_under("../omarchy-menu", &[prefix]),
+            None
+        );
+        assert_eq!(
+            resolve_allowlisted_under("omarchy-menu/../../bin/sh", &[prefix]),
+            None
+        );
+        assert_eq!(
+            resolve_allowlisted_under("omarchy-menu", &["/no/such/openlogi-prefix"]),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn helper_wait_does_not_block_the_caller() {
+        let dir = std::env::temp_dir().join(format!(
+            "openlogi-inject-helper-wait-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp helper dir");
+        let helper = dir.join("slow-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexec sleep 2\n").expect("slow helper script");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("executable helper");
+        }
+        let prefix = dir.to_str().expect("utf-8 temp path");
+        let started = std::time::Instant::now();
+        run_helper_or_else(
+            HelperSpec {
+                program: "slow-helper",
+                args: &[],
+            },
+            &[prefix],
+            || panic!("slow helper should start successfully"),
+        );
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "caller waited for the helper ({elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn missing_helper_falls_back_on_the_caller() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_helper_or_else(
+            HelperSpec {
+                program: "no-such-openlogi-helper",
+                args: &[],
+            },
+            &["/no/such/openlogi-prefix"],
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        rx.try_recv()
+            .expect("missing helper must fall back before returning");
+    }
+
+    #[test]
+    fn unsuccessful_helper_still_falls_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "openlogi-inject-helper-fail-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp helper dir");
+        let helper = dir.join("failing-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexit 1\n").expect("failing helper script");
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+                .expect("executable helper");
+        }
+        let prefix = dir.to_str().expect("utf-8 temp path");
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_helper_or_else(
+            HelperSpec {
+                program: "failing-helper",
+                args: &[],
+            },
+            &[prefix],
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        let arrived = rx.recv_timeout(std::time::Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&dir);
+        arrived.expect("fallback must still run after a helper non-zero exit");
     }
 }

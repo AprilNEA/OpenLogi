@@ -8,7 +8,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{debug, info, warn};
 
@@ -22,8 +22,19 @@ pub(super) fn reconcile(enabled: bool) {
 }
 
 fn apply(enabled: bool) -> io::Result<()> {
-    let path = unit_path()?;
     let exe = std::env::current_exe()?;
+    // A `cargo build`/`cargo run` binary must not rewrite or delete the user's
+    // packaged unit. launch_at_login would otherwise point ExecStart at the
+    // development binary (or wipe the user unit when the setting is off).
+    if is_cargo_built_agent(&exe) {
+        debug!(
+            enabled,
+            path = %exe.display(),
+            "cargo-built agent — leaving the systemd user unit unchanged"
+        );
+        return Ok(());
+    }
+    let path = unit_path()?;
     let desired = enabled.then(|| render_unit(&exe.to_string_lossy()));
 
     let current = std::fs::read_to_string(&path).ok();
@@ -52,6 +63,17 @@ fn apply(enabled: bool) -> io::Result<()> {
         (None, None) => debug!("systemd user unit already absent"),
     }
     Ok(())
+}
+
+/// True for binaries Cargo wrote into a `debug` or `release` profile directory.
+///
+/// That directory is not always named `target/{debug,release}`: `CARGO_TARGET_DIR`,
+/// `--target-dir`, and a `--target` triple all move it. The profile directory
+/// name is the stable signal (same heuristic as xtask `Profile::of`).
+fn is_cargo_built_agent(exe: &Path) -> bool {
+    exe.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "debug" || name == "release")
 }
 
 /// Path to the per-user systemd unit:
@@ -135,6 +157,34 @@ impl fmt::Display for SystemctlArgsDisplay<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_built_agent_paths_are_detected() {
+        assert!(is_cargo_built_agent(Path::new(
+            "/home/dev/openlogi/target/release/openlogi-agent"
+        )));
+        assert!(is_cargo_built_agent(Path::new(
+            "/home/dev/openlogi/target/debug/openlogi-agent"
+        )));
+        // `CARGO_TARGET_DIR` / `--target-dir` replace the `target` component.
+        assert!(is_cargo_built_agent(Path::new(
+            "/tmp/cargo-target/debug/openlogi-agent"
+        )));
+        assert!(is_cargo_built_agent(Path::new(
+            "/elsewhere/shared-target/release/openlogi-agent"
+        )));
+        // `--target <triple>` inserts a directory between `target` and the profile.
+        assert!(is_cargo_built_agent(Path::new(
+            "/home/dev/openlogi/target/x86_64-unknown-linux-gnu/debug/openlogi-agent"
+        )));
+        assert!(!is_cargo_built_agent(Path::new("/usr/bin/openlogi-agent")));
+        assert!(!is_cargo_built_agent(Path::new(
+            "/usr/local/bin/openlogi-agent"
+        )));
+        assert!(!is_cargo_built_agent(Path::new(
+            "/home/dev/target-practice/openlogi-agent"
+        )));
+    }
 
     #[test]
     fn rendered_unit_targets_agent_and_restarts_on_failure() {
