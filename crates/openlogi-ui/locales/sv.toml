@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Upptäcker finare rörelser mellan spä
 wheel_resolution_unsupported = "Den här enheten stöder inte styrning av hjulupplösning."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Strömläge"
+performance_mode = "Prestandaläge"
+power_mode_description = "Prestanda låser upp alla rapportfrekvenser; uthållighet förlänger batteritiden."
+power_mode_hardware_switch_only = "Enhetens strömläge ställs in med dess hårdvarubrytare."
+device_offline_power_mode_is_unavailable = "Enheten är frånkopplad. Strömläget är inte tillgängligt."
+reading_power_mode = "Läser strömläge…"
+couldnt_read_power_mode_click_to_retry = "Kunde inte läsa strömläget. Klicka för att försöka igen."
+this_device_does_not_support_power_mode = "Den här enheten stöder inte byte av strömläge."
+power_mode_macos_pointer_note = "Prestandalägets högre rapportfrekvens kan få macOS-pekaren att kännas långsammare. Det är systemets accelerationskurva, inte en DPI-ändring."
 
 [actions]
 bind_control = "Bind %{name}"

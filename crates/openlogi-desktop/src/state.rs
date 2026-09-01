@@ -24,7 +24,7 @@ pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiStatus, PowerModeLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,7 @@ mod light;
 mod lighting;
 mod load;
 mod pointer;
+mod power_mode;
 mod scroll;
 mod settings;
 mod smartshift;
@@ -103,6 +104,8 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// Power-mode (`0x8090`) data changed.
+    PowerModeChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -214,6 +217,7 @@ impl AppState {
         Self::update(cx, |state, cx| {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
+            state.load_current_power_mode(cx);
             state.confirm_current_smartshift(cx);
         });
     }

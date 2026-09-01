@@ -16,6 +16,7 @@ use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
+use openlogi_core::hid::mode_status::{PowerMode, PowerModeState};
 use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
 use openlogi_device::ChannelPool;
 use openlogi_device::backend::{HidBackend, HotplugStream};
@@ -90,6 +91,16 @@ pub async fn set_smartshift_sensitivity(
     value: SmartShiftAutoDisengage,
 ) -> Result<SmartShiftStatus, WriteError> {
     device::set_smartshift_sensitivity(&*native_backend(), route, value).await
+}
+
+/// Read the power mode and switch capabilities of the device `route` reaches.
+pub async fn get_power_mode(route: &DeviceRoute) -> Result<PowerModeState, WriteError> {
+    device::get_power_mode(&*native_backend(), route).await
+}
+
+/// Write a new power mode to the device `route` reaches.
+pub async fn set_power_mode(route: &DeviceRoute, mode: PowerMode) -> Result<(), WriteError> {
+    device::set_power_mode(&*native_backend(), route, mode).await
 }
 
 /// Read the scroll-wheel resolution and inversion of the device `route` reaches.

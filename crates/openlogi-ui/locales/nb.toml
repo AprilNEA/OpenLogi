@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Oppdager finere bevegelse mellom hakken
 wheel_resolution_unsupported = "Denne enheten støtter ikke styring av hjuloppløsning."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Strømmodus"
+performance_mode = "Ytelsesmodus"
+power_mode_description = "Ytelse låser opp alle rapporteringsrater; utholdenhet forlenger batteritiden."
+power_mode_hardware_switch_only = "Strømmodusen på denne enheten stilles med maskinvarebryteren."
+device_offline_power_mode_is_unavailable = "Enheten er frakoblet. Strømmodus er utilgjengelig."
+reading_power_mode = "Leser strømmodus…"
+couldnt_read_power_mode_click_to_retry = "Kunne ikke lese strømmodusen. Klikk for å prøve igjen."
+this_device_does_not_support_power_mode = "Denne enheten støtter ikke bytte av strømmodus."
+power_mode_macos_pointer_note = "Den høyere rapporteringsraten i ytelsesmodus kan få macOS-pekeren til å føles tregere. Det er systemets akselerasjonskurve, ikke en DPI-endring."
 
 [actions]
 bind_control = "Tilordne %{name}"

@@ -19,8 +19,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, PowerMode,
+    PowerModeState, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -205,6 +205,33 @@ impl Agent for AgentServer {
             .device(&route)
             .run(HidppOperation::ReadSmartShift, |c| async move {
                 openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_power_mode(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PowerModeState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadPowerMode, |c| async move {
+                openlogi_hid::get_power_mode_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_power_mode(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: PowerMode,
+    ) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WritePowerMode, |c| async move {
+                openlogi_hid::set_power_mode_on(&c, mode).await
             })
             .await
     }

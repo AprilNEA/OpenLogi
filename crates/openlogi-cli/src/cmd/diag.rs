@@ -15,6 +15,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod power_mode;
 pub mod smartshift;
 pub mod wheel;
 
@@ -30,6 +31,8 @@ pub enum DiagCmd {
     Dpi(dpi::DpiArgs),
     /// Read SmartShift mode → toggle → read back → toggle back → report.
     Smartshift(smartshift::SmartshiftArgs),
+    /// Read the 0x8090 power mode → toggle → read back → restore → report.
+    PowerMode(power_mode::PowerModeArgs),
     /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
@@ -44,6 +47,7 @@ impl DiagCmd {
             Self::Battery(args) => battery::run(args).await,
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
+            Self::PowerMode(args) => power_mode::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
         }

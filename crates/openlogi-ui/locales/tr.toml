@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Kademeler arasındaki daha ince hareket
 wheel_resolution_unsupported = "Bu cihaz tekerlek çözünürlüğü denetimini desteklemiyor."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Güç modu"
+performance_mode = "Performans modu"
+power_mode_description = "Performans tüm rapor hızlarını açar; dayanıklılık pil ömrünü uzatır."
+power_mode_hardware_switch_only = "Bu cihazın güç modu donanım anahtarıyla ayarlanır."
+device_offline_power_mode_is_unavailable = "Cihaz çevrimdışı. Güç modu kullanılamıyor."
+reading_power_mode = "Güç modu okunuyor…"
+couldnt_read_power_mode_click_to_retry = "Güç modu okunamadı. Yeniden denemek için tıklayın."
+this_device_does_not_support_power_mode = "Bu cihaz güç modu değiştirmeyi desteklemiyor."
+power_mode_macos_pointer_note = "Performans modunun daha yüksek rapor hızı macOS imlecinin daha yavaş hissettirmesine yol açabilir. Bu, DPI değişikliği değil, sistemin ivme eğrisidir."
 
 [actions]
 bind_control = "%{name} ata"

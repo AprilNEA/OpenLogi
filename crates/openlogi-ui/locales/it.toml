@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Rileva movimenti più fini tra gli scat
 wheel_resolution_unsupported = "Questo dispositivo non supporta il controllo della risoluzione della rotellina."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Modalità di alimentazione"
+performance_mode = "Modalità prestazioni"
+power_mode_description = "Prestazioni sblocca tutte le frequenze di polling; risparmio prolunga la batteria."
+power_mode_hardware_switch_only = "La modalità di alimentazione di questo dispositivo si imposta con il suo interruttore fisico."
+device_offline_power_mode_is_unavailable = "Dispositivo offline. Modalità di alimentazione non disponibile."
+reading_power_mode = "Lettura della modalità di alimentazione…"
+couldnt_read_power_mode_click_to_retry = "Impossibile leggere la modalità di alimentazione. Fai clic per riprovare."
+this_device_does_not_support_power_mode = "Questo dispositivo non supporta il cambio della modalità di alimentazione."
+power_mode_macos_pointer_note = "La frequenza di polling più alta della modalità prestazioni può far sembrare più lento il puntatore di macOS. È la curva di accelerazione del sistema, non un cambio di DPI."
 
 [actions]
 bind_control = "Associa %{name}"

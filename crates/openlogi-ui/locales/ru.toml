@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Обнаруживает более м�
 wheel_resolution_unsupported = "Это устройство не поддерживает управление разрешением колеса."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Режим питания"
+performance_mode = "Режим производительности"
+power_mode_description = "Производительность открывает весь диапазон частот опроса; экономия продлевает работу от батареи."
+power_mode_hardware_switch_only = "Режим питания этого устройства задаётся его аппаратным переключателем."
+device_offline_power_mode_is_unavailable = "Устройство не в сети. Режим питания недоступен."
+reading_power_mode = "Чтение режима питания…"
+couldnt_read_power_mode_click_to_retry = "Не удалось прочитать режим питания. Нажмите, чтобы повторить."
+this_device_does_not_support_power_mode = "Это устройство не поддерживает переключение режима питания."
+power_mode_macos_pointer_note = "Более высокая частота опроса в режиме производительности может делать указатель macOS субъективно медленнее. Это кривая ускорения системы, а не изменение DPI."
 
 [actions]
 bind_control = "Назначить %{name}"

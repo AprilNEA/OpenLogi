@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Вылучае дробныя рухі 
 wheel_resolution_unsupported = "Гэта прылада не падтрымлівае кіраванне раздзяляльнасцю кола."
 wheel_resolution_other_connection = "Гэта прылада падтрымлівае раздзяляльнасць кола на іншым падключэнні, але не на гэтым."
 smartshift = "SmartShift"
+power_mode = "Рэжым сілкавання"
+performance_mode = "Рэжым прадукцыйнасці"
+power_mode_description = "Прадукцыйнасць адкрывае ўвесь дыяпазон частот апытання; эканомія падаўжае працу ад батарэі."
+power_mode_hardware_switch_only = "Рэжым сілкавання гэтай прылады задаецца яе апаратным пераключальнікам."
+device_offline_power_mode_is_unavailable = "Прылада не ў сетцы. Рэжым сілкавання недаступны."
+reading_power_mode = "Чытанне рэжыму сілкавання…"
+couldnt_read_power_mode_click_to_retry = "Не ўдалося прачытаць рэжым сілкавання. Націсніце, каб паўтарыць."
+this_device_does_not_support_power_mode = "Гэтая прылада не падтрымлівае пераключэнне рэжыму сілкавання."
+power_mode_macos_pointer_note = "Вышэйшая частата апытання ў рэжыме прадукцыйнасці можа рабіць паказальнік macOS павольнейшым на адчуванне. Гэта крывая паскарэння сістэмы, а не змена DPI."
 
 [actions]
 bind_control = "Прывязаць %{name}"

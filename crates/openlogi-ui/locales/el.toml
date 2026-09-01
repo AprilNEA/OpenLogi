@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Ανιχνεύει λεπτότερη �
 wheel_resolution_unsupported = "Αυτή η συσκευή δεν υποστηρίζει έλεγχο ανάλυσης τροχού."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Λειτουργία τροφοδοσίας"
+performance_mode = "Λειτουργία επιδόσεων"
+power_mode_description = "Οι επιδόσεις ξεκλειδώνουν όλες τις συχνότητες αναφοράς· η αντοχή παρατείνει την μπαταρία."
+power_mode_hardware_switch_only = "Η λειτουργία τροφοδοσίας αυτής της συσκευής ορίζεται από τον διακόπτη της."
+device_offline_power_mode_is_unavailable = "Συσκευή εκτός σύνδεσης. Η λειτουργία τροφοδοσίας δεν είναι διαθέσιμη."
+reading_power_mode = "Ανάγνωση λειτουργίας τροφοδοσίας…"
+couldnt_read_power_mode_click_to_retry = "Αδυναμία ανάγνωσης της λειτουργίας τροφοδοσίας. Κάντε κλικ για επανάληψη."
+this_device_does_not_support_power_mode = "Αυτή η συσκευή δεν υποστηρίζει εναλλαγή λειτουργίας τροφοδοσίας."
+power_mode_macos_pointer_note = "Η υψηλότερη συχνότητα αναφοράς της λειτουργίας επιδόσεων μπορεί να κάνει τον δείκτη του macOS να μοιάζει πιο αργός. Είναι η καμπύλη επιτάχυνσης του συστήματος, όχι αλλαγή DPI."
 
 [actions]
 bind_control = "Αντιστοίχιση %{name}"

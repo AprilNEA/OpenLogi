@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "Detects finer movement between ratchet 
 wheel_resolution_unsupported = "This device does not support wheel resolution control."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "Power mode"
+performance_mode = "Performance mode"
+power_mode_description = "Performance unlocks the full report-rate range; endurance extends battery life."
+power_mode_hardware_switch_only = "This device's power mode is set with its hardware switch."
+device_offline_power_mode_is_unavailable = "Device offline. Power mode is unavailable."
+reading_power_mode = "Reading power mode…"
+couldnt_read_power_mode_click_to_retry = "Couldn't read the power mode. Click to retry."
+this_device_does_not_support_power_mode = "This device does not support power-mode switching."
+power_mode_macos_pointer_note = "The faster performance report rate can make the macOS pointer feel slower. That is the system's acceleration curve, not a DPI change."
 
 [actions]
 bind_control = "Bind %{name}"

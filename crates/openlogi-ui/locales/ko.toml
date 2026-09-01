@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "래칫 단계 사이의 미세한 움�
 wheel_resolution_unsupported = "이 기기는 휠 해상도 제어를 지원하지 않습니다."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
 smartshift = "SmartShift"
+power_mode = "전원 모드"
+performance_mode = "성능 모드"
+power_mode_description = "성능 모드는 모든 보고 속도를 사용할 수 있게 하고, 지구력 모드는 배터리 사용 시간을 늘립니다."
+power_mode_hardware_switch_only = "이 장치의 전원 모드는 하드웨어 스위치로 설정합니다."
+device_offline_power_mode_is_unavailable = "장치가 오프라인입니다. 전원 모드를 사용할 수 없습니다."
+reading_power_mode = "전원 모드를 읽는 중…"
+couldnt_read_power_mode_click_to_retry = "전원 모드를 읽지 못했습니다. 클릭하여 다시 시도하세요."
+this_device_does_not_support_power_mode = "이 장치는 전원 모드 전환을 지원하지 않습니다."
+power_mode_macos_pointer_note = "성능 모드의 높은 보고 속도에서는 macOS 포인터가 느리게 느껴질 수 있습니다. 이는 시스템 가속 곡선 때문이며 DPI 변경이 아닙니다."
 
 [actions]
 bind_control = "%{name} 지정"

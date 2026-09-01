@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, PowerMode,
+    PowerModeState, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -61,7 +61,9 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: `read_power_mode` / `set_power_mode` appended (HID++ `0x8090`
+///      performance/endurance).
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -560,4 +562,8 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Read the `0x8090` power mode + switch capabilities from `route`.
+    async fn read_power_mode(route: DeviceRoute) -> Result<PowerModeState, WriteError>;
+    /// Apply a power mode to `route` now.
+    async fn set_power_mode(route: DeviceRoute, mode: PowerMode) -> Result<(), WriteError>;
 }

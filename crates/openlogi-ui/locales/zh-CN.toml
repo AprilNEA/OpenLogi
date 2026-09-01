@@ -232,6 +232,15 @@ high_resolution_scrolling_description = "检测棘轮刻度之间更细微的移
 wheel_resolution_unsupported = "此设备不支持滚轮分辨率控制。"
 wheel_resolution_other_connection = "此设备通过其他连接时支持滚轮分辨率控制，但当前连接不支持。"
 smartshift = "SmartShift"
+power_mode = "电源模式"
+performance_mode = "性能模式"
+power_mode_description = "性能模式解锁全部回报率；续航模式延长电池续航。"
+power_mode_hardware_switch_only = "此设备的电源模式由其硬件开关设置。"
+device_offline_power_mode_is_unavailable = "设备离线。电源模式不可用。"
+reading_power_mode = "正在读取电源模式…"
+couldnt_read_power_mode_click_to_retry = "无法读取电源模式。点击重试。"
+this_device_does_not_support_power_mode = "此设备不支持切换电源模式。"
+power_mode_macos_pointer_note = "性能模式更高的回报率可能让 macOS 指针感觉变慢。这是系统加速曲线所致，并非 DPI 变化。"
 
 [actions]
 bind_control = "绑定 %{name}"

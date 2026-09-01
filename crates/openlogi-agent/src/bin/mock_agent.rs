@@ -50,8 +50,8 @@ use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, TunableTorque, WriteError,
+    LightCommand, PasskeyMethod, PowerMode, PowerModeState, ReceiverSelector,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -235,6 +235,7 @@ struct DpiState {
 struct DeviceSettings {
     dpi: Option<DpiState>,
     smartshift: Option<SmartShiftStatus>,
+    power_mode: Option<PowerModeState>,
     lighting: bool,
 }
 
@@ -243,6 +244,7 @@ impl DeviceSettings {
         Self {
             dpi: None,
             smartshift: None,
+            power_mode: None,
             lighting: false,
         }
     }
@@ -302,6 +304,12 @@ impl State {
                     ),
                     tunable_torque: Some(MOCK_TORQUE),
                 }),
+                // A G305-shaped seed: ships in endurance, software switch only.
+                power_mode: Some(PowerModeState {
+                    mode: PowerMode::Endurance,
+                    software_switch: true,
+                    hardware_switch: false,
+                }),
                 lighting: false,
             },
         );
@@ -311,6 +319,7 @@ impl State {
             DeviceSettings {
                 dpi: None,
                 smartshift: None,
+                power_mode: None,
                 lighting: true,
             },
         );
@@ -322,6 +331,7 @@ impl State {
                     capabilities: DpiCapabilities::new((400u16..=4000).step_by(100).collect())?,
                 }),
                 smartshift: None,
+                power_mode: None,
                 lighting: false,
             },
         );
@@ -911,6 +921,39 @@ impl Agent for MockAgent {
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: 0x2110,
             })
+    }
+
+    async fn read_power_mode(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PowerModeState, WriteError> {
+        let state = self.state.lock().await;
+        state
+            .settings_for(&route)?
+            .power_mode
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x8090,
+            })
+    }
+
+    async fn set_power_mode(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: PowerMode,
+    ) -> Result<(), WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let power_mode = settings
+            .power_mode
+            .as_mut()
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: 0x8090,
+            })?;
+        power_mode.mode = mode;
+        info!(%route, ?mode, "set_power_mode");
+        Ok(())
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
