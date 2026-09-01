@@ -22,6 +22,12 @@ Nix/devenv is optional. A normal Rust toolchain is enough.
 
 ### Without Nix
 
+Before a direct GUI build on macOS, expose full Xcode to Cargo even when `xcode-select` remains on Command Line Tools. This is not needed for CLI or non-GUI packages:
+
+```sh
+export DEVELOPER_DIR="${OPENLOGI_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+```
+
 ```sh
 # rustup installs the stable toolchain pinned in rust-toolchain.toml
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
