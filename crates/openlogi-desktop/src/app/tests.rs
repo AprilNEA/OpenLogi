@@ -2,9 +2,10 @@ use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
-    LightValueUnit,
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports, LightCapabilities,
+    LightValueRange, LightValueUnit,
 };
+use openlogi_core::diagnostics::ConnectionKind;
 use openlogi_core::hid::DeviceRoute;
 
 /// "Charging" replaces the bogus percentage only when charging *and* the
@@ -64,25 +65,28 @@ fn connection_icon_matches_route() {
         receiver_uid: "r".into(),
         slot: 1,
     };
-    let direct = DeviceRoute::Direct {
+    let wired_route = DeviceRoute::Direct {
         vendor_id: 0x046d,
-        product_id: 0xb019,
+        product_id: 0xc356,
     };
-    // Firmware transport tables (HID++ 0x0003): a wired-only device (G513),
-    // a Bluetooth-capable one (MX Master on a cable or BT), and BLE-direct.
-    let wired = DeviceTransports {
-        usb: true,
-        ..DeviceTransports::default()
+    let bluetooth_route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb38a,
     };
-    let bt = DeviceTransports {
-        usb: true,
-        bluetooth: true,
-        ..DeviceTransports::default()
+    let g915_x = DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            usb: true,
+            equad: true,
+            btle: true,
+            bluetooth: false,
+        },
+        model_ids: [0xb38a, 0x40b5, 0xc356],
+        extended_model_id: 1,
     };
-    let btle = DeviceTransports {
-        btle: true,
-        ..DeviceTransports::default()
-    };
+
     assert_eq!(
         connection_icon_path(Some(&bolt), None),
         "action-icons/bolt.svg"
@@ -91,44 +95,29 @@ fn connection_icon_matches_route() {
         connection_icon_path(Some(&uni), None),
         "action-icons/unifying.svg"
     );
-    // Direct + radio-less firmware = the cable is the only possible link.
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&wired)),
+        ConnectionKind::for_device(Some(&wired_route), Some(&g915_x)),
+        ConnectionKind::Wired
+    );
+    assert_eq!(
+        connection_icon_path(Some(&wired_route), Some(&g915_x)),
         "action-icons/usb.svg"
     );
-    // eQuad is receiver-only, so an equad-only table on a *direct* route
-    // still means a cable — not Bluetooth.
-    let equad_only = DeviceTransports {
-        equad: true,
-        ..DeviceTransports::default()
-    };
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&equad_only)),
-        "action-icons/usb.svg"
+        ConnectionKind::for_device(Some(&bluetooth_route), Some(&g915_x)),
+        ConnectionKind::BluetoothDirect
     );
-    // An all-false table is "unknown", not "wired".
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&DeviceTransports::default())),
-        "action-icons/bluetooth.svg"
-    );
-    // Direct + any radio keeps the Bluetooth mark.
-    assert_eq!(
-        connection_icon_path(Some(&direct), Some(&bt)),
+        connection_icon_path(Some(&bluetooth_route), Some(&g915_x)),
         "action-icons/bluetooth.svg"
     );
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&btle)),
-        "action-icons/bluetooth.svg"
+        connection_icon_path(Some(&wired_route), None),
+        "action-icons/circle-dot.svg"
     );
-    // Unknown transports (no 0x0003 snapshot) keep the old default.
-    assert_eq!(
-        connection_icon_path(Some(&direct), None),
-        "action-icons/bluetooth.svg"
-    );
-    // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
     assert_eq!(
         connection_icon_path(None, None),
-        "action-icons/bluetooth.svg"
+        "action-icons/circle-dot.svg"
     );
 }
 
