@@ -45,7 +45,11 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            img(crate::app_assets::LOGO)
+                .size(gpui::rems(3.5))
+                .flex_none(),
+        )
         .child(
             v_flex()
                 .gap_2()
