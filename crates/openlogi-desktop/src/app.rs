@@ -224,8 +224,11 @@ impl AppView {
             }
         }
 
+        let profile_icons = ProfileIconCache::default();
+        let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
-        let action_ring_panel = cx.new(ActionRingPanel::new);
+        let action_ring_panel =
+            cx.new(|cx| ActionRingPanel::new(profile_icons.clone(), window, cx));
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
@@ -233,8 +236,6 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
-        let profile_icons = ProfileIconCache::default();
-        let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
             let active_key = AppState::try_read(cx)

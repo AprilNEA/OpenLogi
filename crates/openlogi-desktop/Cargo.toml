@@ -66,8 +66,8 @@ embed-resource = "3.0.9"
 # menu-bar status item lives in the agent, not here.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
-objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance", "NSWorkspace"] }
+objc2-foundation = { workspace = true, features = ["NSBundle", "NSError", "NSProcessInfo", "NSString", "NSURL"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
 
 [lints]

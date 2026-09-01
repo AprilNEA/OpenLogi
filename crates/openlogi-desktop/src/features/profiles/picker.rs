@@ -1,9 +1,11 @@
 //! Add-application popover for per-application profiles.
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Anchor, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    Anchor, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, UniformListScrollHandle, WeakEntity, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
@@ -19,6 +21,7 @@ use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
 use crate::features::mouse::picker::{compact_panel, divider, title};
+use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
@@ -26,6 +29,22 @@ const APP_ROW_H: f32 = 44.;
 /// Icon tile edge inside picker rows: the height of the two-line text block,
 /// so the 64 px source rendition maps 1:1 at 2× scale.
 const ROW_ICON_EDGE: f32 = 32.;
+type AppSelection = Rc<dyn Fn(ProfileChoice, &mut App)>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerMode {
+    Profile,
+    Application,
+}
+
+impl PickerMode {
+    fn heading(self) -> gpui::SharedString {
+        match self {
+            Self::Profile => tr!("profiles.add_app_profile"),
+            Self::Application => tr!("profiles.add_app"),
+        }
+    }
+}
 
 pub(super) fn add_app_popover(
     id_base: &'static str,
@@ -35,6 +54,9 @@ pub(super) fn add_app_popover(
     actions: ProfileScopeActions,
     pal: Palette,
 ) -> impl IntoElement {
+    let select: AppSelection = Rc::new(move |choice, cx| {
+        actions.select(Some(choice.app), cx);
+    });
     let catalog_on_open = catalog.clone();
     Popover::new(format!("{id_base}:add-app-popover"))
         .anchor(Anchor::TopRight)
@@ -61,20 +83,106 @@ pub(super) fn add_app_popover(
                 cx,
             );
             add_app_content(
-                id_base, &choices, &catalog, &icons, &actions, pal, cx,
+                id_base,
+                PickerMode::Profile,
+                &choices,
+                (&catalog, &icons),
+                &select,
+                pal,
+                cx,
+            )
+        })
+}
+
+pub(crate) fn application_popover(
+    id_base: &'static str,
+    catalog: Entity<AppCatalogPicker>,
+    icons: ProfileIconCache,
+    on_select: impl Fn(String, String, &mut App) + 'static,
+    pal: Palette,
+) -> impl IntoElement {
+    let select: AppSelection = Rc::new(move |choice, cx| {
+        if let Some(target) = choice.launch_target {
+            on_select(target, choice.name, cx);
+        }
+    });
+    let catalog_on_open = catalog.clone();
+    Popover::new(format!("{id_base}:application-popover"))
+        .anchor(Anchor::TopRight)
+        .appearance(false)
+        .trigger(
+            control_button(format!("{id_base}:application-picker"))
+                .outline()
+                .w_full()
+                .icon(IconName::Folder)
+                .label(tr!("profiles.browse_applications")),
+        )
+        .on_open_change(move |open, window, cx| {
+            if *open {
+                catalog_on_open.update(cx, |catalog, cx| catalog.clear_search(window, cx));
+            }
+        })
+        .content(move |_state, window, cx| {
+            let search = catalog.read(cx).search();
+            crate::ui::components::localize_placeholder(
+                &search,
+                tr!("profiles.search_applications"),
+                window,
+                cx,
+            );
+            let recent_apps = AppState::try_read(cx)
+                .map(|state| {
+                    state
+                        .recent_apps()
+                        .map(|(app, name)| (app.to_string(), name.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let observed = recent_apps
+                .iter()
+                .map(|(app, _)| app.clone())
+                .collect::<HashSet<_>>();
+            catalog.update(cx, |picker, cx| {
+                for (app, _) in &recent_apps {
+                    picker.ensure_application_path(app, cx);
+                }
+            });
+            let catalog_state = catalog.read(cx);
+            let application_paths = recent_apps
+                .iter()
+                .filter_map(|(app, _)| {
+                    catalog_state
+                        .application_path(app)
+                        .map(|path| (app.clone(), path.to_string()))
+                })
+                .collect::<HashMap<_, _>>();
+            let choices = application_choices(
+                catalog_state.available_profiles(&observed, &HashSet::new()),
+                &recent_apps,
+                &application_paths,
+            );
+            add_app_content(
+                id_base,
+                PickerMode::Application,
+                &choices,
+                (&catalog, &icons),
+                &select,
+                pal,
+                cx,
             )
         })
 }
 
 fn add_app_content(
     id_base: &'static str,
+    mode: PickerMode,
     choices: &AddAppChoices,
-    catalog: &Entity<AppCatalogPicker>,
-    icons: &ProfileIconCache,
-    actions: &ProfileScopeActions,
+    resources: (&Entity<AppCatalogPicker>, &ProfileIconCache),
+    select: &AppSelection,
     pal: Palette,
     cx: &mut Context<PopoverState>,
 ) -> gpui::Div {
+    let (catalog, icons) = resources;
     let popover = cx.entity().downgrade();
     let catalog_state = catalog.read(cx);
     let search = catalog_state.search();
@@ -93,7 +201,7 @@ fn add_app_content(
         .cloned()
         .map(|choice| {
             let icon = icons.state(&choice.app);
-            application_row(id_base, choice, icon, actions.clone(), pal, popover.clone())
+            application_row(id_base, choice, icon, select.clone(), pal, popover.clone())
         })
         .collect::<Vec<_>>();
     let application_rows = match &choices.catalog {
@@ -114,8 +222,11 @@ fn add_app_content(
     let application_rows = Arc::new(application_rows);
 
     compact_panel(pal)
-        .w(px(320.))
-        .child(title(tr!("profiles.add_app_profile"), pal))
+        .w(px(match mode {
+            PickerMode::Profile => 320.,
+            PickerMode::Application => 280.,
+        }))
+        .child(title(mode.heading(), pal))
         .child(divider(pal))
         .child(
             control_input(&search)
@@ -159,7 +270,7 @@ fn add_app_content(
                 id_base,
                 application_rows,
                 list_catalog,
-                actions.clone(),
+                select.clone(),
                 list_popover,
                 &list_scroll,
                 pal,
@@ -170,6 +281,49 @@ fn add_app_content(
         })
 }
 
+fn application_choices(
+    catalog: CatalogPresentation,
+    recent_apps: &[(String, String)],
+    application_paths: &HashMap<String, String>,
+) -> AddAppChoices {
+    let (catalog_recent, catalog) = match catalog {
+        CatalogPresentation::Ready(applications) => {
+            let applications = applications
+                .into_iter()
+                .filter(|choice| choice.launch_target.is_some());
+            let recent_ids = recent_apps
+                .iter()
+                .map(|(app, _)| app.as_str())
+                .collect::<HashSet<_>>();
+            let (recent, remaining) =
+                applications.partition(|choice| recent_ids.contains(choice.app.as_str()));
+            (recent, CatalogPresentation::Ready(remaining))
+        }
+        catalog => (Vec::new(), catalog),
+    };
+    let mut catalog_recent = catalog_recent
+        .into_iter()
+        .map(|choice| (choice.app.clone(), choice))
+        .collect::<HashMap<_, _>>();
+    let recent = recent_apps
+        .iter()
+        .filter_map(|(app, name)| {
+            let mut choice = catalog_recent.remove(app).or_else(|| {
+                application_paths.get(app).map(|path| ProfileChoice {
+                    app: app.clone(),
+                    launch_target: Some(path.clone()),
+                    name: name.clone(),
+                    override_count: 0,
+                    persisted: false,
+                })
+            })?;
+            choice.name.clone_from(name);
+            Some(choice)
+        })
+        .collect();
+    AddAppChoices { recent, catalog }
+}
+
 /// The scrollable catalog body: a `uniform_list` capped at six rows, with a
 /// scrollbar signalling position in the full inventory. Rows resolve their
 /// icons as they enter the viewport.
@@ -177,7 +331,7 @@ fn catalog_list(
     id_base: &'static str,
     rows: Arc<Vec<ProfileChoice>>,
     catalog: Entity<AppCatalogPicker>,
-    actions: ProfileScopeActions,
+    select: AppSelection,
     popover: WeakEntity<PopoverState>,
     scroll: &UniformListScrollHandle,
     pal: Palette,
@@ -199,7 +353,7 @@ fn catalog_list(
                                     id_base,
                                     choice,
                                     icon,
-                                    actions.clone(),
+                                    select.clone(),
                                     pal,
                                     popover.clone(),
                                 )
@@ -286,11 +440,11 @@ fn application_row(
     id_base: &'static str,
     choice: ProfileChoice,
     icon: AppIconState,
-    actions: ProfileScopeActions,
+    select: AppSelection,
     pal: Palette,
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
-    let app = choice.app.clone();
+    let selected = choice.clone();
     div().h(px(APP_ROW_H)).child(
         MenuRow::new(format!("{id_base}:catalog-app:{}", choice.app))
             .role(Role::MenuItem)
@@ -314,7 +468,7 @@ fn application_row(
                     ),
             )
             .on_click(move |_event, window, cx| {
-                actions.select(Some(app.clone()), cx);
+                select(selected.clone(), cx);
                 if let Some(popover) = popover.upgrade() {
                     popover.update(cx, |state, cx| state.dismiss(window, cx));
                 }
@@ -346,6 +500,7 @@ fn application_list_height(rows: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::rc::Rc;
 
     use gpui::{
@@ -356,8 +511,9 @@ mod tests {
     use gpui_component::button::Button;
     use gpui_component::popover::Popover;
 
-    use super::APP_ROW_H;
+    use super::{APP_ROW_H, application_choices};
     use crate::features::mouse::picker::compact_panel;
+    use crate::features::profiles::{CatalogPresentation, ProfileChoice};
     use crate::ui::components::MenuRow;
     use crate::ui::theme;
 
@@ -448,5 +604,60 @@ mod tests {
             Some(0),
             "after scrolling a different row sits under the cursor"
         );
+    }
+
+    #[test]
+    fn application_choices_separate_recent_apps_in_recency_order() {
+        let choice = |app: &str, name: &str| ProfileChoice {
+            app: app.to_string(),
+            launch_target: Some(format!("/Applications/{name}.app")),
+            name: name.to_string(),
+            override_count: 0,
+            persisted: false,
+        };
+        let choices = application_choices(
+            CatalogPresentation::Ready(vec![
+                choice("app.alpha", "Alpha"),
+                choice("app.beta", "Beta"),
+                choice("app.gamma", "Gamma"),
+            ]),
+            &[
+                ("app.beta".into(), "Beta Recent".into()),
+                ("app.alpha".into(), "Alpha Recent".into()),
+            ],
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            choices
+                .recent
+                .iter()
+                .map(|choice| choice.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Beta Recent", "Alpha Recent"]
+        );
+        let CatalogPresentation::Ready(remaining) = choices.catalog else {
+            panic!("catalog should remain ready");
+        };
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].app, "app.gamma");
+    }
+
+    #[test]
+    fn application_choices_keep_resolved_recent_apps_without_the_catalog() {
+        let recent = [("app.portable".into(), "Portable".into())];
+        let paths = HashMap::from([(
+            "app.portable".into(),
+            "/Users/example/Tools/Portable.app".into(),
+        )]);
+
+        for catalog in [CatalogPresentation::Loading, CatalogPresentation::Failed] {
+            let choices = application_choices(catalog, &recent, &paths);
+            assert_eq!(choices.recent.len(), 1);
+            assert_eq!(
+                choices.recent[0].launch_target.as_deref(),
+                Some("/Users/example/Tools/Portable.app")
+            );
+        }
     }
 }

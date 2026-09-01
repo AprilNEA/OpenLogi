@@ -1,5 +1,15 @@
 //! Native window policy for the standalone Actions Ring overlay.
 
+use std::sync::Arc;
+
+/// Resolve a configured macOS application bundle to a small native icon.
+///
+/// The lookup is blocking and must run on GPUI's background executor.
+pub fn application_icon(target: &str) -> Option<Arc<gpui::RenderImage>> {
+    const ICON_EDGE: u32 = 64;
+    openlogi_ui::application_icon::application_icon(target, ICON_EDGE)
+}
+
 /// Keep the overlay out of the Dock and app switcher.
 #[cfg(target_os = "macos")]
 pub fn configure_application() {
@@ -140,4 +150,20 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
 #[cfg(not(target_os = "macos"))]
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_application_targets_have_no_native_icon() {
+        for target in [
+            "https://example.test",
+            "/tmp",
+            "/definitely/missing/OpenLogi.app",
+        ] {
+            assert!(application_icon(target).is_none(), "target: {target}");
+        }
+    }
 }
