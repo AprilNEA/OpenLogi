@@ -31,6 +31,10 @@ pub(crate) struct Node {
     pub(crate) product_id: u16,
     /// USB `iSerialNumber` from sysfs when the device reports one.
     pub(crate) serial_number: Option<String>,
+    /// Canonicalized sysfs directory of the *USB device* (not interface)
+    /// behind this node — shared by every capture node the same physical
+    /// device exposes. See [`cameras`].
+    usb_device: PathBuf,
 }
 
 /// Enumerate every V4L2 capture node, newest-first by node index.
@@ -48,7 +52,8 @@ pub(crate) fn nodes() -> Vec<Node> {
         .filter_map(|entry| {
             let sysfs = entry.path();
             let dev_path = PathBuf::from("/dev").join(entry.file_name());
-            let (vendor_id, product_id) = usb_ids(&sysfs)?;
+            let usb_device = usb_device_sysfs(&sysfs)?;
+            let (vendor_id, product_id) = usb_ids(&usb_device)?;
             if !is_capture_node(&dev_path) {
                 return None;
             }
@@ -58,7 +63,8 @@ pub(crate) fn nodes() -> Vec<Node> {
                 path: dev_path,
                 vendor_id,
                 product_id,
-                serial_number: usb_serial(&sysfs),
+                serial_number: usb_serial(&usb_device),
+                usb_device,
             })
         })
         .collect();
@@ -99,6 +105,47 @@ pub(crate) fn describe(node: &Node) -> Camera {
     }
 }
 
+/// One [`Camera`] per physical USB device.
+///
+/// A UVC camera can expose more than one *streaming* interface — e.g. the
+/// Brio's second, low-resolution node feeding its IR sensor for Windows
+/// Hello — and each gets its own `/dev/videoN` capture node just like the
+/// main color sensor does (issue #1191). Grouping by the shared USB device
+/// directory and keeping only the highest-resolution node per group turns
+/// that back into one listing entry per physical camera; `node_for_unique_id`
+/// still resolves every node individually, so a secondary node stays
+/// controllable if some other path ever needs it.
+pub(crate) fn cameras() -> Vec<Camera> {
+    let described = nodes()
+        .into_iter()
+        .map(|node| (node.usb_device.clone(), describe(&node)));
+    merge_by_usb_device(described)
+}
+
+/// Collapse `(usb_device, Camera)` pairs to one `Camera` per distinct
+/// `usb_device`, keeping the highest-resolution entry in each group and
+/// otherwise preserving first-seen order.
+fn merge_by_usb_device(nodes: impl IntoIterator<Item = (PathBuf, Camera)>) -> Vec<Camera> {
+    let mut by_device: Vec<(PathBuf, Camera)> = Vec::new();
+    for (usb_device, camera) in nodes {
+        match by_device.iter_mut().find(|(dev, _)| *dev == usb_device) {
+            Some((_, best)) => {
+                if resolution_area(camera.max_resolution) > resolution_area(best.max_resolution) {
+                    *best = camera;
+                }
+            }
+            None => by_device.push((usb_device, camera)),
+        }
+    }
+    by_device.into_iter().map(|(_, camera)| camera).collect()
+}
+
+/// Pixel count of a resolution, for comparing which capture node is the
+/// primary sensor. `None` sorts as smallest.
+fn resolution_area(resolution: Option<(u32, u32)>) -> u64 {
+    resolution.map_or(0, |(w, h)| u64::from(w) * u64::from(h))
+}
+
 /// The `by-id` symlink for `path` when udev created one (it embeds the USB
 /// serial, so it survives replugging into another port), else the raw node
 /// path. Either way it round-trips through [`node_for_unique_id`].
@@ -116,11 +163,8 @@ fn unique_id_for(path: &Path) -> String {
         .to_string()
 }
 
-/// Read `idVendor`/`idProduct` from the USB device behind a V4L2 node.
-///
-/// `<sysfs>/device` is the USB *interface*; its parent holds the ids.
-fn usb_ids(sysfs: &Path) -> Option<(u16, u16)> {
-    let usb = usb_device_sysfs(sysfs)?;
+/// Read `idVendor`/`idProduct` from the USB device directory.
+fn usb_ids(usb: &Path) -> Option<(u16, u16)> {
     let vendor = read_trimmed(&usb.join("idVendor"))?;
     let product = read_trimmed(&usb.join("idProduct"))?;
     Some((
@@ -129,9 +173,9 @@ fn usb_ids(sysfs: &Path) -> Option<(u16, u16)> {
     ))
 }
 
-/// USB `iSerialNumber` from the parent USB device, when present and non-empty.
-fn usb_serial(sysfs: &Path) -> Option<String> {
-    let usb = usb_device_sysfs(sysfs)?;
+/// USB `iSerialNumber` from the USB device directory, when present and
+/// non-empty.
+fn usb_serial(usb: &Path) -> Option<String> {
     let serial = read_trimmed(&usb.join("serial"))?;
     let serial = serial.trim();
     // Kernel placeholder when the descriptor has no iSerialNumber.
@@ -212,4 +256,55 @@ fn read_trimmed(path: &Path) -> Option<String> {
     fs::read_to_string(path)
         .ok()
         .map(|text| text.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera(name: &str, max_resolution: Option<(u32, u32)>) -> Camera {
+        Camera {
+            name: name.to_string(),
+            unique_id: name.to_string(),
+            serial_number: Some("5091F273".to_string()),
+            vendor_id: 0x046d,
+            product_id: 0x085e,
+            max_resolution,
+            max_fps: None,
+        }
+    }
+
+    #[test]
+    fn brio_ir_node_collapses_into_the_main_capture_node() {
+        // Reproduces issue #1191: the Brio's two capture-capable /dev/videoN
+        // nodes (main sensor + IR sensor for Windows Hello) share one USB
+        // device directory and must collapse to a single listing entry.
+        let usb_device = PathBuf::from("/sys/devices/usb1/1-1");
+        let main = camera("Logitech BRIO", Some((4096, 2160)));
+        let ir = camera("Logitech BRIO", Some((340, 340)));
+
+        let cameras = merge_by_usb_device([(usb_device.clone(), main.clone()), (usb_device, ir)]);
+
+        assert_eq!(cameras, vec![main]);
+    }
+
+    #[test]
+    fn distinct_usb_devices_stay_separate() {
+        let one = camera("Logitech BRIO", Some((4096, 2160)));
+        let two = camera("Logitech StreamCam", Some((1920, 1080)));
+
+        let cameras = merge_by_usb_device([
+            (PathBuf::from("/sys/devices/usb1/1-1"), one.clone()),
+            (PathBuf::from("/sys/devices/usb1/1-2"), two.clone()),
+        ]);
+
+        assert_eq!(cameras, vec![one, two]);
+    }
+
+    #[test]
+    fn resolution_area_treats_unknown_resolution_as_smallest() {
+        assert_eq!(resolution_area(None), 0);
+        assert_eq!(resolution_area(Some((340, 340))), 340 * 340);
+        assert!(resolution_area(Some((4096, 2160))) > resolution_area(Some((340, 340))));
+    }
 }

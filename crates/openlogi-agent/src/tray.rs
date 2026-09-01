@@ -502,8 +502,21 @@ mod tests {
     use super::*;
     use openlogi_hid::device_io_channel;
 
+    /// `NSWorkspace::sharedWorkspace()` and its `notificationCenter()` are a
+    /// process-global singleton: a notification posted by one test's
+    /// `install_activity_observer` call is delivered to every other live
+    /// `ActivityTarget`, this test module's included, regardless of which
+    /// test posted it. Rust's default parallel test runner would otherwise
+    /// let these tests corrupt each other's gate state through that shared
+    /// center — this held for a test's whole body serializes them.
+    fn workspace_notifications_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
+        let _lock = workspace_notifications_lock();
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
         target.finish_startup(false);
@@ -558,6 +571,7 @@ mod tests {
 
     #[test]
     fn startup_stays_suspended_when_the_display_is_already_asleep() {
+        let _lock = workspace_notifications_lock();
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
         assert!(!gate.allows_io(), "startup must fail closed");
