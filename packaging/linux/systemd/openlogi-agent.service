@@ -15,6 +15,14 @@ After=graphical-session.target
 
 [Service]
 Type=simple
+# User units cannot order against the system bluetooth.service via After=, so a
+# kernel-side Bluetooth adapter bring-up racing this agent's own HID++ device
+# probing at login can leave the adapter's HCI commands timing out for the rest
+# of the session (#1065). A machine with no Bluetooth subsystem at all (no
+# /sys/class/bluetooth) returns immediately; otherwise wait up to 10s for any
+# hciN adapter node to appear — not just hci0 — then give it a moment to
+# settle before this agent starts opening HID++ sessions.
+ExecStartPre=/usr/bin/bash -c '[ -d /sys/class/bluetooth ] || exit 0; for i in $(seq 1 20); do ls /sys/class/bluetooth/hci* >/dev/null 2>&1 && { sleep 3; exit 0; }; sleep 0.5; done'
 ExecStart=/usr/bin/openlogi-agent
 Restart=on-failure
 RestartSec=5
