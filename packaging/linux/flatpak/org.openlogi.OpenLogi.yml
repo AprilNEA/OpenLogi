@@ -1,0 +1,144 @@
+# Flatpak manifest for OpenLogi.
+#
+# Built into a single-file `.flatpak` bundle and attached to each release, next
+# to the .deb/.rpm/.pkg.tar.zst. It is the install route for the distributions
+# where none of those three is native — the immutable ones especially, where
+# Flatpak is simply how software is installed.
+#
+# A bundle is a one-time install, not a subscription: `flatpak update` has no
+# remote to check. That is a deliberate limit of this change rather than an
+# oversight, and closing it needs a repository to serve, which is a larger
+# decision than adding a build artifact.
+#
+# Nothing about the application is patched here. Only the build environment
+# lives in this manifest, because that part is genuinely packaging's problem:
+#
+#   - rustup rather than org.freedesktop.Sdk.Extension.rust-stable. The
+#     workspace sets `rust-version` to whatever stable is current, and the SDK
+#     extension trails it by weeks (1.97.1 against a workspace asking for 1.98),
+#     which cargo refuses outright. rustup installs what rust-toolchain.toml
+#     names, so the build tracks this repository rather than the SDK's cadence.
+#   - llvm20, because openlogi-camera pulls v4l2-sys-mit, whose build script
+#     runs bindgen and dlopens libclang. The base SDK ships none.
+#
+# Local build, from the repository root:
+#   flatpak-builder --user --install --force-clean \
+#     build packaging/linux/flatpak/org.openlogi.OpenLogi.yml
+id: org.openlogi.OpenLogi
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.llvm20
+command: openlogi-desktop
+
+finish-args:
+  # ── display ────────────────────────────────────────────────────────────────
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPUI renders through wgpu/Vulkan.
+  - --device=dri
+
+  # ── device access ──────────────────────────────────────────────────────────
+  # /dev/hidraw* for HID++ I/O, /dev/input/event* for the evdev read side of the
+  # hook, /dev/uinput for the synthetic-event write side. `--device=all` is the
+  # only permission covering hidraw and uinput; `--device=input` leaves both out.
+  #
+  # This grants the sandbox a path to those nodes, not DAC permission: the host
+  # still needs 70-openlogi.rules installed, exactly as a distro package would.
+  # The rules ship inside the app at /app/share/openlogi/udev/ for that purpose.
+  - --device=all
+
+  # ── network ────────────────────────────────────────────────────────────────
+  # Device render images are fetched from the asset mirrors and cached in the
+  # app's data dir. No account, no telemetry.
+  - --share=network
+
+  # ── D-Bus ──────────────────────────────────────────────────────────────────
+  # Media-key actions drive whatever player is on the bus, over MPRIS.
+  - --talk-name=org.mpris.MediaPlayer2.*
+
+modules:
+  - name: openlogi
+    buildsystem: simple
+    build-options:
+      append-path: /run/build/openlogi/cargo/bin:/usr/lib/sdk/llvm20/bin
+      prepend-ld-library-path: /usr/lib/sdk/llvm20/lib
+      build-args:
+        # Cargo resolves crates.io and the workspace's git dependencies during
+        # the build, and rustup fetches the toolchain. Fine here; a Flathub
+        # submission would have to vendor all of it, since Flathub's builders
+        # have no network at all.
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/openlogi/cargo
+        RUSTUP_HOME: /run/build/openlogi/rustup
+        # Where bindgen looks for libclang (v4l2-sys-mit's build script).
+        LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
+        # The GPUI crates are the long pole; debug info is dead weight here.
+        CARGO_PROFILE_RELEASE_DEBUG: 'false'
+    build-commands:
+      # No version is pinned here on purpose: rust-toolchain.toml is the source
+      # of truth, and rustup installs exactly what it names.
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
+          | sh -s -- -y --profile minimal --no-modify-path
+
+      - cargo build --release --locked
+          -p openlogi -p openlogi-desktop -p openlogi-overlay -p openlogi-agent
+
+      # ── binaries ─────────────────────────────────────────────────────────
+      # All four. The GUI owns no device I/O (it is a pure IPC client) and it
+      # launches the agent from beside its own executable, so a bundle missing
+      # the agent starts, renders, and lists nothing.
+      - install -Dm755 target/release/openlogi         /app/bin/openlogi
+      - install -Dm755 target/release/openlogi-desktop /app/bin/openlogi-desktop
+      - install -Dm755 target/release/openlogi-overlay /app/bin/openlogi-overlay
+      - install -Dm755 target/release/openlogi-agent   /app/bin/openlogi-agent
+
+      # ── XDG integration ──────────────────────────────────────────────────
+      # Flatpak requires both files to be named for the application ID, which
+      # the packaged .desktop entry is not, and there is no AppStream metadata
+      # in the tree at all — software centres need it to list the app.
+      - install -Dm644 packaging/linux/flatpak/org.openlogi.OpenLogi.desktop
+          /app/share/applications/org.openlogi.OpenLogi.desktop
+      - install -Dm644 packaging/linux/flatpak/org.openlogi.OpenLogi.metainfo.xml
+          /app/share/metainfo/org.openlogi.OpenLogi.metainfo.xml
+
+      # design/icon/openlogi.png is 1024x1024, which `flatpak build-export`
+      # rejects outright ("Image too large. Max. size 512x512"), so the source
+      # icon is only ever installed rescaled. The SDK has no ImageMagick;
+      # ffmpeg is present and scales PNG fine.
+      - for px in 512 256 128 64; do
+          install -d "/app/share/icons/hicolor/${px}x${px}/apps";
+          ffmpeg -loglevel error -i design/icon/openlogi.png -vf "scale=${px}:${px}"
+            "/app/share/icons/hicolor/${px}x${px}/apps/org.openlogi.OpenLogi.png";
+        done
+
+      # ── host-side udev rules ─────────────────────────────────────────────
+      # A Flatpak cannot write /etc/udev/rules.d. Ship the same rules the .deb
+      # and .rpm install so the user can copy them out; docs/INSTALL-linux.md
+      # carries the one-time command.
+      - install -Dm644 packaging/linux/udev/70-openlogi.rules
+          /app/share/openlogi/udev/70-openlogi.rules
+
+      - install -Dm644 LICENSE-APACHE /app/share/licenses/openlogi/LICENSE-APACHE
+      - install -Dm644 LICENSE-MIT    /app/share/licenses/openlogi/LICENSE-MIT
+    sources:
+      # The checkout itself, so a release build is exactly the tagged tree and a
+      # local build is exactly the working tree. `target` is skipped because a
+      # host build tree is both useless in the sandbox and large enough to slow
+      # the copy noticeably.
+      - type: dir
+        path: ../../..
+        skip:
+          - target
+          - .git
+          - .direnv
+          - .devenv
+          # This build's own scratch state. Absent on a fresh checkout, so CI
+          # never sees it, but a second local build would otherwise copy the
+          # first one's tree into itself — gigabytes, and growing each time.
+          - .flatpak-builder
+          - build
+          - repo
