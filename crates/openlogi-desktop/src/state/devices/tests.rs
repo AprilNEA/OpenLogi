@@ -13,7 +13,7 @@ use super::{
     fold_by_inventory_key, offline_record, pick_initial_device,
 };
 use crate::state::inventory::adopt_routes;
-use openlogi_core::hid::Dpi;
+use openlogi_core::hid::{Dpi, ReceiverBrand};
 
 fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
     PairedDevice {
@@ -148,6 +148,22 @@ fn one_mouse_on_two_routes_is_one_record() {
     assert_eq!(records[0].config_key, "unit:6be9d300");
 }
 
+#[test]
+fn records_keep_the_registered_receiver_family() {
+    for (product_id, expected) in [
+        (0xc52b, ReceiverBrand::Unifying),
+        (0xc537, ReceiverBrand::Nano),
+        (0xc547, ReceiverBrand::Lightspeed),
+        (0xc548, ReceiverBrand::Bolt),
+    ] {
+        let mut inventory = inventory_with(vec![paired_device_no_model_info(1, None)]);
+        inventory.receiver.product_id = product_id;
+        let records = records_from(&Config::default(), &[inventory]);
+
+        assert_eq!(records[0].receiver_brand, Some(expected));
+    }
+}
+
 fn online_record(key: &str) -> DeviceRecord {
     DeviceRecord {
         config_key: key.to_string(),
@@ -165,6 +181,7 @@ fn online_record(key: &str) -> DeviceRecord {
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind: DeviceKind::Mouse,
         capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
