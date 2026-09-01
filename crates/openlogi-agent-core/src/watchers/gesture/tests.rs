@@ -668,6 +668,7 @@ fn recovery_session_is_wanted_only_while_its_journal_exists() {
         requested: 5,
         readback: Some(5),
         armed: true,
+        scroll2finger_diverted: None,
     }));
 
     assert!(

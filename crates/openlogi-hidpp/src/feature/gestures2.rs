@@ -1,4 +1,5 @@
-//! Legacy HID++ `Gestures2` (feature `0x6501`) discovery used by older MX mice.
+//! Legacy HID++ `Gestures2` (feature `0x6501`) discovery used by older MX mice
+//! and touchpads.
 //!
 //! MX Master 2S exposes its horizontal thumb wheel as gesture id 46 under
 //! `0x6501`, not through the newer dedicated `0x2150 Thumbwheel` feature.
@@ -10,27 +11,37 @@ use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 /// Gestures2 gesture id for the horizontal thumb wheel.
 pub const THUMBWHEEL_GESTURE_ID: u8 = 46;
 
+/// Gestures2 gesture id for two-finger scrolling.
+///
+/// Options+ diverts exactly this one when it takes over a touchpad: it is
+/// what makes the firmware stop its own two-finger handling — scroll
+/// translation and the click-layer artifacts that kill button-held drags
+/// when a second finger lands.
+pub const SCROLL_2FINGER_GESTURE_ID: u8 = 44;
+
 /// Maximum descriptor fields accepted before treating a malformed table as an
 /// unsupported response. Real device tables are tiny; the bound prevents a
 /// broken device from causing an unbounded probe loop.
 const MAX_DESCRIPTOR_FIELDS: u16 = 1024;
 
-/// Descriptor metadata needed to divert the legacy thumb wheel.
+/// Descriptor metadata needed to divert one gesture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ThumbwheelGesture {
+pub struct GestureDiversion {
+    /// The gesture id this record was resolved for.
+    pub gesture_id: u8,
     /// Sequential index among gestures that advertise the divertable bit.
-    /// `None` means gesture 46 exists but cannot be diverted.
+    /// `None` means the gesture exists but cannot be diverted.
     pub diversion_index: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DescriptorScan {
-    Thumbwheel(ThumbwheelGesture),
+    Found(GestureDiversion),
     End,
     Continue { next_diversion_index: u16 },
 }
 
-fn scan_descriptor_page(payload: &[u8], mut diversion_index: u16) -> DescriptorScan {
+fn scan_descriptor_page(payload: &[u8], mut diversion_index: u16, target: u8) -> DescriptorScan {
     let (fields, _partial) = payload.as_chunks::<2>();
     for &[high, low] in fields.iter().take(8) {
         if high == 0x01 {
@@ -41,8 +52,9 @@ fn scan_descriptor_page(payload: &[u8], mut diversion_index: u16) -> DescriptorS
         }
 
         let divertable = high & 0x02 != 0;
-        if low == THUMBWHEEL_GESTURE_ID {
-            return DescriptorScan::Thumbwheel(ThumbwheelGesture {
+        if low == target {
+            return DescriptorScan::Found(GestureDiversion {
+                gesture_id: target,
                 diversion_index: divertable.then_some(diversion_index),
             });
         }
@@ -76,17 +88,17 @@ pub struct Gestures2Feature {
 }
 
 impl Gestures2Feature {
-    /// Find gesture id 46 (Thumbwheel) and its diversion index. Merely exposing
-    /// `0x6501` is not enough: touchpads and other gesture devices can expose
-    /// the feature without a thumb wheel.
-    pub async fn thumbwheel(&self) -> Result<Option<ThumbwheelGesture>, Hidpp20Error> {
+    /// Find one gesture id and its diversion index. Merely exposing `0x6501`
+    /// is not enough: gesture devices differ in which ids their descriptor
+    /// table carries.
+    pub async fn gesture(&self, gesture_id: u8) -> Result<Option<GestureDiversion>, Hidpp20Error> {
         let mut index = 0u16;
         let mut diversion_index = 0u16;
         while index < MAX_DESCRIPTOR_FIELDS {
             let [hi, lo] = index.to_be_bytes();
             let payload = self.endpoint.call(0, [hi, lo, 0]).await?.extend_payload();
-            match scan_descriptor_page(&payload, diversion_index) {
-                DescriptorScan::Thumbwheel(thumbwheel) => return Ok(Some(thumbwheel)),
+            match scan_descriptor_page(&payload, diversion_index, gesture_id) {
+                DescriptorScan::Found(gesture) => return Ok(Some(gesture)),
                 DescriptorScan::End => return Ok(None),
                 DescriptorScan::Continue {
                     next_diversion_index,
@@ -104,10 +116,19 @@ impl Gestures2Feature {
         Ok(self.thumbwheel().await?.is_some())
     }
 
-    /// Read the current diversion state for gesture id 46. `None` means the
-    /// thumb wheel is absent or present but not divertable.
-    pub async fn thumbwheel_diverted(&self) -> Result<Option<bool>, Hidpp20Error> {
-        let Some(index) = self.thumbwheel().await?.and_then(|g| g.diversion_index) else {
+    /// Find gesture id 46 (Thumbwheel) and its diversion index.
+    pub async fn thumbwheel(&self) -> Result<Option<GestureDiversion>, Hidpp20Error> {
+        self.gesture(THUMBWHEEL_GESTURE_ID).await
+    }
+
+    /// Read the current diversion state for one gesture id. `None` means the
+    /// gesture is absent or present but not divertable.
+    pub async fn gesture_diverted(&self, gesture_id: u8) -> Result<Option<bool>, Hidpp20Error> {
+        let Some(index) = self
+            .gesture(gesture_id)
+            .await?
+            .and_then(|g| g.diversion_index)
+        else {
             return Ok(None);
         };
         let (offset, mask) = diversion_address(index)?;
@@ -119,17 +140,38 @@ impl Gestures2Feature {
         Ok(Some(payload[0] & mask != 0))
     }
 
-    /// Divert or restore gesture id 46. Returns `false` when the thumb wheel is
+    /// Divert or restore one gesture id. Returns `false` when the gesture is
     /// absent or not divertable. Function 4 is the `0x40` Gestures2 diversion
     /// write; its four-byte body requires a long HID++ report.
-    pub async fn set_thumbwheel_diverted(&self, diverted: bool) -> Result<bool, Hidpp20Error> {
-        let Some(index) = self.thumbwheel().await?.and_then(|g| g.diversion_index) else {
+    pub async fn set_gesture_diverted(
+        &self,
+        gesture_id: u8,
+        diverted: bool,
+    ) -> Result<bool, Hidpp20Error> {
+        let Some(index) = self
+            .gesture(gesture_id)
+            .await?
+            .and_then(|g| g.diversion_index)
+        else {
             return Ok(false);
         };
         self.endpoint
             .call_long(4, diversion_write_payload(index, diverted)?)
             .await?;
         Ok(true)
+    }
+
+    /// Read the current diversion state for gesture id 46. `None` means the
+    /// thumb wheel is absent or present but not divertable.
+    pub async fn thumbwheel_diverted(&self) -> Result<Option<bool>, Hidpp20Error> {
+        self.gesture_diverted(THUMBWHEEL_GESTURE_ID).await
+    }
+
+    /// Divert or restore gesture id 46. Returns `false` when the thumb wheel is
+    /// absent or not divertable.
+    pub async fn set_thumbwheel_diverted(&self, diverted: bool) -> Result<bool, Hidpp20Error> {
+        self.set_gesture_diverted(THUMBWHEEL_GESTURE_ID, diverted)
+            .await
     }
 }
 
@@ -138,20 +180,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn descriptor_page_detects_thumbwheel_and_end_marker() {
+    fn descriptor_page_detects_target_and_end_marker() {
         let mut payload = [0u8; 16];
         payload[0] = 0x83; // gesture + enabled + divertable
         payload[1] = THUMBWHEEL_GESTURE_ID;
         assert_eq!(
-            scan_descriptor_page(&payload, 0),
-            DescriptorScan::Thumbwheel(ThumbwheelGesture {
+            scan_descriptor_page(&payload, 0, THUMBWHEEL_GESTURE_ID),
+            DescriptorScan::Found(GestureDiversion {
+                gesture_id: THUMBWHEEL_GESTURE_ID,
                 diversion_index: Some(0)
             })
+        );
+        assert_eq!(
+            scan_descriptor_page(&payload, 0, SCROLL_2FINGER_GESTURE_ID),
+            DescriptorScan::Continue {
+                next_diversion_index: 1
+            }
         );
 
         let mut end = [0u8; 16];
         end[0] = 0x01;
-        assert_eq!(scan_descriptor_page(&end, 0), DescriptorScan::End);
+        assert_eq!(
+            scan_descriptor_page(&end, 0, THUMBWHEEL_GESTURE_ID),
+            DescriptorScan::End
+        );
     }
 
     #[test]
@@ -160,7 +212,7 @@ mod tests {
         payload[0] = 0x83;
         payload[1] = 45; // natural scrolling
         assert_eq!(
-            scan_descriptor_page(&payload, 0),
+            scan_descriptor_page(&payload, 0, THUMBWHEEL_GESTURE_ID),
             DescriptorScan::Continue {
                 next_diversion_index: 1
             }
@@ -168,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_page_counts_divertable_gestures_before_thumbwheel() {
+    fn descriptor_page_counts_divertable_gestures_before_target() {
         let mut payload = [0u8; 16];
         payload[0] = 0x82; // divertable gesture
         payload[1] = 40;
@@ -178,8 +230,9 @@ mod tests {
         payload[5] = THUMBWHEEL_GESTURE_ID;
 
         assert_eq!(
-            scan_descriptor_page(&payload, 3),
-            DescriptorScan::Thumbwheel(ThumbwheelGesture {
+            scan_descriptor_page(&payload, 3, THUMBWHEEL_GESTURE_ID),
+            DescriptorScan::Found(GestureDiversion {
+                gesture_id: THUMBWHEEL_GESTURE_ID,
                 diversion_index: Some(4)
             })
         );

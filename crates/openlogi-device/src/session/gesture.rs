@@ -592,6 +592,7 @@ struct ArmedTouchpad {
     feature: hidpp::feature::touchpad_raw_xy::TouchpadRawXyFeature,
     stream: TouchpadFrameStream,
     raw_mode: ArmedRawMode,
+    gestures: Option<hidpp::feature::gestures2::Gestures2Feature>,
     journal: Arc<dyn TouchpadJournalStore>,
     journal_id: String,
 }
@@ -603,6 +604,12 @@ impl ArmedTouchpad {
         sink: &mpsc::UnboundedSender<CapturedInput>,
     ) {
         let hidpp::feature::touchpad_raw_xy::TouchpadRawEvent::DualXy(report) = event else {
+            if let hidpp::feature::touchpad_raw_xy::TouchpadRawEvent::GestureHandledByDevice {
+                payload,
+            } = event
+            {
+                tracing::debug!(?payload, "firmware handled a gesture itself");
+            }
             return;
         };
         for event in self.stream.push(report, std::time::Instant::now()) {
@@ -665,6 +672,7 @@ impl ArmedControls {
             .raw_mode
             .disarm(
                 &touchpad.feature,
+                touchpad.gestures.as_ref(),
                 touchpad.journal.as_ref(),
                 &touchpad.journal_id,
             )
@@ -1123,7 +1131,23 @@ async fn arm_touchpad(
         slot,
         info.index,
     );
-    ArmedRawMode::recover(&feature, journal.as_ref(), journal_id)
+    let gestures = match device
+        .root()
+        .get_feature(hidpp::feature::gestures2::Gestures2Feature::ID)
+        .await
+    {
+        Ok(Some(info)) => Some(hidpp::feature::gestures2::Gestures2Feature::new(
+            Arc::clone(chan),
+            slot,
+            info.index,
+        )),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(%error, "0x6501 feature lookup failed — arming without the two-finger divert");
+            None
+        }
+    };
+    ArmedRawMode::recover(&feature, gestures.as_ref(), journal.as_ref(), journal_id)
         .await
         .map_err(|error| GestureError::Hidpp(error.to_string()))?;
     if !spec.capture_touchpad {
@@ -1135,13 +1159,14 @@ async fn arm_touchpad(
         .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
     let stream = TouchpadFrameStream::new(touchpad_info)
         .map_err(|error| GestureError::Hidpp(error.to_string()))?;
-    let raw_mode = ArmedRawMode::arm(&feature, journal.as_ref(), journal_id)
+    let raw_mode = ArmedRawMode::arm(&feature, gestures.as_ref(), journal.as_ref(), journal_id)
         .await
         .map_err(touchpad_capture_error)?;
     armed.touchpad = Some(ArmedTouchpad {
         feature,
         stream,
         raw_mode,
+        gestures,
         journal: Arc::clone(journal),
         journal_id: journal_id.clone(),
     });

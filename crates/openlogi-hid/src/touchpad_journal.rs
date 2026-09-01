@@ -137,6 +137,7 @@ mod tests {
             requested: 5,
             readback: Some(5),
             armed: true,
+            scroll2finger_diverted: Some(false),
         };
         let store = FileTouchpadJournalStore::at(path.clone()).expect("store");
         store.save("unit:12345678", journal).expect("save");

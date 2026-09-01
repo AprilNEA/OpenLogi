@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use hidpp::feature::gestures2::{Gestures2Feature, SCROLL_2FINGER_GESTURE_ID};
 use hidpp::feature::touchpad_raw_xy::{
     DualXyData, Origin, RawReportFlags, TouchPoint, TouchpadInfo, TouchpadRawXyFeature,
 };
@@ -22,10 +23,35 @@ const MISSED_FRAME_PERIODS: u64 = 4;
 const MIN_STROKE_END_TIMEOUT_US: u64 = 20_000;
 const MAX_STROKE_END_TIMEOUT_US: u64 = 60_000;
 
-/// Requested `0x6100` reporting mode: raw DualXY reports in the enhanced
-/// layout documented by the Linux `hid-logitech-hidpp` driver.
+/// Requested `0x6100` reporting mode: raw DualXY reports in the 14-bit
+/// layout our decoder parses. A bit-walk against the Casa Touch (0x01/0x05/
+/// 0x41/0x81/0xC1) showed bit 6 is the only one with observable effect —
+/// it selects this layout (0x01 without it makes deltas jump) and suppresses
+/// the firmware's own tap synthesis; bit 7 (Options+ arms `0xC1`) bought
+/// nothing there, and no combination stops the firmware from ending
+/// button-held drags with a native button-up when a second finger lands.
 pub const OPENLOGI_RAW_REPORT_FLAGS: RawReportFlags =
-    RawReportFlags::RAW.union(RawReportFlags::ENHANCED);
+    RawReportFlags::RAW.union(RawReportFlags::WIDTH_HEIGHT_8BIT);
+
+/// The bitmap to arm, honouring the bit-walk probing override: set
+/// `OPENLOGI_RAW_FLAGS_OVERRIDE` (hex, e.g. `41`) to test a firmware's
+/// behaviour per flag combination without a rebuild.
+fn requested_raw_report_flags() -> RawReportFlags {
+    let Ok(value) = std::env::var("OPENLOGI_RAW_FLAGS_OVERRIDE") else {
+        return OPENLOGI_RAW_REPORT_FLAGS;
+    };
+    let trimmed = value.trim_start_matches("0x");
+    match u8::from_str_radix(trimmed, 16) {
+        Ok(bits) => {
+            tracing::warn!(bits, "raw-report flags overridden for firmware probing");
+            RawReportFlags::from_bits_retain(bits)
+        }
+        Err(error) => {
+            tracing::warn!(%value, %error, "invalid OPENLOGI_RAW_FLAGS_OVERRIDE — using the built-in flags");
+            OPENLOGI_RAW_REPORT_FLAGS
+        }
+    }
+}
 
 /// One normalized event emitted by the touchpad stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +527,11 @@ pub struct RawModeJournal {
     pub readback: Option<u8>,
     /// Whether the write and readback completed successfully.
     pub armed: bool,
+    /// Divert state of the `0x6501` two-finger scroll gesture before
+    /// OpenLogi wrote anything, when this session diverted it. `None` means
+    /// the session never touched it.
+    #[serde(default)]
+    pub scroll2finger_diverted: Option<bool>,
 }
 
 /// A durable raw-mode journal store failed.
@@ -541,25 +572,31 @@ impl ArmedRawMode {
     /// mode before leaving the device native.
     pub async fn recover(
         feature: &TouchpadRawXyFeature,
+        gestures: Option<&Gestures2Feature>,
         store: &dyn TouchpadJournalStore,
         device_id: &str,
     ) -> Result<(), TouchpadCaptureError> {
-        recover_raw_mode(feature, store, device_id).await
+        recover_raw_mode(feature, gestures, store, device_id).await
     }
 
     /// Arm raw reporting after recovering any prior interrupted session.
+    /// `gestures`, when the device exposes `0x6501`, also diverts the
+    /// two-finger scroll gesture so the firmware stops its own two-finger
+    /// handling entirely — without that divert it keeps a click layer alive
+    /// that ends button-held drags the moment a second finger lands.
     pub async fn arm(
         feature: &TouchpadRawXyFeature,
+        gestures: Option<&Gestures2Feature>,
         store: &dyn TouchpadJournalStore,
         device_id: &str,
     ) -> Result<Self, TouchpadCaptureError> {
-        recover_raw_mode(feature, store, device_id).await?;
+        recover_raw_mode(feature, gestures, store, device_id).await?;
 
         let original = feature
             .get_raw_report_state()
             .await
             .map_err(protocol_error)?;
-        let requested = OPENLOGI_RAW_REPORT_FLAGS;
+        let requested = requested_raw_report_flags();
         if original.contains(RawReportFlags::RAW) {
             if original != requested {
                 return Err(TouchpadCaptureError::ExternalRawMode {
@@ -576,8 +613,10 @@ impl ArmedRawMode {
             requested: requested.bits(),
             readback: None,
             armed: false,
+            scroll2finger_diverted: None,
         };
         store.save(device_id, journal)?;
+        divert_scroll2finger(gestures, &mut journal, store, device_id).await?;
         feature
             .set_raw_report_state(requested)
             .await
@@ -589,11 +628,11 @@ impl ArmedRawMode {
         journal.readback = Some(readback.bits());
         journal.armed = readback == requested;
         if let Err(error) = store.save(device_id, journal) {
-            let _ = compare_and_restore(feature, store, device_id, journal).await;
+            let _ = compare_and_restore(feature, gestures, store, device_id, journal).await;
             return Err(error.into());
         }
         if readback != requested {
-            compare_and_restore(feature, store, device_id, journal).await?;
+            compare_and_restore(feature, gestures, store, device_id, journal).await?;
             return Err(TouchpadCaptureError::Readback {
                 requested: requested.bits(),
                 actual: readback.bits(),
@@ -616,11 +655,14 @@ impl ArmedRawMode {
     pub async fn disarm(
         self,
         feature: &TouchpadRawXyFeature,
+        gestures: Option<&Gestures2Feature>,
         store: &dyn TouchpadJournalStore,
         device_id: &str,
     ) -> Result<(), TouchpadCaptureError> {
         match self.journal {
-            Some(journal) => compare_and_restore(feature, store, device_id, journal).await,
+            Some(journal) => {
+                compare_and_restore(feature, gestures, store, device_id, journal).await
+            }
             None => Ok(()),
         }
     }
@@ -653,21 +695,83 @@ pub enum TouchpadCaptureError {
 
 async fn recover_raw_mode(
     feature: &TouchpadRawXyFeature,
+    gestures: Option<&Gestures2Feature>,
     store: &dyn TouchpadJournalStore,
     device_id: &str,
 ) -> Result<(), TouchpadCaptureError> {
     let Some(journal) = store.load(device_id)? else {
         return Ok(());
     };
-    compare_and_restore(feature, store, device_id, journal).await
+    compare_and_restore(feature, gestures, store, device_id, journal).await
+}
+
+/// Divert the `0x6501` two-finger scroll gesture, journaling the original
+/// state before the first write so an interrupted session still restores it.
+/// Absent gestures and unreadable state degrade to no divert — loudly, since
+/// the degradation is user-visible (the firmware's click layer then ends
+/// button-held drags); a failed write fails the arm rather than leaving a
+/// half-diverted device.
+async fn divert_scroll2finger(
+    gestures: Option<&Gestures2Feature>,
+    journal: &mut RawModeJournal,
+    store: &dyn TouchpadJournalStore,
+    device_id: &str,
+) -> Result<(), TouchpadCaptureError> {
+    let Some(gestures) = gestures else {
+        tracing::warn!("device exposes no 0x6501 Gestures — arming without the two-finger divert");
+        return Ok(());
+    };
+    let original = match gestures.gesture_diverted(SCROLL_2FINGER_GESTURE_ID).await {
+        Ok(Some(original)) => original,
+        Ok(None) => {
+            tracing::warn!(
+                "no divertable two-finger scroll gesture in 0x6501 — arming without the divert"
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::warn!(%error, "0x6501 gesture lookup failed — arming without the two-finger divert");
+            return Ok(());
+        }
+    };
+    journal.scroll2finger_diverted = Some(original);
+    if let Err(error) = store.save(device_id, *journal) {
+        return Err(error.into());
+    }
+    if original {
+        tracing::debug!("two-finger scroll already diverted — leaving it");
+        return Ok(());
+    }
+    let diverted = gestures
+        .set_gesture_diverted(SCROLL_2FINGER_GESTURE_ID, true)
+        .await
+        .map_err(protocol_error)?;
+    if !diverted {
+        journal.scroll2finger_diverted = None;
+        store.save(device_id, *journal)?;
+    }
+    Ok(())
 }
 
 async fn compare_and_restore(
     feature: &TouchpadRawXyFeature,
+    gestures: Option<&Gestures2Feature>,
     store: &dyn TouchpadJournalStore,
     device_id: &str,
     journal: RawModeJournal,
 ) -> Result<(), TouchpadCaptureError> {
+    // Un-divert before the raw mode returns: while raw reporting still arms
+    // the host owns two-finger motion, so the order never double-handles.
+    if let (Some(gestures), Some(false)) = (gestures, journal.scroll2finger_diverted)
+        && matches!(
+            gestures
+                .set_gesture_diverted(SCROLL_2FINGER_GESTURE_ID, false)
+                .await,
+            Ok(true)
+        )
+    {
+        tracing::debug!("restored 0x6501 two-finger scroll divert");
+    }
     let current = feature
         .get_raw_report_state()
         .await

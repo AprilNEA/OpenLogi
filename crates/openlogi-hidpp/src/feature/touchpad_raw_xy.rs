@@ -40,6 +40,12 @@ bitflags::bitflags! {
         const MAJOR_MINOR = 1 << 5;
         /// Report 8-bit width and height bytes instead of area.
         const WIDTH_HEIGHT_8BIT = 1 << 6;
+        /// Undocumented bit 7. Logi Options+ arms capture as `0xC1` (RAW |
+        /// WIDTH_HEIGHT_8BIT plus this bit) and its agent has no host-side
+        /// defence against the firmware's native click layer — the phantom
+        /// button events that kill captured drags — so this bit is the probe
+        /// for the firmware itself stopping that translation.
+        const DIVERT_NATIVE_GESTURES = 1 << 7;
     }
 }
 
