@@ -5713,12 +5713,14 @@ dependencies = [
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-ui",
+ "raw-window-handle",
  "rust-i18n",
  "succession",
  "tarpc",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
