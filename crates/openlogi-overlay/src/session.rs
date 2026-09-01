@@ -112,12 +112,18 @@ pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
         let Some(ring) = handle.downcast::<RingView>() else {
             continue;
         };
-        let _ = ring.update(cx, |view, window, _| {
+        let _ = ring.update(cx, |view, window, cx| {
             if !click_away_targets(session_id, view.session_id()) {
                 return;
             }
             view.cancel();
             window.remove_window();
+            // The ring's own Wayland layer-shell host (if any) doesn't close
+            // itself — every dismissal path must close it alongside the ring
+            // (#1206).
+            if let Some(host) = view.host() {
+                let _ = host.update(cx, |_, window, _| window.remove_window());
+            }
         });
     }
 }
