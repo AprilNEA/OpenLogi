@@ -65,6 +65,11 @@ impl AppState {
     pub fn request_accessibility_prompt(&self) {
         self.send_ipc(crate::services::ipc::Command::RequestAccessibilityPrompt);
     }
+    /// Ask the agent to request Input Monitoring and relaunch after a grant.
+    /// The agent owns HID access, so the GUI must not request this for itself.
+    pub fn request_input_monitoring(&self) {
+        self.send_ipc(crate::services::ipc::Command::RequestInputMonitoring);
+    }
     /// The agent connection state the render path branches on.
     #[must_use]
     pub fn agent_link(&self) -> &AgentLink {

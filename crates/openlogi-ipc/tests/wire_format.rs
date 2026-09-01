@@ -101,7 +101,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -206,6 +206,7 @@ fn request_variant_order() {
         },
         "1902",
     );
+    assert_wire(&AgentRequest::RequestInputMonitoring {}, "1a");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
