@@ -29,7 +29,7 @@ use gpui_component::{
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use openlogi_core::diagnostics::ConnectionKind;
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
@@ -267,7 +267,11 @@ fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
     let path = if matches!(record.kind, DeviceKind::Camera) {
         "action-icons/usb.svg"
     } else {
-        connection_icon_path(record.route.as_ref(), record.model_info.as_ref())
+        connection_icon_path(
+            record.route.as_ref(),
+            record.receiver_brand,
+            record.model_info.as_ref(),
+        )
     };
     let color: Hsla = match path {
         "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
@@ -499,7 +503,11 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
                 .path(if matches!(record.kind, DeviceKind::Camera) {
                     "action-icons/usb.svg"
                 } else {
-                    connection_icon_path(record.route.as_ref(), record.model_info.as_ref())
+                    connection_icon_path(
+                        record.route.as_ref(),
+                        record.receiver_brand,
+                        record.model_info.as_ref(),
+                    )
                 })
                 .size_3()
                 .flex_none(),
@@ -508,7 +516,7 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
 }
 
 fn connection_summary(record: &DeviceRecord) -> String {
-    let route = route_label(record.route.as_ref());
+    let route = route_label(record.route.as_ref(), record.receiver_brand);
     if matches!(
         record.route,
         Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
@@ -571,11 +579,15 @@ fn device_image(
 /// Connection-type glyph for a gallery card, classified from its active route.
 pub(super) fn connection_icon_path(
     route: Option<&DeviceRoute>,
+    receiver_brand: Option<ReceiverBrand>,
     model: Option<&DeviceModelInfo>,
 ) -> &'static str {
-    match ConnectionKind::for_device(route, model) {
+    match ConnectionKind::for_device(route, receiver_brand, model) {
         ConnectionKind::BoltReceiver => "action-icons/bolt.svg",
-        ConnectionKind::UnifyingReceiver => "action-icons/unifying.svg",
+        // TODO: Replace the Nano and Lightspeed fallbacks with their appropriate logos.
+        ConnectionKind::UnifyingReceiver
+        | ConnectionKind::NanoReceiver
+        | ConnectionKind::LightspeedReceiver => "action-icons/unifying.svg",
         ConnectionKind::BluetoothDirect => "action-icons/bluetooth.svg",
         ConnectionKind::Wired => "action-icons/usb.svg",
         ConnectionKind::Unknown => "action-icons/circle-dot.svg",

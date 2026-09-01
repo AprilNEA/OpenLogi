@@ -99,12 +99,11 @@ pub fn is_receiver_pid(product_id: u16) -> bool {
 /// but are surfaced under their own name.
 #[must_use]
 pub fn receiver_display_name(product_id: u16) -> &'static str {
-    if find_receiver(LOGITECH_VENDOR_ID, product_id)
-        .is_some_and(|receiver| receiver.brand == ReceiverBrand::Lightspeed)
-    {
-        "Lightspeed Receiver"
-    } else {
-        "Unifying Receiver"
+    match find_receiver(LOGITECH_VENDOR_ID, product_id).map(|receiver| receiver.brand) {
+        Some(ReceiverBrand::Bolt) => "Logi Bolt Receiver",
+        Some(ReceiverBrand::Nano) => "Nano Receiver",
+        Some(ReceiverBrand::Lightspeed) => "Lightspeed Receiver",
+        Some(ReceiverBrand::Unifying) | None => "Unifying Receiver",
     }
 }
 
