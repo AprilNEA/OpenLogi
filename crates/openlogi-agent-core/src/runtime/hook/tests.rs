@@ -9,7 +9,10 @@ fn token(id: u64, button: ButtonId) -> PressToken {
 
 #[test]
 fn senderless_buttons_follow_the_platform_source_policy() {
-    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
+    assert_eq!(
+        button_source_may_remap(ButtonId::Back, None, false),
+        !cfg!(target_os = "macos")
+    );
 }
 
 #[test]
@@ -23,8 +26,42 @@ fn attributed_sources_still_follow_the_device_policy() {
         ..EventDevice::default()
     };
 
-    assert!(!button_source_may_remap(Some(&trackpad)));
-    assert!(button_source_may_remap(Some(&logitech_mouse)));
+    assert!(!button_source_may_remap(
+        ButtonId::Back,
+        Some(&trackpad),
+        false
+    ));
+    assert!(button_source_may_remap(
+        ButtonId::Back,
+        Some(&logitech_mouse),
+        false
+    ));
+}
+
+fn test_dispatcher() -> (
+    ActionDispatcher,
+    super::super::button::ButtonRuntimeOwner,
+    mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
+) {
+    let (events, received) = mpsc::channel();
+    let owner = super::super::button::ButtonRuntimeOwner::spawn(move |event| {
+        events
+            .send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = ActionDispatcher {
+        executor: super::super::ActionExecutor {
+            dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            capture: Arc::new(RwLock::new(None)),
+            registry: openlogi_hid::ChannelRegistry::default(),
+            receiver_access: crate::receiver_access::ReceiverAccess::default(),
+            action_ring,
+        },
+        buttons: owner.input(),
+    };
+    (dispatcher, owner, received)
 }
 
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
@@ -170,6 +207,111 @@ fn rejected_key_edges_fail_open() {
         queued_event_disposition(false),
         EventDisposition::PassThrough
     );
+}
+
+#[test]
+fn queued_key_action_retains_its_press_time_target() {
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let keycode = 0x7a;
+    let modifiers = KeyModifiers::default();
+    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+        KeyTrigger { keycode, modifiers },
+        Action::BrowserBack,
+    )])));
+    let (actions, queued) = mpsc::sync_channel(1);
+    let target = ActionDispatchTarget::SafariProcess(417);
+
+    assert_eq!(
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed: true,
+                modifiers: openlogi_hook::KeyModifiers::default(),
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            || target,
+        ),
+        EventDisposition::Suppress
+    );
+    assert_eq!(
+        queued.recv().expect("action should be queued"),
+        (Action::BrowserBack, target)
+    );
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn unattributed_extra_buttons_preserve_the_narrow_macos_exception() {
+    for id in [ButtonId::Back, ButtonId::Forward] {
+        assert_eq!(
+            button_source_may_remap(id, None, false),
+            !cfg!(target_os = "macos"),
+            "macOS keeps sender-less browser buttons native outside Safari"
+        );
+        assert!(button_source_may_remap(id, None, true));
+    }
+    assert_eq!(
+        button_source_may_remap(ButtonId::MiddleClick, None, true),
+        !cfg!(target_os = "macos"),
+        "macOS admits only sender-less Back and Forward events"
+    );
+}
+
+#[test]
+fn accepted_unattributed_press_release_is_consumed_once() {
+    let mut presses = AcceptedUnattributedPresses::default();
+
+    assert!(!presses.take(ButtonId::Back));
+    presses.accept(ButtonId::Back);
+    assert!(presses.take(ButtonId::Back));
+    assert!(!presses.take(ButtonId::Back));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn missing_unattributed_release_keeps_the_next_native_pair_balanced() {
+    HOLD.with_borrow_mut(HoldState::cancel);
+    ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(AcceptedUnattributedPresses::clear);
+    FAIL_OPEN_PRESSES.with_borrow_mut(HashSet::clear);
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::new(),
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+    }));
+
+    assert_eq!(
+        handle_button(ButtonId::Back, true, None, &hooks, &dispatcher, || {
+            ActionDispatchTarget::SafariProcess(417)
+        },),
+        EventDisposition::Suppress
+    );
+    assert!(matches!(
+        events.recv().expect("press should start"),
+        super::super::button::ButtonRuntimeEvent::Started(_)
+    ));
+
+    assert_eq!(
+        handle_button(ButtonId::Back, true, None, &hooks, &dispatcher, || {
+            ActionDispatchTarget::Keyboard
+        },),
+        EventDisposition::PassThrough
+    );
+    assert!(matches!(
+        events.recv().expect("stale press should end"),
+        super::super::button::ButtonRuntimeEvent::Ended {
+            reason: super::super::button::EndReason::Released,
+            ..
+        }
+    ));
+    assert_eq!(
+        handle_button(ButtonId::Back, false, None, &hooks, &dispatcher, || {
+            ActionDispatchTarget::Keyboard
+        },),
+        EventDisposition::PassThrough
+    );
+    assert!(owner.shutdown());
 }
 
 #[test]

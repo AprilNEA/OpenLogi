@@ -20,7 +20,7 @@ use openlogi_hook::{
 use tracing::{info, warn};
 
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
@@ -186,25 +186,54 @@ thread_local! {
     /// rejected the remap. Their matching release must also pass through so
     /// apps never see a stuck auxiliary button (down without up).
     static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    static ACCEPTED_UNATTRIBUTED_PRESSES: RefCell<AcceptedUnattributedPresses> =
+        RefCell::new(AcceptedUnattributedPresses::default());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
-/// Whether a button event's physical source may be remapped/suppressed.
+#[derive(Default)]
+struct AcceptedUnattributedPresses {
+    buttons: HashSet<ButtonId>,
+}
+
+impl AcceptedUnattributedPresses {
+    fn accept(&mut self, id: ButtonId) {
+        self.buttons.insert(id);
+    }
+
+    fn take(&mut self, id: ButtonId) -> bool {
+        self.buttons.remove(&id)
+    }
+
+    fn clear(&mut self) {
+        self.buttons.clear();
+    }
+}
+
+/// Whether a translated mouse button is safe to remap.
 ///
-/// macOS fails closed because its hook is global: only a known Logitech,
-/// non-trackpad source may be suppressed. Bluetooth-direct Back/Forward
-/// gestures are captured through their device-specific HID++ session instead
-/// of weakening this policy. Linux/Windows restrict hook attachment upstream,
-/// so an unavailable source remains eligible there.
-fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
+/// macOS normally attributes CGEvents to an IOKit sender, but physical Back /
+/// Forward events can arrive without the backing IOHIDEvent. While Safari is
+/// frontmost, those two extra buttons are safe to admit: primary clicks are
+/// rejected before this policy, trackpad gestures arrive as scroll/motion
+/// rather than OtherMouse button 3/4, and OpenLogi's own synthetic events are
+/// filtered in the hook backend. Other apps and button types remain fail-closed
+/// when macOS omits attribution. Linux and Windows select the device before the
+/// callback, so their unattributed hook buttons remain remappable.
+fn button_source_may_remap(
+    id: ButtonId,
+    device: Option<&EventDevice>,
+    safari_is_frontmost: bool,
+) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
-        // Linux/Windows restrict which devices the hook attaches to upstream.
-        // macOS uses one global tap, so an unattributed event must fail closed.
-        None => !cfg!(target_os = "macos"),
+        None if cfg!(target_os = "macos") => {
+            safari_is_frontmost && matches!(id, ButtonId::Back | ButtonId::Forward)
+        }
+        None => true,
     }
 }
 
@@ -215,17 +244,23 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
 /// selection before this callback and therefore admit their unattributed
 /// wheel events through the same policy as button remapping.
 fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
-    !from_trackpad && button_source_may_remap(device)
+    !from_trackpad
+        && match device {
+            Some(d) => source_is_remappable(Some(d)),
+            None => !cfg!(target_os = "macos"),
+        }
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
-fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action> {
-    let (tx, rx) = mpsc::sync_channel::<Action>(64);
+type QueuedAction = (Action, ActionDispatchTarget);
+
+fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedAction> {
+    let (tx, rx) = mpsc::sync_channel::<QueuedAction>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
-            while let Ok(action) = rx.recv() {
-                dispatcher.dispatch(&action, None);
+            while let Ok((action, target)) = rx.recv() {
+                dispatcher.executor.dispatch_to(&action, None, target);
             }
         });
     tx
@@ -233,8 +268,12 @@ fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action>
 
 /// Queue a bound action without blocking the tap callback. Returns `false` if
 /// the queue is full (caller should fail open and pass the physical event).
-fn try_queue_action(tx: &mpsc::SyncSender<Action>, action: Action) -> bool {
-    if tx.try_send(action).is_err() {
+fn try_queue_action(
+    tx: &mpsc::SyncSender<QueuedAction>,
+    action: Action,
+    target: ActionDispatchTarget,
+) -> bool {
+    if tx.try_send((action, target)).is_err() {
         warn!("action queue full — dropping bound action to keep the input hook live");
         false
     } else {
@@ -249,9 +288,38 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
+    capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.is_os_hook_button() {
+        return EventDisposition::PassThrough;
+    }
+    let macos_browser_button =
+        cfg!(target_os = "macos") && matches!(id, ButtonId::Back | ButtonId::Forward);
+    if pressed
+        && macos_browser_button
+        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id))
+    {
+        let _ = HOLD.with_borrow_mut(|hold| hold.end(id));
+        dispatcher.try_hook_button_up(id);
+    }
+    let accepted_unattributed_release = macos_browser_button
+        && !pressed
+        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id));
+    let unattributed_browser_down = macos_browser_button && pressed && device.is_none();
+    let action_target = if pressed {
+        capture_target()
+    } else {
+        ActionDispatchTarget::Keyboard
+    };
+    let safari_exception = unattributed_browser_down
+        && matches!(action_target, ActionDispatchTarget::SafariProcess(_));
+    if !accepted_unattributed_release && !button_source_may_remap(id, device, safari_exception) {
+        if !pressed && macos_browser_button && device.is_none() {
+            FAIL_OPEN_PRESSES.with_borrow_mut(|presses| {
+                presses.remove(&id);
+            });
+        }
         return EventDisposition::PassThrough;
     }
 
@@ -267,7 +335,10 @@ fn handle_button(
             if let Some(HoldAdmission::Replace(stale)) = &admission {
                 dispatcher.cancel_stale_hook_press(stale);
             }
-            if let Some(press) = dispatcher.try_hook_button_down(id, None) {
+            if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
+                if unattributed_browser_down {
+                    ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
+                }
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
                 return EventDisposition::Suppress;
             }
@@ -290,6 +361,10 @@ fn handle_button(
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
+        if accepted_unattributed_release {
+            dispatcher.try_hook_button_up(id);
+            return EventDisposition::Suppress;
+        }
     }
 
     let binding = hooks
@@ -305,8 +380,11 @@ fn handle_button(
     if pressed {
         info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
         let queued = dispatcher
-            .try_hook_button_down(id, Some(&binding))
+            .try_hook_button_down(id, Some(&binding), action_target)
             .is_some();
+        if queued && unattributed_browser_down {
+            ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
+        }
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
     dispatcher.try_hook_button_up(id);
@@ -383,8 +461,9 @@ fn handle_moved(
 fn handle_key(
     event: KeyEvent,
     bindings: &SharedKeyboardBindings,
-    action_tx: &mpsc::SyncSender<Action>,
+    action_tx: &mpsc::SyncSender<QueuedAction>,
     dispatcher: &ActionDispatcher,
+    capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     let KeyEvent {
         keycode,
@@ -416,8 +495,9 @@ fn handle_key(
     };
 
     info!(keycode, action = %action.label(), "key → executing bound action");
+    let action_target = capture_target();
     let queued = if action.held_combo().is_some() {
-        let queued = dispatcher.try_hook_key_down(keycode, &action);
+        let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
                 keys.insert(keycode);
@@ -425,7 +505,7 @@ fn handle_key(
         }
         queued
     } else {
-        try_queue_action(action_tx, action)
+        try_queue_action(action_tx, action, action_target)
     };
     queued_event_disposition(queued)
 }
@@ -460,12 +540,21 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
+                } => handle_button(
+                    id,
+                    pressed,
+                    device.as_ref(),
+                    &hooks,
+                    &dispatcher,
+                    ActionDispatchTarget::capture,
+                ),
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
+                    ACCEPTED_UNATTRIBUTED_PRESSES
+                        .with_borrow_mut(AcceptedUnattributedPresses::clear);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();
@@ -484,7 +573,11 @@ pub fn start(
                             .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        return queued_event_disposition(try_queue_action(&action_tx, action));
+                        return queued_event_disposition(try_queue_action(
+                            &action_tx,
+                            action,
+                            ActionDispatchTarget::capture(),
+                        ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
@@ -497,7 +590,13 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
-        HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),
+        HookEvent::Key(event) => handle_key(
+            event,
+            &keyboard_bindings,
+            &action_tx,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        ),
     });
 
     match result {
