@@ -529,7 +529,7 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
 }
 
 fn connection_summary(record: &DeviceRecord) -> String {
-    let route = route_label(record.route.as_ref());
+    let route = route_label(record.route.as_ref(), record.receiver_brand);
     if matches!(
         record.route,
         Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
@@ -613,6 +613,7 @@ pub(super) fn connection_icon_path(
 
     match route {
         Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
+        // TODO: Replace the Nano and Lightspeed fallbacks with their appropriate logos.
         Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
         // Offline records retain model information but have no live route.
         Some(DeviceRoute::Direct { .. }) | None => match model.map(|m| m.transports) {

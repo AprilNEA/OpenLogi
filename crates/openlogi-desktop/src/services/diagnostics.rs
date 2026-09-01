@@ -8,7 +8,7 @@ use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::services::assets::AssetResolver;
@@ -121,7 +121,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
                 codename: paired.and_then(|p| p.codename.clone()),
-                connection: connection_for(record.route.as_ref(), model),
+                connection: connection_for(record.route.as_ref(), record.receiver_brand, model),
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
@@ -163,10 +163,20 @@ fn find_paired<'a>(
 /// static, unordered transport flags (as this used to do unconditionally)
 /// mislabels a USB-connected multi-transport device as Bluetooth, since a
 /// device that supports both always has both flags set: see issue #1218.
-fn connection_for(route: Option<&DeviceRoute>, model: Option<&DeviceModelInfo>) -> ConnectionKind {
+fn connection_for(
+    route: Option<&DeviceRoute>,
+    receiver_brand: Option<ReceiverBrand>,
+    model: Option<&DeviceModelInfo>,
+) -> ConnectionKind {
     match route {
         Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
-        Some(DeviceRoute::Unifying { .. }) => ConnectionKind::UnifyingReceiver,
+        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
+            Some(ReceiverBrand::Nano) => ConnectionKind::NanoReceiver,
+            Some(ReceiverBrand::Lightspeed) => ConnectionKind::LightspeedReceiver,
+            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                ConnectionKind::UnifyingReceiver
+            }
+        },
         Some(DeviceRoute::Direct { product_id, .. }) => {
             match model.and_then(|m| m.transport_for_product_id(*product_id)) {
                 Some(ModelTransport::Bluetooth | ModelTransport::Btle) => {
