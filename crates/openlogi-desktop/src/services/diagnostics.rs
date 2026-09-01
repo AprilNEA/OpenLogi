@@ -237,7 +237,7 @@ fn arch_label() -> &'static str {
 mod connection_for_tests {
     use openlogi_core::device::DeviceTransports;
 
-    use super::{ConnectionKind, DeviceModelInfo, DeviceRoute, connection_for};
+    use super::{ConnectionKind, DeviceModelInfo, DeviceRoute, ReceiverBrand, connection_for};
 
     /// G915 X LS from issue #1218: reports all three transports (USB, eQuad,
     /// BTLE), model_ids packed BTLE/eQuad/USB per the ascending-bit-order
@@ -266,7 +266,7 @@ mod connection_for_tests {
             product_id: 0xc356, // the USB slot in model_ids
         };
         assert_eq!(
-            connection_for(Some(&route), Some(&model)),
+            connection_for(Some(&route), None, Some(&model)),
             ConnectionKind::Wired,
             "a device plugged in over USB must be labeled wired even though \
              it also supports Bluetooth/BTLE"
@@ -281,7 +281,7 @@ mod connection_for_tests {
             product_id: 0xb38a, // the BTLE slot in model_ids
         };
         assert_eq!(
-            connection_for(Some(&route), Some(&model)),
+            connection_for(Some(&route), None, Some(&model)),
             ConnectionKind::BluetoothDirect,
             "the same multi-transport device connected over BTLE must be \
              labeled Bluetooth, proving the label follows the live route \
@@ -299,7 +299,7 @@ mod connection_for_tests {
         // No live match: falls back to the old best-effort guess from the
         // static transport flags (bluetooth/btle preferred there too).
         assert_eq!(
-            connection_for(Some(&route), Some(&model)),
+            connection_for(Some(&route), None, Some(&model)),
             ConnectionKind::BluetoothDirect
         );
     }
@@ -310,7 +310,10 @@ mod connection_for_tests {
             vendor_id: 0x046d,
             product_id: 0xc356,
         };
-        assert_eq!(connection_for(Some(&route), None), ConnectionKind::Unknown);
+        assert_eq!(
+            connection_for(Some(&route), None, None),
+            ConnectionKind::Unknown
+        );
     }
 
     #[test]
@@ -322,6 +325,7 @@ mod connection_for_tests {
                     receiver_uid: "r1".to_string(),
                     slot: 1,
                 }),
+                None,
                 Some(&model)
             ),
             ConnectionKind::BoltReceiver
@@ -332,9 +336,32 @@ mod connection_for_tests {
                     receiver_uid: "r1".to_string(),
                     slot: 1,
                 }),
+                None,
                 Some(&model)
             ),
             ConnectionKind::UnifyingReceiver
         );
+    }
+
+    #[test]
+    fn receiver_product_families_use_the_registered_brand() {
+        let route = DeviceRoute::Unifying {
+            receiver_uid: "r1".to_string(),
+            slot: 1,
+        };
+        for (brand, expected) in [
+            (None, ConnectionKind::UnifyingReceiver),
+            (
+                Some(ReceiverBrand::Unifying),
+                ConnectionKind::UnifyingReceiver,
+            ),
+            (Some(ReceiverBrand::Nano), ConnectionKind::NanoReceiver),
+            (
+                Some(ReceiverBrand::Lightspeed),
+                ConnectionKind::LightspeedReceiver,
+            ),
+        ] {
+            assert_eq!(connection_for(Some(&route), brand, None), expected);
+        }
     }
 }
