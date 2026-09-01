@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::device::{
     BatteryInfo, BatteryStatus, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
-use crate::hid::DeviceRoute;
+use crate::hid::{DeviceRoute, ReceiverBrand};
 
 /// Where the resolver found the bundled device renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,10 @@ pub enum ConnectionKind {
     BoltReceiver,
     /// Paired through a legacy Unifying receiver.
     UnifyingReceiver,
+    /// Paired through a Logitech Nano receiver.
+    NanoReceiver,
+    /// Paired through a Logitech Lightspeed receiver.
+    LightspeedReceiver,
     /// Connected directly over Bluetooth — no receiver involved.
     BluetoothDirect,
     /// Connected over a USB cable.
@@ -40,10 +44,20 @@ pub enum ConnectionKind {
 impl ConnectionKind {
     /// Classify the active connection from its route and HID++ model information.
     #[must_use]
-    pub fn for_device(route: Option<&DeviceRoute>, model: Option<&DeviceModelInfo>) -> Self {
+    pub fn for_device(
+        route: Option<&DeviceRoute>,
+        receiver_brand: Option<ReceiverBrand>,
+        model: Option<&DeviceModelInfo>,
+    ) -> Self {
         match route {
             Some(DeviceRoute::Bolt { .. }) => Self::BoltReceiver,
-            Some(DeviceRoute::Unifying { .. }) => Self::UnifyingReceiver,
+            Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
+                Some(ReceiverBrand::Nano) => Self::NanoReceiver,
+                Some(ReceiverBrand::Lightspeed) => Self::LightspeedReceiver,
+                Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                    Self::UnifyingReceiver
+                }
+            },
             Some(DeviceRoute::Direct { product_id, .. }) => {
                 model.map_or(Self::Unknown, |model| direct_connection(*product_id, model))
             }
@@ -469,6 +483,8 @@ fn connection_label(connection: ConnectionKind) -> &'static str {
     match connection {
         ConnectionKind::BoltReceiver => "Logi Bolt receiver",
         ConnectionKind::UnifyingReceiver => "Logi Unifying receiver",
+        ConnectionKind::NanoReceiver => "Logitech Nano receiver",
+        ConnectionKind::LightspeedReceiver => "Logitech Lightspeed receiver",
         ConnectionKind::BluetoothDirect => "Bluetooth (direct)",
         ConnectionKind::Wired => "Wired (USB)",
         ConnectionKind::Unknown => "unknown",
