@@ -145,18 +145,28 @@ fn dispatch_native(action: &Action, native: NativeAction) {
     let alt = KeyCode::KEY_LEFTALT;
     match native {
         // No universal Linux equivalent; the compositor shortcut varies.
-        NativeAction::MissionControl
-        | NativeAction::AppExpose
-        | NativeAction::ShowDesktop
-        | NativeAction::LaunchpadShow => {
+        NativeAction::LaunchpadShow => {
             tracing::debug!(
                 action = action.label(),
                 "no Linux equivalent — action skipped"
             );
         }
-        // Ctrl+Alt+←/→ is the default in GNOME and KDE.
-        NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
-        NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
+        // KWin's Overview and "Expose windows of current class" effects,
+        // triggered through its global-shortcut component. KDE only — other
+        // compositors have no comparable named effect to invoke.
+        NativeAction::MissionControl => kwin_invoke_shortcut(action, "Overview"),
+        NativeAction::AppExpose => kwin_invoke_shortcut(action, "ExposeClass"),
+        NativeAction::ShowDesktop => kwin_toggle_show_desktop(action),
+        // Ctrl+Alt+←/→ is the default in GNOME and KDE; on KDE, drive KWin's
+        // D-Bus API directly and fall back to the key combo elsewhere.
+        NativeAction::PreviousDesktop => {
+            kwin_switch_desktop("previousDesktop")
+                .unwrap_or_else(|| press_key(&[ctrl, alt], KeyCode::KEY_LEFT));
+        }
+        NativeAction::NextDesktop => {
+            kwin_switch_desktop("nextDesktop")
+                .unwrap_or_else(|| press_key(&[ctrl, alt], KeyCode::KEY_RIGHT));
+        }
         // logind LockSession() via the system bus; falls back to Super+L.
         NativeAction::LockScreen => lock_screen(),
         // Region vs full-screen capture depends on the desktop environment's
@@ -649,6 +659,113 @@ fn sleep_system() {
     ) {
         Ok(_) => tracing::debug!("Sleep via logind Suspend"),
         Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+    }
+}
+
+/// The KWin session bus, but only on KDE. KDE is identified by the XDG_CURRENT_DESKTOP
+/// environment variable
+fn kwin_bus() -> Option<&'static DbusConn> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    if !desktop.contains("kde") {
+        return None;
+    }
+    SESSION_BUS.as_ref().or_else(|| {
+        tracing::warn!("KDE session but no D-Bus session bus — KWin action skipped");
+        None
+    })
+}
+
+/// Trigger a named KWin effect (`Overview`, `ExposeClass`, …) through the
+/// KDE global-shortcut component. No-op with a debug log off KDE.
+fn kwin_invoke_shortcut(action: &Action, effect: &str) {
+    let Some(conn) = kwin_bus() else {
+        tracing::debug!(
+            action = action.label(),
+            "only implemented for KDE — action skipped"
+        );
+        return;
+    };
+    match conn.call_method(
+        Some("org.kde.kglobalaccel"),
+        "/component/kwin",
+        Some("org.kde.kglobalaccel.Component"),
+        "invokeShortcut",
+        &(effect,),
+    ) {
+        Ok(_) => tracing::debug!(effect, "invoked KWin shortcut"),
+        Err(e) => tracing::warn!("KWin invokeShortcut({effect}) failed: {e}"),
+    }
+}
+
+/// Toggle KWin's "show desktop" state, reading the current value first so the
+/// action mirrors the native toggle. No-op with a debug log off KDE.
+fn kwin_toggle_show_desktop(action: &Action) {
+    let Some(conn) = kwin_bus() else {
+        tracing::debug!(
+            action = action.label(),
+            "only implemented for KDE — action skipped"
+        );
+        return;
+    };
+    let showing = match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &("org.kde.KWin", "showingDesktop"),
+    ) {
+        Ok(reply) => match reply.body().deserialize::<zbus::zvariant::Value<'_>>() {
+            Ok(value) => match value.downcast::<bool>() {
+                Ok(showing) => showing,
+                Err(e) => {
+                    tracing::warn!("KWin showingDesktop decode failed: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!("KWin showingDesktop decode failed: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!("KWin showingDesktop query failed: {e}");
+            return;
+        }
+    };
+    match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.kde.KWin"),
+        "showDesktop",
+        &(!showing,),
+    ) {
+        Ok(_) => tracing::debug!(showing = !showing, "toggled KWin show-desktop"),
+        Err(e) => tracing::warn!("KWin showDesktop failed: {e}"),
+    }
+}
+
+/// Call a KWin virtual-desktop navigation method (`previousDesktop` /
+/// `nextDesktop`). Returns `None` when the action was not handled — off KDE,
+/// or when the D-Bus call failed — so the caller can fall back to a key combo.
+fn kwin_switch_desktop(method: &str) -> Option<()> {
+    let conn = kwin_bus()?;
+    match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.kde.KWin"),
+        method,
+        &(),
+    ) {
+        Ok(_) => {
+            tracing::debug!(method, "switched virtual desktop via KWin");
+            Some(())
+        }
+        Err(e) => {
+            tracing::warn!("KWin {method} failed: {e}");
+            None
+        }
     }
 }
 
