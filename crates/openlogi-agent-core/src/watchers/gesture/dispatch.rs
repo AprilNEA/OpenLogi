@@ -134,6 +134,11 @@ struct TouchpadOutcome {
     stream: SwipeOutput,
 }
 
+/// How long tap synthesis stays suppressed after a glide ends, however it
+/// ended — a touch landing to stop the glide must not fire a tap. Options+
+/// runs the same 500 ms window from its scroll-inertia stop.
+const TAP_SUPPRESSION_AFTER_GLIDE: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Default)]
 struct TouchpadRuntime {
     recognizer: TouchpadGestureRecognizer,
@@ -153,6 +158,8 @@ struct TouchpadRuntime {
     last_frame_us: Option<u64>,
     /// A committed swipe streaming its DockSwipe animation, if any.
     stream: Option<ActiveSwipe>,
+    /// Until when tap resolution stays suppressed, armed when a glide ends.
+    taps_suppressed_until: Option<std::time::Instant>,
 }
 
 impl TouchpadRuntime {
@@ -213,10 +220,17 @@ impl TouchpadRuntime {
     }
 
     fn end(&mut self, actions_enabled: bool) -> TouchpadOutcome {
+        let suppressed = match self.taps_suppressed_until {
+            Some(until) if std::time::Instant::now() < until => true,
+            _ => {
+                self.taps_suppressed_until = None;
+                false
+            }
+        };
         let action = self
             .recognizer
             .end()
-            .filter(|_| self.frozen_actions_enabled && actions_enabled)
+            .filter(|_| !suppressed && self.frozen_actions_enabled && actions_enabled)
             .and_then(|trigger| self.action(trigger));
         let terminal = self.close_scroll_stream(true);
         let stream = self
@@ -316,6 +330,11 @@ impl TouchpadRuntime {
             .get(&trigger)
             .cloned()
             .map(|action| (trigger, action))
+    }
+
+    /// Suppress tap resolution for `window`, from a glide that just ended.
+    fn suppress_taps(&mut self, window: std::time::Duration) {
+        self.taps_suppressed_until = Some(std::time::Instant::now() + window);
     }
 }
 
@@ -628,8 +647,15 @@ impl InputDispatcher {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
             CapturedInput::TouchpadFrame(frame) => {
-                // Touch re-lands: stop any gliding tail before the new stroke.
-                self.stop_momentum();
+                // Touch re-lands, or the glide decayed out since the last
+                // frame: either way the tail is over, and the stopping touch
+                // must not resolve into a tap.
+                if let Some(momentum) = self.momentum.take() {
+                    momentum.stop();
+                    self.touchpads
+                        .for_session(session)
+                        .suppress_taps(TAP_SUPPRESSION_AFTER_GLIDE);
+                }
                 let tuning = TouchpadScrollTuning::from_plan(plan);
                 let native_streaming = openlogi_inject::dock_swipe_supported();
                 let outcome = self.touchpads.for_session(session).update(

@@ -105,29 +105,31 @@ fn replacement_session_does_not_inherit_partial_progress() {
 fn touchpad_stroke_freezes_bindings_from_its_first_frame() {
     use openlogi_core::touchpad::TouchContact;
 
-    let frame = TouchFrame::new(
-        1_000,
-        false,
-        vec![
-            TouchContact {
-                id: 1,
-                x_um: 10_000,
-                y_um: 10_000,
-            },
-            TouchContact {
-                id: 2,
-                x_um: 20_000,
-                y_um: 10_000,
-            },
-        ],
-    )
-    .expect("valid frame");
+    let contacts = vec![
+        TouchContact {
+            id: 1,
+            x_um: 10_000,
+            y_um: 10_000,
+        },
+        TouchContact {
+            id: 2,
+            x_um: 20_000,
+            y_um: 10_000,
+        },
+    ];
+    let frame = TouchFrame::new(1_000, false, contacts.clone()).expect("valid frame");
+    // One aged frame: a tap only resolves once it held for 30 ms.
+    let aged = TouchFrame::new(50_000, false, contacts).expect("valid frame");
     let trigger = ButtonId::TouchpadTwoFingerTap;
     let mut runtime = TouchpadRuntime::default();
     let first_profile = BTreeMap::from([(trigger, Action::Copy)]);
     let replacement_profile = BTreeMap::from([(trigger, Action::Paste)]);
 
     assert_eq!(runtime.update(&frame, &first_profile, true, false), idle());
+    assert_eq!(
+        runtime.update(&aged, &replacement_profile, true, false),
+        idle()
+    );
     // A foreground-app change can replace the live plan before lift. The tap
     // must still resolve against the profile active when the stroke began.
     assert_eq!(
@@ -142,6 +144,7 @@ fn touchpad_stroke_freezes_bindings_from_its_first_frame() {
         runtime.update(&frame, &replacement_profile, true, false),
         idle()
     );
+    assert_eq!(runtime.update(&aged, &first_profile, true, false), idle());
     assert_eq!(
         runtime.end(true).routed,
         TouchpadOutput::Action {
@@ -152,26 +155,128 @@ fn touchpad_stroke_freezes_bindings_from_its_first_frame() {
 }
 
 #[test]
+fn a_touch_within_the_glide_suppression_window_cannot_tap() {
+    use openlogi_core::touchpad::TouchContact;
+
+    let contacts = vec![
+        TouchContact {
+            id: 1,
+            x_um: 10_000,
+            y_um: 10_000,
+        },
+        TouchContact {
+            id: 2,
+            x_um: 20_000,
+            y_um: 10_000,
+        },
+    ];
+    let trigger = ButtonId::TouchpadTwoFingerTap;
+    let bindings = BTreeMap::from([(trigger, Action::Copy)]);
+    let mut runtime = TouchpadRuntime::default();
+
+    runtime.suppress_taps(std::time::Duration::from_millis(500));
+    assert_eq!(
+        runtime.update(
+            &TouchFrame::new(1_000, false, contacts.clone()).expect("valid frame"),
+            &bindings,
+            true,
+            false
+        ),
+        idle()
+    );
+    assert_eq!(
+        runtime.update(
+            &TouchFrame::new(50_000, false, contacts).expect("valid frame"),
+            &bindings,
+            true,
+            false
+        ),
+        idle()
+    );
+    // The stopping touch of a glide must not resolve into its bound action.
+    assert_eq!(runtime.end(true).routed, TouchpadOutput::Idle);
+
+    // A zero window has already expired: the next identical tap fires.
+    let mut expired = TouchpadRuntime::default();
+    expired.suppress_taps(std::time::Duration::ZERO);
+    assert_eq!(
+        expired.update(
+            &TouchFrame::new(
+                1_000,
+                false,
+                vec![
+                    TouchContact {
+                        id: 1,
+                        x_um: 10_000,
+                        y_um: 10_000,
+                    },
+                    TouchContact {
+                        id: 2,
+                        x_um: 20_000,
+                        y_um: 10_000,
+                    },
+                ],
+            )
+            .expect("valid frame"),
+            &bindings,
+            true,
+            false
+        ),
+        idle()
+    );
+    assert_eq!(
+        expired.update(
+            &TouchFrame::new(
+                50_000,
+                false,
+                vec![
+                    TouchContact {
+                        id: 1,
+                        x_um: 10_000,
+                        y_um: 10_000,
+                    },
+                    TouchContact {
+                        id: 2,
+                        x_um: 20_000,
+                        y_um: 10_000,
+                    },
+                ],
+            )
+            .expect("valid frame"),
+            &bindings,
+            true,
+            false
+        ),
+        idle()
+    );
+    assert_eq!(
+        expired.end(true).routed,
+        TouchpadOutput::Action {
+            trigger,
+            action: Action::Copy
+        }
+    );
+}
+
+#[test]
 fn diagnostic_touchpad_stroke_cannot_fire_if_management_enables_mid_stroke() {
     use openlogi_core::touchpad::TouchContact;
 
-    let frame = TouchFrame::new(
-        1_000,
-        false,
-        vec![
-            TouchContact {
-                id: 1,
-                x_um: 10_000,
-                y_um: 10_000,
-            },
-            TouchContact {
-                id: 2,
-                x_um: 20_000,
-                y_um: 10_000,
-            },
-        ],
-    )
-    .expect("valid frame");
+    let contacts = vec![
+        TouchContact {
+            id: 1,
+            x_um: 10_000,
+            y_um: 10_000,
+        },
+        TouchContact {
+            id: 2,
+            x_um: 20_000,
+            y_um: 10_000,
+        },
+    ];
+    let frame = TouchFrame::new(1_000, false, contacts.clone()).expect("valid frame");
+    // One aged frame: a tap only resolves once it held for 30 ms.
+    let aged = TouchFrame::new(50_000, false, contacts).expect("valid frame");
     let trigger = ButtonId::TouchpadTwoFingerTap;
     let bindings = BTreeMap::from([(trigger, Action::Copy)]);
     let mut runtime = TouchpadRuntime::default();
@@ -180,6 +285,8 @@ fn diagnostic_touchpad_stroke_cannot_fire_if_management_enables_mid_stroke() {
     assert_eq!(runtime.end(true).routed, TouchpadOutput::Idle);
 
     assert_eq!(runtime.update(&frame, &bindings, true, false), idle());
+    assert_eq!(
+    assert_eq!(runtime.update(&aged, &bindings, true, false), idle());
     assert_eq!(
         runtime.end(true).routed,
         TouchpadOutput::Action {

@@ -9,8 +9,13 @@ use crate::binding::ButtonId;
 #[cfg(test)]
 mod tests;
 
+const TAP_MIN_DURATION_US: u64 = 30_000;
 const TAP_MAX_DURATION_US: u64 = 250_000;
 const TAP_MAX_TRAVEL_UM: u64 = 3_000;
+/// How far two tapping fingers may drift apart. Options+ gates its
+/// two-finger tap at 0.30 of the sensor (~27 mm); spread wider reads as a
+/// pinch attempt, not a tap.
+const TAP_MAX_CONTACT_SPREAD_UM: u64 = 27_000;
 const SWIPE_MIN_DISTANCE_UM: u64 = 10_000;
 const SWIPE_MIN_SPEED_UM_PER_SECOND: u64 = 50_000;
 const HORIZONTAL_SWIPE_MIN_DURATION_US: u64 = 50_000;
@@ -123,6 +128,7 @@ struct Stroke {
     last_at_us: u64,
     start_spread_um: u64,
     max_contact_travel_um: u64,
+    max_contact_spread_um: u64,
     motion_frames: u8,
     previous_centroid: Point,
     scrolling: bool,
@@ -216,6 +222,7 @@ impl Stroke {
             last_at_us: frame.timestamp_us,
             start_spread_um: spread(&frame.contacts, centroid),
             max_contact_travel_um: 0,
+            max_contact_spread_um: contact_spread(&frame.contacts),
             motion_frames: 0,
             previous_centroid: centroid,
             scrolling: false,
@@ -272,6 +279,9 @@ impl Stroke {
                 .max()
                 .unwrap_or(0),
         );
+        self.max_contact_spread_um = self
+            .max_contact_spread_um
+            .max(contact_spread(&frame.contacts));
         self.latest.clone_from(&frame.contacts);
     }
 
@@ -409,8 +419,14 @@ impl Stroke {
     }
 
     fn is_tap(&self) -> bool {
-        self.last_at_us.saturating_sub(self.started_at_us) <= TAP_MAX_DURATION_US
+        let duration = self.last_at_us.saturating_sub(self.started_at_us);
+        // The spread gate follows the two-finger evidence only: three and
+        // four finger taps naturally span wider than one 0.30 gate allows.
+        let spread_ok =
+            self.starts.len() != 2 || self.max_contact_spread_um <= TAP_MAX_CONTACT_SPREAD_UM;
+        (TAP_MIN_DURATION_US..=TAP_MAX_DURATION_US).contains(&duration)
             && self.max_contact_travel_um <= TAP_MAX_TRAVEL_UM
+            && spread_ok
     }
 
     fn tap_gesture(&self) -> Option<ButtonId> {
@@ -429,6 +445,17 @@ fn contact_ids(contacts: &[TouchContact]) -> impl Iterator<Item = u8> + '_ {
 
 fn has_contact(contacts: &[TouchContact], id: u8) -> bool {
     contacts.iter().any(|contact| contact.id == id)
+}
+
+/// Largest distance between any two live contacts.
+fn contact_spread(contacts: &[TouchContact]) -> u64 {
+    contacts
+        .iter()
+        .enumerate()
+        .flat_map(|(index, a)| contacts.iter().skip(index + 1).map(move |b| (a, b)))
+        .map(|(a, b)| contact_distance(*a, *b))
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]

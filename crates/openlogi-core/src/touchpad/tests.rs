@@ -461,3 +461,55 @@ fn a_lifted_and_relanded_finger_resumes_as_a_fresh_stroke() {
         }
     );
 }
+#[test]
+fn a_touch_shorter_than_thirty_milliseconds_is_not_a_tap() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        20_000,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn two_fingers_spread_apart_do_not_tap() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 30_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        80_000,
+        vec![contact(1, 30_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    // 40 mm apart: a pinch attempt, not a tap.
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn a_four_finger_tap_spans_wider_than_two_fingers_may() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![
+            contact(1, 20_000, 50_000),
+            contact(2, 40_000, 50_000),
+            contact(3, 60_000, 50_000),
+            contact(4, 80_000, 50_000),
+        ],
+    ));
+    recognizer.update(&frame(
+        80_000,
+        vec![
+            contact(1, 20_500, 50_000),
+            contact(2, 40_500, 50_000),
+            contact(3, 60_500, 50_000),
+            contact(4, 80_500, 50_000),
+        ],
+    ));
+    assert_eq!(recognizer.end(), Some(ButtonId::TouchpadFourFingerTap));
+}
