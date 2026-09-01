@@ -120,7 +120,11 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
                 codename: paired.and_then(|p| p.codename.clone()),
-                connection: ConnectionKind::for_device(record.route.as_ref(), model),
+                connection: ConnectionKind::for_device(
+                    record.route.as_ref(),
+                    record.receiver_brand,
+                    model,
+                ),
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
