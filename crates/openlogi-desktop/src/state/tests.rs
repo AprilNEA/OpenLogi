@@ -1816,6 +1816,11 @@ fn state_with_an_offline_identity(persistence: ConfigPersistence) -> AppState {
 fn forgetting_an_offline_device_drops_its_card_and_config_entry() {
     let mut state = state_with_an_offline_identity(ConfigPersistence::MemoryOnly);
     assert_eq!(state.devices().len(), 1);
+    assert!(!state.devices()[0].online);
+    assert!(
+        state.devices()[0].route.is_none(),
+        "the fixture has no USB or receiver route"
+    );
     let record_key = state.devices()[0].record_key();
 
     assert!(state.forget_device(&record_key));
@@ -1824,8 +1829,8 @@ fn forgetting_an_offline_device_drops_its_card_and_config_entry() {
     assert!(
         state
             .config
-            .edit(|config| config.device_identity("2b034").is_none()),
-        "the persisted entry must go with the card"
+            .edit(|config| !config.devices.contains_key("2b034")),
+        "the full persisted entry must go with the card"
     );
 }
 

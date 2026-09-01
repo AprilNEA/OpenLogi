@@ -832,7 +832,7 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     let connection = if is_camera {
         tr!("device.usb").to_string()
     } else {
-        route_label(record.route.as_ref())
+        route_label(record.route.as_ref(), record.receiver_brand)
     };
     let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
     if matches!(

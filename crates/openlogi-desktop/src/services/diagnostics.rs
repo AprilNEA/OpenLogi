@@ -8,7 +8,6 @@ use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_core::hid::DeviceRoute;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::services::assets::AssetResolver;
@@ -121,7 +120,11 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
                 codename: paired.and_then(|p| p.codename.clone()),
-                connection: connection_for(record.route.as_ref(), model.map(|m| m.transports)),
+                connection: ConnectionKind::for_device(
+                    record.route.as_ref(),
+                    record.receiver_brand,
+                    model,
+                ),
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
@@ -152,24 +155,6 @@ fn find_paired<'a>(
             .as_ref()
             .is_some_and(|m| m.config_key() == model_key)
     })
-}
-
-/// Refine the HID++ route into a user-facing connection type via the device's announced transports.
-fn connection_for(
-    route: Option<&DeviceRoute>,
-    transports: Option<openlogi_core::device::DeviceTransports>,
-) -> ConnectionKind {
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
-        Some(DeviceRoute::Unifying { .. }) => ConnectionKind::UnifyingReceiver,
-        Some(DeviceRoute::Direct { .. }) => match transports {
-            Some(t) if t.bluetooth || t.btle => ConnectionKind::BluetoothDirect,
-            Some(t) if t.usb => ConnectionKind::Wired,
-            _ => ConnectionKind::Unknown,
-        },
-        Some(DeviceRoute::RawHid { .. }) => ConnectionKind::Wired,
-        None => ConnectionKind::Unknown,
-    }
 }
 
 fn dpi_summary(status: Option<DpiStatus>) -> Option<String> {
