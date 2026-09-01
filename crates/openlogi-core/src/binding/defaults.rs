@@ -48,8 +48,11 @@ pub fn default_binding(button: ButtonId) -> Action {
             reason = "see the left tilt above — same control pair, mirrored direction"
         )]
         ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
-        ButtonId::Back => Action::BrowserBack,
-        ButtonId::Forward => Action::BrowserForward,
+        // Seeding this as BrowserBack made it unreachable: picking BrowserBack
+        // in the GUI matched the default, so capture_plan never diverted the
+        // button and the action never fired.
+        ButtonId::Back => Action::MouseBack,
+        ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
         #[expect(
             clippy::match_same_arms,
