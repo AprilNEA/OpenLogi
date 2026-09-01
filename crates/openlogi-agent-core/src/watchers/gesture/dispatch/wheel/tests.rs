@@ -219,7 +219,12 @@ fn custom_action_fires_on_threshold_then_respects_its_cooldown() {
         WheelOutput::Idle
     );
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold, scale, now + ACTION_COOLDOWN),
+        direction.advance(
+            &Action::VolumeUp,
+            threshold,
+            scale,
+            now + ThumbwheelSensitivity::DEFAULT.action_cooldown()
+        ),
         WheelOutput::FireAction,
         "the same action may fire again at the cooldown boundary"
     );
@@ -358,5 +363,50 @@ fn stale_custom_progress_decays() {
     assert_eq!(
         direction.advance(&Action::VolumeUp, threshold - 1, scale, after_decay),
         WheelOutput::FireAction
+    );
+}
+
+/// At the top of the range a sustained spin repeats instead of firing once and
+/// going quiet — the behaviour #887 asked for.
+#[test]
+fn a_sustained_spin_repeats_at_max_sensitivity() {
+    let mut direction = WheelDirection::default();
+    let sensitivity = ThumbwheelSensitivity::MAX;
+    let gap = sensitivity.action_cooldown();
+    let scale = unscaled(sensitivity);
+    let mut now = Instant::now();
+
+    let mut fires = 0;
+    // Half a second of steady spinning, sampled every 10 ms.
+    for _ in 0..50 {
+        if direction.advance(&Action::VolumeUp, 1, scale, now) == WheelOutput::FireAction {
+            fires += 1;
+        }
+        now += Duration::from_millis(10);
+    }
+    assert!(
+        fires >= 10,
+        "half a second at max sensitivity fired {fires} times (gap {gap:?})"
+    );
+}
+
+/// The same spin at the default still paces itself, so raising the slider is
+/// what opts into the faster repeat.
+#[test]
+fn the_same_spin_stays_paced_at_the_default() {
+    let mut direction = WheelDirection::default();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let mut now = Instant::now();
+
+    let mut fires = 0;
+    for _ in 0..50 {
+        if direction.advance(&Action::VolumeUp, 1, scale, now) == WheelOutput::FireAction {
+            fires += 1;
+        }
+        now += Duration::from_millis(10);
+    }
+    assert!(
+        fires <= 3,
+        "half a second at the default fired {fires} times"
     );
 }
