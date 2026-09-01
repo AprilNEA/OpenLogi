@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-01
+
+### Added
+
+- *(i18n)* migrate catalogs to semantic TOML keys ([#1169](https://github.com/AprilNEA/OpenLogi/pull/1169))
+
+### Changed
+
+- *(i18n)* avoid copying borrowed translations ([#1184](https://github.com/AprilNEA/OpenLogi/pull/1184))
+
 ## [0.8.3] - 2026-08-30
 
 ### Fixed
