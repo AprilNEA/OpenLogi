@@ -23,8 +23,9 @@ use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticCapabilities,
+    HapticConfiguration, HapticIntensity, HapticWaveform, LightingMethod, LitraModel,
+    ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -161,6 +162,21 @@ pub async fn set_keyboard_color_with(
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await
+}
+
+/// Read the haptic configuration and advertised waveforms in one channel open.
+pub async fn get_haptic_state(
+    route: &DeviceRoute,
+) -> Result<(HapticConfiguration, HapticCapabilities), WriteError> {
+    device::get_haptic_state(&*native_backend(), route).await
+}
+
+/// Write the device-wide haptic intensity. Volatile — lost on a power cycle.
+pub async fn set_haptic_intensity(
+    route: &DeviceRoute,
+    intensity: HapticIntensity,
+) -> Result<HapticConfiguration, WriteError> {
+    device::set_haptic_intensity(&*native_backend(), route, intensity).await
 }
 
 /// Apply a light command to the Litra `route` reaches.

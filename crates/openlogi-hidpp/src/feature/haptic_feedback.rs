@@ -17,10 +17,38 @@ bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct SupportedWaveforms: u32 {
+        /// A crisp state-change pulse.
+        const SHARP_STATE_CHANGE = 1 << 0;
         /// A damp state-change pulse, used after activating a ring action.
         const DAMP_STATE_CHANGE = 1 << 1;
+        /// A crisp boundary pulse.
+        const SHARP_COLLISION = 1 << 2;
+        /// A damped boundary pulse.
+        const DAMP_COLLISION = 1 << 3;
         /// A subtle collision pulse, used when the highlighted ring slot changes.
         const SUBTLE_COLLISION = 1 << 4;
+        /// A positive two-tone alert.
+        const HAPPY_ALERT = 1 << 5;
+        /// A negative two-tone alert.
+        const ANGRY_ALERT = 1 << 6;
+        /// A completion flourish.
+        const COMPLETED = 1 << 7;
+        /// A square-wave buzz.
+        const SQUARE = 1 << 8;
+        /// A rolling wave.
+        const WAVE = 1 << 9;
+        /// A burst pattern.
+        const FIREWORK = 1 << 10;
+        /// An agitated pattern.
+        const MAD = 1 << 11;
+        /// A double-tap knock.
+        const KNOCK = 1 << 12;
+        /// A short melodic pattern.
+        const JINGLE = 1 << 13;
+        /// A repeating ring.
+        const RINGING = 1 << 14;
+        /// The faintest boundary pulse.
+        const WHISPER_COLLISION = 1 << 27;
     }
 }
 
@@ -28,10 +56,38 @@ bitflags::bitflags! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum HapticWaveform {
+    /// A crisp state-change pulse.
+    SharpStateChange = 0,
     /// Confirmation pulse used when an action runs.
     DampStateChange = 1,
+    /// A crisp boundary pulse.
+    SharpCollision = 2,
+    /// A damped boundary pulse.
+    DampCollision = 3,
     /// Light boundary pulse used for hover transitions.
     SubtleCollision = 4,
+    /// A positive two-tone alert.
+    HappyAlert = 5,
+    /// A negative two-tone alert.
+    AngryAlert = 6,
+    /// A completion flourish.
+    Completed = 7,
+    /// A square-wave buzz.
+    Square = 8,
+    /// A rolling wave.
+    Wave = 9,
+    /// A burst pattern.
+    Firework = 10,
+    /// An agitated pattern.
+    Mad = 11,
+    /// A double-tap knock.
+    Knock = 12,
+    /// A short melodic pattern.
+    Jingle = 13,
+    /// A repeating ring.
+    Ringing = 14,
+    /// The faintest boundary pulse.
+    WhisperCollision = 27,
 }
 
 /// Valid device haptic intensity (`0..=100`).

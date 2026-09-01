@@ -51,6 +51,7 @@ mod tests {
     use cmd::diag::DiagCmd;
     use cmd::diag::lighting::Method;
     use cmd::diag::wheel::ResolutionArg;
+    use cmd::haptic::{HapticAction, Waveform};
 
     /// Clap's own structural validation (arg ID collisions, invalid
     /// `conflicts_with` targets, etc.) — cheap and catches a broken derive
@@ -101,6 +102,56 @@ mod tests {
     fn backlight_rejects_an_unknown_action() {
         let result = Cli::try_parse_from(["openlogi", "backlight", "dim"]);
         result.expect_err("an unknown backlight action must be rejected");
+    }
+
+    /// A bare `openlogi haptic` must stay valid — `run` treats a missing
+    /// action as `status`, so it can never write to the device by accident.
+    #[test]
+    fn haptic_defaults_to_status_and_accepts_a_device_filter() {
+        let cli = Cli::try_parse_from(["openlogi", "haptic", "--device", "MX Master 4"])
+            .expect("bare haptic invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Haptic(args) => {
+                assert_eq!(args.device.as_deref(), Some("MX Master 4"));
+                assert!(args.action.is_none());
+            }
+            other => panic!("expected Haptic, got {other:?}"),
+        }
+    }
+
+    /// Waveform names reach the CLI in kebab-case, which is clap's default for
+    /// a `ValueEnum`; `WhisperCollision` is the awkward one.
+    #[test]
+    fn haptic_play_parses_a_kebab_case_waveform() {
+        let cli = Cli::try_parse_from(["openlogi", "haptic", "play", "whisper-collision"])
+            .expect("haptic play parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Haptic(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(HapticAction::Play {
+                        waveform: Waveform::WhisperCollision
+                    })
+                ));
+            }
+            other => panic!("expected Haptic, got {other:?}"),
+        }
+    }
+
+    /// The intensity is a percentage, so a value the device cannot accept must
+    /// fail at the boundary rather than reaching `set_configuration`.
+    #[test]
+    fn haptic_level_rejects_a_value_above_a_byte() {
+        let result = Cli::try_parse_from(["openlogi", "haptic", "level", "256"]);
+        result.expect_err("an out-of-range level must fail to parse");
+    }
+
+    #[test]
+    fn haptic_rejects_an_unknown_waveform() {
+        let result = Cli::try_parse_from(["openlogi", "haptic", "play", "rumble"]);
+        result.expect_err("an unknown waveform must be rejected");
     }
 
     #[test]

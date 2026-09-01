@@ -5,7 +5,10 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
-        haptic_feedback::{HapticFeedbackFeature, HapticIntensity, HapticWaveform},
+        haptic_feedback::{
+            HapticCapabilities, HapticConfiguration, HapticFeedbackFeature, HapticIntensity,
+            HapticWaveform,
+        },
     },
 };
 
@@ -185,6 +188,59 @@ pub async fn play_haptic(
     with_route(backend, route, move |channel| async move {
         let (feature, _) = feature_on_channel(&channel, index).await?;
         feature.play(waveform).await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })
+    })
+    .await
+}
+
+/// Read the haptic configuration and the advertised waveform mask together.
+///
+/// One `with_route` for both reads: opening the channel and walking to the
+/// feature dominates the cost on a Bluetooth-direct device, so a second open
+/// would roughly double it for one extra round trip.
+pub async fn get_haptic_state(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<(HapticConfiguration, HapticCapabilities), WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let (feature, _) = feature_on_channel(&channel, index).await?;
+        let config = feature.get_configuration().await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })?;
+        let capabilities = feature.get_capabilities().await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })?;
+        Ok((config, capabilities))
+    })
+    .await
+}
+
+/// Write the device-wide haptic intensity and return the configuration as the
+/// device reports it afterwards.
+///
+/// Volatile: `setConfig` writes to device RAM, so the value is lost on a power
+/// cycle. Zero intensity is the documented way to silence haptics, so playback
+/// stays enabled and the level carries the meaning.
+///
+/// The write and its read-back share one channel, for the same reason as
+/// [`get_haptic_state`].
+pub async fn set_haptic_intensity(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    intensity: HapticIntensity,
+) -> Result<HapticConfiguration, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let (feature, _) = feature_on_channel(&channel, index).await?;
+        feature
+            .set_configuration(true, intensity)
+            .await
+            .map_err(|error| {
+                classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+            })?;
+        feature.get_configuration().await.map_err(|error| {
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
         })
     })
