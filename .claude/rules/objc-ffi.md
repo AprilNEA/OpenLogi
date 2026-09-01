@@ -228,7 +228,7 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `dlopen`/`dlsym`-resolved Dock/CGS SPIs, `post_media_key`'s `NSEvent`
   synthesis (with its own `autoreleasepool`, see below), and
   `keyboard_layout`'s Carbon Text Input Source Services calls — the last
-  guarded by a process-wide `Mutex` (`TIS_LOCK`), not just a `SAFETY`
+  guarded by a process-wide `Mutex` (`LAYOUT_STATE`), not just a `SAFETY`
   comment: `TISCopyCurrentKeyboardLayoutInputSource` lazily bootstraps a
   shared XPC connection on first use, and two threads racing that bootstrap
   crashes the process (`SIGABRT` inside `_xpc_connection_activate_if_needed`,

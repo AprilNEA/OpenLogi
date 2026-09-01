@@ -1,6 +1,7 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
-use std::sync::{LazyLock, Mutex};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
@@ -11,7 +12,8 @@ use core_graphics::geometry::CGPoint;
 
 use core_foundation::base::TCFType as _;
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Script, Shortcut,
+    WorkflowStep,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -322,20 +324,77 @@ fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
     post_key_phase(vk, flags, phase);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PinnedHeldKey {
+    vk: u16,
+    needs_shift: bool,
+    needs_option: bool,
+}
+
+static PINNED_HELD_KEYS: LazyLock<Mutex<HashMap<KeyboardUsage, PinnedHeldKey>>> =
+    LazyLock::new(|| Mutex::new(HashMap::default()));
+
 fn held_key_event(
     key: HeldKey,
     phase: KeyPhase,
     modifiers: &mut HeldModifiers,
 ) -> Option<(u16, CGEventFlags)> {
     modifiers.set(key, phase == KeyPhase::Down);
-    let vk = match key {
-        HeldKey::Command => Some(0x37),
-        HeldKey::Shift => Some(0x38),
-        HeldKey::Alt => Some(0x3a),
-        HeldKey::Control => Some(0x3b),
-        HeldKey::Key(usage) => hid_usage_to_macos(usage.code()),
-    }?;
-    Some((vk, held_modifier_flags(*modifiers)))
+    match key {
+        HeldKey::Command => Some((0x37, held_modifier_flags(*modifiers))),
+        HeldKey::Shift => Some((0x38, held_modifier_flags(*modifiers))),
+        HeldKey::Alt => Some((0x3a, held_modifier_flags(*modifiers))),
+        HeldKey::Control => Some((0x3b, held_modifier_flags(*modifiers))),
+        HeldKey::Key(usage) => {
+            let pinned = match phase {
+                KeyPhase::Down => {
+                    let pinned = resolve_held_usage(usage, *modifiers)?;
+                    let mut lock = PINNED_HELD_KEYS
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    lock.insert(usage, pinned);
+                    pinned
+                }
+                KeyPhase::Up => {
+                    let mut lock = PINNED_HELD_KEYS
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    lock.remove(&usage)
+                        .or_else(|| resolve_held_usage(usage, *modifiers))?
+                }
+            };
+            let mut flags = held_modifier_flags(*modifiers);
+            if pinned.needs_shift {
+                flags |= CGEventFlags::CGEventFlagShift;
+            }
+            if pinned.needs_option {
+                flags |= CGEventFlags::CGEventFlagAlternate;
+            }
+            Some((pinned.vk, flags))
+        }
+    }
+}
+
+fn resolve_held_usage(usage: KeyboardUsage, modifiers: HeldModifiers) -> Option<PinnedHeldKey> {
+    if let Some(ch) = usage.ascii_char()
+        && let Some(resolved) = resolve_char_with_base(
+            ch,
+            modifiers.contains(HeldKey::Command),
+            modifiers.contains(HeldKey::Shift),
+            modifiers.contains(HeldKey::Alt),
+        )
+    {
+        return Some(PinnedHeldKey {
+            vk: resolved.vk,
+            needs_shift: resolved.needs_shift,
+            needs_option: resolved.needs_option,
+        });
+    }
+    hid_usage_to_macos(usage.code()).map(|vk| PinnedHeldKey {
+        vk,
+        needs_shift: false,
+        needs_option: false,
+    })
 }
 
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
@@ -404,21 +463,23 @@ fn post_keycombo(combo: &KeyCombo) {
     let mut flags = combo_flags(combo);
     // Layout-aware lookup first (issue #343): resolve the vk that currently
     // produces this character under the active layout, preferring the
-    // combo's own Shift/Option layer but always falling back to whichever
-    // layer the layout actually puts the character on — `ascii_char()` is
-    // always the *unshifted* character, so a Shift/Option shortcut (e.g.
-    // Cmd+Shift+Z) must still be able to find it at the unshifted layer, not
-    // just the layer matching the combo's own modifiers (Greptile review on
-    // #948, "Base modifiers defeat layout lookup"). ORs in whatever
-    // Shift/Option the layer was actually found under. Falls back to the
-    // static positional table when the key isn't a single ASCII character
-    // (function/arrow/editing keys — unaffected by layout switches) or when
-    // TIS/UCKeyTranslate can't resolve one (e.g. no active console session).
-    let vk = match combo
-        .key()
-        .ascii_char()
-        .and_then(|ch| resolve_char_with_base(ch, combo.has_shift(), combo.has_option()))
-    {
+    // combo's own Shift/Option layer and passing whether Command is held
+    // (for Command-dependent layouts like "Dvorak – QWERTY ⌘" which switch to
+    // QWERTY under Command). Always falls back to whichever layer the layout
+    // actually puts the character on — `ascii_char()` is always the *unshifted*
+    // character, so a Shift/Option shortcut (e.g. Cmd+Shift+Z) must still be able
+    // to find it at the unshifted layer. ORs in whatever Shift/Option the layer
+    // was actually found under. Falls back to the static positional table when
+    // the key isn't a single ASCII character (function/arrow/editing keys) or
+    // when TIS/UCKeyTranslate can't resolve one.
+    let vk = match combo.key().ascii_char().and_then(|ch| {
+        resolve_char_with_base(
+            ch,
+            combo.has_command(),
+            combo.has_shift(),
+            combo.has_option(),
+        )
+    }) {
         Some(resolved) => {
             if resolved.needs_shift {
                 flags |= CGEventFlags::CGEventFlagShift;
@@ -488,12 +549,15 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use core_graphics::event::CGEventFlags;
-    use openlogi_core::binding::Shortcut;
+    use openlogi_core::binding::{KeyboardUsage, Shortcut};
 
     use super::{
         CAPTURE_REGION_COMBO, LOCK_SCREEN_COMBO, SCREENSHOT_COMBO, combo, held_key_event,
         hid_usage_to_macos,
-        keyboard_layout::{candidate_order, resolve_char_with_base},
+        keyboard_layout::{
+            ResolvedKey, candidate_order, installed_layout_data, resolve_char_from_layout,
+            resolve_char_with_base,
+        },
     };
     use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
 
@@ -507,127 +571,9 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0xff), None);
     }
 
-    /// Exercises the real TIS/UCKeyTranslate path (not just the static
-    /// fallback table) against whatever keyboard layout is actually active
-    /// on the machine running this test. Deliberately does not assert
-    /// *which* vk comes back: unlike a QWERTY-only assumption, this repo's
-    /// own dev machines aren't guaranteed to run a "U.S." layout (issue #343
-    /// exists precisely because that assumption doesn't hold — this test was
-    /// first written on a machine with Dvorak active, where 's' legitimately
-    /// resolves to a different vk than `hid_usage_to_macos`'s QWERTY-pinned
-    /// one). Every keyboard layout maps the letter 'a' to *some* physical
-    /// key, so this should never be `None`, and 'a' never needs a modifier
-    /// to reach on any real layout.
-    #[test]
-    fn resolve_char_resolves_a_common_letter() {
-        let resolved = resolve_char_with_base('a', false, false)
-            .expect("no key produces 'a' under the active layout");
-        assert!(!resolved.needs_shift);
-        assert!(!resolved.needs_option);
-    }
-
-    /// A character no physical key produces under any layout/modifier
-    /// combination resolves to `None` rather than panicking or looping
-    /// forever. '€' deliberately isn't used here: with Shift/Option now
-    /// searched too, it's reachable via Option+Shift+2 on common Mac
-    /// layouts, so it doesn't exercise the "truly unmapped" path. A CJK
-    /// character needs IME composition, not a bare modifier layer, on every
-    /// standard macOS keyboard layout.
-    #[test]
-    fn resolve_char_returns_none_for_unmapped_characters() {
-        assert!(resolve_char_with_base('好', false, false).is_none());
-    }
-
-    /// Regression test for the Greptile review on PR #948: the original
-    /// `vk_for_char` only searched the unshifted layer, so a character
-    /// sitting behind Shift or Option on the active layout (e.g. digits on
-    /// AZERTY) fell through to the QWERTY-positional fallback — reproducing
-    /// the exact bug #343 exists to fix, just for a narrower set of
-    /// characters. `resolve_char_with_base` must search the shifted/optioned
-    /// layers too. This can't be pinned to a specific vk without controlling
-    /// the test runner's active layout, but it proves the modifier search
-    /// itself is wired up: translating the resolved vk back under the
-    /// reported modifier state must reproduce the target character.
-    #[test]
-    fn resolve_char_finds_characters_needing_shift_or_option() {
-        // '!' through ')' sit behind Shift on a "U.S." layout and behind no
-        // modifier on some others — whichever this runner's layout does,
-        // resolve_char_with_base must find *a* key, proving the
-        // shifted/optioned search paths are reachable and correct, not just
-        // present in name.
-        for ch in ['!', '@', '#', '$', '%'] {
-            assert!(
-                resolve_char_with_base(ch, false, false).is_some(),
-                "no key on any modifier layer produces {ch:?}"
-            );
-        }
-    }
-
-    /// `TISCopyCurrentKeyboardLayoutInputSource` lazily bootstraps a shared
-    /// XPC connection inside HIToolbox on first use; two threads racing that
-    /// bootstrap crashes the whole process with `SIGABRT` deep inside
-    /// `_xpc_connection_activate_if_needed` (reproduced locally before
-    /// `keyboard_layout::LAYOUT_STATE` was added). Hammer `resolve_char_with_base`
-    /// from many threads at once so a regression that drops the lock shows up
-    /// as a crashed test binary, not a quiet flake.
-    #[test]
-    fn resolve_char_is_safe_under_concurrent_calls() {
-        let handles: Vec<_> = (0..32)
-            .map(|_| std::thread::spawn(|| resolve_char_with_base('a', false, false).is_some()))
-            .collect();
-        for handle in handles {
-            assert!(handle.join().expect("thread panicked"));
-        }
-    }
-
-    /// Regression test for a caching bug class rather than a specific
-    /// commit: a cache keyed on the wrong thing (or never invalidated) can
-    /// serve a stale or simply wrong answer on the second call even though
-    /// the first was correct. Repeated calls with the same arguments must
-    /// keep returning the identical vk and modifier flags — proving a cache
-    /// hit reproduces the original scan rather than some other cached
-    /// entry — and calls with *different* `base_shift`/`base_option` for
-    /// the same character must not collide on the same cache slot.
-    #[test]
-    fn resolve_char_with_base_cache_is_consistent_and_does_not_collide() {
-        let first = resolve_char_with_base('a', false, false)
-            .expect("no key produces 'a' under the active layout");
-        let second = resolve_char_with_base('a', false, false)
-            .expect("no key produces 'a' under the active layout");
-        assert_eq!(first.vk, second.vk);
-        assert_eq!(first.needs_shift, second.needs_shift);
-        assert_eq!(first.needs_option, second.needs_option);
-
-        // A different base for the same character must be resolved (and
-        // cached) independently, not conflated with the (false, false)
-        // entry above.
-        let with_base = resolve_char_with_base('a', true, true)
-            .expect("no key produces 'a' under the active layout even with a base");
-        assert_eq!(with_base.vk, first.vk);
-    }
-
-    /// The cache stores `Option<ResolvedKey>`, not just `ResolvedKey` — a
-    /// character no key on this layout produces (like '好', see
-    /// `resolve_char_returns_none_for_unmapped_characters`) must keep
-    /// returning `None` on a cache hit rather than, say, panicking on an
-    /// `unwrap` of an empty cache slot or falling through to some other
-    /// entry once the negative result is cached.
-    #[test]
-    fn resolve_char_with_base_caches_a_negative_result_too() {
-        assert!(resolve_char_with_base('好', false, false).is_none());
-        assert!(resolve_char_with_base('好', false, false).is_none());
-    }
-
-    /// Unit test for the pure lookup table `resolve_uncached` searches:
-    /// every arm must start with the base it was given, and its four
-    /// entries must be the four (Shift, Option) combinations with none
-    /// repeated and none missing — the exact property finding #1 needed
-    /// ("resolve_char_with_base's 5-entry search list always duplicates one
-    /// of the four canonical layers"). Checking this directly, rather than
-    /// only through `resolve_char_with_base`'s end-to-end behavior, means a
-    /// future edit that reintroduces a duplicate or drops a layer fails
-    /// here even for a layout where the dropped layer's character happens
-    /// to also be reachable elsewhere.
+    /// Unit test for the pure candidate order table: every arm must start
+    /// with the base it was given, and its four entries must be the four
+    /// (Shift, Option) combinations with none repeated and none missing.
     #[test]
     fn candidate_order_starts_with_the_base_and_never_repeats_or_drops_a_layer() {
         for base in [(false, false), (true, false), (false, true), (true, true)] {
@@ -645,28 +591,248 @@ mod tests {
         }
     }
 
-    /// Regression test for the Greptile review on PR #948 ("Base modifiers
-    /// defeat layout lookup"): an earlier revision treated the caller's own
-    /// Shift/Option (e.g. `post_keycombo` passing `combo.has_shift()` for a
-    /// Cmd+Shift+Z shortcut) as a *mandatory* floor for every probed layer.
-    /// But `ascii_char()` is always the key's unshifted character, and
-    /// holding Shift changes what a key produces — so a mandatory Shift
-    /// base meant the unshifted layer, where 'z' actually lives, was never
-    /// searched at all, and the lookup fell through to `None` for every
-    /// Shift/Option shortcut on a printable key. `base_shift`/`base_option`
-    /// must be a search *preference*: a letter has to resolve (with no
-    /// extra modifier reported) even when the caller passes a base that
-    /// doesn't match where the layout actually places it.
+    /// Controlled fixture test against standard US keyboard layout data:
+    /// verifies unshifted letters, shifted symbols, and unmapped characters
+    /// without relying on the test runner's live input source.
     #[test]
-    fn resolve_char_with_base_still_finds_unshifted_letters() {
-        for (base_shift, base_option) in
-            [(false, false), (true, false), (false, true), (true, true)]
-        {
-            let resolved = resolve_char_with_base('a', base_shift, base_option)
-                .expect("no key produces 'a' under the active layout even with a base");
+    fn us_layout_fixture_resolves_common_and_shifted_characters() {
+        let Some(layout_data) = installed_layout_data("com.apple.keylayout.US") else {
+            return;
+        };
+        let layout_ptr = layout_data.bytes().as_ptr().cast();
+
+        // Common letter 'a' is at ANSI A (vk 0x00) with no modifier needed.
+        let resolved = resolve_char_from_layout(layout_ptr, 0, 'a', false, false, false);
+        assert_eq!(
+            resolved,
+            Some(ResolvedKey {
+                vk: 0x00,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+
+        // 'a' with base_shift=true still resolves unshifted 'a' at vk 0x00 without spurious needs_shift.
+        let resolved = resolve_char_from_layout(layout_ptr, 0, 'a', false, true, false);
+        assert_eq!(
+            resolved,
+            Some(ResolvedKey {
+                vk: 0x00,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+
+        // Shifted digits/symbols ('!' is on Shift+1, vk 0x12).
+        let resolved = resolve_char_from_layout(layout_ptr, 0, '!', false, false, false);
+        assert_eq!(
+            resolved,
+            Some(ResolvedKey {
+                vk: 0x12,
+                needs_shift: true,
+                needs_option: false,
+            })
+        );
+
+        for ch in ['@', '#', '$', '%'] {
+            let resolved = resolve_char_from_layout(layout_ptr, 0, ch, false, false, false);
+            assert!(
+                resolved.is_some_and(|r| r.needs_shift),
+                "expected {ch:?} to require shift on US layout"
+            );
+        }
+
+        // Unmapped CJK character produces None.
+        assert_eq!(
+            resolve_char_from_layout(layout_ptr, 0, '好', false, false, false),
+            None
+        );
+    }
+
+    /// Tests Command-dependent layout resolution for Apple's built-in
+    /// "Dvorak – QWERTY ⌘" layout (`com.apple.keylayout.Dvorak-QWERTYCmd`).
+    /// Under this layout, holding Command explicitly switches key mappings
+    /// back to QWERTY positions so shortcuts like Cmd+C, Cmd+S, Cmd+V, Cmd+Z
+    /// match standard physical key locations.
+    #[test]
+    fn dvorak_qwerty_cmd_switches_to_qwerty_when_command_is_held() {
+        let Some(layout_data) = installed_layout_data("com.apple.keylayout.Dvorak-QWERTYCmd")
+        else {
+            return;
+        };
+        let layout_ptr = layout_data.bytes().as_ptr().cast();
+
+        // 'c': without Cmd -> Dvorak 'c' (QWERTY 'i' key, vk 0x22)
+        //      with Cmd    -> QWERTY 'c' (vk 0x08)
+        let without_cmd = resolve_char_from_layout(layout_ptr, 0, 'c', false, false, false);
+        assert_eq!(
+            without_cmd,
+            Some(ResolvedKey {
+                vk: 0x22,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+        let with_cmd = resolve_char_from_layout(layout_ptr, 0, 'c', true, false, false);
+        assert_eq!(
+            with_cmd,
+            Some(ResolvedKey {
+                vk: 0x08,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+
+        // 's': without Cmd -> Dvorak 's' (QWERTY 'o' key, vk 0x1f)
+        //      with Cmd    -> QWERTY 's' (vk 0x01)
+        let without_cmd = resolve_char_from_layout(layout_ptr, 0, 's', false, false, false);
+        assert_eq!(
+            without_cmd,
+            Some(ResolvedKey {
+                vk: 0x1f,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+        let with_cmd = resolve_char_from_layout(layout_ptr, 0, 's', true, false, false);
+        assert_eq!(
+            with_cmd,
+            Some(ResolvedKey {
+                vk: 0x01,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+
+        // 'v': without Cmd -> Dvorak 'v' (QWERTY '.' key, vk 0x2f)
+        //      with Cmd    -> QWERTY 'v' (vk 0x09)
+        let without_cmd = resolve_char_from_layout(layout_ptr, 0, 'v', false, false, false);
+        assert_eq!(
+            without_cmd,
+            Some(ResolvedKey {
+                vk: 0x2f,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+        let with_cmd = resolve_char_from_layout(layout_ptr, 0, 'v', true, false, false);
+        assert_eq!(
+            with_cmd,
+            Some(ResolvedKey {
+                vk: 0x09,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+
+        // 'z': without Cmd -> Dvorak 'z' (QWERTY '\'' key, vk 0x27)
+        //      with Cmd    -> QWERTY 'z' (vk 0x06)
+        let without_cmd = resolve_char_from_layout(layout_ptr, 0, 'z', false, false, false);
+        assert_eq!(
+            without_cmd,
+            Some(ResolvedKey {
+                vk: 0x27,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+        let with_cmd = resolve_char_from_layout(layout_ptr, 0, 'z', true, false, false);
+        assert_eq!(
+            with_cmd,
+            Some(ResolvedKey {
+                vk: 0x06,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+    }
+
+    /// Held keys must pin their resolved virtual keycode on KeyPhase::Down
+    /// and release the exact same keycode on KeyPhase::Up, preventing stuck
+    /// keys across layout changes.
+    #[test]
+    fn held_keys_pin_resolved_vk_across_phase_transitions() {
+        let usage_c = KeyboardUsage::try_from(0x06).expect("0x06 is valid usage for 'c'");
+        let mut modifiers = HeldModifiers::default();
+
+        let (_, flags_cmd) = held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers)
+            .expect("Command has vk");
+        assert!(flags_cmd.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (vk_down, flags_down) =
+            held_key_event(HeldKey::Key(usage_c), KeyPhase::Down, &mut modifiers)
+                .expect("usage has vk");
+        assert!(flags_down.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (vk_up, flags_up) = held_key_event(HeldKey::Key(usage_c), KeyPhase::Up, &mut modifiers)
+            .expect("usage has vk");
+        assert_eq!(
+            vk_down, vk_up,
+            "held key must release the identical pinned vk"
+        );
+        assert!(flags_up.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (_, flags_cmd_up) =
+            held_key_event(HeldKey::Command, KeyPhase::Up, &mut modifiers).expect("Command has vk");
+        assert!(!flags_cmd_up.contains(CGEventFlags::CGEventFlagCommand));
+    }
+
+    /// Optional live TIS smoke test: if an active console session is present,
+    /// verifies that resolution does not panic or crash.
+    #[test]
+    fn resolve_char_live_tis_smoke_test() {
+        if let Some(resolved) = resolve_char_with_base('a', false, false, false) {
             assert!(!resolved.needs_shift);
             assert!(!resolved.needs_option);
         }
+    }
+
+    /// Concurrency safety test: hammering resolve_char_with_base from 32 threads
+    /// does not crash with SIGABRT during lazy XPC bootstrap.
+    #[test]
+    fn resolve_char_is_safe_under_concurrent_calls() {
+        let handles: Vec<_> = (0..32)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _ = resolve_char_with_base('a', false, false, false);
+                    let _ = resolve_char_with_base('c', true, false, false);
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+    }
+
+    /// Verifies that layout resolution distinguishes all modifier dimensions
+    /// (Command, Shift, Option) so cache entries cannot collide across layers.
+    #[test]
+    fn cache_is_keyed_by_all_modifier_dimensions() {
+        let Some(layout_data) = installed_layout_data("com.apple.keylayout.Dvorak-QWERTYCmd")
+        else {
+            return;
+        };
+        let layout_ptr = layout_data.bytes().as_ptr().cast();
+
+        let no_cmd = resolve_char_from_layout(layout_ptr, 0, 'c', false, false, false);
+        let with_cmd = resolve_char_from_layout(layout_ptr, 0, 'c', true, false, false);
+        assert_ne!(no_cmd, with_cmd);
+        assert_eq!(
+            no_cmd,
+            Some(ResolvedKey {
+                vk: 0x22,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
+        assert_eq!(
+            with_cmd,
+            Some(ResolvedKey {
+                vk: 0x08,
+                needs_shift: false,
+                needs_option: false,
+            })
+        );
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
@@ -1699,15 +1865,17 @@ mod keyboard_layout {
 
     /// Every resolution this process has made under the layout named by
     /// `source_id` (`kTISPropertyInputSourceID`, e.g.
-    /// `"com.apple.keylayout.US"`), keyed by the arguments that produced it.
-    /// A layout switch is detected by comparing `source_id` on the next
-    /// call — cheap (one more `TISGetInputSourceProperty`, not a rescan) —
+    /// `"com.apple.keylayout.US"`) and `kbd_type` (`LMGetKbdType()`), keyed by
+    /// the arguments that produced it. A layout or keyboard-type switch is
+    /// detected by comparing `(source_id, kbd_type)` on the next call — cheap
+    /// (one more `TISGetInputSourceProperty` + `LMGetKbdType()`, not a rescan) —
     /// and evicts the whole map rather than tracking per-entry freshness,
     /// since a switch invalidates every cached vk at once anyway.
     #[derive(Default)]
     struct LayoutCache {
         source_id: String,
-        entries: HashMap<(char, bool, bool), Option<ResolvedKey>>,
+        kbd_type: u32,
+        entries: HashMap<(char, bool, bool, bool), Option<ResolvedKey>>,
     }
 
     /// Guards every call into the Text Input Source Services API below, and
@@ -1731,6 +1899,11 @@ mod keyboard_layout {
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
         fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
+        #[cfg(test)]
+        fn TISCreateInputSourceList(
+            properties: core_foundation::dictionary::CFDictionaryRef,
+            include_all_installed: bool,
+        ) -> core_foundation::array::CFArrayRef;
         fn TISGetInputSourceProperty(
             input_source: CFTypeRef,
             property_key: CFStringRef,
@@ -1758,8 +1931,10 @@ mod keyboard_layout {
     const NO_DEAD_KEYS: u32 = 1;
 
     // UCKeyTranslate's modifierKeyState packs the classic Toolbox modifier
-    // mask into bits 8-15: `(eventModifiers >> 8) & 0xFF`. shiftKey = 0x0200,
-    // optionKey = 0x0800, so shifted right 8 gives 0x02 / 0x08.
+    // mask into bits 8-15: `(eventModifiers >> 8) & 0xFF`. cmdKey = 0x0100,
+    // shiftKey = 0x0200, optionKey = 0x0800, so shifted right 8 gives
+    // 0x01 / 0x02 / 0x08.
+    const MOD_COMMAND: u32 = 0x01;
     const MOD_SHIFT: u32 = 0x02;
     const MOD_OPTION: u32 = 0x08;
 
@@ -1785,7 +1960,7 @@ mod keyboard_layout {
     /// exactly the shortcuts issue #343 exists to fix (Greptile review on
     /// #948, "Combined modifier layer remains unverified" — not applicable
     /// for the reasons above; see the PR discussion for the citations).
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) struct ResolvedKey {
         pub(super) vk: u16,
         pub(super) needs_shift: bool,
@@ -1797,8 +1972,10 @@ mod keyboard_layout {
     /// character (see `KeyboardUsage::ascii_char`), independent of what
     /// modifiers the caller's shortcut wants held — a Cmd+Shift+Z shortcut
     /// must still resolve plain 'z', which typically lives at the unshifted
-    /// layer, not the Shift layer. `base_shift`/`base_option` are only a
-    /// *search preference*: if the caller already holds Shift/Option for
+    /// layer, not the Shift layer. `has_command` includes Command in the probed
+    /// modifier state so Command-dependent layouts (like "Dvorak – QWERTY ⌘")
+    /// correctly switch to their Command layer. `base_shift`/`base_option` are
+    /// a *search preference*: if the caller already holds Shift/Option for
     /// other reasons (a combo's own modifier, or Screenshot/CaptureRegion's
     /// own Shift) and the layout happens to place `target` exactly there
     /// too, trying that layer first avoids reporting a spurious extra
@@ -1813,6 +1990,7 @@ mod keyboard_layout {
     /// produces this character).
     pub(super) fn resolve_char_with_base(
         target: char,
+        has_command: bool,
         base_shift: bool,
         base_option: bool,
     ) -> Option<ResolvedKey> {
@@ -1834,6 +2012,9 @@ mod keyboard_layout {
         let source_id_ptr = unsafe {
             TISGetInputSourceProperty(source.as_concrete_TypeRef(), kTISPropertyInputSourceID)
         };
+        // SAFETY: LMGetKbdType has no preconditions.
+        let kbd_type = u32::from(unsafe { LMGetKbdType() });
+
         // No stable identity to cache against — always resolve fresh rather
         // than risk serving a stale answer from a previous layout.
         let Some(source_id) = (!source_id_ptr.is_null()).then(|| {
@@ -1842,42 +2023,33 @@ mod keyboard_layout {
             // sound. wrap_under_get_rule does not release on drop.
             unsafe { CFString::wrap_under_get_rule(source_id_ptr.cast()) }.to_string()
         }) else {
-            return resolve_uncached(&source, target, base_shift, base_option);
+            return resolve_uncached(&source, target, has_command, base_shift, base_option);
         };
 
-        if state.source_id != source_id {
+        if state.source_id != source_id || state.kbd_type != kbd_type {
             *state = LayoutCache {
                 source_id,
+                kbd_type,
                 entries: HashMap::new(),
             };
         }
-        if let Some(&cached) = state.entries.get(&(target, base_shift, base_option)) {
+        let cache_key = (target, has_command, base_shift, base_option);
+        if let Some(&cached) = state.entries.get(&cache_key) {
             return cached;
         }
 
-        let resolved = resolve_uncached(&source, target, base_shift, base_option);
-        state
-            .entries
-            .insert((target, base_shift, base_option), resolved);
+        let resolved = resolve_uncached(&source, target, has_command, base_shift, base_option);
+        state.entries.insert(cache_key, resolved);
         resolved
     }
 
     /// The actual `UCKeyTranslate` scan, run on a cache miss (or when the
     /// active input source has no `kTISPropertyInputSourceID` to cache
-    /// against at all). Tries the caller's own modifiers first: if the
-    /// layout happens to place `target` exactly where the shortcut already
-    /// holds Shift/Option, no extra modifier needs to be added at all. But
-    /// `target` is `ascii_char()`'s *unshifted* character regardless of what
-    /// the caller wants held (Cmd+Shift+Z must still find plain 'z', which
-    /// lives at the unshifted layer, not the Shift layer) — so the base is
-    /// a search preference, never a filter: the other three of the four
-    /// possible (Shift, Option) layers are always tried after it too,
-    /// unfiltered by the base. The base is exactly one of those four, so
-    /// it's excluded from the "other three" up front rather than probed
-    /// twice.
+    /// against at all).
     fn resolve_uncached(
         source: &CFType,
         target: char,
+        has_command: bool,
         base_shift: bool,
         base_option: bool,
     ) -> Option<ResolvedKey> {
@@ -1901,9 +2073,38 @@ mod keyboard_layout {
         // SAFETY: LMGetKbdType has no preconditions.
         let kbd_type = u32::from(unsafe { LMGetKbdType() });
 
+        resolve_char_from_layout(
+            layout_ptr,
+            kbd_type,
+            target,
+            has_command,
+            base_shift,
+            base_option,
+        )
+    }
+
+    /// Resolve `target` on `layout_ptr` under `kbd_type` and candidate modifier layers.
+    /// Tries the caller's own modifiers first: if the layout happens to place
+    /// `target` exactly where the shortcut already holds Shift/Option, no extra
+    /// modifier needs to be added at all. But `target` is `ascii_char()`'s
+    /// *unshifted* character regardless of what the caller wants held (Cmd+Shift+Z
+    /// must still find plain 'z', which lives at the unshifted layer, not the Shift
+    /// layer) — so the base is a search preference, never a filter: the other three
+    /// of the four possible (Shift, Option) layers are always tried after it too,
+    /// unfiltered by the base.
+    pub(super) fn resolve_char_from_layout(
+        layout_ptr: *const c_void,
+        kbd_type: u32,
+        target: char,
+        has_command: bool,
+        base_shift: bool,
+        base_option: bool,
+    ) -> Option<ResolvedKey> {
+        let command_mask = if has_command { MOD_COMMAND } else { 0 };
         for &(shift, option) in &candidate_order(base_shift, base_option) {
-            let modifier_state =
-                (if shift { MOD_SHIFT } else { 0 }) | (if option { MOD_OPTION } else { 0 });
+            let modifier_state = command_mask
+                | (if shift { MOD_SHIFT } else { 0 })
+                | (if option { MOD_OPTION } else { 0 });
             if let Some(vk) = find_vk(layout_ptr, kbd_type, modifier_state, target) {
                 return Some(ResolvedKey {
                     vk,
@@ -1966,6 +2167,44 @@ mod keyboard_layout {
                 && char::from_u32(u32::from(unichar_buf[0])) == Some(target)
             {
                 return Some(vk);
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub(super) fn installed_layout_data(source_id: &str) -> Option<CFData> {
+        let _guard = LAYOUT_STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: TISCreateInputSourceList with null properties and true lists all installed layouts (+1 retain, Create rule).
+        let list_ptr = unsafe { TISCreateInputSourceList(std::ptr::null(), true) };
+        if list_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: list_ptr is a non-null +1 CFArrayRef from TISCreateInputSourceList; wrap_under_create_rule takes ownership.
+        let list = unsafe {
+            core_foundation::array::CFArray::<CFTypeRef>::wrap_under_create_rule(list_ptr)
+        };
+        for item in list.iter() {
+            let source_ptr = *item;
+            // SAFETY: source_ptr is a valid TISInputSourceRef; kTISPropertyInputSourceID is a valid CFStringRef.
+            let id_ptr =
+                unsafe { TISGetInputSourceProperty(source_ptr, kTISPropertyInputSourceID) };
+            if id_ptr.is_null() {
+                continue;
+            }
+            // SAFETY: Get rule — borrowed from source_ptr which remains alive in this loop iteration.
+            let source_identifier =
+                unsafe { CFString::wrap_under_get_rule(id_ptr.cast()) }.to_string();
+            if source_identifier == source_id {
+                // SAFETY: source_ptr is valid; kTISPropertyUnicodeKeyLayoutData is a valid CFStringRef.
+                let data_ptr = unsafe {
+                    TISGetInputSourceProperty(source_ptr, kTISPropertyUnicodeKeyLayoutData)
+                };
+                if !data_ptr.is_null() {
+                    // SAFETY: Get rule — borrowed from source_ptr; clone() creates an owned retain.
+                    let data = unsafe { CFData::wrap_under_get_rule(data_ptr.cast()) };
+                    return Some(data.clone());
+                }
             }
         }
         None
