@@ -255,17 +255,48 @@ impl MenuTarget {
     }
 }
 
-fn open_url(url: &str) {
-    match opener::open(url) {
-        Ok(()) => info!(url, "menu-bar — opening URL"),
-        Err(e) => warn!(error = %e, url, "could not open URL from menu bar"),
+fn gui_bundle_id_for_profile(dev_profile: bool) -> String {
+    if dev_profile {
+        brand::dev_id(brand::APP_ID)
+    } else {
+        brand::APP_ID.to_string()
     }
 }
 
-/// Route a GUI-directed [`DeeplinkCommand`] through the `openlogi://` scheme.
-/// macOS launches the GUI (cold start) or hands the URL to the running app.
+fn current_gui_bundle_id() -> String {
+    gui_bundle_id_for_profile(openlogi_core::paths::is_dev_profile())
+}
+
+/// Route a GUI-directed [`DeeplinkCommand`] to the GUI bundle that matches this
+/// agent's profile. Both prod and dev bundles register `openlogi://`; a generic
+/// LaunchServices open can therefore hand a dev-agent click to the installed
+/// production app. `open -b` pins delivery to the matching bundle id while still
+/// preserving cold-start and warm-reopen Apple Event behaviour.
 fn open_command(command: DeeplinkCommand) {
-    open_url(&command.to_url());
+    let url = command.to_url();
+    let bundle_id = current_gui_bundle_id();
+    match std::process::Command::new("/usr/bin/open")
+        .arg("-b")
+        .arg(&bundle_id)
+        .arg(&url)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            info!(url, bundle_id, "menu-bar — opening GUI command");
+        }
+        Ok(status) => warn!(
+            %status,
+            url,
+            bundle_id,
+            "could not open GUI command from menu bar"
+        ),
+        Err(e) => warn!(
+            error = %e,
+            url,
+            bundle_id,
+            "could not open GUI command from menu bar"
+        ),
+    }
 }
 
 /// Menu-bar Quit: take a running GUI with us, then end the process.
@@ -273,16 +304,11 @@ fn open_command(command: DeeplinkCommand) {
 /// Kept out of `define_class!` so the lint set actually sees the exit — clippy
 /// does not look inside macro expansions.
 fn quit_agent() -> ! {
-    // Tell a *running* GUI to quit too, but don't let `open` cold-launch one
-    // just to immediately quit it (it would flash a window — and on first run
-    // the update-consent prompt — before exiting). The gate keeps the target
-    // warm in the common case, so the blocking `.output()` (which guarantees
-    // Apple-Event delivery) returns at once; a GUI that races to exit after the
-    // check was quitting anyway.
+    // Tell only this profile's *running* GUI to quit. Matching the agent's
+    // profile matters when a dev bundle coexists with the installed app: seeing
+    // the other profile must never make us cold-launch this one just to quit it.
     if gui_is_running() {
-        let _ = std::process::Command::new("open")
-            .arg(DeeplinkCommand::Quit.to_url())
-            .output();
+        open_command(DeeplinkCommand::Quit);
     }
     crate::overlay::evict_on_quit();
     info!("menu-bar Quit — exiting agent");
@@ -293,17 +319,14 @@ fn quit_agent() -> ! {
     std::process::exit(0)
 }
 
-/// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
-/// Used to avoid cold-launching the GUI from the Quit handler just to quit it.
+/// Whether the GUI matching this agent's prod/dev profile is currently running.
+/// Used to avoid cold-launching that GUI from the Quit handler just to quit it.
 fn gui_is_running() -> bool {
-    // Release and dev; the agent's own id is `brand::AGENT_ID`, so neither
-    // matches the agent itself.
-    let dev = brand::dev_id(brand::APP_ID);
-    [brand::APP_ID, dev.as_str()].iter().any(|id| {
-        let running =
-            NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id));
-        !running.is_empty()
-    })
+    let bundle_id = current_gui_bundle_id();
+    let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+        &NSString::from_str(&bundle_id),
+    );
+    !running.is_empty()
 }
 
 /// Run the agent's AppKit main loop: an `Accessory` `NSApplication` (no Dock
@@ -501,6 +524,15 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 mod tests {
     use super::*;
     use openlogi_hid::device_io_channel;
+
+    #[test]
+    fn gui_bundle_id_matches_the_agent_profile() {
+        assert_eq!(gui_bundle_id_for_profile(false), brand::APP_ID);
+        assert_eq!(
+            gui_bundle_id_for_profile(true),
+            brand::dev_id(brand::APP_ID)
+        );
+    }
 
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
