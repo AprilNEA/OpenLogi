@@ -4,9 +4,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// One of the user-rebindable hotspots on a Logi mouse. The order matches the
-/// physical layout from front to side; [`ButtonId::ALL`] is consumed by the
-/// default-binding generator and the popover trigger list.
+/// One user-rebindable Logitech HID control. Mouse controls occupy the legacy
+/// declaration prefix; keyboard controls are appended so persisted/binary enum
+/// indices remain stable. [`ButtonId::ALL`] contains mouse controls only, while
+/// [`ButtonId::KEYBOARD_KEYS`] contains divertable keyboard controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ButtonId {
     /// The primary button. Rebindable in the config schema, but the OS hook
@@ -73,10 +74,20 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// Keyboard "Calculator" control (CID `0x000a`) — one of the extra
+    /// programmable controls on full-size MX Mechanical boards.
+    KeyCalculator,
+    /// Keyboard "Show Desktop" control (CID `0x006e`) on full-size MX Mechanical
+    /// boards.
+    KeyShowDesktop,
+    /// Keyboard "Lock PC" control (CID `0x006f`) on full-size MX Mechanical
+    /// boards. The adjacent MultiPlatform Search control already maps to
+    /// [`ButtonId::KeySearch`] (`0x00d4`).
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    KeyLockPC,
 }
 
 impl ButtonId {
@@ -99,11 +110,11 @@ impl ButtonId {
         ButtonId::HapticPanel,
     ];
 
-    /// The divertable keyboard F-row controls, in F-row order. Kept out of
-    /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
-    /// popover trigger list, while keyboard keys stay native unless the user
-    /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    /// Divertable Logitech keyboard controls. Kept out of [`ButtonId::ALL`]:
+    /// that array seeds mouse defaults and the mouse popover trigger list, while
+    /// keyboard controls stay native unless the user binds them (an unbound key
+    /// is never diverted).
+    pub const KEYBOARD_KEYS: [ButtonId; 12] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -113,6 +124,9 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+        ButtonId::KeyCalculator,
+        ButtonId::KeyShowDesktop,
+        ButtonId::KeyLockPC,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -165,6 +179,9 @@ impl ButtonId {
             ButtonId::KeyMute => "Mute Key",
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
+            ButtonId::KeyCalculator => "Calculator Key",
+            ButtonId::KeyShowDesktop => "Show Desktop Key",
+            ButtonId::KeyLockPC => "Lock PC Key",
             ButtonId::HapticPanel => "Haptic Panel",
         }
     }
@@ -194,6 +211,9 @@ impl ButtonId {
             ButtonId::KeyMute => "keyboard.mute_key",
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
+            ButtonId::KeyCalculator => "keyboard.calculator_key",
+            ButtonId::KeyShowDesktop => "keyboard.show_desktop_key",
+            ButtonId::KeyLockPC => "keyboard.lock_pc_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
         }
     }

@@ -1,6 +1,6 @@
 use super::*;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
-use openlogi_core::device::DeviceKind;
+use openlogi_core::device::{DeviceKind, DeviceModelInfo, DeviceTransports};
 use std::path::PathBuf;
 
 #[test]
@@ -27,6 +27,55 @@ fn function_row_covers_esc_through_f19() {
     assert_eq!(labels.last(), Some(&"F19"));
     assert!(labels.contains(&"F13"));
     assert!(labels.contains(&"F19"));
+}
+
+#[test]
+fn mx_mechanical_extra_positions_use_device_hidpp_controls() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            btle: true,
+            ..DeviceTransports::default()
+        },
+        model_ids: [MX_MECHANICAL_BTLE_PID, 0, 0],
+        extended_model_id: 0,
+    };
+
+    assert_eq!(mx_mechanical_extra_button(&model, 15), None);
+    assert_eq!(
+        mx_mechanical_extra_button(&model, 16),
+        Some(ButtonId::KeyCalculator)
+    );
+    assert_eq!(
+        mx_mechanical_extra_button(&model, 17),
+        Some(ButtonId::KeyShowDesktop)
+    );
+    assert_eq!(
+        mx_mechanical_extra_button(&model, 18),
+        Some(ButtonId::KeySearch)
+    );
+    assert_eq!(
+        mx_mechanical_extra_button(&model, 19),
+        Some(ButtonId::KeyLockPC)
+    );
+}
+
+#[test]
+fn unrelated_keyboard_keeps_high_function_keys_as_host_triggers() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [0x1234, 0, 0],
+        extended_model_id: 0,
+    };
+
+    for idx in 16..=19 {
+        assert_eq!(mx_mechanical_extra_button(&model, idx), None);
+    }
 }
 
 #[test]

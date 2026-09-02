@@ -6,9 +6,10 @@
 //! right while the keyboard physically makes room. Only one key is selected at a
 //! time.
 //!
-//! F-key bindings are global (`AppState`'s keyboard map), committed via
-//! [`AppState::commit_keyboard_binding`]. The panel lists the same action
-//! catalog the mouse picker uses, plus a Power User section.
+//! Ordinary Esc/F-key bindings are global (`AppState`'s keyboard map). Dedicated
+//! Logitech HID++ controls that occupy top-row positions on supported boards are
+//! per-device and use the same binding projection as mouse HID++ controls. The
+//! panel lists the shared action catalog plus parameterised Power User actions.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -31,8 +32,9 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::device::DeviceModelInfo;
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -56,6 +58,8 @@ use gpui::{Animation, AnimationExt, img};
 /// boards expose all 20; boards with a shorter F-row (a G513 has F1-F12)
 /// surface a prefix of this list, sized by the asset's key markers — see
 /// [`key_points`].
+const MX_MECHANICAL_BTLE_PID: u16 = 0xb366;
+
 const FUNCTION_KEYS: [(&str, u16); 20] = [
     ("Esc", 0x35),
     ("F1", 0x7A),
@@ -243,8 +247,8 @@ impl FunctionRowView {
 impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
-        let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
-        let bindings = state.map(AppState::keyboard_bindings);
+        let record = state.and_then(AppState::current_record);
+        let asset = record.and_then(|record| record.asset.as_ref());
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -264,11 +268,12 @@ impl Render for FunctionRowView {
                     keycode: *keycode,
                     modifiers: KeyModifiers::default(),
                 };
-                let bound = bindings.and_then(|bindings| bindings.get(&trigger));
+                let target = binding_target_for_slot(record, idx, trigger);
+                let bound = state.and_then(|state| target.current_action(state));
                 KeySlot {
                     idx,
                     label,
-                    trigger,
+                    target,
                     x_frac: point.x_frac,
                     y_frac: point.y_frac,
                     binding: binding_label(bound),
@@ -291,7 +296,7 @@ impl Render for FunctionRowView {
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
-            let current_action = bindings.and_then(|bindings| bindings.get(&slot.trigger));
+            let current_action = state.and_then(|state| slot.target.current_action(state));
             match kind {
                 PowerUserKind::Workflow => {
                     if self.workflow_draft.is_empty() {
@@ -346,12 +351,40 @@ fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32,
     asset_dimensions_for_png(asset, target_h, KEYBOARD_W)
 }
 
+/// Where one top-row hotspot stores and dispatches its binding.
+///
+/// Most function keys are host-level shortcuts shared across keyboards. Some
+/// Logitech boards expose dedicated HID++ controls in positions that the
+/// generic diagram historically labelled F16-F19; those must stay per-device
+/// or the OS hook never sees the physical press.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BindingTarget {
+    Global(KeyTrigger),
+    Device(ButtonId),
+}
+
+impl BindingTarget {
+    fn current_action<'a>(&self, state: &'a AppState) -> Option<&'a Action> {
+        match self {
+            Self::Global(trigger) => state.keyboard_bindings().get(trigger),
+            Self::Device(button) => state.button_bindings().get(button),
+        }
+    }
+
+    fn display_name(&self) -> gpui::SharedString {
+        match self {
+            Self::Global(trigger) => trigger.to_string().into(),
+            Self::Device(button) => tr!(button.translation_key()),
+        }
+    }
+}
+
 /// One function-row key with its resolved layout + binding.
 #[derive(Clone)]
 struct KeySlot {
     idx: usize,
     label: &'static str,
-    trigger: KeyTrigger,
+    target: BindingTarget,
     x_frac: f32,
     y_frac: f32,
     binding: gpui::SharedString,
@@ -674,6 +707,42 @@ fn key_click_target(
         })
 }
 
+fn binding_target_for_slot(
+    record: Option<&DeviceRecord>,
+    idx: usize,
+    trigger: KeyTrigger,
+) -> BindingTarget {
+    let Some(button) = record
+        .and_then(|record| record.model_info.as_ref())
+        .and_then(|model| mx_mechanical_extra_button(model, idx))
+    else {
+        return BindingTarget::Global(trigger);
+    };
+    BindingTarget::Device(button)
+}
+
+fn mx_mechanical_extra_button(model: &DeviceModelInfo, idx: usize) -> Option<ButtonId> {
+    if !model.model_ids.contains(&MX_MECHANICAL_BTLE_PID) {
+        return None;
+    }
+    match idx {
+        16 => Some(ButtonId::KeyCalculator),
+        17 => Some(ButtonId::KeyShowDesktop),
+        18 => Some(ButtonId::KeySearch),
+        19 => Some(ButtonId::KeyLockPC),
+        _ => None,
+    }
+}
+
+pub(crate) fn commit_target(state: &mut AppState, target: &BindingTarget, action: Action) {
+    match target {
+        BindingTarget::Global(trigger) => {
+            state.commit_keyboard_binding(trigger.clone(), Some(action));
+        }
+        BindingTarget::Device(button) => state.commit_binding(*button, action),
+    }
+}
+
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
@@ -796,13 +865,18 @@ impl FunctionRowView {
     ) -> gpui::Div {
         let pal = theme::palette(cx);
         let slot = &slots[selected_idx];
-        let trigger = slot.trigger.clone();
-        let key_name = trigger.to_string();
+        let target = slot.target.clone();
+        let target_name = target.display_name();
+        let panel_name: gpui::SharedString = match &target {
+            BindingTarget::Global(_) => slot.label.into(),
+            BindingTarget::Device(_) => format!("{} · {}", slot.label, target_name).into(),
+        };
 
         // If an editor is active, render it instead of the list.
         if let Some(kind) = self.active_editor {
             return super::editors::editor_card(
-                trigger,
+                target,
+                panel_name,
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
@@ -811,15 +885,15 @@ impl FunctionRowView {
             );
         }
 
-        let current = AppState::try_read(cx)
-            .and_then(|state| state.keyboard_bindings().get(&trigger).cloned());
+        let current =
+            AppState::try_read(cx).and_then(|state| slot.target.current_action(state).cloned());
 
         let view_for_pick = view.clone();
-        let trigger_for_pick = trigger.clone();
+        let target_for_pick = slot.target.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
+                commit_target(state, &target_for_pick, action);
                 if let Some(key) = key {
                     cx.emit(StateEvent::BindingsChanged(key));
                 }
@@ -832,14 +906,14 @@ impl FunctionRowView {
         compact_panel(pal)
             .w(px(PANEL_W))
             .max_h(px(500.))
-            .child(title_header(&key_name, &pal))
+            .child(title_header(&panel_name, &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".
-fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
+fn title_header(key_name: &gpui::SharedString, pal: &Palette) -> impl IntoElement {
     h_flex()
         .items_center()
         .justify_between()
@@ -850,7 +924,7 @@ fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
                 .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
-                .child(tr!("actions.bind_control", name => key_name)),
+                .child(tr!("actions.bind_control", name => key_name.clone())),
         )
 }
 
@@ -864,25 +938,30 @@ fn panel_action_rows(
 ) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
 
-    let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
+    let power_user_actions = [
+        (
+            PowerUserKind::CustomShortcut,
+            tr!("action_ring.custom_shortcut"),
+            "action-icons/keyboard.svg",
+        ),
         (
             PowerUserKind::TypeText,
-            "Type Text…",
+            tr!("actions.type_text_heading"),
             "action-icons/keyboard.svg",
         ),
         (
             PowerUserKind::RunAppleScript,
-            "Run AppleScript…",
+            tr!("actions.run_applescript_heading"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::RunShellCommand,
-            "Run Shell Command…",
+            tr!("actions.run_shell_command_heading"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::Workflow,
-            "Workflow…",
+            tr!("actions.workflow_heading"),
             "action-icons/list-checks.svg",
         ),
     ];
@@ -896,7 +975,10 @@ fn panel_action_rows(
                     let view = view.clone();
                     let selected = matches!(
                         (current, kind),
-                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+                        (
+                            Some(Action::CustomShortcut(_)),
+                            PowerUserKind::CustomShortcut
+                        ) | (Some(Action::TypeText(_)), PowerUserKind::TypeText)
                             | (
                                 Some(Action::RunAppleScript(_)),
                                 PowerUserKind::RunAppleScript
