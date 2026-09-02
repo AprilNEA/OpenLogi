@@ -80,13 +80,14 @@ pub enum ButtonId {
     /// other button; a separate `CrownLongPress` variant is unnecessary.
     Crown,
     /// Rotating the crown clockwise — `0x4600`'s
-    /// `relative_slot_rotation` reporting negative for a physical clockwise
-    /// turn (confirmed against real Craft hardware; see the `diag crown
-    /// --listen` smoke test). Named `Clockwise`/`Counterclockwise` rather
-    /// than `Up`/`Down` because a dial has no up or down.
+    /// `relative_slot_rotation` reporting positive for a physical clockwise
+    /// turn (confirmed against real Craft hardware, including a live-binding
+    /// round trip; see `session::gesture::crown_rotation_button` in
+    /// `openlogi-device`). Named `Clockwise`/`Counterclockwise` rather than
+    /// `Up`/`Down` because a dial has no up or down.
     CrownRotateClockwise,
     /// Rotating the crown counterclockwise (`relative_slot_rotation`
-    /// positive).
+    /// negative).
     CrownRotateCounterclockwise,
     /// A finger touching the crown (`0x4600`'s capacitive touch sensor,
     /// `touch: ActivityState`) — distinct from [`ButtonId::Crown`], which is

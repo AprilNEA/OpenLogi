@@ -1024,25 +1024,26 @@ fn crown_touching_covers_start_and_active_only() {
     assert!(!crown_touching(ActivityState::Inactive));
 }
 
-/// Clockwise is negative — confirmed against real Craft hardware, not
-/// assumed from the spec (see the `diag crown --listen` smoke test); `held`
-/// must select the press-modified pair regardless of sign.
+/// Clockwise is positive — confirmed by a live-binding round trip on real
+/// Craft hardware (see `crown_rotation_button`'s own doc comment for why this
+/// overrides the earlier `diag crown --listen` reading); `held` must select
+/// the press-modified pair regardless of sign.
 #[test]
 fn crown_rotation_button_maps_sign_and_held_independently() {
     assert_eq!(
-        crown_rotation_button(-1, false),
+        crown_rotation_button(1, false),
         ButtonId::CrownRotateClockwise
     );
     assert_eq!(
-        crown_rotation_button(-1, true),
+        crown_rotation_button(1, true),
         ButtonId::CrownPressRotateClockwise
     );
     assert_eq!(
-        crown_rotation_button(1, false),
+        crown_rotation_button(-1, false),
         ButtonId::CrownRotateCounterclockwise
     );
     assert_eq!(
-        crown_rotation_button(1, true),
+        crown_rotation_button(-1, true),
         ButtonId::CrownPressRotateCounterclockwise
     );
 }

@@ -506,15 +506,18 @@ fn crown_touching(touch: ActivityState) -> bool {
 }
 
 /// The [`ButtonId`] one slot of rotation dispatches as. Clockwise is
-/// negative `relative_slot_rotation` — confirmed against real Craft hardware
-/// (`diag crown --listen`), not assumed from the spec — and `held` selects
+/// positive `relative_slot_rotation` — confirmed by binding each direction to
+/// a distinguishable action (`VolumeUp`/`VolumeDown`) and turning the crown
+/// by hand, which is authoritative where the earlier `diag crown --listen`
+/// reading (no bound action, direction inferred from a verbal description of
+/// the motion) turned out backward. Not assumed from the spec. `held` selects
 /// the press-modified pair.
 fn crown_rotation_button(relative_slot_rotation: i8, held: bool) -> ButtonId {
     match (relative_slot_rotation < 0, held) {
-        (true, false) => ButtonId::CrownRotateClockwise,
-        (true, true) => ButtonId::CrownPressRotateClockwise,
-        (false, false) => ButtonId::CrownRotateCounterclockwise,
-        (false, true) => ButtonId::CrownPressRotateCounterclockwise,
+        (true, false) => ButtonId::CrownRotateCounterclockwise,
+        (true, true) => ButtonId::CrownPressRotateCounterclockwise,
+        (false, false) => ButtonId::CrownRotateClockwise,
+        (false, true) => ButtonId::CrownPressRotateClockwise,
     }
 }
 
