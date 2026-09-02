@@ -73,10 +73,24 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// The Craft keyboard's rotary crown, pressed — HID++ `0x4600 Crown`
+    /// (`ButtonState::Press`/`Release`/`LongPress`). Supports
+    /// [`Binding::LongPress`](crate::binding::Binding::LongPress) like any
+    /// other button; a separate `CrownLongPress` variant is unnecessary.
+    Crown,
+    /// Rotating the crown clockwise — `0x4600`'s
+    /// `relative_slot_rotation` reporting negative for a physical clockwise
+    /// turn (confirmed against real Craft hardware; see the `diag crown
+    /// --listen` smoke test). Named `Clockwise`/`Counterclockwise` rather
+    /// than `Up`/`Down` because a dial has no up or down.
+    CrownRotateClockwise,
+    /// Rotating the crown counterclockwise (`relative_slot_rotation`
+    /// positive).
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    CrownRotateCounterclockwise,
 }
 
 impl ButtonId {
@@ -113,6 +127,17 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+    ];
+
+    /// The Craft keyboard's rotary crown: press and its two rotation
+    /// directions. Kept out of [`ButtonId::ALL`] for the same reason as
+    /// [`ButtonId::KEYBOARD_KEYS`] — it lives on the keyboard, not the mouse
+    /// popover, and stays native (never diverted) until the user binds one of
+    /// these.
+    pub const CROWN_CONTROLS: [ButtonId; 3] = [
+        ButtonId::Crown,
+        ButtonId::CrownRotateClockwise,
+        ButtonId::CrownRotateCounterclockwise,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -166,6 +191,9 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::Crown => "Crown",
+            ButtonId::CrownRotateClockwise => "Crown Clockwise",
+            ButtonId::CrownRotateCounterclockwise => "Crown Counterclockwise",
         }
     }
 
@@ -195,6 +223,9 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::Crown => "keyboard.crown",
+            ButtonId::CrownRotateClockwise => "keyboard.crown_clockwise",
+            ButtonId::CrownRotateCounterclockwise => "keyboard.crown_counterclockwise",
         }
     }
 }

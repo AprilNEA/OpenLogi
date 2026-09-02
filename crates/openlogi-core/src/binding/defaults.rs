@@ -80,6 +80,20 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
         | ButtonId::KeyVolumeUp => Action::None,
+        // The crown reports press/rotation only while diverted, and diverting
+        // it forfeits whatever its native firmware behavior is — same
+        // tradeoff as the keyboard keys above, so it gets the same inert
+        // default: stay native until the user explicitly binds one of the
+        // three controls.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "same None value as the keyboard keys above for a different reason (native \
+                      firmware forfeited by diverting, not an OS-owned control) — keeping the \
+                      arms apart keeps each comment attached to the button group it explains"
+        )]
+        ButtonId::Crown
+        | ButtonId::CrownRotateClockwise
+        | ButtonId::CrownRotateCounterclockwise => Action::None,
     }
 }
 
