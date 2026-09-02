@@ -35,10 +35,11 @@ use openlogi_inject::DockSwipeMotion;
 /// geometry is plumbed through.
 const HORIZONTAL_PAD_TRAVEL_UM: f64 = 117_000.0;
 const VERTICAL_PAD_TRAVEL_UM: f64 = 75_600.0;
-/// This much spread change equals one progress unit. Hardware-tuned on the
-/// Casa Touch: the full ~40 mm open↔close span revealed only a quarter of
-/// the native animation, so one unit per quarter span.
-const PINCH_SPREAD_TRAVEL_UM: f64 = 10_000.0;
+/// Spread change equal to one progress unit, per pinch finger count — the
+/// thumb-plus-three opening of a four-finger pinch reaches unit progress
+/// over less measured spread. Hardware-tuned on the Casa Touch.
+const TWO_FINGER_PINCH_TRAVEL_UM: f64 = 15_000.0;
+const FOUR_FINGER_PINCH_TRAVEL_UM: f64 = 10_000.0;
 
 /// One routed step of a session's swipe stream.
 #[derive(Debug, Default, PartialEq)]
@@ -196,6 +197,8 @@ fn pair_sibling(trigger: ButtonId) -> Option<(ButtonId, GestureAxis, Side)> {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SwipeStreamPlan {
     axis: GestureAxis,
+    /// Travel along the axis that equals one progress unit, micrometres.
+    travel_um: f64,
     motion: DockSwipeMotion,
     /// Whether finger travel maps onto motion progress negated, solved from
     /// the bindings so each bound side commits its own action.
@@ -212,6 +215,19 @@ impl SwipeStreamPlan {
         bindings: &BTreeMap<ButtonId, Action>,
     ) -> Option<Self> {
         let (sibling, axis, own_side) = pair_sibling(trigger)?;
+        let travel_um = match axis {
+            GestureAxis::Horizontal => HORIZONTAL_PAD_TRAVEL_UM,
+            GestureAxis::Vertical => VERTICAL_PAD_TRAVEL_UM,
+            GestureAxis::Pinch
+                if matches!(
+                    trigger,
+                    ButtonId::TouchpadTwoFingerPinchIn | ButtonId::TouchpadTwoFingerPinchOut
+                ) =>
+            {
+                TWO_FINGER_PINCH_TRAVEL_UM
+            }
+            GestureAxis::Pinch => FOUR_FINGER_PINCH_TRAVEL_UM,
+        };
         let mut motion = None;
         let mut positive = None;
         let mut negative = None;
@@ -240,6 +256,7 @@ impl SwipeStreamPlan {
         }
         Some(Self {
             axis,
+            travel_um,
             motion: motion?,
             flipped: demanded?,
             positive,
@@ -303,17 +320,14 @@ impl ActiveSwipe {
         let spread = frame_spread(frame.contacts(), centroid);
         let mut mapped = 0.0;
         if contact_ids.as_slice() == &*self.contact_ids {
-            let raw = match self.plan.axis {
-                GestureAxis::Horizontal => {
-                    (centroid.0 - self.centroid_um.0) as f64 / HORIZONTAL_PAD_TRAVEL_UM
-                }
+            let travel = match self.plan.axis {
+                GestureAxis::Horizontal => (centroid.0 - self.centroid_um.0) as f64,
                 // Window y grows downward, but vertical progress is
                 // positive upward.
-                GestureAxis::Vertical => {
-                    -(centroid.1 - self.centroid_um.1) as f64 / VERTICAL_PAD_TRAVEL_UM
-                }
-                GestureAxis::Pinch => (spread - self.spread_um) / PINCH_SPREAD_TRAVEL_UM,
+                GestureAxis::Vertical => -(centroid.1 - self.centroid_um.1) as f64,
+                GestureAxis::Pinch => spread - self.spread_um,
             };
+            let raw = travel / self.plan.travel_um;
             mapped = if self.plan.flipped { -raw } else { raw };
         }
         self.contact_ids = contact_ids.into_boxed_slice();

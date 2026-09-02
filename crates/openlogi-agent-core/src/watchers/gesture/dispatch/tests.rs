@@ -1204,7 +1204,7 @@ fn the_launchpad_desktop_pair_streams_the_scale_motion() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Pinch,
-            progress: -10_000.0 / 10_000.0,
+            progress: -10_000.0 / 15_000.0,
         }
     );
 }
@@ -1274,16 +1274,16 @@ fn pinch_out_bound_to_mission_control_streams_the_vertical_motion() {
     // Spreading past the pinch threshold commits PinchOut mid-stroke.
     runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
 
-    // Further spread streams as vertical DockSwipe progress — the mapping
-    // onto an existing motion is the test vehicle until the native pinch
-    // consumer is wired in.
+    // Further spread streams as vertical DockSwipe progress — the motion
+    // follows the bound action's consumer, and two-finger spread normalizes
+    // against the 15 mm travel.
     let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
     assert_eq!(outcome.routed, TouchpadOutput::Idle);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 10_000.0,
+            progress: 10_000.0 / 15_000.0,
         }
     );
 }
@@ -1300,7 +1300,7 @@ fn pinch_in_bound_to_app_expose_streams_negative_progress() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: -10_000.0 / 10_000.0,
+            progress: -10_000.0 / 15_000.0,
         }
     );
 }
@@ -1319,7 +1319,7 @@ fn a_reversed_pinch_binding_flips_the_travel_mapping() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 10_000.0,
+            progress: 10_000.0 / 15_000.0,
         }
     );
 }
@@ -1345,7 +1345,7 @@ fn the_unbound_pinch_side_clamps_progress_at_zero() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 16_000.0 / 10_000.0,
+            progress: 16_000.0 / 15_000.0,
         }
     );
 }
