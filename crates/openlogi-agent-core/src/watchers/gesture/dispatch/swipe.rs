@@ -104,16 +104,18 @@ enum GestureAxis {
 fn swipe_consumer(action: &Action) -> Option<(DockSwipeMotion, i8)> {
     /// Fingers right commit the next Space.
     const NEXT_DESKTOP_SIGN: i8 = 1;
-    /// Spreading commits Launchpad (its macOS 26+ replacement), per Mac
-    /// Mouse Fix's production mapping of the scale motion.
-    const LAUNCHPAD_SIGN: i8 = 1;
+    /// Spreading drives positive scale progress, which the Dock resolves as
+    /// Show Desktop; closing drives negative, resolving as Launchpad (its
+    /// macOS 26+ replacement). Hardware-verified on macOS 27 — the opposite
+    /// of the native trackpad's finger mapping.
+    const SHOW_DESKTOP_SIGN: i8 = 1;
     match action {
         Action::NextDesktop => Some((DockSwipeMotion::Horizontal, NEXT_DESKTOP_SIGN)),
         Action::PreviousDesktop => Some((DockSwipeMotion::Horizontal, -NEXT_DESKTOP_SIGN)),
         Action::MissionControl => Some((DockSwipeMotion::Vertical, 1)),
         Action::AppExpose => Some((DockSwipeMotion::Vertical, -1)),
-        Action::LaunchpadShow => Some((DockSwipeMotion::Pinch, LAUNCHPAD_SIGN)),
-        Action::ShowDesktop => Some((DockSwipeMotion::Pinch, -LAUNCHPAD_SIGN)),
+        Action::ShowDesktop => Some((DockSwipeMotion::Pinch, SHOW_DESKTOP_SIGN)),
+        Action::LaunchpadShow => Some((DockSwipeMotion::Pinch, -SHOW_DESKTOP_SIGN)),
         _ => None,
     }
 }

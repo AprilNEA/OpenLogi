@@ -1167,8 +1167,8 @@ fn show_desktop_on_a_swipe_pair_streams_the_scale_motion() {
         true,
     );
 
-    // Show Desktop lives on the scale motion's negative commit; an upward
-    // swipe bound to it flips the mapping so the reveal commits the binding.
+    // Show Desktop lives on the scale motion's positive commit, so an upward
+    // swipe bound to it streams identity-mapped progress.
     let outcome = runtime.update(
         &translated_frame(90_000, 3, 0, -25_000),
         &bindings,
@@ -1180,7 +1180,7 @@ fn show_desktop_on_a_swipe_pair_streams_the_scale_motion() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Pinch,
-            progress: -10_000.0 / 75_600.0,
+            progress: 10_000.0 / 75_600.0,
         }
     );
 }
@@ -1195,15 +1195,16 @@ fn the_launchpad_desktop_pair_streams_the_scale_motion() {
     runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
     runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
 
-    // Spreading drives the scale motion's positive commit: Launchpad (its
-    // macOS 26+ replacement) reveals with the fingers.
+    // Spreading commits Show Desktop on the scale motion, so the
+    // Launchpad-bound side of the pair flips the mapping: spreading drives
+    // negative progress, resolving as Launchpad (its macOS 26+ replacement).
     let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
     assert_eq!(outcome.routed, TouchpadOutput::Idle);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Pinch,
-            progress: 10_000.0 / 40_000.0,
+            progress: -10_000.0 / 40_000.0,
         }
     );
 }
