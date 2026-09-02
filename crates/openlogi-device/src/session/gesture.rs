@@ -26,6 +26,10 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature, EmittingFeature,
+        crown::{
+            ActivityState, ButtonState, CrownEvent, CrownFeature, CrownUpdate, ReportingMode,
+            SetCrownMode,
+        },
         root::RootFeature,
         wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
     },
@@ -212,6 +216,9 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Divert the Craft keyboard's rotary crown over `0x4600` (any of
+    /// [`ButtonId::CROWN_CONTROLS`] bound to a non-default action).
+    pub capture_crown: bool,
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
@@ -390,8 +397,10 @@ async fn run_capture_session_on(
             registry,
             shared: &shared,
             activity: &activity,
+            sink: &sink,
         },
         wireless,
+        armed.crown.as_ref().map(|crown| crown.feature.listen()),
         shutdown,
         device_io,
     )
@@ -462,6 +471,121 @@ fn thumbwheel_input(
         .then_some(CapturedInput::ButtonPulse(ButtonId::Thumbwheel))
 }
 
+/// Cross-event edge state for the crown's press and touch sensor.
+///
+/// Rotation needs no entry here: unlike the button and touch fields, which
+/// only matter on their `Start`/`Stop` transition, the crown's own report
+/// already carries the button state alongside any rotation in the same
+/// payload, so [`handle_crown_event`] reads it fresh from each event instead
+/// of tracking it across events.
+#[derive(Default)]
+struct CrownEdgeState {
+    button_down: bool,
+    touching: bool,
+}
+
+/// Whether `button` represents the crown currently held down, folding
+/// firmware's own five-state press lifecycle to one bit. OpenLogi's own
+/// binding runtime (`agent-core::runtime::button`) times long-press itself
+/// from the down/up edges this produces — independent of firmware's own
+/// `Press`/`ShortPressActive`/`LongPress`/`LongPressActive` states, the same
+/// way it already does for every other button.
+fn crown_button_held(button: ButtonState) -> bool {
+    matches!(
+        button,
+        ButtonState::Press
+            | ButtonState::ShortPressActive
+            | ButtonState::LongPress
+            | ButtonState::LongPressActive
+    )
+}
+
+/// Whether `touch` represents contact with the crown's capacitive sensor.
+fn crown_touching(touch: ActivityState) -> bool {
+    matches!(touch, ActivityState::Start | ActivityState::Active)
+}
+
+/// The [`ButtonId`] one slot of rotation dispatches as. Clockwise is
+/// negative `relative_slot_rotation` — confirmed against real Craft hardware
+/// (`diag crown --listen`), not assumed from the spec — and `held` selects
+/// the press-modified pair.
+fn crown_rotation_button(relative_slot_rotation: i8, held: bool) -> ButtonId {
+    match (relative_slot_rotation < 0, held) {
+        (true, false) => ButtonId::CrownRotateClockwise,
+        (true, true) => ButtonId::CrownPressRotateClockwise,
+        (false, false) => ButtonId::CrownRotateCounterclockwise,
+        (false, true) => ButtonId::CrownPressRotateCounterclockwise,
+    }
+}
+
+/// Route one crown-channel poll result: `None` means the channel closed
+/// (clears `crown_events` so `monitor_capture` stops polling it), an
+/// unrecognised [`CrownEvent`] variant is dropped, and an `Update` is folded
+/// into `state`/`sink` by [`handle_crown_event`].
+fn handle_crown_poll(
+    crown_events: &mut Option<async_channel::Receiver<CrownEvent>>,
+    event: Option<CrownEvent>,
+    state: &mut CrownEdgeState,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    let Some(event) = event else {
+        *crown_events = None;
+        return;
+    };
+    let CrownEvent::Update(update) = event else {
+        return;
+    };
+    handle_crown_event(state, update, sink);
+}
+
+/// Convert one `CrownUpdate` into edges and pulses, updating `state` for the
+/// button/touch transitions it observed.
+///
+/// Rotation dispatches as `abs(relative_slot_rotation)` pulses: the crown's
+/// physical ratchet already gives the "one notch, one trigger" feel the bound
+/// action should have, so — unlike the thumb wheel's continuous re-synthesis
+/// — there is no threshold/decay smoothing here.
+/// Diff `now` against `current`'s tracked value, updating it and returning
+/// the edge to send, if any — a `false → true` transition is a down edge, a
+/// `true → false` transition is an up edge, and no change sends nothing.
+/// Pulled out of [`handle_crown_event`] purely so it is testable without
+/// constructing a [`CrownUpdate`], which is `#[non_exhaustive]` outside
+/// `openlogi-hidpp`.
+fn crown_edge(current: &mut bool, now: bool, button: ButtonId) -> Option<CapturedInput> {
+    if now == *current {
+        return None;
+    }
+    *current = now;
+    Some(if now {
+        CapturedInput::ButtonDown(button)
+    } else {
+        CapturedInput::ButtonUp(button)
+    })
+}
+
+fn handle_crown_event(
+    state: &mut CrownEdgeState,
+    update: CrownUpdate,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    let now_down = crown_button_held(update.button);
+    if let Some(input) = crown_edge(&mut state.button_down, now_down, ButtonId::Crown) {
+        let _ = sink.send(input);
+    }
+
+    let now_touching = crown_touching(update.touch);
+    if let Some(input) = crown_edge(&mut state.touching, now_touching, ButtonId::CrownTouch) {
+        let _ = sink.send(input);
+    }
+
+    if update.relative_slot_rotation != 0 {
+        let button = crown_rotation_button(update.relative_slot_rotation, now_down);
+        for _ in 0..update.relative_slot_rotation.unsigned_abs() {
+            let _ = sink.send(CapturedInput::ButtonPulse(button));
+        }
+    }
+}
+
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
 #[derive(Default)]
@@ -483,6 +607,33 @@ struct ArmedControls {
     /// `0x2150` accessor and the information read while diverting it, present
     /// when the thumb wheel is diverted.
     thumb: Option<ArmedThumbwheel>,
+    /// `0x4600` accessor, present when the crown is diverted.
+    crown: Option<ArmedCrown>,
+}
+
+/// `0x4600` accessor armed for the session.
+///
+/// Unlike the shared `0x1b04`/`0x2150` listener, the crown's own event is
+/// self-contained — button, touch, and rotation all snapshot together in one
+/// report — so it needs no [`CaptureAccum`] participation. It gets its own
+/// [`CrownFeature::listen`] receiver and its own small edge-tracking state
+/// (see [`CrownEdgeState`]) polled directly in [`monitor_capture`].
+struct ArmedCrown {
+    feature: Arc<CrownFeature>,
+    feature_index: u8,
+}
+
+/// Divert the crown; leaves every other `SetCrownMode` field unchanged.
+async fn divert_crown(feature: &CrownFeature) -> Result<(), v20::Hidpp20Error> {
+    feature
+        .set_mode(SetCrownMode {
+            diverting: Some(ReportingMode::Diverted),
+            ratchet_mode: None,
+            rotation_timeout: None,
+            short_long_timeout: None,
+            double_tap_speed: None,
+        })
+        .await
 }
 
 struct ArmedThumbwheel {
@@ -526,6 +677,7 @@ impl ArmedControls {
             reprog,
             reporting,
             thumb,
+            crown,
             ..
         } = self;
         let reprog =
@@ -534,6 +686,7 @@ impl ArmedControls {
             retired,
             reprog,
             thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
+            crown.as_ref().map(|crown| crown.feature_index),
         )
     }
 
@@ -567,6 +720,11 @@ impl ArmedControls {
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
+        if let Some(crown) = self.crown.as_ref()
+            && let Err(error) = divert_crown(&crown.feature).await
+        {
+            warn!(?error, "crown re-divert after wake failed");
+        }
     }
 }
 
@@ -578,6 +736,7 @@ fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool)
         dpi_buttons = armed.dpi_cids.len(),
         buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
+        crown = armed.crown.is_some(),
         wake_rearm,
         "control capture active"
     );
@@ -592,6 +751,7 @@ struct CaptureMonitor<'a> {
     registry: Option<&'a ChannelRegistry>,
     shared: &'a SharedChannel,
     activity: &'a ChannelActivity,
+    sink: &'a mpsc::UnboundedSender<CapturedInput>,
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
@@ -600,10 +760,12 @@ struct CaptureMonitor<'a> {
 async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
+    mut crown_events: Option<async_channel::Receiver<CrownEvent>>,
     shutdown: oneshot::Receiver<()>,
     mut device_io: DeviceIoGate,
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
+    let mut crown_edges = CrownEdgeState::default();
     let mut shutdown = std::pin::pin!(shutdown);
     let mut liveness =
         CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
@@ -659,7 +821,20 @@ async fn monitor_capture(
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
                     CaptureAccum::default();
+                crown_edges = CrownEdgeState::default();
                 context.armed.rearm(&device_io).await;
+            }
+            event = async {
+                match crown_events.as_ref() {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                // The crown's own event proves this channel is alive just
+                // like any other parsed report — see the liveness comment
+                // above the shared `0x1b04`/`0x2150` listener.
+                context.activity.record();
+                handle_crown_poll(&mut crown_events, event, &mut crown_edges, context.sink);
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -831,6 +1006,26 @@ async fn arm_controls_into(
         if let Some(thumb) = armed.thumb.as_ref()
             && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
+            return Err(GestureError::Hidpp(format!("{error:?}")));
+        }
+    }
+
+    if spec.capture_crown
+        && let Some(info) = device
+            .root()
+            .get_feature(CrownFeature::ID)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+    {
+        let feature = Arc::new(CrownFeature::new(Arc::clone(chan), slot, info.index));
+        // Store ownership before the write, matching the thumb wheel above: a
+        // transport error cannot prove whether firmware applied diversion, so
+        // rollback must cover it too.
+        armed.crown = Some(ArmedCrown {
+            feature: Arc::clone(&feature),
+            feature_index: info.index,
+        });
+        if let Err(error) = divert_crown(&feature).await {
             return Err(GestureError::Hidpp(format!("{error:?}")));
         }
     }

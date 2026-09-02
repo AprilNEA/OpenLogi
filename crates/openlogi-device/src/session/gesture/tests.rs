@@ -47,6 +47,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
             }],
         ),
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -99,6 +100,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
                 original: reporting(false, None),
             }],
         ),
+        None,
         None,
     )
     .expect("one diverted control should require restoration");
@@ -155,6 +157,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
                 original: reporting(false, None),
             }],
         ),
+        None,
         None,
     );
 
@@ -992,5 +995,73 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
             TRACED_RES
         ),
         None
+    );
+}
+
+#[test]
+fn crown_button_held_covers_every_held_state_and_only_those() {
+    for held in [
+        ButtonState::Press,
+        ButtonState::ShortPressActive,
+        ButtonState::LongPress,
+        ButtonState::LongPressActive,
+    ] {
+        assert!(crown_button_held(held), "{held:?} must count as held");
+    }
+    for released in [ButtonState::Inactive, ButtonState::Release] {
+        assert!(
+            !crown_button_held(released),
+            "{released:?} must not count as held"
+        );
+    }
+}
+
+#[test]
+fn crown_touching_covers_start_and_active_only() {
+    assert!(crown_touching(ActivityState::Start));
+    assert!(crown_touching(ActivityState::Active));
+    assert!(!crown_touching(ActivityState::Stop));
+    assert!(!crown_touching(ActivityState::Inactive));
+}
+
+/// Clockwise is negative — confirmed against real Craft hardware, not
+/// assumed from the spec (see the `diag crown --listen` smoke test); `held`
+/// must select the press-modified pair regardless of sign.
+#[test]
+fn crown_rotation_button_maps_sign_and_held_independently() {
+    assert_eq!(
+        crown_rotation_button(-1, false),
+        ButtonId::CrownRotateClockwise
+    );
+    assert_eq!(
+        crown_rotation_button(-1, true),
+        ButtonId::CrownPressRotateClockwise
+    );
+    assert_eq!(
+        crown_rotation_button(1, false),
+        ButtonId::CrownRotateCounterclockwise
+    );
+    assert_eq!(
+        crown_rotation_button(1, true),
+        ButtonId::CrownPressRotateCounterclockwise
+    );
+}
+
+#[test]
+fn crown_edge_fires_only_on_transition() {
+    let mut down = false;
+    assert_eq!(crown_edge(&mut down, false, ButtonId::Crown), None);
+    assert_eq!(
+        crown_edge(&mut down, true, ButtonId::Crown),
+        Some(CapturedInput::ButtonDown(ButtonId::Crown))
+    );
+    assert_eq!(
+        crown_edge(&mut down, true, ButtonId::Crown),
+        None,
+        "a repeated held state must not refire the down edge"
+    );
+    assert_eq!(
+        crown_edge(&mut down, false, ButtonId::Crown),
+        Some(CapturedInput::ButtonUp(ButtonId::Crown))
     );
 }

@@ -6,6 +6,8 @@ use std::future::Future;
 use std::sync::{Arc, RwLock, Weak};
 
 use hidpp::channel::HidppChannel;
+use hidpp::feature::CreatableFeature;
+use hidpp::feature::crown::{CrownFeature, ReportingMode, SetCrownMode};
 use thiserror::Error;
 
 use crate::backend::BackendError;
@@ -135,6 +137,7 @@ pub struct PendingCaptureRestore {
     retired_policy: RetiredChannelPolicy,
     reprog: Option<ReprogRestore>,
     thumb_index: Option<u8>,
+    crown_index: Option<u8>,
 }
 
 impl fmt::Debug for PendingCaptureRestore {
@@ -149,6 +152,7 @@ impl fmt::Debug for PendingCaptureRestore {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_crown", &self.crown_index.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -158,8 +162,9 @@ impl PendingCaptureRestore {
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb_index: Option<u8>,
+        crown_index: Option<u8>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+        if reprog.is_none() && thumb_index.is_none() && crown_index.is_none() {
             return None;
         }
         Some(Self {
@@ -168,6 +173,7 @@ impl PendingCaptureRestore {
             retired_policy: RetiredChannelPolicy::ReplacementOnly,
             reprog,
             thumb_index,
+            crown_index,
         })
     }
 
@@ -225,8 +231,26 @@ impl PendingCaptureRestore {
             }
         }
         if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, feature_index);
             restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        }
+        if let Some(feature_index) = self.crown_index {
+            let crown = CrownFeature::new(channel, device_index, feature_index);
+            // Undivert unconditionally, like the thumb wheel above, rather
+            // than restoring whatever reporting mode preceded this session:
+            // native (Hid) is the crown's only other-than-diverted resting
+            // state, so there is no "restore to original" case this would
+            // lose.
+            let result = crown
+                .set_mode(SetCrownMode {
+                    diverting: Some(ReportingMode::Hid),
+                    ratchet_mode: None,
+                    rotation_timeout: None,
+                    short_long_timeout: None,
+                    double_tap_speed: None,
+                })
+                .await;
+            restored &= restore_result(result, "crown");
         }
         restored
     }
