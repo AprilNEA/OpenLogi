@@ -45,9 +45,10 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
 /// The divertable keyboard F-row controls OpenLogi models, as
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
-/// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+/// catalog (cross-checked against Solaar's `special_keys.py`). The first group
+/// covers the Signature-series F-row; the trailing controls cover the extra
+/// programmable keys on full-size MX Mechanical boards.
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 12] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
@@ -57,6 +58,11 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
     (0x00e7, ButtonId::KeyMute),
     (0x00e8, ButtonId::KeyVolumeDown),
     (0x00e9, ButtonId::KeyVolumeUp),
+    // MX Mechanical's four extra programmable keys are Calculator, Show Desktop,
+    // MultiPlatform Search (the existing 0x00d4 above), and Lock PC.
+    (0x000a, ButtonId::KeyCalculator),
+    (0x006e, ButtonId::KeyShowDesktop),
+    (0x006f, ButtonId::KeyLockPC),
 ];
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
@@ -409,6 +415,14 @@ fn device_io_suspended() -> GestureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mx_mechanical_extra_controls_are_in_the_capture_catalog() {
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x000a, ButtonId::KeyCalculator)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x006e, ButtonId::KeyShowDesktop)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x00d4, ButtonId::KeySearch)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x006f, ButtonId::KeyLockPC)));
+    }
 
     #[test]
     fn keyboard_snapshots_emit_balanced_edges_without_duplicates() {

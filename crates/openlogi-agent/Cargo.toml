@@ -35,7 +35,6 @@ rust-i18n = "4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
-opener = { workspace = true }
 succession = { version = "0.2", features = ["supervision", "eviction"] }
 tracing-appender = "0.2.5"
 

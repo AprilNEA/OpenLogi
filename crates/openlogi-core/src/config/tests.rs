@@ -510,6 +510,47 @@ fn bindings_roundtrip_per_device() {
 }
 
 #[test]
+fn mx_mechanical_extra_bindings_roundtrip_as_device_controls() {
+    let mut cfg = Config::default();
+    let key = "serial:2233sct00sw8";
+    cfg.set_binding(
+        key,
+        ButtonId::KeyCalculator,
+        Binding::Single(Action::CustomShortcut(
+            "Ctrl+Alt+N".parse().expect("valid shortcut"),
+        )),
+    );
+    cfg.set_binding(
+        key,
+        ButtonId::KeyShowDesktop,
+        Binding::Single(Action::CustomShortcut(
+            "Ctrl+Alt+L".parse().expect("valid shortcut"),
+        )),
+    );
+
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("KeyCalculator"));
+    assert!(body.contains("KeyShowDesktop"));
+    assert!(!body.contains("KeyLockPC"));
+
+    let parsed = write_and_read(&cfg);
+    let bindings = parsed.bindings_for(key);
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(
+        bindings.get(&ButtonId::KeyCalculator),
+        Some(&Binding::Single(Action::CustomShortcut(
+            "Ctrl+Alt+N".parse().expect("valid shortcut")
+        )))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::KeyShowDesktop),
+        Some(&Binding::Single(Action::CustomShortcut(
+            "Ctrl+Alt+L".parse().expect("valid shortcut")
+        )))
+    );
+}
+
+#[test]
 fn human_readable_toml_layout() {
     let mut cfg = Config::default();
     cfg.set_binding(
