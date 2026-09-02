@@ -1048,6 +1048,27 @@ fn crown_rotation_button_maps_sign_and_held_independently() {
     );
 }
 
+/// Real hardware: one physical click reported `relative_slot_rotation` as
+/// high as 6-7 while `relative_ratchet_rotation` moved by exactly 1, so in
+/// `Ratchet` mode the ratchet field — not the slot field — must be the one
+/// that decides the pulse count.
+#[test]
+fn crown_rotation_amount_prefers_ratchet_over_slot_in_ratchet_mode() {
+    assert_eq!(
+        crown_rotation_amount(7, 1, RatchetMode::Ratchet),
+        1,
+        "one felt click must fire once, not once per slot"
+    );
+    assert_eq!(crown_rotation_amount(7, 0, RatchetMode::Ratchet), 0);
+}
+
+/// A free-spinning crown has no detents: `relative_ratchet_rotation` never
+/// moves, so the slot field is the only signal.
+#[test]
+fn crown_rotation_amount_uses_slot_in_free_mode() {
+    assert_eq!(crown_rotation_amount(3, 0, RatchetMode::Free), 3);
+}
+
 #[test]
 fn crown_edge_fires_only_on_transition() {
     let mut down = false;

@@ -27,8 +27,8 @@ use hidpp::{
     feature::{
         CreatableFeature, EmittingFeature,
         crown::{
-            ActivityState, ButtonState, CrownEvent, CrownFeature, CrownUpdate, ReportingMode,
-            SetCrownMode,
+            ActivityState, ButtonState, CrownEvent, CrownFeature, CrownUpdate, RatchetMode,
+            ReportingMode, SetCrownMode,
         },
         root::RootFeature,
         wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
@@ -505,15 +505,15 @@ fn crown_touching(touch: ActivityState) -> bool {
     matches!(touch, ActivityState::Start | ActivityState::Active)
 }
 
-/// The [`ButtonId`] one slot of rotation dispatches as. Clockwise is
-/// positive `relative_slot_rotation` — confirmed by binding each direction to
-/// a distinguishable action (`VolumeUp`/`VolumeDown`) and turning the crown
-/// by hand, which is authoritative where the earlier `diag crown --listen`
-/// reading (no bound action, direction inferred from a verbal description of
-/// the motion) turned out backward. Not assumed from the spec. `held` selects
-/// the press-modified pair.
-fn crown_rotation_button(relative_slot_rotation: i8, held: bool) -> ButtonId {
-    match (relative_slot_rotation < 0, held) {
+/// The [`ButtonId`] one unit of rotation (from [`crown_rotation_amount`])
+/// dispatches as. Clockwise is positive — confirmed by binding each direction
+/// to a distinguishable action (`VolumeUp`/`VolumeDown`) and turning the
+/// crown by hand, which is authoritative where the earlier `diag crown
+/// --listen` reading (no bound action, direction inferred from a verbal
+/// description of the motion) turned out backward. Not assumed from the
+/// spec. `held` selects the press-modified pair.
+fn crown_rotation_button(amount: i8, held: bool) -> ButtonId {
+    match (amount < 0, held) {
         (true, false) => ButtonId::CrownRotateCounterclockwise,
         (true, true) => ButtonId::CrownPressRotateCounterclockwise,
         (false, false) => ButtonId::CrownRotateClockwise,
@@ -521,16 +521,64 @@ fn crown_rotation_button(relative_slot_rotation: i8, held: bool) -> ButtonId {
     }
 }
 
+/// Which field of a [`CrownUpdate`] counts as "one rotation unit" to
+/// dispatch a pulse for, chosen once at arm time from the crown's current
+/// [`RatchetMode`] (see [`ArmedCrown::ratchet_mode`]).
+///
+/// In [`RatchetMode::Ratchet`], `relative_slot_rotation` is a much finer
+/// encoder resolution than the felt detent — real hardware showed a single
+/// physical click reporting `relative_slot_rotation` as high as 6-7 while
+/// `relative_ratchet_rotation` moved by exactly 1, so counting slots fired a
+/// bound action 6-7 times for one click. `relative_ratchet_rotation` is the
+/// field that matches the physical click. In [`RatchetMode::Free`] the crown
+/// has no detents, so `relative_ratchet_rotation` never moves and the slot
+/// count is the only signal — also the fallback for any future `RatchetMode`
+/// variant this crate does not yet know.
+///
+/// Takes the two fields directly rather than a [`CrownUpdate`] so it is
+/// testable without constructing one, which is `#[non_exhaustive]` outside
+/// `openlogi-hidpp` (same reason as [`crown_edge`]).
+fn crown_rotation_amount(
+    relative_slot_rotation: i8,
+    relative_ratchet_rotation: i8,
+    ratchet_mode: RatchetMode,
+) -> i8 {
+    match ratchet_mode {
+        RatchetMode::Ratchet => relative_ratchet_rotation,
+        // Free has no detents to count, and this is also the safe fallback
+        // for any RatchetMode variant this crate does not yet know.
+        _ => relative_slot_rotation,
+    }
+}
+
+/// The crown's cached ratchet mode, or an arbitrary value when no crown is
+/// armed — `crown_events` is then always `None`, so `handle_crown_poll` (the
+/// only reader of this value) never runs.
+fn armed_crown_ratchet_mode(armed: &ArmedControls) -> RatchetMode {
+    armed
+        .crown
+        .as_ref()
+        .map_or(RatchetMode::Ratchet, |crown| crown.ratchet_mode)
+}
+
 /// Route one crown-channel poll result: `None` means the channel closed
 /// (clears `crown_events` so `monitor_capture` stops polling it), an
 /// unrecognised [`CrownEvent`] variant is dropped, and an `Update` is folded
 /// into `state`/`sink` by [`handle_crown_event`].
+///
+/// Records `activity` unconditionally first: the crown's own event proves
+/// this channel is alive just like any other parsed report — see the
+/// liveness comment above the shared `0x1b04`/`0x2150` listener in
+/// [`run_capture_session_on`].
 fn handle_crown_poll(
     crown_events: &mut Option<async_channel::Receiver<CrownEvent>>,
     event: Option<CrownEvent>,
     state: &mut CrownEdgeState,
+    ratchet_mode: RatchetMode,
+    activity: &ChannelActivity,
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
+    activity.record();
     let Some(event) = event else {
         *crown_events = None;
         return;
@@ -538,16 +586,9 @@ fn handle_crown_poll(
     let CrownEvent::Update(update) = event else {
         return;
     };
-    handle_crown_event(state, update, sink);
+    handle_crown_event(state, update, ratchet_mode, sink);
 }
 
-/// Convert one `CrownUpdate` into edges and pulses, updating `state` for the
-/// button/touch transitions it observed.
-///
-/// Rotation dispatches as `abs(relative_slot_rotation)` pulses: the crown's
-/// physical ratchet already gives the "one notch, one trigger" feel the bound
-/// action should have, so — unlike the thumb wheel's continuous re-synthesis
-/// — there is no threshold/decay smoothing here.
 /// Diff `now` against `current`'s tracked value, updating it and returning
 /// the edge to send, if any — a `false → true` transition is a down edge, a
 /// `true → false` transition is an up edge, and no change sends nothing.
@@ -566,9 +607,17 @@ fn crown_edge(current: &mut bool, now: bool, button: ButtonId) -> Option<Capture
     })
 }
 
+/// Convert one `CrownUpdate` into edges and pulses, updating `state` for the
+/// button/touch transitions it observed.
+///
+/// Rotation dispatches [`crown_rotation_amount`]'s pulses: the crown's
+/// physical ratchet already gives the "one notch, one trigger" feel the bound
+/// action should have, so — unlike the thumb wheel's continuous re-synthesis
+/// — there is no threshold/decay smoothing here.
 fn handle_crown_event(
     state: &mut CrownEdgeState,
     update: CrownUpdate,
+    ratchet_mode: RatchetMode,
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
     let now_down = crown_button_held(update.button);
@@ -581,9 +630,14 @@ fn handle_crown_event(
         let _ = sink.send(input);
     }
 
-    if update.relative_slot_rotation != 0 {
-        let button = crown_rotation_button(update.relative_slot_rotation, now_down);
-        for _ in 0..update.relative_slot_rotation.unsigned_abs() {
+    let amount = crown_rotation_amount(
+        update.relative_slot_rotation,
+        update.relative_ratchet_rotation,
+        ratchet_mode,
+    );
+    if amount != 0 {
+        let button = crown_rotation_button(amount, now_down);
+        for _ in 0..amount.unsigned_abs() {
             let _ = sink.send(CapturedInput::ButtonPulse(button));
         }
     }
@@ -624,6 +678,13 @@ struct ArmedControls {
 struct ArmedCrown {
     feature: Arc<CrownFeature>,
     feature_index: u8,
+    /// The crown's ratchet mode as read while arming — decides which
+    /// `CrownUpdate` field [`crown_rotation_amount`] counts a rotation pulse
+    /// from. Cached rather than re-read per event: a mode change mid-session
+    /// (from another app, or a future OpenLogi setting) is rare enough that
+    /// picking it up on the next rearm is an acceptable simplification, the
+    /// same one the thumb wheel's cached [`ArmedThumbwheel::direction`] makes.
+    ratchet_mode: RatchetMode,
 }
 
 /// Divert the crown; leaves every other `SetCrownMode` field unchanged.
@@ -760,6 +821,14 @@ struct CaptureMonitor<'a> {
 /// Keep a capture session alive and reapply its volatile diversions whenever
 /// the device announces a reconnect. Returns only the typed reason capture
 /// stopped; restoration performs a fresh registry lookup after monitoring.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one biased tokio::select! loop over six event sources that all belong to the same \
+              session's liveness/rearm/capture state machine; the crown arm is already reduced \
+              to a single delegating call (handle_crown_poll), and splitting the other \
+              pre-existing arms out would scatter one control-flow decision across functions \
+              rather than shrink it"
+)]
 async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
@@ -769,6 +838,7 @@ async fn monitor_capture(
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut crown_edges = CrownEdgeState::default();
+    let crown_ratchet_mode = armed_crown_ratchet_mode(context.armed);
     let mut shutdown = std::pin::pin!(shutdown);
     let mut liveness =
         CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
@@ -833,11 +903,14 @@ async fn monitor_capture(
                     None => std::future::pending().await,
                 }
             } => {
-                // The crown's own event proves this channel is alive just
-                // like any other parsed report — see the liveness comment
-                // above the shared `0x1b04`/`0x2150` listener.
-                context.activity.record();
-                handle_crown_poll(&mut crown_events, event, &mut crown_edges, context.sink);
+                handle_crown_poll(
+                    &mut crown_events,
+                    event,
+                    &mut crown_edges,
+                    crown_ratchet_mode,
+                    context.activity,
+                    context.sink,
+                );
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -1021,12 +1094,21 @@ async fn arm_controls_into(
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
     {
         let feature = Arc::new(CrownFeature::new(Arc::clone(chan), slot, info.index));
+        // Read before diverting (diverting leaves ratchet_mode unchanged
+        // anyway) so a failure here fails arming cleanly, with nothing yet
+        // diverted to roll back.
+        let ratchet_mode = feature
+            .get_mode()
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+            .ratchet_mode;
         // Store ownership before the write, matching the thumb wheel above: a
         // transport error cannot prove whether firmware applied diversion, so
         // rollback must cover it too.
         armed.crown = Some(ArmedCrown {
             feature: Arc::clone(&feature),
             feature_index: info.index,
+            ratchet_mode,
         });
         if let Err(error) = divert_crown(&feature).await {
             return Err(GestureError::Hidpp(format!("{error:?}")));
