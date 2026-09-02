@@ -181,5 +181,5 @@ openlogi-desktop
 
 | Limitation | Status |
 |---|---|
-| Wayland: per-application profile switching | Requires XWayland (`WM_CLASS` lookup uses X11) |
+| Wayland: per-application profile switching | Native on wlroots compositors; GNOME and KWin need the companion extension/script shipped in `crates/openlogi-hook/` — otherwise it falls back to XWayland (`WM_CLASS` lookup uses X11) |
 | Button capture: middle / mode-shift / thumbwheel | Side buttons only today |
