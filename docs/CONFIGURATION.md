@@ -36,7 +36,7 @@ profiles so they keep their native direction.
 
 ## Shape
 
-`schema_version` is required and currently `7`. `selected_device` is an
+`schema_version` is required and currently `8`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -79,6 +79,12 @@ Common device fields are:
 - `action_ring`: default and complete per-application eight-slot layouts
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
+- `g_key_software_control` opts a gaming keyboard's whole G/M cluster into
+  software control. `gaming_key_mode = "Profiles"` keeps Logitech's official
+  behavior: M1/M2/M3 select the matching `g_key_profiles` map and M1 is active
+  when the agent starts. `gaming_key_mode = "NineButtons"` instead dispatches
+  G1-G5, M1-M3, and MR from `gaming_button_bindings`. Both stores remain in the
+  file when the mode changes, so switching back restores the previous mappings
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

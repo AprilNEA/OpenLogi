@@ -17,7 +17,9 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
+use openlogi_core::config::{
+    Config, GKeyProfile, GamingKeyMode, LightSettings, ScrollResolution, canonical_device_key,
+};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
@@ -359,6 +361,16 @@ impl Orchestrator {
                 // user must explicitly opt this device into software control.
                 GAMING_G_KEYS.iter().map(|(_, button)| *button).collect()
             });
+        let g_key_profiles: BTreeMap<_, _> = GKeyProfile::ALL
+            .into_iter()
+            .filter_map(|profile| {
+                let bindings = self.config.g_key_bindings_for(&dev.config_key, profile);
+                (!bindings.is_empty()).then_some((profile, bindings))
+            })
+            .collect();
+        let gaming_key_mode = self.config.gaming_key_mode(&dev.config_key);
+        let gaming_button_bindings = self.config.gaming_button_bindings_for(&dev.config_key);
+        let software_control_active = !wanted_g_keys.is_empty();
         let wanted_aux_keys = dev.capabilities.map_or_else(BTreeSet::new, |capabilities| {
             GAMING_AUX_KEYS
                 .into_iter()
@@ -368,10 +380,11 @@ impl Orchestrator {
                     _ => false,
                 })
                 .filter(|button| {
-                    bindings.get(button).is_some_and(|binding| {
-                        matches!(binding, Binding::LongPress(_))
-                            || binding.click_action() != Action::None
-                    })
+                    software_control_active
+                        && match gaming_key_mode {
+                            GamingKeyMode::Profiles => GKeyProfile::from_button(*button).is_some(),
+                            GamingKeyMode::NineButtons => true,
+                        }
                 })
                 .collect()
         });
@@ -385,6 +398,9 @@ impl Orchestrator {
             wanted_g_keys,
             wanted_aux_keys,
             bindings,
+            g_key_profiles,
+            gaming_key_mode,
+            gaming_button_bindings,
         })
     }
 

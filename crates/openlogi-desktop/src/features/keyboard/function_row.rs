@@ -32,7 +32,7 @@ use gpui::{
 };
 use gpui_component::{Disableable as _, Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::{GKeyProfile, GamingKeyMode, KeyModifiers, KeyTrigger};
 use openlogi_core::device::Capabilities;
 
 use super::editors::{
@@ -47,6 +47,7 @@ use crate::features::mouse::picker::{
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
+use crate::ui::choice_card::ChoiceCard;
 use crate::ui::components::{MenuRow, Toggle};
 use crate::ui::theme::{self, ACCENT_BLUE, ContentWidth, Palette, Typography as _};
 use gpui::ease_in_out;
@@ -100,6 +101,30 @@ struct GamingKeysAvailable {
     g_row: bool,
     mode: bool,
     macro_record: bool,
+}
+
+struct GamingEditorState {
+    available: GamingKeysAvailable,
+    software_control: bool,
+    mode: GamingKeyMode,
+    profile_bindings: std::collections::BTreeMap<ButtonId, Action>,
+    nine_button_bindings: std::collections::BTreeMap<ButtonId, Action>,
+}
+
+struct GamingStripState<'a> {
+    enabled: bool,
+    selected: Option<ButtonId>,
+    bindings: Option<&'a std::collections::BTreeMap<ButtonId, Action>>,
+}
+
+struct GamingControlsState<'a> {
+    available: GamingKeysAvailable,
+    software_control: bool,
+    mode: GamingKeyMode,
+    selected: Option<ButtonId>,
+    selected_profile: GKeyProfile,
+    profile_bindings: &'a std::collections::BTreeMap<ButtonId, Action>,
+    nine_button_bindings: &'a std::collections::BTreeMap<ButtonId, Action>,
 }
 
 impl GamingKeysAvailable {
@@ -163,6 +188,8 @@ pub struct FunctionRowView {
     selected_key: Option<usize>,
     /// Selected dedicated G-key, mutually exclusive with `selected_key`.
     selected_g_key: Option<ButtonId>,
+    /// G-key profile currently shown in the editor.
+    selected_g_profile: GKeyProfile,
     /// The hovered function-row key index, shared by callout bubbles, key hit
     /// zones, and leader lines.
     hovered_key: Option<usize>,
@@ -193,6 +220,7 @@ impl FunctionRowView {
         Self {
             selected_key: None,
             selected_g_key: None,
+            selected_g_profile: GKeyProfile::M1,
             hovered_key: None,
             active_editor: None,
             text_state: None,
@@ -223,6 +251,14 @@ impl FunctionRowView {
         self.text_state = None;
         self.workflow_draft.clear();
         cx.notify();
+    }
+
+    fn select_g_profile(&mut self, profile: GKeyProfile, cx: &mut Context<Self>) {
+        if self.selected_g_profile != profile {
+            self.selected_g_profile = profile;
+            self.selected_g_key = None;
+            cx.notify();
+        }
     }
 
     /// Toggle a key selection from a click on either its callout or key hit
@@ -297,12 +333,16 @@ impl FunctionRowView {
 }
 
 impl Render for FunctionRowView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the GPUI render pass assembles one coordinated keyboard inspector tree"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
         let bindings = state.map(AppState::keyboard_bindings);
-        let button_bindings = state.map(|state| state.button_bindings().clone());
-        let (gaming_keys, g_key_software_control) = gaming_key_state(state);
+        let selected_g_profile = self.selected_g_profile;
+        let gaming = gaming_editor_state(state, selected_g_profile);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -335,7 +375,12 @@ impl Render for FunctionRowView {
             })
             .collect();
 
-        self.normalize_selection(slots.len(), gaming_keys, g_key_software_control);
+        self.normalize_selection(
+            slots.len(),
+            gaming.available,
+            gaming.software_control,
+            gaming.mode,
+        );
         let selected = self.selected_key;
         let hovered = self.hovered_key;
         let active_editor = self.active_editor;
@@ -375,7 +420,9 @@ impl Render for FunctionRowView {
                 .hovered(hovered);
         let panel = self
             .selected_g_key
-            .map(|button| Self::gaming_key_panel(button, &view, cx))
+            .map(|button| {
+                Self::gaming_key_panel(button, selected_g_profile, gaming.mode, &view, cx)
+            })
             .or_else(|| selected.map(|selected| self.config_panel(selected, &slots, &view, cx)));
 
         // The whole row animates as one: when a key is selected the right-side
@@ -384,10 +431,15 @@ impl Render for FunctionRowView {
             .w_full()
             .items_center()
             .child(gaming_key_controls(
-                gaming_keys,
-                g_key_software_control,
-                self.selected_g_key,
-                button_bindings.as_ref(),
+                GamingControlsState {
+                    available: gaming.available,
+                    software_control: gaming.software_control,
+                    mode: gaming.mode,
+                    selected: self.selected_g_key,
+                    selected_profile: selected_g_profile,
+                    profile_bindings: &gaming.profile_bindings,
+                    nine_button_bindings: &gaming.nine_button_bindings,
+                },
                 &view,
                 cx,
             ))
@@ -412,13 +464,60 @@ fn gaming_key_state(state: Option<&AppState>) -> (GamingKeysAvailable, bool) {
     (available, software_control)
 }
 
+fn gaming_editor_state(state: Option<&AppState>, profile: GKeyProfile) -> GamingEditorState {
+    let (available, software_control) = gaming_key_state(state);
+    let mode = state
+        .and_then(|state| {
+            let key = state
+                .current_record()
+                .and_then(DeviceRecord::persistent_config_key)?;
+            Some(state.gaming_key_mode(key))
+        })
+        .unwrap_or_default();
+    let profile_bindings = state
+        .map(|state| {
+            GAMING_KEYS
+                .into_iter()
+                .filter_map(|button| {
+                    state
+                        .g_key_binding(profile, button)
+                        .map(|action| (button, action))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let nine_button_bindings = state
+        .map(|state| {
+            GAMING_KEYS
+                .into_iter()
+                .chain(GAMING_AUX_KEYS)
+                .filter_map(|button| {
+                    state
+                        .gaming_button_binding(button)
+                        .map(|action| (button, action))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    GamingEditorState {
+        available,
+        software_control,
+        mode,
+        profile_bindings,
+        nine_button_bindings,
+    }
+}
+
 fn gaming_selection_ok(
     selected: Option<ButtonId>,
     available: GamingKeysAvailable,
     software_control: bool,
+    mode: GamingKeyMode,
 ) -> bool {
     selected.is_none_or(|button| {
-        available.supports(button) && (software_control || !GAMING_KEYS.contains(&button))
+        software_control
+            && available.supports(button)
+            && (mode == GamingKeyMode::NineButtons || GAMING_KEYS.contains(&button))
     })
 }
 
@@ -928,15 +1027,26 @@ impl FunctionRowView {
 
     fn gaming_key_panel(
         button: ButtonId,
+        selected_profile: GKeyProfile,
+        mode: GamingKeyMode,
         view: &Entity<Self>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let pal = theme::palette(cx);
-        let current =
-            AppState::try_read(cx).and_then(|state| state.button_bindings().get(&button).cloned());
+        let current = AppState::try_read(cx).and_then(|state| match mode {
+            GamingKeyMode::Profiles => state.g_key_binding(selected_profile, button),
+            GamingKeyMode::NineButtons => state.gaming_button_binding(button),
+        });
         let view_for_pick = view.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-            AppState::update_bindings(cx, |state| state.commit_binding(button, action));
+            AppState::update_bindings(cx, |state| match mode {
+                GamingKeyMode::Profiles => {
+                    state.commit_g_key_binding(selected_profile, button, action);
+                }
+                GamingKeyMode::NineButtons => {
+                    state.commit_gaming_button_binding(button, action);
+                }
+            });
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
         let rows = action_rows("g-key-panel-action", current.as_ref(), &on_pick, pal);
@@ -954,6 +1064,7 @@ impl FunctionRowView {
         slot_count: usize,
         gaming_keys: GamingKeysAvailable,
         g_key_software_control: bool,
+        gaming_key_mode: GamingKeyMode,
     ) {
         // A stale selection can outlive a device switch to a shorter F-row;
         // drop it instead of indexing past the new slot list.
@@ -963,23 +1074,26 @@ impl FunctionRowView {
             self.text_state = None;
             self.workflow_draft.clear();
         }
-        if !gaming_selection_ok(self.selected_g_key, gaming_keys, g_key_software_control) {
+        if !gaming_selection_ok(
+            self.selected_g_key,
+            gaming_keys,
+            g_key_software_control,
+            gaming_key_mode,
+        ) {
             self.selected_g_key = None;
         }
     }
 }
 
 fn gaming_key_strip(
-    label: &'static str,
+    label: SharedString,
     element_id: &'static str,
     keys: &[ButtonId],
-    state: (bool, Option<ButtonId>),
-    bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
+    state: GamingStripState<'_>,
     view: &Entity<FunctionRowView>,
     cx: &mut Context<FunctionRowView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
-    let (enabled, selected) = state;
     v_flex()
         .w_full()
         .max_w(px(KEYBOARD_W))
@@ -997,12 +1111,13 @@ fn gaming_key_strip(
                 .gap_2()
                 .children(keys.iter().copied().enumerate().map(|(index, button)| {
                     let view = view.clone();
-                    let is_selected = selected == Some(button);
-                    let action = bindings.and_then(|bindings| bindings.get(&button));
+                    let is_selected = state.selected == Some(button);
+                    let action = state.bindings.and_then(|bindings| bindings.get(&button));
+                    let binding = binding_label(action).to_string();
                     div().w(px(104.)).child(
                         MenuRow::new((element_id, index))
                             .selected(is_selected)
-                            .disabled(!enabled)
+                            .disabled(!state.enabled)
                             .role(Role::MenuItem)
                             .child(
                                 v_flex()
@@ -1017,7 +1132,7 @@ fn gaming_key_strip(
                                         div()
                                             .text_caption()
                                             .text_color(pal.text_muted)
-                                            .child(binding_label(action)),
+                                            .child(binding),
                                     ),
                             )
                             .on_click(move |_event, _window, cx| {
@@ -1029,89 +1144,224 @@ fn gaming_key_strip(
 }
 
 fn gaming_key_controls(
-    available: GamingKeysAvailable,
-    g_key_software_control: bool,
-    selected: Option<ButtonId>,
-    bindings: Option<&std::collections::BTreeMap<ButtonId, Action>>,
+    state: GamingControlsState<'_>,
     view: &Entity<FunctionRowView>,
     cx: &mut Context<FunctionRowView>,
 ) -> impl IntoElement {
     v_flex()
         .w_full()
         .items_center()
-        .when(available.g_row, |layout| {
+        .when(state.available.g_row, |layout| {
+            layout.child(g_key_takeover_control(state.software_control, cx))
+        })
+        .when(state.available.g_row && state.software_control, |layout| {
             layout
-                .child(gaming_key_strip(
-                    "G1–G5",
-                    "gaming-g-key",
-                    &GAMING_KEYS,
-                    (g_key_software_control, selected),
-                    bindings,
-                    view,
-                    cx,
+                .child(gaming_mode_selector(state.mode, cx))
+                .when(state.mode == GamingKeyMode::Profiles, |layout| {
+                    layout
+                        .child(g_profile_selector(state.selected_profile, view))
+                        .child(gaming_key_strip(
+                            tr!("keyboard.g_key_profile", profile => state.selected_profile.label()),
+                            "gaming-g-key",
+                            &GAMING_KEYS,
+                            GamingStripState {
+                                enabled: true,
+                                selected: state.selected,
+                                bindings: Some(state.profile_bindings),
+                            },
+                            view,
+                            cx,
+                        ))
+                })
+                .when(state.mode == GamingKeyMode::NineButtons, |layout| {
+                    let mut aux_keys = Vec::new();
+                    if state.available.mode {
+                        aux_keys.extend_from_slice(&GAMING_AUX_KEYS[..3]);
+                    }
+                    if state.available.macro_record {
+                        aux_keys.push(ButtonId::KeyMr);
+                    }
+                    layout
+                        .child(gaming_key_strip(
+                            tr!("keyboard.gaming_nine_buttons"),
+                            "gaming-nine-g-key",
+                            &GAMING_KEYS,
+                            GamingStripState {
+                                enabled: true,
+                                selected: state.selected,
+                                bindings: Some(state.nine_button_bindings),
+                            },
+                            view,
+                            cx,
+                        ))
+                        .child(gaming_key_strip(
+                            "M1–M3 / MR".into(),
+                            "gaming-nine-aux-key",
+                            &aux_keys,
+                            GamingStripState {
+                                enabled: true,
+                                selected: state.selected,
+                                bindings: Some(state.nine_button_bindings),
+                            },
+                            view,
+                            cx,
+                        ))
+                })
+        })
+}
+
+fn gaming_mode_selector(
+    selected: GamingKeyMode,
+    cx: &mut Context<FunctionRowView>,
+) -> impl IntoElement {
+    let pal = theme::palette(cx);
+    let card = |mode, id, title: SharedString, description: SharedString| {
+        ChoiceCard::new(id, title.clone())
+            .selected(selected == mode)
+            .w(px(290.))
+            .p_3()
+            .gap_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(if selected == mode {
+                rgb(ACCENT_BLUE).into()
+            } else {
+                pal.border
+            })
+            .bg(if selected == mode {
+                theme::accent_tint()
+            } else {
+                pal.control
+            })
+            .cursor_pointer()
+            .child(
+                div()
+                    .text_body()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(pal.text_primary)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(description),
+            )
+            .on_click(move |_, _, cx| {
+                AppState::update(cx, |state, cx| {
+                    let device = state.current_record().and_then(|record| {
+                        record
+                            .persistent_config_key()
+                            .map(|key| (key.to_string(), record.device_key()))
+                    });
+                    if let Some((config_key, device_key)) = device {
+                        state.set_gaming_key_mode(&config_key, mode);
+                        cx.emit(StateEvent::BindingsChanged(device_key));
+                    }
+                });
+            })
+    };
+
+    v_flex()
+        .w_full()
+        .max_w(px(KEYBOARD_W))
+        .gap_2()
+        .mb_3()
+        .child(
+            div()
+                .text_caption()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(pal.text_muted)
+                .child(tr!("keyboard.gaming_mode_title")),
+        )
+        .child(
+            h_flex()
+                .gap_3()
+                .child(card(
+                    GamingKeyMode::Profiles,
+                    "gaming-mode-profiles",
+                    tr!("keyboard.gaming_mode_profiles"),
+                    tr!("keyboard.gaming_mode_profiles_description"),
                 ))
+                .child(card(
+                    GamingKeyMode::NineButtons,
+                    "gaming-mode-nine-buttons",
+                    tr!("keyboard.gaming_mode_nine_buttons"),
+                    tr!("keyboard.gaming_mode_nine_buttons_description"),
+                )),
+        )
+}
+
+fn g_profile_selector(selected: GKeyProfile, view: &Entity<FunctionRowView>) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .max_w(px(KEYBOARD_W))
+        .gap_2()
+        .mb_3()
+        .children(
+            GKeyProfile::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, profile)| {
+                    let view = view.clone();
+                    div().w(px(104.)).child(
+                        MenuRow::new(("gaming-g-profile", index))
+                            .selected(selected == profile)
+                            .role(Role::MenuItem)
+                            .child(profile.label())
+                            .on_click(move |_event, _window, cx| {
+                                view.update(cx, |view, cx| view.select_g_profile(profile, cx));
+                            }),
+                    )
+                }),
+        )
+}
+
+fn g_key_takeover_control(
+    software_control: bool,
+    cx: &mut Context<FunctionRowView>,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .max_w(ContentWidth::Medium.rems())
+        .px_5()
+        .pb_3()
+        .gap_4()
+        .items_center()
+        .justify_between()
+        .child(
+            v_flex()
+                .gap_1()
                 .child(
-                    h_flex()
-                        .w_full()
-                        .max_w(ContentWidth::Medium.rems())
-                        .px_5()
-                        .pb_3()
-                        .gap_4()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_body()
-                                        .text_color(theme::palette(cx).text_primary)
-                                        .child(tr!("keyboard.g_key_software_control")),
-                                )
-                                .child(
-                                    div()
-                                        .text_caption()
-                                        .text_color(theme::palette(cx).text_muted)
-                                        .child(tr!("keyboard.g_key_software_control_description")),
-                                ),
-                        )
-                        .child(
-                            Toggle::new("g-key-software-control")
-                                .selected(g_key_software_control)
-                                .on_change(|enabled, _window, cx| {
-                                    AppState::update(cx, |state, cx| {
-                                        let device = state.current_record().and_then(|record| {
-                                            record
-                                                .persistent_config_key()
-                                                .map(|key| (key.to_string(), record.device_key()))
-                                        });
-                                        if let Some((config_key, device_key)) = device {
-                                            state.set_g_key_software_control(&config_key, *enabled);
-                                            cx.emit(StateEvent::BindingsChanged(device_key));
-                                        }
-                                    });
-                                }),
-                        ),
+                    div()
+                        .text_body()
+                        .text_color(theme::palette(cx).text_primary)
+                        .child(tr!("keyboard.g_key_software_control")),
                 )
-        })
-        .when(available.mode || available.macro_record, |layout| {
-            let mut keys = Vec::new();
-            if available.mode {
-                keys.extend_from_slice(&GAMING_AUX_KEYS[..3]);
-            }
-            if available.macro_record {
-                keys.push(ButtonId::KeyMr);
-            }
-            layout.child(gaming_key_strip(
-                "M1–M3 / MR",
-                "gaming-aux-key",
-                &keys,
-                (true, selected),
-                bindings,
-                view,
-                cx,
-            ))
-        })
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(theme::palette(cx).text_muted)
+                        .child(tr!("keyboard.g_key_software_control_description")),
+                ),
+        )
+        .child(
+            Toggle::new("g-key-software-control")
+                .selected(software_control)
+                .on_change(|enabled, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let device = state.current_record().and_then(|record| {
+                            record
+                                .persistent_config_key()
+                                .map(|key| (key.to_string(), record.device_key()))
+                        });
+                        if let Some((config_key, device_key)) = device {
+                            state.set_g_key_software_control(&config_key, *enabled);
+                            cx.emit(StateEvent::BindingsChanged(device_key));
+                        }
+                    });
+                }),
+        )
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".

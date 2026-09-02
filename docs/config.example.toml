@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 7
+schema_version = 9
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -75,10 +75,32 @@ tunable_torque = 50
 [devices."receiver:aabbccdd:slot:2"]
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
 fn_lock = false
+g_key_software_control = true
+# Choose "Profiles" for Logitech's M1/M2/M3 profile switching, or
+# "NineButtons" to make G1-G5, M1-M3, and MR independent shortcuts.
+gaming_key_mode = "NineButtons"
 
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+
+[devices."receiver:aabbccdd:slot:2".g_key_profiles.M1]
+KeyG1 = "VolumeUp"
+KeyG2 = "VolumeDown"
+
+[devices."receiver:aabbccdd:slot:2".g_key_profiles.M2]
+KeyG1 = "Copy"
+KeyG2 = "Paste"
+
+# Stored independently from the three profile maps above. Changing
+# gaming_key_mode never destroys either set of assignments.
+[devices."receiver:aabbccdd:slot:2".gaming_button_bindings]
+KeyG1 = "VolumeUp"
+KeyG2 = "VolumeDown"
+KeyM1 = "Copy"
+KeyM2 = "MissionControl"
+KeyM3 = "Paste"
+KeyMr = "ShowDesktop"
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings

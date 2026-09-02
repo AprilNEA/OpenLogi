@@ -3,8 +3,8 @@
 use super::{AppState, StateEvent};
 use gpui::Context;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
-    UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GamingKeyMode,
+    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -217,6 +217,22 @@ impl AppState {
         self.config
             .edit(|config| config.set_g_key_software_control(key, enabled));
         self.persist_and_reload("gaming G-key software control");
+    }
+
+    /// Current official-profile or nine-button interpretation.
+    #[must_use]
+    pub fn gaming_key_mode(&self, key: &str) -> GamingKeyMode {
+        self.config.gaming_key_mode(key)
+    }
+
+    /// Switch the cluster between official profiles and nine independent keys.
+    pub fn set_gaming_key_mode(&mut self, key: &str, mode: GamingKeyMode) {
+        if self.config.gaming_key_mode(key) == mode {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_gaming_key_mode(key, mode));
+        self.persist_and_reload("gaming key mode");
     }
 
     /// The effective thumb-wheel sensitivity for `key` (its per-device
