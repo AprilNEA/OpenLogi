@@ -1179,7 +1179,7 @@ fn show_desktop_bindings_keep_the_pair_discrete() {
 }
 
 #[test]
-fn pinch_triggers_never_stream() {
+fn pinch_bound_to_zoom_stays_discrete() {
     let trigger = ButtonId::TouchpadTwoFingerPinchOut;
     let bindings = BTreeMap::from([(trigger, Action::ZoomIn)]);
     let mut runtime = TouchpadRuntime::default();
@@ -1193,8 +1193,8 @@ fn pinch_triggers_never_stream() {
         true,
     );
 
-    // Spreading the pair outward past the pinch threshold commits PinchOut,
-    // which has no native swipe animation to stream — discrete it stays.
+    // Spreading past the pinch threshold commits PinchOut, but ZoomIn has no
+    // native swipe-commit consumer — the pair stays discrete.
     let outcome = runtime.update(
         &frame(
             60_000,
@@ -1212,6 +1212,140 @@ fn pinch_triggers_never_stream() {
         }
     );
     assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+/// Contacts symmetric around the pad centre whose mean distance from it —
+/// the recognizer's spread — is exactly `half_spread_um`.
+fn spread_frame(timestamp_us: u64, count: u8, half_spread_um: i32) -> TouchFrame {
+    let pos = |offset: i32| u32::try_from(50_000 + offset).expect("test spread stays on-pad");
+    let contacts = match count {
+        2 => vec![
+            contact(1, pos(-half_spread_um), 50_000),
+            contact(2, pos(half_spread_um), 50_000),
+        ],
+        4 => vec![
+            contact(1, pos(-half_spread_um), 50_000),
+            contact(2, pos(half_spread_um), 50_000),
+            contact(3, 50_000, pos(-half_spread_um)),
+            contact(4, 50_000, pos(half_spread_um)),
+        ],
+        _ => panic!("test helper covers two- and four-finger pinches"),
+    };
+    frame(timestamp_us, contacts)
+}
+
+#[test]
+fn pinch_out_bound_to_mission_control_streams_the_vertical_motion() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchOut, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
+
+    // Spreading past the pinch threshold commits PinchOut mid-stroke.
+    runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
+
+    // Further spread streams as vertical DockSwipe progress — the mapping
+    // onto an existing motion is the test vehicle until the native pinch
+    // consumer is wired in.
+    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: 10_000.0 / 40_000.0,
+        }
+    );
+}
+
+#[test]
+fn pinch_in_bound_to_app_expose_streams_negative_progress() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchIn, Action::AppExpose)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
+    runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
+
+    let outcome = runtime.update(&spread_frame(90_000, 2, 8_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: -10_000.0 / 40_000.0,
+        }
+    );
+}
+
+#[test]
+fn a_reversed_pinch_binding_flips_the_travel_mapping() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchIn, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
+    runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
+
+    // Closing in on the positive-commit consumer: the mapping flips so the
+    // animation commits the bound action.
+    let outcome = runtime.update(&spread_frame(90_000, 2, 8_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: 10_000.0 / 40_000.0,
+        }
+    );
+}
+
+#[test]
+fn the_unbound_pinch_side_clamps_progress_at_zero() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchOut, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
+
+    // The inward direction is unbound, but its commit still opens the pair's
+    // stream: closing pins progress at zero instead of dying.
+    let outcome = runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
+    assert_eq!(outcome, idle());
+    let outcome = runtime.update(&spread_frame(90_000, 2, 10_000), &bindings, true, true);
+    assert_eq!(outcome, idle());
+
+    // Re-spreading tracks one-to-one from the first frame and begins the
+    // animation mid-stroke: the pinned travel is dropped, not eaten through,
+    // so the delta is this frame's whole 16 mm of spread.
+    let outcome = runtime.update(&spread_frame(120_000, 2, 26_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: 16_000.0 / 40_000.0,
+        }
+    );
+}
+
+#[test]
+fn four_finger_pinches_plan_their_own_pair() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadFourFingerPinchOut, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 4, 10_000), &bindings, true, true);
+    runtime.update(&spread_frame(60_000, 4, 20_000), &bindings, true, true);
+
+    let outcome = runtime.update(&spread_frame(90_000, 4, 30_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Vertical,
+            progress: 10_000.0 / 40_000.0,
+        }
+    );
+}
+
+#[test]
+fn a_two_finger_binding_does_not_adopt_a_four_finger_stroke() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchOut, Action::MissionControl)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 4, 10_000), &bindings, true, true);
+
+    // A four-finger spread commits FourFingerPinchOut, whose own pair is
+    // unbound — the two-finger binding must not adopt it.
+    let outcome = runtime.update(&spread_frame(60_000, 4, 20_000), &bindings, true, true);
+    assert_eq!(outcome, idle());
 }
 
 #[test]

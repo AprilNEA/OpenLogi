@@ -1,23 +1,29 @@
-//! Pair-planned native swipe streaming.
+//! Pair-planned native gesture streaming.
 //!
-//! A DockSwipe animation belongs to a swipe *pair* — the left/right or
-//! up/down directions of one finger count — not to a single direction: the
-//! recognizer commits one direction, but every frame after the commit drives
-//! the pair's one shared progress stream, so an unbound side still follows
-//! the finger and springs back at release instead of dying silently.
+//! A DockSwipe animation belongs to a gesture *pair* — the left/right or
+//! up/down directions of one finger count, or that count's pinch in/out —
+//! not to a single direction: the recognizer commits one direction, but
+//! every frame after the commit drives the pair's one shared progress
+//! stream, so an unbound side still follows the finger and springs back at
+//! release instead of dying silently.
 //!
 //! A pair streams only when the system can honor every bound direction: each
 //! bound action needs a native swipe-commit consumer (desktop switching on
 //! the horizontal motion, Mission Control / App Exposé on the vertical one)
-//! and all of them must share one motion, with the finger-travel mapping
-//! solved so each bound side commits its own binding. Anything else — no
-//! binding on the pair, a keyboard-style action, mixed motions, or the same
-//! commit sign demanded twice — keeps the pair discrete, so an animation can
-//! never commit an outcome the user did not bind. A bound pair whose one
-//! side is unbound clamps progress at zero on that side: the finger can pull
-//! the animation back, never push it past its start. Pinch triggers have no
-//! swipe consumer at all (`ShowDesktop` and `LaunchpadShow` are pinch-native
-//! on the Dock) and always stay discrete.
+//! and all of them must share one motion, with the travel mapping solved so
+//! each bound side commits its own binding. Anything else — no binding on
+//! the pair, a keyboard-style action, mixed motions, or the same commit sign
+//! demanded twice — keeps the pair discrete, so an animation can never
+//! commit an outcome the user did not bind. A bound pair whose one side is
+//! unbound clamps progress at zero on that side: the finger can pull the
+//! animation back, never push it past its start.
+//!
+//! Pinch pairs stream onto the existing motions the same way — the motion
+//! follows the bound actions' consumer, and spread change drives its
+//! progress. Their own native consumers (the Launchpad successor and Show
+//! Desktop on the Dock's pinch axis) wait on hardware identification of the
+//! event that drives them; until then, a pinch bound to a zoom action keeps
+//! the discrete dispatch, matching the pair defaults.
 
 use std::collections::BTreeMap;
 
@@ -30,6 +36,10 @@ use openlogi_inject::DockSwipeMotion;
 /// geometry is plumbed through.
 const HORIZONTAL_PAD_TRAVEL_UM: f64 = 117_000.0;
 const VERTICAL_PAD_TRAVEL_UM: f64 = 75_600.0;
+/// One full open↔close spread span equals one progress unit. A hardware
+/// tuning constant: the native pinch reveal tracks roughly this much spread
+/// change across the whole gesture.
+const PINCH_SPREAD_TRAVEL_UM: f64 = 40_000.0;
 
 /// One routed step of a session's swipe stream.
 #[derive(Debug, Default, PartialEq)]
@@ -60,12 +70,14 @@ pub(super) enum SwipeEnd {
     Cancelled,
 }
 
-/// Direction along a swipe pair's finger axis.
+/// Direction along a pair's gesture axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
-    /// Left on the horizontal axis, down on the vertical one.
+    /// Left on the horizontal axis, down on the vertical one, closing on the
+    /// pinch one.
     Negative,
-    /// Right on the horizontal axis, up on the vertical one.
+    /// Right on the horizontal axis, up on the vertical one, spreading on
+    /// the pinch one.
     Positive,
 }
 
@@ -78,11 +90,13 @@ impl Side {
     }
 }
 
-/// The finger axis a swipe pair lives on.
+/// The physical quantity of a stroke that drives its pair's progress:
+/// centroid travel along a finger axis, or contact spread on the pinch axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SwipeAxis {
+enum GestureAxis {
     Horizontal,
     Vertical,
+    Pinch,
 }
 
 /// The native swipe-commit consumer an action maps onto, with the motion
@@ -100,53 +114,70 @@ fn swipe_consumer(action: &Action) -> Option<(DockSwipeMotion, i8)> {
     }
 }
 
-/// The sibling trigger on the same finger axis, the pair's axis, and this
+/// The sibling trigger on the same gesture axis, the pair's axis, and this
 /// trigger's side along it.
-fn swipe_sibling(trigger: ButtonId) -> Option<(ButtonId, SwipeAxis, Side)> {
+fn pair_sibling(trigger: ButtonId) -> Option<(ButtonId, GestureAxis, Side)> {
     use ButtonId::{
-        TouchpadFourFingerSwipeDown, TouchpadFourFingerSwipeLeft, TouchpadFourFingerSwipeRight,
-        TouchpadFourFingerSwipeUp, TouchpadThreeFingerSwipeDown, TouchpadThreeFingerSwipeLeft,
-        TouchpadThreeFingerSwipeRight, TouchpadThreeFingerSwipeUp,
+        TouchpadFourFingerPinchIn, TouchpadFourFingerPinchOut, TouchpadFourFingerSwipeDown,
+        TouchpadFourFingerSwipeLeft, TouchpadFourFingerSwipeRight, TouchpadFourFingerSwipeUp,
+        TouchpadThreeFingerSwipeDown, TouchpadThreeFingerSwipeLeft, TouchpadThreeFingerSwipeRight,
+        TouchpadThreeFingerSwipeUp, TouchpadTwoFingerPinchIn, TouchpadTwoFingerPinchOut,
     };
     Some(match trigger {
         TouchpadThreeFingerSwipeRight => (
             TouchpadThreeFingerSwipeLeft,
-            SwipeAxis::Horizontal,
+            GestureAxis::Horizontal,
             Side::Positive,
         ),
         TouchpadThreeFingerSwipeLeft => (
             TouchpadThreeFingerSwipeRight,
-            SwipeAxis::Horizontal,
+            GestureAxis::Horizontal,
             Side::Negative,
         ),
         TouchpadThreeFingerSwipeUp => (
             TouchpadThreeFingerSwipeDown,
-            SwipeAxis::Vertical,
+            GestureAxis::Vertical,
             Side::Positive,
         ),
         TouchpadThreeFingerSwipeDown => (
             TouchpadThreeFingerSwipeUp,
-            SwipeAxis::Vertical,
+            GestureAxis::Vertical,
             Side::Negative,
         ),
         TouchpadFourFingerSwipeRight => (
             TouchpadFourFingerSwipeLeft,
-            SwipeAxis::Horizontal,
+            GestureAxis::Horizontal,
             Side::Positive,
         ),
         TouchpadFourFingerSwipeLeft => (
             TouchpadFourFingerSwipeRight,
-            SwipeAxis::Horizontal,
+            GestureAxis::Horizontal,
             Side::Negative,
         ),
         TouchpadFourFingerSwipeUp => (
             TouchpadFourFingerSwipeDown,
-            SwipeAxis::Vertical,
+            GestureAxis::Vertical,
             Side::Positive,
         ),
         TouchpadFourFingerSwipeDown => (
             TouchpadFourFingerSwipeUp,
-            SwipeAxis::Vertical,
+            GestureAxis::Vertical,
+            Side::Negative,
+        ),
+        TouchpadTwoFingerPinchOut => (TouchpadTwoFingerPinchIn, GestureAxis::Pinch, Side::Positive),
+        TouchpadTwoFingerPinchIn => (
+            TouchpadTwoFingerPinchOut,
+            GestureAxis::Pinch,
+            Side::Negative,
+        ),
+        TouchpadFourFingerPinchOut => (
+            TouchpadFourFingerPinchIn,
+            GestureAxis::Pinch,
+            Side::Positive,
+        ),
+        TouchpadFourFingerPinchIn => (
+            TouchpadFourFingerPinchOut,
+            GestureAxis::Pinch,
             Side::Negative,
         ),
         _ => return None,
@@ -158,7 +189,7 @@ fn swipe_sibling(trigger: ButtonId) -> Option<(ButtonId, SwipeAxis, Side)> {
 /// sign commits.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SwipeStreamPlan {
-    axis: SwipeAxis,
+    axis: GestureAxis,
     motion: DockSwipeMotion,
     /// Whether finger travel maps onto motion progress negated, solved from
     /// the bindings so each bound side commits its own action.
@@ -174,7 +205,7 @@ impl SwipeStreamPlan {
         trigger: ButtonId,
         bindings: &BTreeMap<ButtonId, Action>,
     ) -> Option<Self> {
-        let (sibling, axis, own_side) = swipe_sibling(trigger)?;
+        let (sibling, axis, own_side) = pair_sibling(trigger)?;
         let mut motion = None;
         let mut positive = None;
         let mut negative = None;
@@ -221,8 +252,8 @@ fn commit_side(commit_sign: i8) -> Side {
     }
 }
 
-/// A committed swipe streaming its pair's animation, anchored at the commit
-/// frame and advanced by every later frame of the stroke.
+/// A committed gesture streaming its pair's animation, anchored at the
+/// commit frame and advanced by every later frame of the stroke.
 pub(super) struct ActiveSwipe {
     plan: SwipeStreamPlan,
     /// The direction the recognizer committed on, whose binding a
@@ -231,18 +262,22 @@ pub(super) struct ActiveSwipe {
     opened: bool,
     contact_ids: Box<[u8]>,
     centroid_um: (i64, i64),
+    /// Mean contact distance from the centroid, the pinch axis's quantity.
+    spread_um: f64,
     /// Clamped progress accumulated since the stream anchored.
     progress: f64,
 }
 
 impl ActiveSwipe {
     pub(super) fn new(frame: &TouchFrame, plan: SwipeStreamPlan, committed: ButtonId) -> Self {
+        let centroid = frame_centroid(frame.contacts());
         Self {
             plan,
             committed,
             opened: false,
             contact_ids: frame.contacts().iter().map(|contact| contact.id).collect(),
-            centroid_um: frame_centroid(frame.contacts()),
+            centroid_um: centroid,
+            spread_um: frame_spread(frame.contacts(), centroid),
             progress: 0.0,
         }
     }
@@ -254,27 +289,30 @@ impl ActiveSwipe {
     /// bound sign, the animation tracks it one-to-one from that frame.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "centroid deltas are bounded by the pad size; f64 precision is ample"
+        reason = "centroid and spread deltas are bounded by the pad size; f64 precision is ample"
     )]
     pub(super) fn advance(&mut self, frame: &TouchFrame) -> Option<SwipeOutput> {
         let contact_ids: Vec<u8> = frame.contacts().iter().map(|contact| contact.id).collect();
         let centroid = frame_centroid(frame.contacts());
+        let spread = frame_spread(frame.contacts(), centroid);
         let mut mapped = 0.0;
         if contact_ids.as_slice() == &*self.contact_ids {
-            let (dx, dy) = (
-                centroid.0 - self.centroid_um.0,
-                centroid.1 - self.centroid_um.1,
-            );
             let raw = match self.plan.axis {
-                SwipeAxis::Horizontal => dx as f64 / HORIZONTAL_PAD_TRAVEL_UM,
+                GestureAxis::Horizontal => {
+                    (centroid.0 - self.centroid_um.0) as f64 / HORIZONTAL_PAD_TRAVEL_UM
+                }
                 // Window y grows downward, but vertical progress is
                 // positive upward.
-                SwipeAxis::Vertical => -dy as f64 / VERTICAL_PAD_TRAVEL_UM,
+                GestureAxis::Vertical => {
+                    -(centroid.1 - self.centroid_um.1) as f64 / VERTICAL_PAD_TRAVEL_UM
+                }
+                GestureAxis::Pinch => (spread - self.spread_um) / PINCH_SPREAD_TRAVEL_UM,
             };
             mapped = if self.plan.flipped { -raw } else { raw };
         }
         self.contact_ids = contact_ids.into_boxed_slice();
         self.centroid_um = centroid;
+        self.spread_um = spread;
         let candidate = self.progress + mapped;
         // An unbound sign cannot cross zero: it may be pulled back to it,
         // never past it, so the release rule springs the stroke back instead
@@ -384,4 +422,24 @@ fn frame_centroid(contacts: &[TouchContact]) -> (i64, i64) {
         (sx + i64::from(contact.x_um), sy + i64::from(contact.y_um))
     });
     (sum.0 / count, sum.1 / count)
+}
+
+/// Mean contact distance from the centroid — the recognizer's spread, as a
+/// continuous quantity for progress tracking.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "contact positions stay far below 2^53 micrometres"
+)]
+fn frame_spread(contacts: &[TouchContact], centroid: (i64, i64)) -> f64 {
+    contacts
+        .iter()
+        .map(|contact| {
+            let (dx, dy) = (
+                i64::from(contact.x_um) - centroid.0,
+                i64::from(contact.y_um) - centroid.1,
+            );
+            ((dx as f64) * (dx as f64) + (dy as f64) * (dy as f64)).sqrt()
+        })
+        .sum::<f64>()
+        / contacts.len() as f64
 }
