@@ -1236,7 +1236,7 @@ fn pinch_bound_to_zoom_streams_magnification() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: GestureMotion::Zoom,
-            progress: 10_000.0 / 30_000.0,
+            progress: 10_000.0 / 15_000.0,
         }
     );
     let outcome = runtime.update(&spread_frame(120_000, 2, 40_000), &bindings, true, true);
@@ -1244,7 +1244,7 @@ fn pinch_bound_to_zoom_streams_magnification() {
         outcome.stream,
         SwipeOutput::Advance {
             motion: GestureMotion::Zoom,
-            delta: 10_000.0 / 30_000.0,
+            delta: 10_000.0 / 15_000.0,
         }
     );
 }
@@ -1287,7 +1287,7 @@ fn zoom_streams_without_the_dock_swipe_bridge() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: GestureMotion::Zoom,
-            progress: -10_000.0 / 15_000.0,
+            progress: -10_000.0 / 7_500.0,
         }
     );
 }

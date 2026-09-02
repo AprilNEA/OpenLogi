@@ -43,6 +43,12 @@ const TWO_FINGER_PINCH_CLOSE_TRAVEL_UM: f64 = 15_000.0;
 const TWO_FINGER_PINCH_OPEN_TRAVEL_UM: f64 = 30_000.0;
 const FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM: f64 = 10_000.0;
 const FOUR_FINGER_PINCH_OPEN_TRAVEL_UM: f64 = 25_000.0;
+/// Spread change equal to one unit of magnification — the zoom motion's
+/// own travel, direction-split like the reveal's but tuned for content
+/// scale instead of an animation position. Hardware-tuned on the Casa
+/// Touch.
+const ZOOM_OPEN_TRAVEL_UM: f64 = 15_000.0;
+const ZOOM_CLOSE_TRAVEL_UM: f64 = 7_500.0;
 
 /// One routed step of a session's swipe stream.
 #[derive(Debug, Default, PartialEq)]
@@ -258,25 +264,10 @@ impl SwipeStreamPlan {
         bindings: &BTreeMap<ButtonId, Action>,
     ) -> Option<Self> {
         let (sibling, axis, own_side) = pair_sibling(trigger)?;
-        let travel = match axis {
-            GestureAxis::Horizontal => AxisTravel::Linear(HORIZONTAL_PAD_TRAVEL_UM),
-            GestureAxis::Vertical => AxisTravel::Linear(VERTICAL_PAD_TRAVEL_UM),
-            GestureAxis::Pinch
-                if matches!(
-                    trigger,
-                    ButtonId::TouchpadTwoFingerPinchIn | ButtonId::TouchpadTwoFingerPinchOut
-                ) =>
-            {
-                AxisTravel::Pinch {
-                    close: TWO_FINGER_PINCH_CLOSE_TRAVEL_UM,
-                    spread: TWO_FINGER_PINCH_OPEN_TRAVEL_UM,
-                }
-            }
-            GestureAxis::Pinch => AxisTravel::Pinch {
-                close: FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM,
-                spread: FOUR_FINGER_PINCH_OPEN_TRAVEL_UM,
-            },
-        };
+        let two_finger = matches!(
+            trigger,
+            ButtonId::TouchpadTwoFingerPinchIn | ButtonId::TouchpadTwoFingerPinchOut
+        );
         let mut motion = None;
         let mut positive = None;
         let mut negative = None;
@@ -303,6 +294,25 @@ impl SwipeStreamPlan {
                 negative = Some((button, action.clone()));
             }
         }
+        // Travel follows the motion the bindings resolved to: zoom pairs
+        // gain magnification, dock-reveal pairs keep their validated
+        // per-count travel.
+        let travel = match (axis, motion) {
+            (GestureAxis::Horizontal, _) => AxisTravel::Linear(HORIZONTAL_PAD_TRAVEL_UM),
+            (GestureAxis::Vertical, _) => AxisTravel::Linear(VERTICAL_PAD_TRAVEL_UM),
+            (GestureAxis::Pinch, Some(GestureMotion::Zoom)) => AxisTravel::Pinch {
+                close: ZOOM_CLOSE_TRAVEL_UM,
+                spread: ZOOM_OPEN_TRAVEL_UM,
+            },
+            (GestureAxis::Pinch, _) if two_finger => AxisTravel::Pinch {
+                close: TWO_FINGER_PINCH_CLOSE_TRAVEL_UM,
+                spread: TWO_FINGER_PINCH_OPEN_TRAVEL_UM,
+            },
+            (GestureAxis::Pinch, _) => AxisTravel::Pinch {
+                close: FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM,
+                spread: FOUR_FINGER_PINCH_OPEN_TRAVEL_UM,
+            },
+        };
         Some(Self {
             axis,
             travel,

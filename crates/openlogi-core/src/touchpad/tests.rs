@@ -178,6 +178,26 @@ fn cardinal_swipes_keep_the_locked_finger_count_and_direction() {
 }
 
 #[test]
+fn a_two_finger_zoom_chord_commits_early() {
+    // Two-finger pinches stream magnify zoom, whose dead zone must stay
+    // native-short: 3 mm of spread (contacts ±3 mm apart from a 6 mm
+    // resting spread) with a still centroid commits before the four-finger
+    // reveal threshold would.
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 44_000, 50_000), contact(2, 56_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            20_000,
+            vec![contact(1, 41_000, 50_000), contact(2, 59_000, 50_000)],
+        )),
+        GestureRecognition::Gesture(ButtonId::TouchpadTwoFingerPinchOut)
+    );
+}
+
+#[test]
 fn spread_dominance_commits_pinch_in_and_out() {
     let mut outward = TouchpadGestureRecognizer::default();
     outward.update(&frame(

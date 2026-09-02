@@ -23,7 +23,13 @@ const VERTICAL_SWIPE_MIN_DURATION_US: u64 = 35_000;
 const FLICK_MIN_MOTION_FRAMES: u8 = 3;
 const FLICK_MIN_DISTANCE_UM: u64 = 15_000;
 const SWIPE_CROSS_AXIS_FLOOR_UM: u64 = 3_000;
-const PINCH_MIN_SPREAD_CHANGE_UM: u64 = 8_000;
+/// Spread change that commits a pinch, floor per finger count: two-finger
+/// pinches stream magnify zoom, whose dead zone must stay native-short,
+/// while four-finger dock reveals keep the deliberate gate — they carry no
+/// dominance guard, so a low floor would let sloppy four-finger swipes
+/// drift into a pinch.
+const TWO_FINGER_PINCH_MIN_SPREAD_CHANGE_UM: u64 = 3_000;
+const FOUR_FINGER_PINCH_MIN_SPREAD_CHANGE_UM: u64 = 8_000;
 const PINCH_MIN_SPREAD_PERCENT: u64 = 8;
 // Real swipes keep the spread within ~2 mm while pinching hands drift the
 // centroid past the spread change itself, so only two-finger pinches need
@@ -401,7 +407,12 @@ impl Stroke {
     }
 
     fn pinch_threshold(&self) -> u64 {
-        PINCH_MIN_SPREAD_CHANGE_UM.max(
+        let floor = if self.starts.len() == 4 {
+            FOUR_FINGER_PINCH_MIN_SPREAD_CHANGE_UM
+        } else {
+            TWO_FINGER_PINCH_MIN_SPREAD_CHANGE_UM
+        };
+        floor.max(
             self.start_spread_um
                 .saturating_mul(PINCH_MIN_SPREAD_PERCENT)
                 / 100,
