@@ -25,7 +25,7 @@ use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, CrownInfo, CrownMode, Dpi, DpiInfo, FeatureEntry, FirmwareEntity,
     HapticWaveform, LightingMethod, LitraModel, ReprogControlEntry, ScrollResolution,
-    ScrollWheelMode,
+    ScrollWheelMode, SetCrownMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -129,6 +129,14 @@ pub async fn get_crown_info(route: &DeviceRoute) -> Result<CrownInfo, WriteError
 /// Read the crown's current mode on the device `route` reaches.
 pub async fn get_crown_mode(route: &DeviceRoute) -> Result<CrownMode, WriteError> {
     device::get_crown_mode(&*native_backend(), route).await
+}
+
+/// Write the crown's mode on the device `route` reaches, verified by read-back.
+pub async fn set_crown_mode(
+    route: &DeviceRoute,
+    mode: SetCrownMode,
+) -> Result<CrownMode, WriteError> {
+    device::set_crown_mode(&*native_backend(), route, mode).await
 }
 
 /// Set the Fn-key inversion of the keyboard `route` reaches.

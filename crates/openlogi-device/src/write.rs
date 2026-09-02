@@ -28,7 +28,7 @@ mod litra;
 mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
-pub use crown::{get_crown_info, get_crown_mode};
+pub use crown::{get_crown_info, get_crown_mode, set_crown_mode};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
@@ -41,7 +41,7 @@ pub use fn_lock::{set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::crown::{
     CrownControlCapabilities, CrownInfo, CrownMode, CrownSensorCapabilities, RatchetMode,
-    ReportingMode,
+    ReportingMode, SetCrownMode,
 };
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{

@@ -137,6 +137,8 @@ pub enum HidppOperation {
     ReadCrownInfo,
     /// Read the current Crown mode. Appended last — variant order is wire format.
     ReadCrownMode,
+    /// Write and verify the Crown mode. Appended last — variant order is wire format.
+    WriteCrownMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

@@ -128,6 +128,9 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// A rotary crown is present — HID++ `0x4600 Crown` (Craft's dial).
+    #[serde(default)]
+    pub crown: bool,
 }
 
 impl Capabilities {
@@ -153,6 +156,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            crown: ids.contains(&0x4600),
         }
     }
 
@@ -173,6 +177,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                crown: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +483,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    crown: false,
                 }),
             }],
         }
@@ -548,9 +554,13 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                crown: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
+        // Craft Advanced Keyboard: Crown (0x4600) present.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x4600]).crown);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1b04]).crown);
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(
@@ -564,6 +574,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                crown: false,
             }
         );
         // No driving features → nothing offered.
