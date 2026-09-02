@@ -42,8 +42,11 @@ contents:
       mode: 0755
 
   # ── udev rules ──────────────────────────────────────────────────────────────
+  # Vendor directory, not /etc: /etc/udev/rules.d is reserved for the admin, and
+  # on Arch only usr/lib/udev/rules.d/* triggers the systemd hook that reloads
+  # and re-applies rules after a transaction.
   - src: packaging/linux/udev/70-openlogi.rules
-    dst: /etc/udev/rules.d/70-openlogi.rules
+    dst: /usr/lib/udev/rules.d/70-openlogi.rules
     file_info:
       mode: 0644
 
@@ -110,6 +113,12 @@ contents:
 archlinux:
   packager: "AprilNEA <dev@aprilnea.me>"
 
+# The lists below come from a readelf/dlopen audit of the release binaries:
+# linked are libc/libm/libgcc_s plus libxcb and libxkbcommon{,-x11} (GUIs);
+# dlopened are libvulkan, libEGL, libwayland-client, and libwayland-egl.
+# libdbus is never loaded (zbus speaks the wire protocol over the socket —
+# `dbus` is the daemon dependency), and fonts.conf is read by a pure-Rust
+# parser, so the dependency is on whichever package owns that file.
 overrides:
   archlinux:
     depends:
@@ -117,12 +126,41 @@ overrides:
       - fontconfig
       - gcc-libs
       - glibc
+      - hicolor-icon-theme
       - libglvnd
       - libxcb
       - libxkbcommon
       - libxkbcommon-x11
       - vulkan-icd-loader
       - wayland
+  deb:
+    depends:
+      - dbus
+      - fontconfig-config
+      - hicolor-icon-theme
+      - libc6
+      - libegl1
+      - libgcc-s1
+      - libvulkan1
+      - libwayland-client0
+      - libwayland-egl1
+      - libxcb1
+      - libxkbcommon-x11-0
+      - libxkbcommon0
+  rpm:
+    depends:
+      - dbus
+      - fontconfig
+      - glibc
+      - hicolor-icon-theme
+      - libgcc
+      - libglvnd-egl
+      - libwayland-client
+      - libwayland-egl
+      - libxcb
+      - libxkbcommon
+      - libxkbcommon-x11
+      - vulkan-loader
 
 scripts:
   postinstall: packaging/linux/nfpm-scripts/postinstall.sh
