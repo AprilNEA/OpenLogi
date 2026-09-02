@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
+use openlogi_device_registry::headset::{GAMING_HEADSET_DRIVER_ID, find_gaming_headset};
 use openlogi_device_registry::litra::find_litra;
 
 use super::InventoryError;
@@ -20,37 +21,70 @@ pub async fn enumerate_standalone(
     let devices = backend.enumerate().await?;
     let devices: Vec<_> = devices
         .into_iter()
-        .filter_map(|device| {
-            let descriptor = find_litra(
-                device.vendor_id,
-                device.product_id,
-                device.usage_page,
-                device.usage_id,
-            )?;
-            let identity = device.identity();
-            Some(StandaloneDevice {
-                address: RawDeviceAddress {
-                    vendor_id: device.vendor_id,
-                    product_id: device.product_id,
-                    usage_page: device.usage_page,
-                    usage_id: device.usage_id,
-                    identity,
-                },
-                display_name: device.name.clone(),
-                manufacturer: device.manufacturer.clone(),
-                serial_number: device.serial_number.clone(),
-                unit_id: [0; 4],
-                kind: DeviceKind::Light,
-                online: true,
-                capabilities: None,
-                light_capabilities: Some(litra_capabilities(descriptor.model)),
-                driver_id: descriptor.driver_id.to_owned(),
-                registry_model_id: Some(descriptor.registry_model_id.to_owned()),
-            })
-        })
+        .filter_map(|device| standalone_device(&device))
         .collect();
     validate_no_ambiguous_nodes(&devices)?;
     Ok(devices)
+}
+
+/// Classifies one enumerated HID node against every standalone driver family
+/// OpenLogi recognizes, in precedence order. `None` when no family claims it.
+fn standalone_device(device: &crate::backend::NodeInfo) -> Option<StandaloneDevice> {
+    if let Some(descriptor) = find_litra(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+    ) {
+        return Some(StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                usage_page: device.usage_page,
+                usage_id: device.usage_id,
+                identity: device.identity(),
+            },
+            display_name: device.name.clone(),
+            manufacturer: device.manufacturer.clone(),
+            serial_number: device.serial_number.clone(),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(litra_capabilities(descriptor.model)),
+            driver_id: descriptor.driver_id.to_owned(),
+            registry_model_id: Some(descriptor.registry_model_id.to_owned()),
+        });
+    }
+
+    if let Some(descriptor) = find_gaming_headset(
+        device.vendor_id,
+        device.product_id,
+        device.usage_page,
+        device.usage_id,
+    ) {
+        return Some(StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                usage_page: device.usage_page,
+                usage_id: device.usage_id,
+                identity: device.identity(),
+            },
+            display_name: descriptor.name.to_owned(),
+            manufacturer: device.manufacturer.clone(),
+            serial_number: device.serial_number.clone(),
+            unit_id: [0; 4],
+            kind: DeviceKind::Headset,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: GAMING_HEADSET_DRIVER_ID.to_owned(),
+            registry_model_id: None,
+        });
+    }
+
+    None
 }
 
 /// Reject multiple nodes that the route cannot distinguish safely.
