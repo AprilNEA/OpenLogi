@@ -103,7 +103,6 @@ impl GestureOutputs {
 /// later deltas feed the overscroll. Wheel-class deltas clamp, exactly the
 /// native feel this device has without capture.
 fn post_touchpad_scroll(tuning: TouchpadScrollTuning, dx: i64, dy: i64) {
-    // Wheel-class on purpose — see the doc comment above.
     openlogi_inject::post_touchpad_scroll(tuning.content_delta(dx, dy));
 }
 
@@ -203,13 +202,17 @@ impl Drop for GestureWatcher {
 #[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
-    capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     outputs: GestureOutputs,
     touchpad_monitor: SharedTouchpadMonitor,
+    channels: (
+        CaptureChannel,
+        openlogi_hid::ChannelRegistry,
+        Arc<std::sync::atomic::AtomicBool>,
+    ),
 ) -> GestureWatcher {
+    let (capture_channel, channel_registry, native_button) = channels;
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     let (shutdown, shutdown_rx) = oneshot::channel();
@@ -230,12 +233,10 @@ pub fn spawn(
             };
             let (context, event_rx) = ManagerContext::new(
                 plans,
-                capture_channel,
                 receiver_access,
                 receiver_requests,
-                channel_registry,
-                device_io,
                 touchpad_monitor,
+                (capture_channel, channel_registry, device_io, native_button),
             );
             runtime.block_on(manage(context, event_rx, outputs, shutdown_rx));
             let _ = done.send(());
@@ -304,6 +305,7 @@ struct SessionChannels {
     registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     touchpad_journal: Option<Arc<dyn TouchpadJournalStore>>,
+    native_button: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct ManagerContext {
@@ -318,13 +320,17 @@ struct ManagerContext {
 impl ManagerContext {
     fn new(
         capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-        capture_channel: CaptureChannel,
         receiver_access: ReceiverAccess,
         receiver_requests: watch::Receiver<ReceiverRequestState>,
-        channel_registry: openlogi_hid::ChannelRegistry,
-        device_io: DeviceIoGate,
         touchpad_monitor: SharedTouchpadMonitor,
+        channels: (
+            CaptureChannel,
+            openlogi_hid::ChannelRegistry,
+            DeviceIoGate,
+            Arc<std::sync::atomic::AtomicBool>,
+        ),
     ) -> (Self, mpsc::UnboundedReceiver<SessionEvent>) {
+        let (capture_channel, channel_registry, device_io, native_button) = channels;
         let (events, event_rx) = mpsc::unbounded_channel();
         let touchpad_journal = match FileTouchpadJournalStore::in_state_dir() {
             Ok(store) => Some(Arc::new(store) as Arc<dyn TouchpadJournalStore>),
@@ -344,6 +350,7 @@ impl ManagerContext {
                     registry: channel_registry,
                     device_io: device_io.clone(),
                     touchpad_journal,
+                    native_button: native_button.clone(),
                 },
                 device_io,
                 touchpad_monitor,
@@ -1024,6 +1031,7 @@ fn spawn_session(
     let registry = channels.registry.clone();
     let device_io = channels.device_io.clone();
     let touchpad_journal = channels.touchpad_journal.clone();
+    let native_button = channels.native_button.clone();
     tokio::spawn(async move {
         let _lease = lease;
         let result = run_capture_session_with_registry_spec(
@@ -1035,6 +1043,7 @@ fn spawn_session(
                 shutdown: stop_rx,
                 channel_slot: slot,
                 device_io,
+                native_button,
             },
             &registry,
         )

@@ -15,6 +15,7 @@ const TOUCHPAD_INDEX: u8 = 0x04;
 static RAW_MODE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RAW_MODE: AtomicU8 = AtomicU8::new(0);
 static RAW_MODE_WRITE_RESULT: AtomicU8 = AtomicU8::new(u8::MAX);
+const HANDLING: [u8; 4] = [0x22, 0x11, 0x30, 0xc0];
 
 #[derive(Default)]
 struct MemoryJournal(Mutex<Option<RawModeJournal>>);
@@ -52,6 +53,15 @@ fn raw_mode_responder(request: &[u8]) -> Option<Vec<u8>> {
                 },
                 Ordering::Relaxed,
             );
+        }
+        // fn3 rides a long report: answer with one so the four handling
+        // bytes survive the round trip.
+        (TOUCHPAD_INDEX, 0x03) => {
+            let mut response = vec![0u8; 20];
+            response[0] = 0x11;
+            response[1..4].copy_from_slice(&request[1..4]);
+            response[4..8].copy_from_slice(&HANDLING);
+            return Some(response);
         }
         _ => return None,
     }
@@ -137,10 +147,12 @@ async fn journal_owned_raw_mode_is_restored_on_disarm() {
     let feature = raw_mode_feature(0).await;
     let journal = Arc::new(MemoryJournal::default());
 
-    let armed = ArmedRawMode::arm(&feature, None, journal.as_ref(), "unit:casa")
+    let armed = ArmedRawMode::arm(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("raw mode should arm");
 
+    // RAW | WIDTH_HEIGHT_8BIT | DIVERT_NATIVE_GESTURES — the Options+ mode.
+    assert_eq!(OPENLOGI_RAW_REPORT_FLAGS.bits(), 0xC1);
     assert_eq!(
         RAW_MODE.load(Ordering::Relaxed),
         OPENLOGI_RAW_REPORT_FLAGS.bits()
@@ -152,12 +164,11 @@ async fn journal_owned_raw_mode_is_restored_on_disarm() {
             requested: OPENLOGI_RAW_REPORT_FLAGS.bits(),
             readback: Some(OPENLOGI_RAW_REPORT_FLAGS.bits()),
             armed: true,
-            scroll2finger_diverted: None,
         })
     );
 
     armed
-        .disarm(&feature, None, journal.as_ref(), "unit:casa")
+        .disarm(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("owned mode should restore");
     assert_eq!(RAW_MODE.load(Ordering::Relaxed), 0);
@@ -173,12 +184,11 @@ async fn recovery_writes_only_when_the_current_mode_is_journal_owned() {
         requested: OPENLOGI_RAW_REPORT_FLAGS.bits(),
         readback: Some(OPENLOGI_RAW_REPORT_FLAGS.bits()),
         armed: true,
-        scroll2finger_diverted: None,
     };
     journal.save("unit:casa", record).expect("save journal");
     let feature = raw_mode_feature(OPENLOGI_RAW_REPORT_FLAGS.bits()).await;
 
-    ArmedRawMode::recover(&feature, None, journal.as_ref(), "unit:casa")
+    ArmedRawMode::recover(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("owned mode should recover");
     assert_eq!(RAW_MODE.load(Ordering::Relaxed), 0);
@@ -186,7 +196,7 @@ async fn recovery_writes_only_when_the_current_mode_is_journal_owned() {
 
     journal.save("unit:casa", record).expect("save journal");
     let feature = raw_mode_feature(9).await;
-    ArmedRawMode::recover(&feature, None, journal.as_ref(), "unit:casa")
+    ArmedRawMode::recover(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("external mode should only clear the stale journal");
     assert_eq!(RAW_MODE.load(Ordering::Relaxed), 9);
@@ -199,11 +209,11 @@ async fn exact_raw_mode_without_a_journal_is_not_claimed_or_restored() {
     let feature = raw_mode_feature(OPENLOGI_RAW_REPORT_FLAGS.bits()).await;
     let journal = Arc::new(MemoryJournal::default());
 
-    let armed = ArmedRawMode::arm(&feature, None, journal.as_ref(), "unit:casa")
+    let armed = ArmedRawMode::arm(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("exact external layout can be observed");
     armed
-        .disarm(&feature, None, journal.as_ref(), "unit:casa")
+        .disarm(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("unowned mode has nothing to restore");
 
@@ -219,13 +229,13 @@ async fn an_external_change_during_capture_is_not_overwritten_on_disarm() {
     let _guard = RAW_MODE_TEST_LOCK.lock().await;
     let feature = raw_mode_feature(0).await;
     let journal = Arc::new(MemoryJournal::default());
-    let armed = ArmedRawMode::arm(&feature, None, journal.as_ref(), "unit:casa")
+    let armed = ArmedRawMode::arm(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("raw mode should arm");
     RAW_MODE.store(9, Ordering::Relaxed);
 
     armed
-        .disarm(&feature, None, journal.as_ref(), "unit:casa")
+        .disarm(&feature, journal.as_ref(), "unit:casa")
         .await
         .expect("external takeover should only clear ownership");
 
@@ -240,7 +250,7 @@ async fn mismatched_readback_is_not_treated_as_openlogi_owned() {
     RAW_MODE_WRITE_RESULT.store(9, Ordering::Relaxed);
     let journal = Arc::new(MemoryJournal::default());
 
-    let Err(error) = ArmedRawMode::arm(&feature, None, journal.as_ref(), "unit:casa").await else {
+    let Err(error) = ArmedRawMode::arm(&feature, journal.as_ref(), "unit:casa").await else {
         panic!("a mismatched raw-mode readback must fail arming");
     };
 
@@ -259,7 +269,7 @@ async fn incompatible_external_raw_mode_is_never_overwritten() {
     let feature = raw_mode_feature(9).await;
     let journal = Arc::new(MemoryJournal::default());
 
-    let Err(error) = ArmedRawMode::arm(&feature, None, journal.as_ref(), "unit:casa").await else {
+    let Err(error) = ArmedRawMode::arm(&feature, journal.as_ref(), "unit:casa").await else {
         panic!("an incompatible external layout must block capture");
     };
 
@@ -505,22 +515,8 @@ fn a_dropped_active_frame_keeps_the_stroke_tappable() {
 
 #[test]
 fn silence_ends_the_previous_stroke() {
-    let mut stream = TouchpadFrameStream {
-        assembler: assembler(Origin::UpperLeft),
-        active_contacts: None,
-        last_frame_at: None,
-        last_timestamp_us: None,
-        cadence_us: None,
-    };
+    let mut stream = stream();
     let now = Instant::now();
-    let two = stream
-        .assembler
-        .push(chunk(50, [point(1, 1, 1), point(2, 2, 2)], 2, true));
-    assert!(matches!(two, Some(FrameOutcome::Frame(_))));
-
-    // Drive the public stream bookkeeping with the same state shape; the raw
-    // HID++ constructor is intentionally not public, so unit tests exercise
-    // strict assembly above and lifecycle transitions directly here.
     stream.active_contacts = Some(2);
     stream.last_frame_at = Some(now);
     let timeout = stream.stroke_end_timeout();
@@ -606,13 +602,7 @@ fn stroke_end_timeout_tracks_report_cadence_with_bounds() {
 
 #[test]
 fn finger_count_change_stays_in_one_stroke_for_recognizer_cancellation() {
-    let mut stream = TouchpadFrameStream {
-        assembler: assembler(Origin::UpperLeft),
-        active_contacts: None,
-        last_frame_at: None,
-        last_timestamp_us: None,
-        cadence_us: None,
-    };
+    let mut stream = stream();
     let now = Instant::now();
     let two = TouchFrame::new(
         1_000,
@@ -664,13 +654,7 @@ fn finger_count_change_stays_in_one_stroke_for_recognizer_cancellation() {
 
 #[test]
 fn abnormal_device_timestamp_gap_ends_before_the_next_frame() {
-    let mut stream = TouchpadFrameStream {
-        assembler: assembler(Origin::UpperLeft),
-        active_contacts: None,
-        last_frame_at: None,
-        last_timestamp_us: None,
-        cadence_us: None,
-    };
+    let mut stream = stream();
     let now = Instant::now();
     let frame = |timestamp_us| {
         TouchFrame::new(
@@ -733,4 +717,16 @@ fn a_version_zero_touchpad_builds_a_stream_like_a_version_one_pad() {
         TouchpadFrameStream::new(info(2)).err(),
         Some(TouchpadStreamError::UnsupportedMapping(2))
     );
+}
+
+#[tokio::test]
+async fn gestures_handling_output_reads_four_bytes() {
+    let _guard = RAW_MODE_TEST_LOCK.lock().await;
+    let feature = raw_mode_feature(0).await;
+
+    let handling = feature
+        .get_gestures_handling_output()
+        .await
+        .expect("handling bitmap should read");
+    assert_eq!(handling, [0x22, 0x11, 0x30, 0xc0]);
 }

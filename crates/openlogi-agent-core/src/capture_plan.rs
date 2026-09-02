@@ -116,7 +116,10 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
-/// Build one device's plan from the config (per-app effective for `app`).
+/// Build one device's plan with journal-less touchpad options — a test
+/// convenience; production always resolves a probed journal identity through
+/// [`plan_for_device_with_touchpad`].
+#[cfg(test)]
 #[must_use]
 pub fn plan_for_device(
     config: &Config,
@@ -731,16 +734,8 @@ mod tests {
         );
 
         assert_eq!(plan.target.spec.mode, CaptureSessionMode::TouchpadRecovery);
-        assert!(plan.dispatch.bindings.is_empty());
-        assert!(plan.dispatch.gesture_bindings.is_empty());
-        assert!(plan.target.spec.divert_buttons.is_empty());
-        assert!(!plan.target.spec.capture_thumbwheel);
-        assert!(plan.dispatch.touchpad_bindings.is_empty());
         assert!(!plan.target.spec.capture_touchpad);
-        assert_eq!(
-            plan.dispatch.touchpad_scroll_sensitivity,
-            TouchpadScrollSensitivity::DEFAULT
-        );
-        assert!(!plan.dispatch.touchpad_scroll_inverted);
+        assert!(!plan.target.spec.capture_thumbwheel);
+        assert!(plan.target.spec.divert_buttons.is_empty());
     }
 }

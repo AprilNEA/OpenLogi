@@ -149,6 +149,10 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+/// Re-exported so dependents can name the receivers
+/// [`feature::EmittingFeature`]'s `listen` hands out without depending on
+/// the channel crate themselves.
+pub use async_channel;
 pub use async_trait::async_trait;
 
 pub mod channel;

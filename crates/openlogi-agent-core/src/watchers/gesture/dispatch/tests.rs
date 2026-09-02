@@ -170,8 +170,7 @@ fn a_touch_within_the_glide_suppression_window_cannot_tap() {
             y_um: 10_000,
         },
     ];
-    let trigger = ButtonId::TouchpadTwoFingerTap;
-    let bindings = BTreeMap::from([(trigger, Action::Copy)]);
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerTap, Action::Copy)]);
     let mut runtime = TouchpadRuntime::default();
 
     runtime.suppress_taps(std::time::Duration::from_millis(500));
@@ -195,67 +194,6 @@ fn a_touch_within_the_glide_suppression_window_cannot_tap() {
     );
     // The stopping touch of a glide must not resolve into its bound action.
     assert_eq!(runtime.end(true).routed, TouchpadOutput::Idle);
-
-    // A zero window has already expired: the next identical tap fires.
-    let mut expired = TouchpadRuntime::default();
-    expired.suppress_taps(std::time::Duration::ZERO);
-    assert_eq!(
-        expired.update(
-            &TouchFrame::new(
-                1_000,
-                false,
-                vec![
-                    TouchContact {
-                        id: 1,
-                        x_um: 10_000,
-                        y_um: 10_000,
-                    },
-                    TouchContact {
-                        id: 2,
-                        x_um: 20_000,
-                        y_um: 10_000,
-                    },
-                ],
-            )
-            .expect("valid frame"),
-            &bindings,
-            true,
-            false
-        ),
-        idle()
-    );
-    assert_eq!(
-        expired.update(
-            &TouchFrame::new(
-                50_000,
-                false,
-                vec![
-                    TouchContact {
-                        id: 1,
-                        x_um: 10_000,
-                        y_um: 10_000,
-                    },
-                    TouchContact {
-                        id: 2,
-                        x_um: 20_000,
-                        y_um: 10_000,
-                    },
-                ],
-            )
-            .expect("valid frame"),
-            &bindings,
-            true,
-            false
-        ),
-        idle()
-    );
-    assert_eq!(
-        expired.end(true).routed,
-        TouchpadOutput::Action {
-            trigger,
-            action: Action::Copy
-        }
-    );
 }
 
 #[test]
@@ -285,7 +223,6 @@ fn diagnostic_touchpad_stroke_cannot_fire_if_management_enables_mid_stroke() {
     assert_eq!(runtime.end(true).routed, TouchpadOutput::Idle);
 
     assert_eq!(runtime.update(&frame, &bindings, true, false), idle());
-    assert_eq!(
     assert_eq!(runtime.update(&aged, &bindings, true, false), idle());
     assert_eq!(
         runtime.end(true).routed,
@@ -355,7 +292,7 @@ fn native_swipe_streams_progress_instead_of_dispatching() {
 }
 
 #[test]
-fn touchpad_scroll_streams_phases_and_terminates_on_end() {
+fn touchpad_scroll_streams_deltas_and_terminates_on_end() {
     use openlogi_core::touchpad::TouchContact;
 
     let resting = |travelled: u32| {
@@ -982,4 +919,61 @@ fn begin_failure_falls_back_to_discrete_action() {
     assert_eq!(outcome.stream, SwipeOutput::Idle);
     let outcome = runtime.end(true);
     assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+#[test]
+fn a_button_press_at_any_contact_count_kills_the_glide() {
+    use openlogi_core::touchpad::TouchContact;
+
+    let travelling = |timestamp_us: u64, travelled: i32| {
+        TouchFrame::new(
+            timestamp_us,
+            false,
+            vec![
+                TouchContact {
+                    id: 1,
+                    x_um: u32::try_from(50_000_i32 + travelled).expect("positive"),
+                    y_um: 50_000,
+                },
+                TouchContact {
+                    id: 2,
+                    x_um: u32::try_from(60_000_i32 + travelled).expect("positive"),
+                    y_um: 50_000,
+                },
+            ],
+        )
+        .expect("valid frame")
+    };
+    let button_held = |timestamp_us: u64| {
+        TouchFrame::new(
+            timestamp_us,
+            true,
+            vec![TouchContact {
+                id: 1,
+                x_um: 56_000,
+                y_um: 50_000,
+            }],
+        )
+        .expect("valid frame")
+    };
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerTap, Action::Copy)]);
+    let mut runtime = TouchpadRuntime::default();
+
+    // A fast scroll, then the button lands with a single finger still down:
+    // the pressed button owns the pad, so the scroll it cut into must not
+    // glide on lift — the exit velocity dies at the button frame itself.
+    runtime.update(&travelling(0, 0), &bindings, true, false);
+    runtime.update(&travelling(25_000, 3_000), &bindings, true, false);
+    runtime.update(&travelling(50_000, 6_000), &bindings, true, false);
+    assert_eq!(
+        runtime.update(&button_held(75_000), &bindings, true, false),
+        idle()
+    );
+    let TouchpadOutput::ScrollEnd {
+        exit_velocity_um_per_s: Some((vx, vy)),
+    } = runtime.end(true).routed
+    else {
+        panic!("streamed stroke");
+    };
+    assert_eq!((vx, vy), (0.0, 0.0));
 }

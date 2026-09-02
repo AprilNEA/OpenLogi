@@ -11,14 +11,6 @@ use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 /// Gestures2 gesture id for the horizontal thumb wheel.
 pub const THUMBWHEEL_GESTURE_ID: u8 = 46;
 
-/// Gestures2 gesture id for two-finger scrolling.
-///
-/// Options+ diverts exactly this one when it takes over a touchpad: it is
-/// what makes the firmware stop its own two-finger handling — scroll
-/// translation and the click-layer artifacts that kill button-held drags
-/// when a second finger lands.
-pub const SCROLL_2FINGER_GESTURE_ID: u8 = 44;
-
 /// Maximum descriptor fields accepted before treating a malformed table as an
 /// unsupported response. Real device tables are tiny; the bound prevents a
 /// broken device from causing an unbounded probe loop.
@@ -190,12 +182,6 @@ mod tests {
                 gesture_id: THUMBWHEEL_GESTURE_ID,
                 diversion_index: Some(0)
             })
-        );
-        assert_eq!(
-            scan_descriptor_page(&payload, 0, SCROLL_2FINGER_GESTURE_ID),
-            DescriptorScan::Continue {
-                next_diversion_index: 1
-            }
         );
 
         let mut end = [0u8; 16];

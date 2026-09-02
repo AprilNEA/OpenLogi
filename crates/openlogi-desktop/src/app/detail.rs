@@ -400,7 +400,6 @@ struct ScrollingFacts {
 /// that control lives on the Gestures tab, where the touchpad capability
 /// already gates the page.
 fn inversion_row(inverted: bool, wheel_supported: bool, pal: Palette) -> gpui::Div {
-    let available = wheel_supported;
     let description = if wheel_supported {
         tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
     } else {
@@ -428,8 +427,8 @@ fn inversion_row(inverted: bool, wheel_supported: bool, pal: Palette) -> gpui::D
         .child(
             Toggle::new("invert-scroll-toggle")
                 .selected(inverted)
-                .disabled(!available)
-                .label((!available).then(|| tr!("Unavailable")))
+                .disabled(!wheel_supported)
+                .label((!wheel_supported).then(|| tr!("Unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::update(cx, |state, cx| {
                         let key = state.current_record().map(DeviceRecord::device_key);

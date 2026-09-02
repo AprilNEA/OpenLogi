@@ -109,6 +109,12 @@ pub enum GestureRecognition {
 #[derive(Debug, Default)]
 pub struct TouchpadGestureRecognizer {
     state: StrokeState,
+    /// Whether the previous frame carried a pressed physical button, so a
+    /// release mid-contact marks the surviving contacts as predating their
+    /// stroke: a stroke must see a landing edge before it can resolve a
+    /// tap, or lifting the leftovers of a click-drag clicks.
+    button_was_held: bool,
+    stale_contacts: bool,
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +138,10 @@ struct Stroke {
     motion_frames: u8,
     previous_centroid: Point,
     scrolling: bool,
+    /// Whether the stroke opened with fingers landing on the pad. Contacts
+    /// surviving a button release predate their stroke; lifting them must
+    /// not read as a tap.
+    landed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,18 +161,38 @@ impl TouchpadGestureRecognizer {
     pub fn update(&mut self, frame: &TouchFrame) -> GestureRecognition {
         let count = frame.contacts.len();
         if count == 0 {
+            self.button_was_held = false;
+            self.stale_contacts = false;
             let _ = self.end();
             return GestureRecognition::Pending;
         }
         if count > 4 {
+            self.button_was_held = frame.button;
             self.state = StrokeState::Cancelled;
             return GestureRecognition::Pending;
         }
-
+        if frame.button {
+            // A pressed button turns contact motion into dragging: no
+            // gesture stroke may claim it while the button holds. Under the
+            // press toggle the capture disarms raw reporting moments later,
+            // so these frames only span the press-to-native window.
+            self.button_was_held = true;
+            self.state = StrokeState::Idle;
+            return GestureRecognition::Pending;
+        }
+        if self.button_was_held {
+            // The button lifted mid-contact; gesture tracking restarts
+            // fresh, and the surviving contacts never landed inside the
+            // stroke that follows — whatever it becomes, it cannot resolve
+            // a tap.
+            self.button_was_held = false;
+            self.stale_contacts = true;
+            self.state = StrokeState::Idle;
+        }
         match &mut self.state {
             StrokeState::Idle => {
                 if count >= 2 {
-                    self.state = StrokeState::Tracking(Stroke::new(frame));
+                    self.state = StrokeState::Tracking(Stroke::new(frame, !self.stale_contacts));
                 }
                 GestureRecognition::Pending
             }
@@ -208,12 +238,14 @@ impl TouchpadGestureRecognizer {
 
     /// Cancel the current stroke without producing a tap.
     pub fn cancel(&mut self) {
+        self.button_was_held = false;
+        self.stale_contacts = false;
         self.state = StrokeState::Cancelled;
     }
 }
 
 impl Stroke {
-    fn new(frame: &TouchFrame) -> Self {
+    fn new(frame: &TouchFrame, landed: bool) -> Self {
         let centroid = centroid(&frame.contacts);
         Self {
             starts: frame.contacts.clone(),
@@ -226,6 +258,7 @@ impl Stroke {
             motion_frames: 0,
             previous_centroid: centroid,
             scrolling: false,
+            landed,
         }
     }
 
@@ -247,7 +280,7 @@ impl Stroke {
                 .iter()
                 .all(|contact| has_contact(&frame.contacts, contact.id));
         if fingers_landed {
-            *self = Self::new(frame);
+            *self = Self::new(frame, true);
             return Some(ContactUpdate::Rebased);
         }
 
@@ -424,7 +457,8 @@ impl Stroke {
         // four finger taps naturally span wider than one 0.30 gate allows.
         let spread_ok =
             self.starts.len() != 2 || self.max_contact_spread_um <= TAP_MAX_CONTACT_SPREAD_UM;
-        (TAP_MIN_DURATION_US..=TAP_MAX_DURATION_US).contains(&duration)
+        self.landed
+            && (TAP_MIN_DURATION_US..=TAP_MAX_DURATION_US).contains(&duration)
             && self.max_contact_travel_um <= TAP_MAX_TRAVEL_UM
             && spread_ok
     }

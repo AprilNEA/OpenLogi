@@ -461,6 +461,61 @@ fn a_lifted_and_relanded_finger_resumes_as_a_fresh_stroke() {
         }
     );
 }
+
+fn button_frame(timestamp_us: u64, contacts: Vec<TouchContact>) -> TouchFrame {
+    TouchFrame::new(timestamp_us, true, contacts).expect("test contacts have unique ids")
+}
+
+#[test]
+fn releasing_the_button_hands_the_contacts_back_to_gestures() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&button_frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&button_frame(
+            8_000,
+            vec![contact(1, 54_000, 50_000), contact(2, 74_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+
+    // The button lifts while both fingers stay down: the same co-motion is
+    // a scroll stroke again, starting from its own activation travel.
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 90_000, 50_000), contact(2, 110_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+    assert_eq!(
+        recognizer.update(&frame(
+            24_000,
+            vec![contact(1, 94_000, 50_000), contact(2, 114_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 4_000,
+            dy_um: 0
+        }
+    );
+}
+
+#[test]
+fn a_button_held_stroke_never_taps_or_gestures() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&button_frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&button_frame(
+        80_000,
+        vec![contact(1, 50_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    assert_eq!(recognizer.end(), None);
+}
+
 #[test]
 fn a_touch_shorter_than_thirty_milliseconds_is_not_a_tap() {
     let mut recognizer = TouchpadGestureRecognizer::default();
@@ -512,4 +567,28 @@ fn a_four_finger_tap_spans_wider_than_two_fingers_may() {
         ],
     ));
     assert_eq!(recognizer.end(), Some(ButtonId::TouchpadFourFingerTap));
+}
+
+#[test]
+fn contacts_surviving_a_button_release_cannot_tap() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    // A click-drag: button held, two contacts, then the button lifts while
+    // both fingers stay down for a short, still moment before liftoff.
+    recognizer.update(&button_frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&button_frame(
+        80_000,
+        vec![contact(1, 50_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    recognizer.update(&frame(
+        100_000,
+        vec![contact(1, 50_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    // Lifting within the tap window after a short hold must not click: the
+    // stroke never saw these fingers land. (That the same stale contacts can
+    // still scroll is covered by
+    // `releasing_the_button_hands_the_contacts_back_to_gestures`.)
+    assert_eq!(recognizer.end(), None);
 }

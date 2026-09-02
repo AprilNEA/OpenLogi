@@ -109,12 +109,11 @@ enum TouchpadOutput {
     /// A committed gesture trigger with its resolved action.
     Action { trigger: ButtonId, action: Action },
     /// One synthesized two-finger scroll frame: the centroid's travel in
-    /// micrometres. Wheel-class output — no gesture phase stream to belong to.
+    /// micrometres.
     Scroll { dx_um: i64, dy_um: i64 },
-    /// The scroll stream closed. Nothing posts for a wheel-class stream, so
-    /// this only carries the exit velocity (centroid micrometres per second,
-    /// an exponential average over the stroke) that seeds momentum on a clean
-    /// end; a cancellation carries none.
+    /// The scroll stream closed, carrying the exit velocity (centroid
+    /// micrometres per second, an exponential average over the stroke) that
+    /// seeds momentum on a clean end; a cancellation carries none.
     ScrollEnd {
         exit_velocity_um_per_s: Option<(f64, f64)>,
     },
@@ -184,6 +183,11 @@ impl TouchpadRuntime {
             (timestamp_us.saturating_sub(previous)) as f64
         });
         self.last_frame_us = Some(timestamp_us);
+        // A pressed button owns the pad however many contacts it holds: any
+        // scroll stream it cut into must not glide on lift.
+        if frame.button {
+            self.scroll_velocity_um_per_s = (0.0, 0.0);
+        }
         match self.recognizer.update(frame) {
             GestureRecognition::Gesture(trigger)
                 if self.frozen_actions_enabled && actions_enabled =>
@@ -648,8 +652,8 @@ impl InputDispatcher {
             }
             CapturedInput::TouchpadFrame(frame) => {
                 // Touch re-lands, or the glide decayed out since the last
-                // frame: either way the tail is over, and the stopping touch
-                // must not resolve into a tap.
+                // frame: either way the tail is over, and the stopping
+                // touch must not resolve into a tap.
                 if let Some(momentum) = self.momentum.take() {
                     momentum.stop();
                     self.touchpads
@@ -740,11 +744,9 @@ impl InputDispatcher {
     }
 
     /// End one touchpad stroke: execute the swipe stream's release step,
-    /// route the terminal (zero-delta phase event, or a tap that survived
-    /// the scroll travel limits), and, when the lift-off was fast enough,
-    /// hand the exit velocity to a momentum tail. The tail is wheel-class
-    /// output, so the gesture stream's own terminal still closes it and the
-    /// two never share a phase machine.
+    /// route the terminal (a tap that survived the scroll travel limits),
+    /// and, when the lift-off was fast enough, hand the exit velocity to a
+    /// momentum tail.
     fn end_touchpad_stroke(
         &mut self,
         session: &HidppSessionId,
@@ -840,9 +842,8 @@ impl InputDispatcher {
             TouchpadOutput::Scroll { dx_um, dy_um } => {
                 super::post_touchpad_scroll(tuning, dx_um, dy_um);
             }
-            // Wheel-class streams end by simply stopping — the terminal only
-            // hands the exit velocity back for the momentum decision. Idle
-            // likewise posts nothing.
+            // The terminal's exit velocity was consumed above; idle posts
+            // nothing.
             TouchpadOutput::Idle | TouchpadOutput::ScrollEnd { .. } => {}
         }
     }

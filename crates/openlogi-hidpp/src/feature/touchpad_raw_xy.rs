@@ -142,4 +142,20 @@ impl TouchpadRawXyFeature {
         self.endpoint.call(2, [flags.bits(), 0, 0]).await?;
         Ok(())
     }
+
+    /// Retrieves the firmware's per-gesture handling bitmap.
+    ///
+    /// The four bytes say, per gesture handling, whether the firmware keeps
+    /// translating it into HID events or stands down for the host. Decoded
+    /// from a production agent's `apply_gesture_states` write, the layout is
+    /// a pack of 2-bit fields: `byte0` bits 4–5 and `byte1` bits 0–1 govern
+    /// one-finger taps (set per the tap-to-click setting), `byte2` bits 0–3
+    /// the secondary-click trigger, `byte2` bits 4–5 the three-finger
+    /// tap-and-hold drag, `byte3` bits 6–7 the one-finger double-tap-and-hold
+    /// drag, and the remaining bits — including the click-hold handling that
+    /// drags with assist fingers — ride through at their device defaults.
+    pub async fn get_gestures_handling_output(&self) -> Result<[u8; 4], Hidpp20Error> {
+        let payload = self.endpoint.call_long(3, [0; 16]).await?.extend_payload();
+        Ok([payload[0], payload[1], payload[2], payload[3]])
+    }
 }

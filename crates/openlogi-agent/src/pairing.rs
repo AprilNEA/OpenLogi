@@ -405,6 +405,7 @@ mod tests {
         let (_, host_switch_links) = tokio::sync::watch::channel(Arc::new(Vec::new()));
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
+            native_button: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             scroll_preferences: Arc::new(ScrollPreferences::new(
                 false,

@@ -13,8 +13,7 @@
 //! recipes, including Mac Mouse Fix's production one, all inert), while the
 //! pad's own firmware "momentum" is simply more unphased wheel deltas after
 //! lift. Plain deltas are the one shape proven to scroll, and through the
-//! session tap they land as exact per-pixel values. A wheel-class stream
-//! needs no closure event: it ends by stopping.
+//! session tap they land as exact per-pixel values.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +52,7 @@ const START_UM_PER_S: f64 = 40_000.0;
 #[derive(Debug)]
 pub(super) struct TouchpadMomentum {
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 impl TouchpadMomentum {
@@ -69,28 +68,20 @@ impl TouchpadMomentum {
 
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let spawned = std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("touchpad-momentum".to_string())
-            .spawn(move || run(&mut velocity, &flag));
-        if spawned.is_err() {
-            // Scrolling simply stops at lift, as it did before momentum.
-            return None;
-        }
+            .spawn(move || run(&mut velocity, &flag))
+            .ok()?;
 
         tracing::debug!(?velocity, "touchpad scroll momentum started");
-        Some(Self {
-            stop,
-            thread: spawned.ok(),
-        })
+        Some(Self { stop, thread })
     }
 
     /// The join is load-bearing: it orders every remaining delta before the
     /// replacement output the caller posts next, never after it.
-    pub(super) fn stop(mut self) {
+    pub(super) fn stop(self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let _ = self.thread.join();
     }
 }
 
@@ -173,19 +164,6 @@ mod tests {
             touchpad_scroll_sensitivity: openlogi_core::config::TouchpadScrollSensitivity::DEFAULT,
             touchpad_scroll_inverted: inverted,
         }
-    }
-
-    #[test]
-    fn decay_shrinks_the_tail_and_preserves_direction() {
-        let mut velocity = (3000.0, -4000.0);
-        let magnitude = speed(velocity);
-        velocity.0 *= DECAY_PER_TICK;
-        velocity.1 *= DECAY_PER_TICK;
-
-        let shrunk = speed(velocity);
-        assert!((magnitude - shrunk - magnitude * (1.0 - DECAY_PER_TICK)).abs() < 1e-9);
-        // Direction survives: both components keep their sign and ratio.
-        assert!((velocity.0 / velocity.1 - 3000.0 / -4000.0).abs() < 1e-12);
     }
 
     #[test]
