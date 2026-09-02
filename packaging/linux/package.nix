@@ -200,6 +200,13 @@ rustPlatform.buildRustPackage {
       install -Dm644 "design/icon/openlogi-$size.png" \
         "$out/share/icons/hicolor/''${size}x''${size}/apps/openlogi.png"
     done
+    # The GNOME Shell companion extension: per-app profiles read the focused
+    # window's WM_CLASS through it, because Mutter exposes that nowhere else.
+    # Installed, not enabled — GNOME only loads what the user opted into.
+    for file in metadata.json extension.js; do
+      install -Dm644 "crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev/$file" \
+        "$out/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/$file"
+    done
     install -Dm644 packaging/linux/udev/70-openlogi.rules \
       "$out/lib/udev/rules.d/70-openlogi.rules"
     install -Dm644 packaging/linux/systemd/openlogi-agent.service \
@@ -231,6 +238,8 @@ rustPlatform.buildRustPackage {
     for size in 1024 512 256 128 64 48 32 16; do
       test -f "$out/share/icons/hicolor/''${size}x''${size}/apps/openlogi.png"
     done
+    test -f "$out/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/metadata.json"
+    test -f "$out/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/extension.js"
     grep -Fqx \
       "ExecStart=$out/bin/openlogi-agent" \
       "$out/share/systemd/user/openlogi-agent.service"
