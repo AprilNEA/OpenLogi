@@ -26,7 +26,9 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
-use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
+use openlogi_device::{
+    DeviceIoGate, DeviceIoSignal, DeviceRoute, HostOperatingSystem, HostPlatformApply,
+};
 
 /// This host's HID stack.
 ///
@@ -122,6 +124,14 @@ pub async fn set_scroll_wheel_mode(
 /// Set the Fn-key inversion of the keyboard `route` reaches.
 pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<(), WriteError> {
     device::set_fn_lock(&*native_backend(), route, on).await
+}
+
+/// Select the keyboard platform descriptor matching this host OS.
+pub async fn set_native_host_platform(
+    route: &DeviceRoute,
+    host_os: HostOperatingSystem,
+) -> Result<HostPlatformApply, WriteError> {
+    device::set_native_host_platform(&*native_backend(), route, host_os).await
 }
 
 /// Read the backlight state of the keyboard `route` reaches.

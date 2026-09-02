@@ -270,6 +270,13 @@ pub struct AppSettings {
     /// `0` / `6` / `12`). `None` keeps each theme's own radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_radius: Option<u8>,
+    /// Whether the agent asks compatible keyboards to use the platform native
+    /// to the connected host whenever they appear, reconnect, or resume. This
+    /// is opt-in because changing the keyboard's firmware mode can conflict
+    /// with intentional cross-platform layouts or OS-level modifier remaps.
+    /// Appended last because this struct crosses the IPC wire positionally.
+    #[serde(default)]
+    pub enforce_native_keyboard_platform: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -471,6 +478,7 @@ impl Default for AppSettings {
             theme_light: None,
             theme_dark: None,
             ui_radius: None,
+            enforce_native_keyboard_platform: false,
         }
     }
 }

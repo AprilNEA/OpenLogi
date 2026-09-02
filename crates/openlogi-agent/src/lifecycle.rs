@@ -345,8 +345,12 @@ impl Running {
                 inventories,
                 standalone,
                 hid_open_failures,
+                reapply_volatile,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
+                if reapply_volatile {
+                    orchestrator.reapply_volatile_on_next_refresh();
+                }
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);

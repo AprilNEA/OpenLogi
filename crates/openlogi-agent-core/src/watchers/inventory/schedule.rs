@@ -54,6 +54,21 @@ pub(super) enum ReconcileTrigger {
     RecoveryScan,
 }
 
+impl ReconcileTrigger {
+    /// Whether this trigger means device RAM may have reset even when the
+    /// authoritative snapshot keeps the same route and online state.
+    pub(super) fn reapplies_volatile_settings(self) -> bool {
+        matches!(
+            self,
+            Self::Hotplug
+                | Self::SystemResume
+                | Self::HidEvent(
+                    HidppEventSource::ReceiverConnection | HidppEventSource::WirelessDeviceStatus
+                )
+        )
+    }
+}
+
 /// A deadline owned by the inventory worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DeadlinePurpose {
@@ -216,6 +231,24 @@ mod tests {
         );
 
         assert_eq!(schedule.recovery_due, event_time + RECOVERY_SCAN_INTERVAL);
+    }
+
+    #[test]
+    fn reconnect_triggers_reapply_but_battery_events_do_not() {
+        assert!(ReconcileTrigger::Hotplug.reapplies_volatile_settings());
+        assert!(
+            ReconcileTrigger::HidEvent(HidppEventSource::ReceiverConnection)
+                .reapplies_volatile_settings()
+        );
+        assert!(
+            ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus)
+                .reapplies_volatile_settings()
+        );
+        assert!(
+            !ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery)
+                .reapplies_volatile_settings()
+        );
+        assert!(!ReconcileTrigger::RecoveryScan.reapplies_volatile_settings());
     }
 
     #[test]

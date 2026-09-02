@@ -14,9 +14,9 @@ bitflags::bitflags! {
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct MultiPlatformCapabilities: u16 {
         /// The device can detect the host OS automatically.
-        const OS_DETECTION = 1 << 0;
+        const OS_DETECTION = 1 << 8;
         /// Software can set the host platform.
-        const SET_HOST_PLATFORM = 1 << 1;
+        const SET_HOST_PLATFORM = 1 << 9;
     }
 }
 
@@ -26,23 +26,23 @@ bitflags::bitflags! {
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct OsMask: u16 {
         /// Microsoft Windows.
-        const WINDOWS = 1 << 0;
+        const WINDOWS = 1 << 8;
         /// Windows Embedded.
-        const WINDOWS_EMBEDDED = 1 << 1;
+        const WINDOWS_EMBEDDED = 1 << 9;
         /// Linux.
-        const LINUX = 1 << 2;
+        const LINUX = 1 << 10;
         /// ChromeOS.
-        const CHROME = 1 << 3;
+        const CHROME = 1 << 11;
         /// Android.
-        const ANDROID = 1 << 4;
+        const ANDROID = 1 << 12;
         /// macOS.
-        const MACOS = 1 << 5;
+        const MACOS = 1 << 13;
         /// iOS.
-        const IOS = 1 << 6;
+        const IOS = 1 << 14;
         /// webOS.
-        const WEBOS = 1 << 7;
+        const WEBOS = 1 << 15;
         /// Tizen.
-        const TIZEN = 1 << 8;
+        const TIZEN = 1 << 0;
     }
 }
 
@@ -183,8 +183,84 @@ impl MultiPlatformFeature {
             auto_descriptor_index: optional_index(payload[5]),
         })
     }
+
+    /// Selects `platform_index` for a concrete host slot.
+    ///
+    /// `MultiPlatform` is not part of Logitech's public HID++ feature spec;
+    /// function 3 and its argument order are based on device captures and the
+    /// behavior implemented by existing HID++ tools. Callers should resolve
+    /// [`HostIndex`] from [`Self::get_feature_infos`] instead of relying on the
+    /// `Current` (`0xff`) alias, which some keyboard firmware acknowledges but
+    /// does not persist.
+    pub async fn set_host_platform(
+        &self,
+        host: HostIndex,
+        platform_index: u8,
+    ) -> Result<(), Hidpp20Error> {
+        self.endpoint
+            .call(3, [u8::from(host), platform_index, 0])
+            .await?;
+        Ok(())
+    }
 }
 
 fn optional_index(value: u8) -> Option<u8> {
     (value != 0xff).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        channel::tests::{MockRawHidChannel, channel_with_reader},
+        feature::CreatableFeature,
+        nibble::U4,
+        protocol::v20::{Message, MessageHeader},
+    };
+
+    #[test]
+    fn decodes_observed_capability_and_os_mask_bytes() {
+        let capabilities =
+            MultiPlatformCapabilities::from_bits_retain(u16::from_be_bytes([0x03, 0x00]));
+        assert!(capabilities.contains(MultiPlatformCapabilities::OS_DETECTION));
+        assert!(capabilities.contains(MultiPlatformCapabilities::SET_HOST_PLATFORM));
+
+        assert_eq!(
+            OsMask::from_bits_retain(u16::from_be_bytes([0x01, 0x00])),
+            OsMask::WINDOWS
+        );
+        assert_eq!(
+            OsMask::from_bits_retain(u16::from_be_bytes([0x20, 0x00])),
+            OsMask::MACOS
+        );
+        assert_eq!(
+            OsMask::from_bits_retain(u16::from_be_bytes([0x00, 0x01])),
+            OsMask::TIZEN
+        );
+    }
+
+    #[test]
+    fn setter_writes_the_concrete_host_and_platform_indices() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = MultiPlatformFeature::new(Arc::clone(&channel), 1, 5);
+            let header = MessageHeader {
+                device_index: 1,
+                feature_index: 5,
+                function_id: U4::from_lo(3),
+                software_id: U4::from_lo(1),
+            };
+            handle.queue_response(Message::Short(header, [2, 0, 0]).into());
+
+            feature
+                .set_host_platform(HostIndex::Slot(2), 0)
+                .await
+                .unwrap();
+
+            assert_eq!(handle.written_reports(), [vec![0x10, 1, 5, 0x31, 2, 0, 0]]);
+        });
+    }
 }

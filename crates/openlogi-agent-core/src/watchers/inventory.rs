@@ -51,6 +51,9 @@ pub enum InventoryEvent {
         /// macOS the observable signature of a missing or stale Input
         /// Monitoring grant (the open denial itself is silent).
         hid_open_failures: bool,
+        /// Whether the trigger implies volatile device RAM may have reset even
+        /// when route and online state look unchanged.
+        reapply_volatile: bool,
     },
     /// Enumeration has never succeeded and won't be treated as "still
     /// starting" any longer; without this the GUI would show its scanning
@@ -157,6 +160,7 @@ impl WatchState {
         inventories: Vec<DeviceInventory>,
         standalone: Result<Vec<StandaloneDevice>, openlogi_hid::InventoryError>,
         hid_open_failures: bool,
+        reapply_volatile: bool,
     ) -> InventoryEvent {
         self.succeeded = true;
         let standalone = match standalone {
@@ -173,6 +177,7 @@ impl WatchState {
             inventories,
             standalone,
             hid_open_failures,
+            reapply_volatile,
         }
     }
 
@@ -195,7 +200,7 @@ impl WatchState {
     ) -> Option<InventoryEvent> {
         match result {
             Ok((inventories, standalone)) => {
-                Some(self.classify_parts(inventories, Ok(standalone), false))
+                Some(self.classify_parts(inventories, Ok(standalone), false, false))
             }
             Err(e) => {
                 warn!(error = ?e, "enumerate failed during reconciliation — keeping last snapshot");
@@ -399,9 +404,12 @@ impl InventoryWorker {
                 let standalone = openlogi_hid::enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
                 let open_failures = self.enumerator.open_failures_last_tick();
-                let event = self
-                    .state
-                    .classify_parts(inventories, standalone, open_failures);
+                let event = self.state.classify_parts(
+                    inventories,
+                    standalone,
+                    open_failures,
+                    trigger.reapplies_volatile_settings(),
+                );
                 let needs_repair = self.enumerator.retry_needed_last_tick()
                     || standalone_failed
                     || self.state.raw_nodes.has_pending_misses();
@@ -549,7 +557,7 @@ mod tests {
         let _ = state.classify(Ok((vec![], vec![raw_light("serial:glow-1")])));
 
         assert_matches!(
-            state.classify_parts(vec![], Err(enumerate_failed()), false),
+            state.classify_parts(vec![], Err(enumerate_failed()), false, false),
             InventoryEvent::Snapshot { inventories, standalone, .. }
                 if inventories.is_empty()
                     && standalone.len() == 1
