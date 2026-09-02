@@ -47,26 +47,30 @@ fn draining_session_with_epoch(epoch: u64) -> RunningSession {
 
 #[tokio::test(start_paused = true)]
 async fn planned_done_allows_an_immediate_successor_but_unexpected_done_is_paced() {
-    let planned = draining_session_with_epoch(7);
-    let CompletionAction::Remove {
-        unexpected: planned_unexpected,
-    } = planned.completion(&session_id(7))
-    else {
-        panic!("the tracked planned completion should remove its session");
-    };
+    let now = Instant::now();
+    let mut planned = GestureSlot::running(draining_session_with_epoch(7));
+    let (_, planned_unexpected) = planned
+        .complete(&session_id(7), None, Some(now + RETRY_DELAY))
+        .expect("the tracked planned completion should settle its session");
     assert!(
-        restart_deadline(planned_unexpected, Instant::now()).is_none(),
+        !planned_unexpected
+            && planned
+                .recovery()
+                .is_some_and(|recovery| recovery.restart_at.is_none()),
         "ordered Done after planned retirement must reconcile its successor immediately"
     );
 
-    let unexpected = live_session_with_epoch(8);
-    let CompletionAction::Remove { unexpected: failed } = unexpected.completion(&session_id(8))
-    else {
-        panic!("the tracked unexpected completion should remove its session");
-    };
-    let retry_at =
-        restart_deadline(failed, Instant::now()).expect("an unexpected completion must be paced");
-    assert_eq!(retry_at, Instant::now() + RETRY_DELAY);
+    let mut unexpected = GestureSlot::running(live_session_with_epoch(8));
+    let (_, failed) = unexpected
+        .complete(&session_id(8), None, Some(now + RETRY_DELAY))
+        .expect("the tracked unexpected completion should settle its session");
+    assert!(failed);
+    assert_eq!(
+        unexpected
+            .recovery()
+            .and_then(|recovery| recovery.restart_at),
+        Some(now + RETRY_DELAY)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -101,24 +105,17 @@ async fn retry_deadline_is_not_postponed_by_ready_input() {
 #[test]
 fn suspended_device_io_disables_retry_deadlines() {
     let retry_at = Instant::now() + RETRY_DELAY;
-    let restart_after = HashMap::from([(physical_key(), retry_at)]);
+    let slots = HashMap::from([(
+        physical_key(),
+        GestureSlot::recovering(None, Some(retry_at)),
+    )]);
 
     assert_eq!(
-        next_deadline(
-            ReceiverRequestState::default(),
-            true,
-            &HashMap::new(),
-            &restart_after,
-        ),
+        next_deadline(ReceiverRequestState::default(), true, &slots),
         Some(retry_at),
     );
     assert_eq!(
-        next_deadline(
-            ReceiverRequestState::default(),
-            false,
-            &HashMap::new(),
-            &restart_after,
-        ),
+        next_deadline(ReceiverRequestState::default(), false, &slots),
         None,
         "capture retries must stay dormant until visible resume",
     );
