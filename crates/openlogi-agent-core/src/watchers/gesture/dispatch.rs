@@ -15,7 +15,7 @@ use openlogi_hid::thumbwheel::WheelResolution;
 use tracing::debug;
 
 use self::momentum::TouchpadMomentum;
-use self::swipe::{ActiveSwipe, SwipeEnd, SwipeOutput, SwipeStreamPlan};
+use self::swipe::{ActiveSwipe, SpreadBank, SwipeEnd, SwipeOutput, SwipeStreamPlan};
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::{GestureOutputs, TouchpadScrollTuning};
 use crate::capture_plan::DispatchPlan;
@@ -158,6 +158,9 @@ struct TouchpadRuntime {
     last_frame_us: Option<u64>,
     /// A committed swipe streaming its DockSwipe animation, if any.
     stream: Option<ActiveSwipe>,
+    /// The stroke's banked spread, seeding a pinch commit with the travel
+    /// the recognizer threshold consumed.
+    spread_bank: SpreadBank,
     /// Until when tap resolution stays suppressed, armed when a glide ends.
     taps_suppressed_until: Option<std::time::Instant>,
 }
@@ -173,6 +176,7 @@ impl TouchpadRuntime {
         if self.frozen_bindings.is_none() {
             self.frozen_bindings = Some(current_bindings.clone());
             self.frozen_actions_enabled = actions_enabled;
+            self.spread_bank.reset();
         }
         let mut outcome = TouchpadOutcome::default();
         let timestamp_us = frame.timestamp_us;
@@ -189,6 +193,7 @@ impl TouchpadRuntime {
         if frame.button {
             self.scroll_velocity_um_per_s = (0.0, 0.0);
         }
+        self.spread_bank.fold(frame);
         match self.recognizer.update(frame) {
             GestureRecognition::Gesture(trigger)
                 if self.frozen_actions_enabled && actions_enabled =>
@@ -201,7 +206,10 @@ impl TouchpadRuntime {
                 // cannot honor exactly stays discrete.
                 match (native_streaming, self.swipe_plan(trigger)) {
                     (true, Some(plan)) => {
-                        self.stream = Some(ActiveSwipe::new(frame, plan, trigger));
+                        let (swipe, seeded) =
+                            ActiveSwipe::new(frame, plan, trigger, self.spread_bank.take());
+                        self.stream = Some(swipe);
+                        outcome.stream = seeded.unwrap_or_default();
                     }
                     (_, _) => {
                         if let Some((trigger, action)) = self.action(trigger) {
@@ -246,6 +254,7 @@ impl TouchpadRuntime {
             .take()
             .map_or((SwipeOutput::Idle, None), ActiveSwipe::release);
         self.frozen_bindings = None;
+        self.spread_bank.reset();
         self.frozen_actions_enabled = false;
         TouchpadOutcome {
             routed: terminal.unwrap_or_else(|| {
@@ -265,6 +274,7 @@ impl TouchpadRuntime {
         let terminal = self.close_scroll_stream(false);
         self.recognizer.cancel();
         self.frozen_bindings = None;
+        self.spread_bank.reset();
         self.frozen_actions_enabled = false;
         TouchpadOutcome {
             routed: terminal.unwrap_or(TouchpadOutput::Idle),

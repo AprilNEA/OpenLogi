@@ -35,11 +35,14 @@ use openlogi_inject::DockSwipeMotion;
 /// geometry is plumbed through.
 const HORIZONTAL_PAD_TRAVEL_UM: f64 = 117_000.0;
 const VERTICAL_PAD_TRAVEL_UM: f64 = 75_600.0;
-/// Spread change equal to one progress unit, per pinch finger count — the
-/// thumb-plus-three opening of a four-finger pinch reaches unit progress
-/// over less measured spread. Hardware-tuned on the Casa Touch.
-const TWO_FINGER_PINCH_TRAVEL_UM: f64 = 15_000.0;
-const FOUR_FINGER_PINCH_TRAVEL_UM: f64 = 10_000.0;
+/// Spread change equal to one progress unit, per pinch finger count and
+/// direction: a close runs over the short travel between resting spread and
+/// fingers-touching, a spread over the wide travel it has room for, so the
+/// two directions normalize separately. Hardware-tuned on the Casa Touch.
+const TWO_FINGER_PINCH_CLOSE_TRAVEL_UM: f64 = 15_000.0;
+const TWO_FINGER_PINCH_OPEN_TRAVEL_UM: f64 = 30_000.0;
+const FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM: f64 = 10_000.0;
+const FOUR_FINGER_PINCH_OPEN_TRAVEL_UM: f64 = 25_000.0;
 
 /// One routed step of a session's swipe stream.
 #[derive(Debug, Default, PartialEq)]
@@ -197,8 +200,9 @@ fn pair_sibling(trigger: ButtonId) -> Option<(ButtonId, GestureAxis, Side)> {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SwipeStreamPlan {
     axis: GestureAxis,
-    /// Travel along the axis that equals one progress unit, micrometres.
-    travel_um: f64,
+    /// Travel along the axis that equals one progress unit, micrometres —
+    /// pinch pairs carry both directions' divisors.
+    travel: AxisTravel,
     motion: DockSwipeMotion,
     /// Whether finger travel maps onto motion progress negated, solved from
     /// the bindings so each bound side commits its own action.
@@ -208,6 +212,30 @@ pub(super) struct SwipeStreamPlan {
     negative: Option<(ButtonId, Action)>,
 }
 
+/// The travel that equals one progress unit. Pinch travel is
+/// direction-split: closing and spreading normalize against their own
+/// divisors, chosen by each delta's physical direction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AxisTravel {
+    Linear(f64),
+    Pinch { close: f64, spread: f64 },
+}
+
+impl AxisTravel {
+    fn divisor_for(self, travel_um: f64) -> f64 {
+        match self {
+            AxisTravel::Linear(travel) => travel,
+            AxisTravel::Pinch { close, spread } => {
+                if travel_um < 0.0 {
+                    close
+                } else {
+                    spread
+                }
+            }
+        }
+    }
+}
+
 impl SwipeStreamPlan {
     /// Plan the pair `trigger` belongs to from a stroke's frozen bindings.
     pub(super) fn for_trigger(
@@ -215,18 +243,24 @@ impl SwipeStreamPlan {
         bindings: &BTreeMap<ButtonId, Action>,
     ) -> Option<Self> {
         let (sibling, axis, own_side) = pair_sibling(trigger)?;
-        let travel_um = match axis {
-            GestureAxis::Horizontal => HORIZONTAL_PAD_TRAVEL_UM,
-            GestureAxis::Vertical => VERTICAL_PAD_TRAVEL_UM,
+        let travel = match axis {
+            GestureAxis::Horizontal => AxisTravel::Linear(HORIZONTAL_PAD_TRAVEL_UM),
+            GestureAxis::Vertical => AxisTravel::Linear(VERTICAL_PAD_TRAVEL_UM),
             GestureAxis::Pinch
                 if matches!(
                     trigger,
                     ButtonId::TouchpadTwoFingerPinchIn | ButtonId::TouchpadTwoFingerPinchOut
                 ) =>
             {
-                TWO_FINGER_PINCH_TRAVEL_UM
+                AxisTravel::Pinch {
+                    close: TWO_FINGER_PINCH_CLOSE_TRAVEL_UM,
+                    spread: TWO_FINGER_PINCH_OPEN_TRAVEL_UM,
+                }
             }
-            GestureAxis::Pinch => FOUR_FINGER_PINCH_TRAVEL_UM,
+            GestureAxis::Pinch => AxisTravel::Pinch {
+                close: FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM,
+                spread: FOUR_FINGER_PINCH_OPEN_TRAVEL_UM,
+            },
         };
         let mut motion = None;
         let mut positive = None;
@@ -256,12 +290,30 @@ impl SwipeStreamPlan {
         }
         Some(Self {
             axis,
-            travel_um,
+            travel,
             motion: motion?,
             flipped: demanded?,
             positive,
             negative,
         })
+    }
+
+    /// The lowest progress the pair's bindings may commit at.
+    fn lower_bound(&self) -> f64 {
+        if self.negative.is_some() {
+            f64::NEG_INFINITY
+        } else {
+            0.0
+        }
+    }
+
+    /// The highest progress the pair's bindings may commit at.
+    fn upper_bound(&self) -> f64 {
+        if self.positive.is_some() {
+            f64::INFINITY
+        } else {
+            0.0
+        }
     }
 }
 
@@ -276,7 +328,12 @@ fn commit_side(commit_sign: i8) -> Side {
 }
 
 /// A committed gesture streaming its pair's animation, anchored at the
-/// commit frame and advanced by every later frame of the stroke.
+/// commit frame and advanced by every later frame of the stroke. A pinch
+/// commit arrives with the stroke's banked spread, so the travel the
+/// recognizer threshold consumed still counts: a fast close that crosses
+/// the threshold near the end of its range begins the stream with real
+/// progress instead of falling to a discrete dispatch that some consumers
+/// cannot even perform (Launchpad is a no-op on macOS 26+).
 pub(super) struct ActiveSwipe {
     plan: SwipeStreamPlan,
     /// The direction the recognizer committed on, whose binding a
@@ -292,17 +349,40 @@ pub(super) struct ActiveSwipe {
 }
 
 impl ActiveSwipe {
-    pub(super) fn new(frame: &TouchFrame, plan: SwipeStreamPlan, committed: ButtonId) -> Self {
+    /// Anchor the stream at the commit frame. `banked_spread_um` is the
+    /// stroke's accumulated pinch spread at that moment; when it maps to
+    /// in-bounds progress the returned `Begin` opens the animation on the
+    /// commit frame itself.
+    pub(super) fn new(
+        frame: &TouchFrame,
+        plan: SwipeStreamPlan,
+        committed: ButtonId,
+        banked_spread_um: f64,
+    ) -> (Self, Option<SwipeOutput>) {
         let centroid = frame_centroid(frame.contacts());
-        Self {
-            plan,
-            committed,
-            opened: false,
-            contact_ids: frame.contacts().iter().map(|contact| contact.id).collect(),
-            centroid_um: centroid,
-            spread_um: frame_spread(frame.contacts(), centroid),
-            progress: 0.0,
+        let mut seed = 0.0;
+        if banked_spread_um != 0.0 {
+            let raw = banked_spread_um / plan.travel.divisor_for(banked_spread_um);
+            let mapped = if plan.flipped { -raw } else { raw };
+            seed = mapped.clamp(plan.lower_bound(), plan.upper_bound());
         }
+        let opened = seed != 0.0;
+        let begin = opened.then_some(SwipeOutput::Begin {
+            motion: plan.motion,
+            progress: seed,
+        });
+        (
+            Self {
+                plan,
+                committed,
+                opened,
+                contact_ids: frame.contacts().iter().map(|contact| contact.id).collect(),
+                centroid_um: centroid,
+                spread_um: frame_spread(frame.contacts(), centroid),
+                progress: seed,
+            },
+            begin,
+        )
     }
 
     /// Fold one frame into the stream. A contact-set change re-anchors
@@ -327,7 +407,7 @@ impl ActiveSwipe {
                 GestureAxis::Vertical => -(centroid.1 - self.centroid_um.1) as f64,
                 GestureAxis::Pinch => spread - self.spread_um,
             };
-            let raw = travel / self.plan.travel_um;
+            let raw = travel / self.plan.travel.divisor_for(travel);
             mapped = if self.plan.flipped { -raw } else { raw };
         }
         self.contact_ids = contact_ids.into_boxed_slice();
@@ -340,7 +420,7 @@ impl ActiveSwipe {
         // stream the mapped travel itself — bit-identical to the raw
         // division — while a clipped one falls back to the progress
         // difference it actually achieved.
-        let (lower, upper) = (self.lower_bound(), self.upper_bound());
+        let (lower, upper) = (self.plan.lower_bound(), self.plan.upper_bound());
         let clipped = candidate < lower || candidate > upper;
         let next = if clipped {
             candidate.clamp(lower, upper)
@@ -367,24 +447,6 @@ impl ActiveSwipe {
             motion: self.plan.motion,
             delta,
         })
-    }
-
-    /// The lowest progress the pair's bindings may commit at.
-    fn lower_bound(&self) -> f64 {
-        if self.plan.negative.is_some() {
-            f64::NEG_INFINITY
-        } else {
-            0.0
-        }
-    }
-
-    /// The highest progress the pair's bindings may commit at.
-    fn upper_bound(&self) -> f64 {
-        if self.plan.positive.is_some() {
-            f64::INFINITY
-        } else {
-            0.0
-        }
     }
 
     /// Resolve the stroke's lift. An opened stream hands the commit-versus-
@@ -462,4 +524,42 @@ fn frame_spread(contacts: &[TouchContact], centroid: (i64, i64)) -> f64 {
         })
         .sum::<f64>()
         / contacts.len() as f64
+}
+
+/// Banks a stroke's spread change frame by frame, so a pinch commit can
+/// seed its stream with the travel the recognizer threshold consumed.
+/// Contact-set changes skip their frame's delta, exactly like the stream's
+/// own tracking, so a finger landing mid-stroke cannot fake banked travel.
+#[derive(Default)]
+pub(super) struct SpreadBank {
+    anchor: Option<(Box<[u8]>, f64)>,
+    banked_um: f64,
+}
+
+impl SpreadBank {
+    pub(super) fn fold(&mut self, frame: &TouchFrame) {
+        let centroid = frame_centroid(frame.contacts());
+        let spread = frame_spread(frame.contacts(), centroid);
+        let ids: Vec<u8> = frame.contacts().iter().map(|contact| contact.id).collect();
+        let delta = match &self.anchor {
+            Some((anchor_ids, anchor_spread)) if ids.as_slice() == &**anchor_ids => {
+                Some(spread - *anchor_spread)
+            }
+            _ => None,
+        };
+        if let Some(delta) = delta {
+            self.banked_um += delta;
+        }
+        self.anchor = Some((ids.into_boxed_slice(), spread));
+    }
+
+    /// Withdraw the banked spread, closing the bank for this stroke.
+    pub(super) fn take(&mut self) -> f64 {
+        std::mem::take(&mut self.banked_um)
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.anchor = None;
+        self.banked_um = 0.0;
+    }
 }

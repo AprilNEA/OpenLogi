@@ -1193,18 +1193,27 @@ fn the_launchpad_desktop_pair_streams_the_scale_motion() {
     ]);
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
-    runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
 
     // Spreading commits Show Desktop on the scale motion, so the
     // Launchpad-bound side of the pair flips the mapping: spreading drives
     // negative progress, resolving as Launchpad (its macOS 26+ replacement).
-    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    // The commit frame itself begins the stream, seeded with the whole
+    // pre-commit spread normalized by the opening travel.
+    let outcome = runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
     assert_eq!(outcome.routed, TouchpadOutput::Idle);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Pinch,
-            progress: -10_000.0 / 15_000.0,
+            progress: -10_000.0 / 30_000.0,
+        }
+    );
+    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: DockSwipeMotion::Pinch,
+            delta: -10_000.0 / 30_000.0,
         }
     );
 }
@@ -1271,19 +1280,24 @@ fn pinch_out_bound_to_mission_control_streams_the_vertical_motion() {
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
 
-    // Spreading past the pinch threshold commits PinchOut mid-stroke.
-    runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
-
-    // Further spread streams as vertical DockSwipe progress — the motion
-    // follows the bound action's consumer, and two-finger spread normalizes
-    // against the 15 mm travel.
-    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    // Spreading past the pinch threshold commits PinchOut and the commit
+    // frame itself begins the stream, seeded with the banked pre-commit
+    // spread — two-finger opening normalizes against the 30 mm travel.
+    let outcome = runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
     assert_eq!(outcome.routed, TouchpadOutput::Idle);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 15_000.0,
+            progress: 10_000.0 / 30_000.0,
+        }
+    );
+    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: DockSwipeMotion::Vertical,
+            delta: 10_000.0 / 30_000.0,
         }
     );
 }
@@ -1293,14 +1307,24 @@ fn pinch_in_bound_to_app_expose_streams_negative_progress() {
     let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchIn, Action::AppExpose)]);
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
-    runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
 
-    let outcome = runtime.update(&spread_frame(90_000, 2, 8_000), &bindings, true, true);
+    // Closing normalizes against the 15 mm close travel, so the banked
+    // pre-commit close over-reveals on purpose: the short physical range of
+    // a close must still reach a committing progress.
+    let outcome = runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: -10_000.0 / 15_000.0,
+            progress: -12_000.0 / 15_000.0,
+        }
+    );
+    let outcome = runtime.update(&spread_frame(90_000, 2, 8_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: DockSwipeMotion::Vertical,
+            delta: -10_000.0 / 15_000.0,
         }
     );
 }
@@ -1310,16 +1334,15 @@ fn a_reversed_pinch_binding_flips_the_travel_mapping() {
     let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchIn, Action::MissionControl)]);
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
-    runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
 
     // Closing in on the positive-commit consumer: the mapping flips so the
     // animation commits the bound action.
-    let outcome = runtime.update(&spread_frame(90_000, 2, 8_000), &bindings, true, true);
+    let outcome = runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 15_000.0,
+            progress: 12_000.0 / 15_000.0,
         }
     );
 }
@@ -1330,8 +1353,8 @@ fn the_unbound_pinch_side_clamps_progress_at_zero() {
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
 
-    // The inward direction is unbound, but its commit still opens the pair's
-    // stream: closing pins progress at zero instead of dying.
+    // The inward direction is unbound: its commit opens the pair's stream
+    // with the banked close clamped away, so progress stays pinned at zero.
     let outcome = runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
     assert_eq!(outcome, idle());
     let outcome = runtime.update(&spread_frame(90_000, 2, 10_000), &bindings, true, true);
@@ -1339,13 +1362,14 @@ fn the_unbound_pinch_side_clamps_progress_at_zero() {
 
     // Re-spreading tracks one-to-one from the first frame and begins the
     // animation mid-stroke: the pinned travel is dropped, not eaten through,
-    // so the delta is this frame's whole 16 mm of spread.
+    // so the delta is this frame's whole 16 mm of spread against the opening
+    // travel.
     let outcome = runtime.update(&spread_frame(120_000, 2, 26_000), &bindings, true, true);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 16_000.0 / 15_000.0,
+            progress: 16_000.0 / 30_000.0,
         }
     );
 }
@@ -1355,14 +1379,52 @@ fn four_finger_pinches_plan_their_own_pair() {
     let bindings = BTreeMap::from([(ButtonId::TouchpadFourFingerPinchOut, Action::MissionControl)]);
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&spread_frame(0, 4, 10_000), &bindings, true, true);
-    runtime.update(&spread_frame(60_000, 4, 20_000), &bindings, true, true);
 
-    let outcome = runtime.update(&spread_frame(90_000, 4, 30_000), &bindings, true, true);
+    let outcome = runtime.update(&spread_frame(60_000, 4, 20_000), &bindings, true, true);
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 10_000.0,
+            progress: 10_000.0 / 25_000.0,
+        }
+    );
+    let outcome = runtime.update(&spread_frame(90_000, 4, 30_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: DockSwipeMotion::Vertical,
+            delta: 10_000.0 / 25_000.0,
+        }
+    );
+}
+
+#[test]
+fn a_fast_close_banks_pre_commit_travel_and_begins_at_commit() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadFourFingerPinchIn, Action::LaunchpadShow)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 4, 20_000), &bindings, true, true);
+
+    // A quick close crosses the threshold near the end of its travel: the
+    // stream must begin on the commit frame with the banked close — the
+    // discrete fallback for Launchpad is a no-op on macOS 26+, so an
+    // unseeded stream would swallow the gesture entirely.
+    let outcome = runtime.update(&spread_frame(60_000, 4, 12_000), &bindings, true, true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Pinch,
+            progress: -8_000.0 / 10_000.0,
+        }
+    );
+
+    let outcome = runtime.end(true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Finish {
+            motion: DockSwipeMotion::Pinch,
+            end: SwipeEnd::AtRelease,
         }
     );
 }
