@@ -311,6 +311,17 @@ fn next_gesture(
     }
 }
 
+/// Feed one raw-XY report into a hold on `cids`.
+fn raw_xy(
+    acc: &mut CaptureAccum,
+    cids: &[u16],
+    dx: i16,
+    dy: i16,
+    tx: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    handle_reprog(acc, RawControlEvent::RawXy { dx, dy }, cids, &[], &[], tx);
+}
+
 #[test]
 fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     // Both sources diverted: press the gesture button, add the panel, release
@@ -333,6 +344,16 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     );
 
     acc.backdate_hold_for_test();
+    // The taken-over hold is fresh, so its first raw-XY report is discarded as
+    // a contact jump before the real swipe is read.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -3000, dy: 40 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -489,6 +510,15 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     // Pretend the button has been held well past the swipe gate.
     acc.backdate_hold_for_test();
+    // The hold's first raw-XY report is discarded as a contact jump.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 8, dy: 1 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -579,8 +609,8 @@ fn a_quick_panel_tap_is_a_click() {
 }
 
 #[test]
-fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
-    // Real-hardware probe finding: the panel's first raw-XY sample after
+fn the_first_raw_xy_sample_after_contact_is_discarded() {
+    // Real-hardware probe finding: a gesture source's first raw-XY sample after
     // contact is a large position jump (up to thousands of units), not a
     // relative delta. Un-discarded it would instantly commit a bogus swipe.
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -621,30 +651,110 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
 }
 
 #[test]
-fn the_dedicated_buttons_first_sample_is_not_discarded() {
-    // The discard is a panel quirk: the dedicated button's raw-XY stream is
-    // relative from the first sample, which must keep committing as-is.
+fn the_dedicated_buttons_contact_jump_is_discarded_too() {
+    // Real-hardware observation on the MX Master 4: the contact jump is
+    // reported under the mechanical gesture button's CID as often as the haptic
+    // panel's — raw-XY reports carry no CID on the wire, so the discard is not
+    // scoped per control.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.backdate_hold_for_test();
+    // The dedicated button's contact jump — rightward, far past every threshold.
     handle_reprog(
         &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        RawControlEvent::RawXy { dx: 4200, dy: 30 },
         GESTURE,
         &[],
         &[],
         &tx,
     );
-
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "the dedicated button's contact jump must not commit a swipe"
+    );
+    // A leftward swipe follows from a clean accumulator: had the rightward jump
+    // been summed, this could never commit Left.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
     assert_eq!(
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
+            GestureDirection::Left
+        ))
+    );
+}
+
+#[test]
+fn a_jump_several_reports_into_a_hold_is_discarded_and_motion_resumes() {
+    // Real-hardware finding: the absolute-position artifact is not only a
+    // contact jump — it also lands sporadically mid-hold, several clean reports
+    // in. It must be dropped there too, and the motion on either side of it
+    // must still resolve to the real direction.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    raw_xy(&mut acc, PANEL, -2800, 30, &tx); // contact jump, discarded
+    // A clean upward swipe builds over several small reports, none committing.
+    raw_xy(&mut acc, PANEL, 3, -12, &tx);
+    raw_xy(&mut acc, PANEL, 2, -14, &tx);
+    raw_xy(&mut acc, PANEL, 4, -13, &tx);
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "a clean sub-threshold build must not commit yet"
+    );
+    // A mid-hold jump — rightward, into the thousands. Summed it would commit
+    // Right on the spot; it must be discarded.
+    raw_xy(&mut acc, PANEL, 9700, 40, &tx);
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "the mid-hold jump must not commit a swipe"
+    );
+    // The upward motion continues from where it left off and commits Up.
+    raw_xy(&mut acc, PANEL, 3, -18, &tx);
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Up
+        )),
+        "motion after the jump resolves to the real direction"
+    );
+}
+
+#[test]
+fn a_hold_whose_every_report_is_large_is_not_frozen_out() {
+    // The bootstrap bound guards the reports before the hold has a per-report
+    // scale. If every report is large — a high pointer resolution, or a very
+    // fast swipe — that grace window must expire and let motion through rather
+    // than filter the hold forever.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    // Report 1 is the contact discard; the next few are held to the bootstrap
+    // bound, then the grace window expires and motion accumulates.
+    for _ in 0..6 {
+        raw_xy(&mut acc, PANEL, 620, 20, &tx);
+    }
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
             GestureDirection::Right
         )),
-        "the dedicated button's very first sample still counts"
+        "a hold of uniformly large reports still resolves"
     );
 }
 
@@ -993,4 +1103,113 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
         ),
         None
     );
+}
+
+// ── JumpFilter in isolation: the rules and their edges ───────────────────────
+
+/// [`RAW_XY_JUMP_FLOOR`] as an `i16`, for building report values around it.
+fn jump_floor() -> i16 {
+    i16::try_from(RAW_XY_JUMP_FLOOR).unwrap()
+}
+
+#[test]
+fn jump_filter_drops_a_contact_sources_first_report_always() {
+    let mut f = JumpFilter::new(true);
+    // Even a plausible small delta on report 1 is dropped — it is an absolute
+    // position, not a delta.
+    assert!(!f.admit(4, 2));
+    // The next report is real motion.
+    assert!(f.admit(4, 2));
+}
+
+#[test]
+fn jump_filter_keeps_a_non_contact_sources_first_report() {
+    let mut f = JumpFilter::new(false);
+    // A repurposed standard button reports the relative pointer sensor from the
+    // first sample.
+    assert!(f.admit(30, 2));
+}
+
+#[test]
+fn jump_filter_still_rejects_a_first_report_jump_from_a_non_contact_source() {
+    let mut f = JumpFilter::new(false);
+    // Nothing forces the first report out, but the opening bound still catches
+    // an absolute position past ten whole swipes' worth of travel in one report.
+    assert!(!f.admit(jump_floor() + 1, 0));
+}
+
+#[test]
+fn jump_filter_drops_a_stray_mid_hold_jump() {
+    let mut f = JumpFilter::new(false);
+    assert!(f.admit(40, 3));
+    assert!(f.admit(55, 4));
+    // A single report far past the bound is the artifact; it is dropped and the
+    // motion on either side keeps flowing.
+    assert!(!f.admit(jump_floor() + 900, 40));
+    assert!(f.admit(60, 5));
+}
+
+#[test]
+fn jump_filter_bound_grows_with_the_hold_so_a_fast_swipe_is_never_filtered() {
+    // High pointer resolution: real per-report travel climbs into the hundreds.
+    // Each report a little bigger than the last — up to 5x the running peak —
+    // must all be admitted, well past the opening floor.
+    let mut f = JumpFilter::new(true);
+    assert!(!f.admit(1500, 90)); // contact jump
+    let mut prev = 30i16;
+    for _ in 0..12 {
+        let step = prev + prev / 2; // +50% per report
+        assert!(
+            f.admit(step, step / 8),
+            "ramping step {step} must be admitted"
+        );
+        prev = step;
+    }
+    assert!(
+        prev > jump_floor(),
+        "the ramp climbed past the opening floor"
+    );
+}
+
+#[test]
+fn jump_filter_tiny_settling_reports_do_not_poison_the_bound() {
+    // The failure that killed the mean-based design: contact jump, then a run of
+    // ~1-unit settling reports, then real motion. The real motion must survive —
+    // the peak only ever grows to a report's own size, so ~1-unit reports leave
+    // it near zero and the opening floor still governs.
+    let mut f = JumpFilter::new(true);
+    assert!(!f.admit(3200, 180)); // contact jump
+    for _ in 0..8 {
+        assert!(f.admit(-1, 0)); // settling noise
+    }
+    for step in [-11, -28, -46, -75, -99, -60] {
+        assert!(
+            f.admit(step, -4),
+            "real motion after settling must be admitted"
+        );
+    }
+}
+
+#[test]
+fn jump_filter_disengages_when_every_report_trips_the_bound() {
+    let mut f = JumpFilter::new(false);
+    let big = jump_floor() / 3 * 4; // comfortably over the opening floor
+    // A run of dropped reports means the bound is wrong for this device...
+    for _ in 0..RAW_XY_JUMP_DISENGAGE_AFTER - 1 {
+        assert!(!f.admit(big, 10));
+    }
+    // ...so the filter disengages and admits the rest of the hold.
+    assert!(f.admit(big, 10));
+    assert!(f.admit(big, 10));
+}
+
+#[test]
+fn jump_filter_an_isolated_jump_never_disengages() {
+    let mut f = JumpFilter::new(false);
+    // Single jumps, each broken by real motion, must keep being caught.
+    for _ in 0..6 {
+        assert!(!f.admit(jump_floor() + 500, 30));
+        assert!(f.admit(40, 3));
+    }
+    assert!(!f.admit(jump_floor() + 500, 30));
 }
