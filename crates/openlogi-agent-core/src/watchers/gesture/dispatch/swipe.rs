@@ -18,12 +18,11 @@
 //! unbound clamps progress at zero on that side: the finger can pull the
 //! animation back, never push it past its start.
 //!
-//! Pinch pairs stream onto the existing motions the same way — the motion
-//! follows the bound actions' consumer, and spread change drives its
-//! progress. Their own native consumers (the Launchpad successor and Show
-//! Desktop on the Dock's pinch axis) wait on hardware identification of the
-//! event that drives them; until then, a pinch bound to a zoom action keeps
-//! the discrete dispatch, matching the pair defaults.
+//! Pinch pairs stream the same way — the motion follows the bound actions'
+//! consumer, and spread change drives the scale motion's progress, which
+//! the Dock maps to Show Desktop (closing) and Launchpad, or its macOS 26+
+//! replacement (spreading). A pinch bound to a zoom action keeps the
+//! discrete dispatch, matching the pair defaults.
 
 use std::collections::BTreeMap;
 
@@ -100,16 +99,21 @@ enum GestureAxis {
 }
 
 /// The native swipe-commit consumer an action maps onto, with the motion
-/// progress sign it commits at. Flipping the two sign anchors re-anchors the
-/// whole table if hardware verification disagrees.
+/// progress sign it commits at. Flipping a sign anchor re-anchors the table
+/// if hardware verification disagrees.
 fn swipe_consumer(action: &Action) -> Option<(DockSwipeMotion, i8)> {
     /// Fingers right commit the next Space.
     const NEXT_DESKTOP_SIGN: i8 = 1;
+    /// Spreading commits Launchpad (its macOS 26+ replacement), per Mac
+    /// Mouse Fix's production mapping of the scale motion.
+    const LAUNCHPAD_SIGN: i8 = 1;
     match action {
         Action::NextDesktop => Some((DockSwipeMotion::Horizontal, NEXT_DESKTOP_SIGN)),
         Action::PreviousDesktop => Some((DockSwipeMotion::Horizontal, -NEXT_DESKTOP_SIGN)),
         Action::MissionControl => Some((DockSwipeMotion::Vertical, 1)),
         Action::AppExpose => Some((DockSwipeMotion::Vertical, -1)),
+        Action::LaunchpadShow => Some((DockSwipeMotion::Pinch, LAUNCHPAD_SIGN)),
+        Action::ShowDesktop => Some((DockSwipeMotion::Pinch, -LAUNCHPAD_SIGN)),
         _ => None,
     }
 }

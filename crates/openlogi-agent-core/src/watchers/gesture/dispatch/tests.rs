@@ -1156,26 +1156,56 @@ fn the_same_action_on_both_sides_keeps_the_pair_discrete() {
 }
 
 #[test]
-fn show_desktop_bindings_keep_the_pair_discrete() {
-    let trigger = ButtonId::TouchpadThreeFingerSwipeUp;
-    let bindings = BTreeMap::from([(trigger, Action::ShowDesktop)]);
+fn show_desktop_on_a_swipe_pair_streams_the_scale_motion() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadThreeFingerSwipeUp, Action::ShowDesktop)]);
     let mut runtime = TouchpadRuntime::default();
     runtime.update(&translated_frame(0, 3, 0, 0), &bindings, true, true);
-
-    let outcome = runtime.update(
+    runtime.update(
         &translated_frame(60_000, 3, 0, -15_000),
         &bindings,
         true,
         true,
     );
+
+    // Show Desktop lives on the scale motion's negative commit; an upward
+    // swipe bound to it flips the mapping so the reveal commits the binding.
+    let outcome = runtime.update(
+        &translated_frame(90_000, 3, 0, -25_000),
+        &bindings,
+        true,
+        true,
+    );
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
     assert_eq!(
-        outcome.routed,
-        TouchpadOutput::Action {
-            trigger,
-            action: Action::ShowDesktop
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Pinch,
+            progress: -10_000.0 / 75_600.0,
         }
     );
-    assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+#[test]
+fn the_launchpad_desktop_pair_streams_the_scale_motion() {
+    let bindings = BTreeMap::from([
+        (ButtonId::TouchpadTwoFingerPinchOut, Action::LaunchpadShow),
+        (ButtonId::TouchpadTwoFingerPinchIn, Action::ShowDesktop),
+    ]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
+    runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
+
+    // Spreading drives the scale motion's positive commit: Launchpad (its
+    // macOS 26+ replacement) reveals with the fingers.
+    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: DockSwipeMotion::Pinch,
+            progress: 10_000.0 / 40_000.0,
+        }
+    );
 }
 
 #[test]

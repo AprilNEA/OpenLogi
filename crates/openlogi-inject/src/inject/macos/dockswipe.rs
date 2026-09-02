@@ -114,11 +114,12 @@ pub(in crate::inject) fn post(
     posted
 }
 
-/// IOHIDGestureMotion values: HorizontalX = 1, VerticalY = 2.
+/// IOHIDGestureMotion values: HorizontalX = 1, VerticalY = 2, Scale = 3.
 fn motion_id(motion: DockSwipeMotion) -> isize {
     match motion {
         DockSwipeMotion::Horizontal => 1,
         DockSwipeMotion::Vertical => 2,
+        DockSwipeMotion::Pinch => 3,
     }
 }
 

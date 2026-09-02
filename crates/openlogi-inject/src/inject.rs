@@ -477,6 +477,8 @@ pub enum DockSwipeMotion {
     Horizontal,
     /// Up-and-down finger travel: Mission Control / App Exposé.
     Vertical,
+    /// Contact spread: Show Desktop (closing) / Launchpad (spreading).
+    Pinch,
 }
 
 /// Lifecycle role of one streamed DockSwipe event.
