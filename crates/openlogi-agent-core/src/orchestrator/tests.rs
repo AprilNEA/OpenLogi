@@ -3,7 +3,7 @@
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets, stable_id,
+    online_routes, pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
@@ -384,15 +384,14 @@ fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
         .entry("keyboard".into())
         .or_default()
         .host_switch_targets = vec!["mouse".into(), "offline".into(), "missing".into()];
-    let devices = [
-        dev("keyboard", 1, true),
-        dev("mouse", 2, true),
-        dev("offline", 3, false),
-    ];
+    let mut keyboard = dev("keyboard", 1, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    let devices = [keyboard, dev("mouse", 2, true), dev("offline", 3, false)];
 
     let links = host_switch_links(&config, &devices);
 
     assert_eq!(links.len(), 1);
+    assert_eq!(links[0].keyboard_key, "keyboard");
     assert_eq!(
         links[0].keyboard,
         DeviceRoute::Bolt {
@@ -412,6 +411,10 @@ fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
                 slot: 3,
             }
         ]
+    );
+    assert_eq!(
+        online_routes(&devices),
+        vec![links[0].keyboard.clone(), links[0].targets[0].clone()]
     );
 }
 

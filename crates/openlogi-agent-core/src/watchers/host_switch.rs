@@ -1,10 +1,11 @@
-//! Keep configured keyboard → pointing-device host-switch links armed.
+//! Keep configured keyboard → linked-device host-switch relationships armed.
 
 use std::thread;
 use std::time::Duration;
 
 use openlogi_hid::{
-    ChannelPool, DeviceIoGate, DeviceRoute, HostSwitchStopReason, run_host_switch_session,
+    ChannelPool, DeviceIoGate, DeviceRoute, HostSwitchCaptureMode, HostSwitchError,
+    HostSwitchRequest, HostSwitchStopReason, KeyboardHostTransition, run_host_switch_session,
     switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -16,27 +17,44 @@ use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess, ReceiverRequ
 const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Copy)]
+struct TransitionTimeouts {
+    commanded_departure: Duration,
+}
+
+const TRANSITION_TIMEOUTS: TransitionTimeouts = TransitionTimeouts {
+    commanded_departure: DEPARTURE_TIMEOUT,
+};
+
 /// One resolved link. Config keys are converted to live routes by the
 /// orchestrator so the transport watcher never needs to understand inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostSwitchLink {
+    /// Stable physical configuration identity of the initiating keyboard.
+    pub keyboard_key: String,
     /// Keyboard whose host switch keys initiate the transition.
     pub keyboard: DeviceRoute,
-    /// Pointing devices that follow the keyboard.
+    /// Devices that follow the keyboard.
     pub targets: Vec<DeviceRoute>,
 }
 
 /// Read-only, lossless, coalescing view of resolved links.
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
+/// Read-only physical routes from the latest successful inventory snapshot.
+/// This stays independent of host-switch configuration so editing a link
+/// cannot masquerade as a keyboard departure.
+pub type HostSwitchInventory = watch::Receiver<std::sync::Arc<Vec<DeviceRoute>>>;
 
 /// Spawn the host switch session manager.
 pub fn spawn(
     links: &HostSwitchLinks,
+    inventory: &HostSwitchInventory,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
 ) {
     let links = links.clone();
+    let inventory = inventory.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -51,6 +69,7 @@ pub fn spawn(
         };
         runtime.block_on(manage(
             links,
+            inventory,
             channel_pool,
             receiver_access,
             receiver_requests,
@@ -63,6 +82,7 @@ struct HostSwitchManagerState {
     sessions: Vec<RunningSession>,
     next_generation: u64,
     restart_after: Vec<(HostSwitchLink, Instant)>,
+    announcement_keyboards: Vec<String>,
 }
 
 impl HostSwitchManagerState {
@@ -71,6 +91,7 @@ impl HostSwitchManagerState {
             sessions: Vec::new(),
             next_generation: 0,
             restart_after: Vec::new(),
+            announcement_keyboards: Vec::new(),
         }
     }
 
@@ -123,11 +144,13 @@ impl HostSwitchManagerState {
                 break;
             };
             self.next_generation = self.next_generation.wrapping_add(1);
+            let capture_mode = capture_mode_for(&self.announcement_keyboards, &link.keyboard_key);
             self.sessions.push(spawn_session(
                 link.clone(),
                 self.next_generation,
                 receiver_lease,
                 channel_pool.clone(),
+                capture_mode,
                 done.clone(),
                 device_io.clone(),
             ));
@@ -136,7 +159,8 @@ impl HostSwitchManagerState {
 }
 
 async fn manage(
-    mut links: watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>,
+    mut links: HostSwitchLinks,
+    mut inventory: HostSwitchInventory,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
@@ -175,27 +199,39 @@ async fn manage(
 
         tokio::select! {
             Some(completion) = done_rx.recv() => {
-                if let Some(index) = state.sessions
-                    .iter()
-                    .position(|session| session.generation == completion.generation)
-                {
-                    let completed = state.sessions.remove(index);
+                if let Some(accepted) = accept_completion(&mut state.sessions, completion) {
+                    let AcceptedCompletion { completed, request } = accepted;
                     let _ = completed.task.await;
-                    if let Some((link, host)) = completion.request {
+                    if let Some((link, request)) = request {
+                        if request.keyboard_transition.announcement_observed() {
+                            remember_announcement_keyboard(
+                                &mut state.announcement_keyboards,
+                                link.keyboard_key.clone(),
+                            );
+                        }
+                        debug!(
+                            generation = completed.generation,
+                            route = %link.keyboard,
+                            host = request.host,
+                            targets = link.targets.len(),
+                            "starting linked transition"
+                        );
                         if !device_io.wait_until_allowed().await {
                             return;
                         }
                         stop_all(&mut state.sessions, HostSwitchStopReason::Graceful).await;
                         run_transition(
-                            &mut links,
+                            &mut inventory,
                             &channel_pool,
                             &receiver_access,
                             link,
-                            host,
+                            request,
                         )
                         .await;
                     } else if device_io.allows_io() {
-                        state.restart_after.push((completed.link, Instant::now() + RETRY_DELAY));
+                        state
+                            .restart_after
+                            .push((completed.link, Instant::now() + RETRY_DELAY));
                     }
                     reconcile = true;
                 }
@@ -237,6 +273,7 @@ fn spawn_session(
     generation: u64,
     receiver_lease: crate::receiver_access::SessionReceiverLease,
     pool: ChannelPool,
+    capture_mode: HostSwitchCaptureMode,
     done: mpsc::UnboundedSender<SessionCompletion>,
     device_io: DeviceIoGate,
 ) -> RunningSession {
@@ -245,16 +282,21 @@ fn spawn_session(
     let task = tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
         let keyboard = session_link.keyboard.clone();
-        let request =
-            match run_host_switch_session(session_link.keyboard.clone(), stop_rx, pool, device_io)
-                .await
-            {
-                Ok(host) => host.map(|host| (session_link, host)),
-                Err(error) => {
-                    debug!(%error, route = %keyboard, "host switch session ended");
-                    None
-                }
-            };
+        let request = match run_host_switch_session(
+            session_link.keyboard.clone(),
+            stop_rx,
+            pool,
+            capture_mode,
+            device_io,
+        )
+        .await
+        {
+            Ok(request) => request.map(|request| (session_link, request)),
+            Err(error) => {
+                debug!(%error, route = %keyboard, "host switch session ended");
+                None
+            }
+        };
         let _ = done.send(SessionCompletion {
             generation,
             request,
@@ -277,7 +319,30 @@ struct RunningSession {
 
 struct SessionCompletion {
     generation: u64,
-    request: Option<(HostSwitchLink, u8)>,
+    request: Option<(HostSwitchLink, HostSwitchRequest)>,
+}
+
+struct AcceptedCompletion {
+    completed: RunningSession,
+    request: Option<(HostSwitchLink, HostSwitchRequest)>,
+}
+
+/// Accept a completion only while its exact session generation is still live.
+///
+/// A stopped session can finish after a replacement is armed. Discarding that
+/// obsolete request here prevents its host selection from moving the current
+/// session's linked devices.
+fn accept_completion(
+    sessions: &mut Vec<RunningSession>,
+    completion: SessionCompletion,
+) -> Option<AcceptedCompletion> {
+    let index = sessions
+        .iter()
+        .position(|session| session.generation == completion.generation)?;
+    Some(AcceptedCompletion {
+        completed: sessions.remove(index),
+        request: completion.request,
+    })
 }
 
 async fn stop_all(sessions: &mut Vec<RunningSession>, reason: HostSwitchStopReason) {
@@ -306,108 +371,136 @@ async fn stop_unwanted(sessions: &mut Vec<RunningSession>, wanted: &[HostSwitchL
 }
 
 async fn run_transition(
-    links: &mut watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>,
+    inventory: &mut HostSwitchInventory,
     channel_pool: &ChannelPool,
     receiver_access: &ReceiverAccess,
     link: HostSwitchLink,
-    host: u8,
+    request: HostSwitchRequest,
+) {
+    run_transition_with(
+        inventory,
+        channel_pool,
+        receiver_access,
+        link,
+        request,
+        &DeviceTransitionExecutor,
+        TRANSITION_TIMEOUTS,
+    )
+    .await;
+}
+
+trait HostTransitionExecutor {
+    async fn switch(
+        &self,
+        keyboard: &DeviceRoute,
+        targets: &[DeviceRoute],
+        host: u8,
+        keyboard_transition: KeyboardHostTransition,
+        channel_pool: &ChannelPool,
+    ) -> Result<bool, HostSwitchError>;
+}
+
+struct DeviceTransitionExecutor;
+
+impl HostTransitionExecutor for DeviceTransitionExecutor {
+    async fn switch(
+        &self,
+        keyboard: &DeviceRoute,
+        targets: &[DeviceRoute],
+        host: u8,
+        keyboard_transition: KeyboardHostTransition,
+        channel_pool: &ChannelPool,
+    ) -> Result<bool, HostSwitchError> {
+        switch_linked_hosts(keyboard, targets, host, keyboard_transition, channel_pool).await
+    }
+}
+
+async fn run_transition_with(
+    inventory: &mut HostSwitchInventory,
+    channel_pool: &ChannelPool,
+    receiver_access: &ReceiverAccess,
+    link: HostSwitchLink,
+    request: HostSwitchRequest,
+    executor: &impl HostTransitionExecutor,
+    timeouts: TransitionTimeouts,
 ) {
     let _lease = receiver_access
         .acquire_exclusive(ExclusiveAccessReason::HostTransition)
         .await;
-    match switch_linked_hosts(&link.keyboard, &link.targets, host, channel_pool).await {
-        Ok(true) => wait_for_departure(links, &link.keyboard).await,
+    match executor
+        .switch(
+            &link.keyboard,
+            &link.targets,
+            request.host,
+            request.keyboard_transition,
+            channel_pool,
+        )
+        .await
+    {
+        Ok(true) => {
+            if !wait_for_departure(inventory, &link.keyboard, timeouts.commanded_departure).await {
+                warn!(route = %link.keyboard, "host transition departure was not observed");
+            }
+        }
         Ok(false) => {}
+        Err(HostSwitchError::HostSlotUnverified { .. }) => {
+            warn!(
+                route = %link.keyboard,
+                host = request.host,
+                "host destination could not be revalidated; followers remain"
+            );
+        }
         Err(error) => {
-            debug!(%error, route = %link.keyboard, host, "keyboard host switch failed");
+            debug!(%error, route = %link.keyboard, host = request.host, "keyboard host switch failed");
         }
     }
 }
 
+fn capture_mode_for(
+    announcement_keyboards: &[String],
+    keyboard_key: &str,
+) -> HostSwitchCaptureMode {
+    if announcement_keyboards
+        .iter()
+        .any(|known_key| known_key == keyboard_key)
+    {
+        HostSwitchCaptureMode::ChangeHostAnnouncement
+    } else {
+        HostSwitchCaptureMode::Full
+    }
+}
+
+fn remember_announcement_keyboard(announcement_keyboards: &mut Vec<String>, keyboard_key: String) {
+    if !announcement_keyboards.contains(&keyboard_key) {
+        announcement_keyboards.push(keyboard_key);
+    }
+}
+
+fn keyboard_departed(inventory: &mut HostSwitchInventory, keyboard: &DeviceRoute) -> bool {
+    !inventory.borrow_and_update().contains(keyboard)
+}
+
 async fn wait_for_departure(
-    links: &mut watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>,
+    inventory: &mut HostSwitchInventory,
     keyboard: &DeviceRoute,
-) {
-    let deadline = tokio::time::sleep(DEPARTURE_TIMEOUT);
+    timeout: Duration,
+) -> bool {
+    let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     loop {
-        let departed = !links
-            .borrow_and_update()
-            .iter()
-            .any(|link| link.keyboard == *keyboard);
-        if departed {
-            return;
+        if keyboard_departed(inventory, keyboard) {
+            return true;
         }
         tokio::select! {
-            result = links.changed() => {
+            result = inventory.changed() => {
                 if result.is_err() {
-                    return;
+                    return false;
                 }
             }
-            () = &mut deadline => {
-                warn!(route = %keyboard, "host transition departure was not observed");
-                return;
-            }
+            () = &mut deadline => return false,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn route(slot: u8) -> DeviceRoute {
-        DeviceRoute::Bolt {
-            receiver_uid: "cafe".to_owned(),
-            slot,
-        }
-    }
-
-    #[test]
-    fn suspended_device_io_disables_retry_deadlines() {
-        let retry_at = Instant::now() + RETRY_DELAY;
-        let mut state = HostSwitchManagerState::new();
-        state.restart_after.push((
-            HostSwitchLink {
-                keyboard: route(1),
-                targets: vec![route(2)],
-            },
-            retry_at,
-        ));
-
-        assert_eq!(
-            state.deadline(ReceiverRequestState::default(), true),
-            Some(retry_at),
-        );
-        assert_eq!(
-            state.deadline(ReceiverRequestState::default(), false),
-            None,
-            "host-switch retries must stay dormant until visible resume",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn departure_publication_finishes_wait_without_advancing_time() {
-        let keyboard = route(1);
-        let link = HostSwitchLink {
-            keyboard: keyboard.clone(),
-            targets: vec![route(2)],
-        };
-        let (links, mut published) = watch::channel(std::sync::Arc::new(vec![link]));
-        let started = Instant::now();
-        let waiting = tokio::spawn(async move {
-            wait_for_departure(&mut published, &keyboard).await;
-            Instant::now()
-        });
-        tokio::task::yield_now().await;
-
-        links.send_replace(std::sync::Arc::new(Vec::new()));
-        tokio::task::yield_now().await;
-
-        assert_eq!(
-            waiting.await.expect("departure waiter should finish"),
-            started,
-            "the link publication should reconcile departure immediately"
-        );
-    }
-}
+mod tests;
