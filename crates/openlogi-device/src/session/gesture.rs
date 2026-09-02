@@ -31,7 +31,8 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{ButtonId, GestureDirection, GestureTrace, SwipeAccumulator};
+use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -56,12 +57,12 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
 
 /// One input captured from the active device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapturedInput {
     /// A completed swipe (or tap click) from a diverted gesture source,
     /// tagged with the source control so dispatch resolves it against that
-    /// button's own direction map.
-    Gesture(ButtonId, GestureDirection),
+    /// button's own direction map, along with the raw motion trace if available.
+    Gesture(ButtonId, GestureDirection, Option<GestureTrace>),
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
@@ -122,9 +123,21 @@ enum HoldState {
 }
 
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
-    let mut swipe = SwipeAccumulator::default();
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    sensitivity: GestureSensitivity,
+    axis_bias: GestureAxisBias,
+) -> HoldState {
+    let mut swipe = SwipeAccumulator::new(sensitivity, axis_bias);
     swipe.begin();
+    // The haptic panel already drops its absolute contact jump before the
+    // accumulator sees motion — don't also discard the first real delta.
+    if skip_first_raw_xy {
+        swipe.clear_contact_kick_pending();
+    }
     HoldState::Holding {
         cid,
         button,
@@ -149,6 +162,10 @@ struct CaptureAccum {
     dpi_down: bool,
     /// Diverted standard-button CIDs held in the last event.
     buttons_down: Vec<u16>,
+    /// Configured gesture sensitivity for swipe classification.
+    sensitivity: GestureSensitivity,
+    /// Configured gesture axis bias for directional balance.
+    axis_bias: GestureAxisBias,
 }
 
 #[cfg(test)]
@@ -159,6 +176,14 @@ impl CaptureAccum {
         if let HoldState::Holding { swipe, .. } = &mut self.hold {
             swipe.backdate_hold_for_test();
         }
+    }
+}
+
+fn capture_accum_for(spec: &CaptureSpec) -> CaptureAccum {
+    CaptureAccum {
+        sensitivity: spec.gesture_sensitivity,
+        axis_bias: spec.gesture_axis_bias,
+        ..CaptureAccum::default()
     }
 }
 
@@ -212,6 +237,10 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Configured gesture sensitivity for hold duration and swipe distance.
+    pub gesture_sensitivity: GestureSensitivity,
+    /// Configured gesture axis bias for horizontal vs vertical balance.
+    pub gesture_axis_bias: GestureAxisBias,
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
@@ -310,7 +339,7 @@ async fn run_capture_session_on(
         *slot = Some(shared.clone());
     }
 
-    let accum = Arc::new(Mutex::new(CaptureAccum::default()));
+    let accum = Arc::new(Mutex::new(capture_accum_for(&spec)));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
     let gesture_cids = armed.gesture_cids.clone();
     let gesture_button_set = armed.gesture_button_cids.clone();
@@ -657,8 +686,19 @@ async fn monitor_capture(
                     continue;
                 };
                 info!(?broadcast, "device reconnected — re-arming control capture");
-                *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
-                    CaptureAccum::default();
+                {
+                    let mut accum = context
+                        .accum
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let sensitivity = accum.sensitivity;
+                    let axis_bias = accum.axis_bias;
+                    *accum = CaptureAccum {
+                        sensitivity,
+                        axis_bias,
+                        ..CaptureAccum::default()
+                    };
+                }
                 context.armed.rearm(&device_io).await;
             }
             generation = context.activity.changed_after(activity_generation) => {
@@ -958,7 +998,12 @@ fn handle_reprog_with_gesture_buttons(
                         && swipe.end()
                     {
                         debug!(%button, "gesture click");
-                        let _ = sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                        let trace = swipe.create_trace(button, GestureDirection::Click, false);
+                        let _ = sink.send(CapturedInput::Gesture(
+                            button,
+                            GestureDirection::Click,
+                            Some(trace),
+                        ));
                     }
                     // ...and the first still-held source begins (or takes
                     // over) the hold. A source not down in the previous event
@@ -972,6 +1017,8 @@ fn handle_reprog_with_gesture_buttons(
                             held.len() > 1,
                             cid == reprog_controls::HAPTIC_PANEL_CID
                                 && !acc.gestures_down.contains(&cid),
+                            acc.sensitivity,
+                            acc.axis_bias,
                         ),
                         None => HoldState::Idle,
                     }
@@ -1027,8 +1074,8 @@ fn handle_raw_xy(
     dy: i16,
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
-    // Motion is attributed to the holding source; outside a hold the report
-    // is stray and dropped.
+    // Motion is attributed to the holding source; outside a hold the
+    // report is stray and dropped.
     let HoldState::Holding {
         button,
         swipe,
@@ -1039,23 +1086,25 @@ fn handle_raw_xy(
     else {
         return;
     };
-    // While two armed sources are held the report could belong to either
-    // control — drop it rather than miscommit a swipe through the holder's map.
+    // While two armed sources are held the report could belong to
+    // either control — drop it rather than miscommit a swipe through
+    // the holder's map.
     if *overlap {
         return;
     }
-    // The haptic panel's first sample after contact is a position jump;
-    // summing it would commit a bogus direction instantly.
+    // The haptic panel's first sample after contact is a position
+    // jump; summing it would commit a bogus direction instantly.
     if *skip_first_raw_xy {
         *skip_first_raw_xy = false;
         return;
     }
-    // Commit the instant a clean direction emerges (mid-swipe, once per hold);
-    // the accumulator gates on hold duration internally and drops travel that
-    // arrives outside a hold.
+    // Commit the instant a clean direction emerges (mid-swipe, once per
+    // hold); the accumulator gates on hold duration internally and drops
+    // travel that arrives outside a hold.
     if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
+        let trace = swipe.create_trace(*button, direction, swipe.is_fast_flick());
         debug!(?direction, %button, "gesture committed");
-        let _ = sink.send(CapturedInput::Gesture(*button, direction));
+        let _ = sink.send(CapturedInput::Gesture(*button, direction, Some(trace)));
     }
 }
 

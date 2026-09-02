@@ -1,20 +1,24 @@
 //! General settings page.
 
 use super::{
-    App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
-    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
-    ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    App, AppState, Entity, FluentBuilder, GestureAxisBias, GestureSensitivity, IconName,
+    InteractiveElement, ParentElement, SettingField, SettingGroup, SettingItem, SettingPage,
+    Slider, SliderState, StateEvent, Styled, ThumbwheelSensitivity, VerticalScrollSensitivity, div,
+    h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
+use gpui::MouseButton;
 use gpui_base::Button as BaseButton;
 
 use crate::platform::registration::ServiceStatus;
 
-/// The page's two sensitivity sliders, named so a call site cannot swap two
+/// The page's sensitivity sliders, named so a call site cannot swap two
 /// same-typed `Entity<SliderState>`s without the compiler noticing.
 pub(super) struct SensitivitySliders {
     pub(super) vertical_scroll: Entity<SliderState>,
     pub(super) thumbwheel: Entity<SliderState>,
+    pub(super) gesture: Entity<SliderState>,
+    pub(super) gesture_bias: Entity<SliderState>,
 }
 
 pub(super) fn general_page(
@@ -24,6 +28,8 @@ pub(super) fn general_page(
     let SensitivitySliders {
         vertical_scroll,
         thumbwheel,
+        gesture,
+        gesture_bias,
     } = sliders;
     let group = SettingGroup::new()
         .item(smooth_scrolling_item())
@@ -42,6 +48,20 @@ pub(super) fn general_page(
                 SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
             .description(tr!("pointer.thumbwheel_sensitivity_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("pointer.gesture_sensitivity"),
+                SettingField::render(move |_, _, cx| gesture_sensitivity_field(&gesture, cx)),
+            )
+            .description(tr!("pointer.gesture_sensitivity_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("pointer.gesture_axis_bias"),
+                SettingField::render(move |_, _, cx| gesture_axis_bias_field(&gesture_bias, cx)),
+            )
+            .description(tr!("pointer.gesture_axis_bias_description")),
         )
         .item(launch_at_login_item());
 
@@ -107,31 +127,93 @@ fn smooth_scrolling_item() -> SettingItem {
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
-    sensitivity_field(
+    sensitivity_field_with_reset(
         slider,
         value.to_string(),
         value == ThumbwheelSensitivity::DEFAULT,
+        px(72.),
+        f32::from(ThumbwheelSensitivity::DEFAULT),
+        |cx| {
+            AppState::update(cx, |state, cx| {
+                state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::DEFAULT);
+                cx.emit(StateEvent::SettingsChanged);
+            });
+        },
+        cx,
+    )
+}
+
+fn gesture_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = GestureSensitivity::from_rounded(slider.read(cx).value().start());
+    sensitivity_field_with_reset(
+        slider,
+        value.to_string(),
+        value == GestureSensitivity::DEFAULT,
+        px(72.),
+        f32::from(GestureSensitivity::DEFAULT),
+        |cx| {
+            AppState::update(cx, |state, cx| {
+                state.set_gesture_sensitivity(GestureSensitivity::DEFAULT);
+                cx.emit(StateEvent::SettingsChanged);
+            });
+        },
+        cx,
+    )
+}
+
+fn gesture_axis_bias_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = GestureAxisBias::from_rounded(slider.read(cx).value().start());
+    let raw = i8::from(value);
+    let label = match raw.cmp(&0) {
+        std::cmp::Ordering::Less => format!("{} ({})", tr!("common.horizontal"), raw.abs()),
+        std::cmp::Ordering::Greater => format!("{} ({})", tr!("common.vertical"), raw),
+        std::cmp::Ordering::Equal => tr!("common.neutral").to_string(),
+    };
+    sensitivity_field_with_reset(
+        slider,
+        label,
+        value == GestureAxisBias::DEFAULT,
+        px(120.),
+        f32::from(GestureAxisBias::DEFAULT),
+        |cx| {
+            AppState::update(cx, |state, cx| {
+                state.set_gesture_axis_bias(GestureAxisBias::DEFAULT);
+                cx.emit(StateEvent::SettingsChanged);
+            });
+        },
         cx,
     )
 }
 
 fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = VerticalScrollSensitivity::from_rounded(slider.read(cx).value().start());
-    sensitivity_field(
+    sensitivity_field_with_reset(
         slider,
         value.to_string(),
         value == VerticalScrollSensitivity::DEFAULT,
+        px(72.),
+        f32::from(VerticalScrollSensitivity::DEFAULT),
+        |cx| {
+            AppState::update(cx, |state, cx| {
+                state.set_vertical_scroll_sensitivity(VerticalScrollSensitivity::DEFAULT);
+                cx.emit(StateEvent::SettingsChanged);
+            });
+        },
         cx,
     )
 }
 
-fn sensitivity_field(
+fn sensitivity_field_with_reset(
     slider: &Entity<SliderState>,
     value: String,
     is_default: bool,
+    value_width: gpui::Pixels,
+    default_val: f32,
+    on_reset: impl Fn(&mut App) + 'static,
     cx: &mut App,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
+    let slider_handle = slider.clone();
     v_flex()
         .flex_shrink_0()
         .gap_1()
@@ -139,10 +221,23 @@ fn sensitivity_field(
             h_flex()
                 .items_center()
                 .gap_3()
-                .child(div().w(px(180.)).child(Slider::new(slider)))
                 .child(
                     div()
-                        .w(px(72.))
+                        .w(px(180.))
+                        .capture_any_mouse_down(move |event, window, cx| {
+                            if event.button == MouseButton::Left && event.click_count == 2 {
+                                cx.stop_propagation();
+                                slider_handle.update(cx, |s, cx| {
+                                    s.set_value(default_val, window, cx);
+                                });
+                                on_reset(cx);
+                            }
+                        })
+                        .child(Slider::new(slider)),
+                )
+                .child(
+                    div()
+                        .w(value_width)
                         .text_body()
                         .text_color(pal.text_muted)
                         .child(value),

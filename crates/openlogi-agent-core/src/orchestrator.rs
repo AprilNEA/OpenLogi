@@ -281,6 +281,12 @@ impl Orchestrator {
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
+        let gesture_sensitivity = key.map_or(self.config.app_settings.gesture_sensitivity, |k| {
+            self.config.gesture_sensitivity(k)
+        });
+        let gesture_axis_bias = key.map_or(self.config.app_settings.gesture_axis_bias, |k| {
+            self.config.gesture_axis_bias(k)
+        });
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if let Some(key) = key {
@@ -296,6 +302,8 @@ impl Orchestrator {
             bindings,
             gestures,
             selected_device: key.map(str::to_owned),
+            gesture_sensitivity,
+            gesture_axis_bias,
             ..HookMaps::default()
         }
     }

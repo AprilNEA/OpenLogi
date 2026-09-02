@@ -3,8 +3,8 @@
 use super::{AppState, StateEvent};
 use gpui::Context;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
-    UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GestureAxisBias,
+    GestureSensitivity, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -247,6 +247,77 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.thumbwheel_sensitivity = sensitivity);
         self.persist_and_reload("thumbwheel sensitivity");
+    }
+
+    /// The effective gesture sensitivity for `key` (its per-device
+    /// override, else the app-wide default).
+    #[must_use]
+    pub fn device_gesture_sensitivity(&self, key: &str) -> GestureSensitivity {
+        self.config.gesture_sensitivity(key)
+    }
+
+    /// Set `key`'s per-device gesture sensitivity override and persist it.
+    /// Committing the app-wide default clears the override.
+    pub fn set_device_gesture_sensitivity(&mut self, key: &str, sensitivity: GestureSensitivity) {
+        let override_value =
+            (sensitivity != self.config.app_settings.gesture_sensitivity).then_some(sensitivity);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.gesture_sensitivity);
+        if stored == override_value {
+            return;
+        }
+        self.config.edit(|config| {
+            config.set_device_gesture_sensitivity(key, override_value);
+        });
+        self.persist_and_reload("device gesture sensitivity");
+    }
+
+    /// Set the app-wide default gesture sensitivity and persist it.
+    pub fn set_gesture_sensitivity(&mut self, sensitivity: GestureSensitivity) {
+        if self.config.app_settings.gesture_sensitivity == sensitivity {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.gesture_sensitivity = sensitivity);
+        self.persist_and_reload("gesture sensitivity");
+    }
+
+    /// The effective gesture axis bias for `key` (its per-device
+    /// override, else the app-wide default).
+    #[must_use]
+    pub fn device_gesture_axis_bias(&self, key: &str) -> GestureAxisBias {
+        self.config.gesture_axis_bias(key)
+    }
+
+    /// Set `key`'s per-device gesture axis bias override and persist it.
+    /// Committing the app-wide default clears the override.
+    pub fn set_device_gesture_axis_bias(&mut self, key: &str, bias: GestureAxisBias) {
+        let override_value = (bias != self.config.app_settings.gesture_axis_bias).then_some(bias);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.gesture_axis_bias);
+        if stored == override_value {
+            return;
+        }
+        self.config.edit(|config| {
+            config.set_device_gesture_axis_bias(key, override_value);
+        });
+        self.persist_and_reload("device gesture axis bias");
+    }
+
+    /// Set the app-wide default gesture axis bias and persist it.
+    pub fn set_gesture_axis_bias(&mut self, bias: GestureAxisBias) {
+        if self.config.app_settings.gesture_axis_bias == bias {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.gesture_axis_bias = bias);
+        self.persist_and_reload("gesture axis bias");
     }
     /// Toggle finite animation for traditional mouse-wheel input and persist
     /// it. The agent publishes the change to the scroll worker on config
