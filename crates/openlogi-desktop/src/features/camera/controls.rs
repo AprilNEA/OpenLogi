@@ -19,7 +19,10 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    IconName, Selectable as _, h_flex,
+    IconName, Selectable as _, WindowExt as _,
+    dialog::DialogButtonProps,
+    h_flex,
+    input::InputState,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -28,7 +31,7 @@ use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::{AppState, StateEvent};
-use crate::ui::components::ProfileTab;
+use crate::ui::components::{ProfileTab, control_input};
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
@@ -351,7 +354,7 @@ impl CameraControlsPanel {
         key: &str,
         v: i32,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let takeover = control.auto_toggle().and_then(|toggle| {
             let ix = self.autos.iter().position(|a| a.toggle == toggle && a.on)?;
             Some((toggle, ix))
@@ -369,7 +372,7 @@ impl CameraControlsPanel {
             // before the value fails). Rebuild from live hardware so the panel
             // never shows a value the device didn't take.
             self.resync_after_failed_write(cx);
-            return;
+            return false;
         }
         if let Some((toggle, ix)) = takeover {
             self.autos[ix].on = false;
@@ -382,6 +385,140 @@ impl CameraControlsPanel {
         });
         self.sync_active_custom(cx);
         cx.notify();
+        true
+    }
+
+    /// Show an exact-value editor for a control whose slider is awkward to
+    /// position precisely. The device's reported range remains authoritative:
+    /// unsupported values leave the dialog open rather than being rounded.
+    fn open_value_dialog(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slider) = self.sliders.get(ix) else {
+            return;
+        };
+        let control = slider.control;
+        let range = slider.range;
+        let current = from_slider(slider.state.read(cx).value().start());
+        let label = control_label(control).to_string();
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(current.to_string(), window, cx);
+            input
+        });
+        let panel = cx.entity();
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            dialog
+                .w(px(320.))
+                .title(format!("Set {label}"))
+                .child(
+                    v_flex().gap_2().child(control_input(&input)).child(
+                        div()
+                            .text_caption()
+                            .text_color(theme::palette(cx).text_muted)
+                            .child(format!("Supported range: {}–{}", range.min, range.max)),
+                    ),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(tr!("Save"))
+                        .cancel_text(tr!("Cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok({
+                    let input = input.clone();
+                    let panel = panel.clone();
+                    move |_, window, cx| {
+                        let Ok(value) = input.read(cx).value().trim().parse::<i32>() else {
+                            return false;
+                        };
+                        if !range.supports(value) {
+                            return false;
+                        }
+                        let mut saved = false;
+                        panel.update(cx, |panel, app| {
+                            saved = panel.set_control_value_app(ix, control, value, window, app);
+                        });
+                        saved
+                    }
+                })
+        });
+    }
+
+    fn set_control_value_app(
+        &mut self,
+        ix: usize,
+        control: CameraControl,
+        value: i32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let (Some(key), Some(uid), Some(slider)) =
+            (self.key.clone(), self.uid.clone(), self.sliders.get(ix))
+        else {
+            return false;
+        };
+        if slider.control != control || !slider.range.supports(value) {
+            return false;
+        }
+        let takeover = control.auto_toggle().and_then(|toggle| {
+            let ix = self.autos.iter().position(|a| a.toggle == toggle && a.on)?;
+            Some((toggle, ix))
+        });
+        let written = match takeover {
+            Some((toggle, _)) => {
+                openlogi_camera::apply_settings(&uid, &[(toggle, false)], &[(control, value)])
+            }
+            None => openlogi_camera::set_control(&uid, control, value),
+        };
+        if written.is_err() {
+            self.resync_after_failed_write_app(cx);
+            return false;
+        }
+        slider.state.clone().update(cx, |state, cx| {
+            state.set_value(to_slider(value), window, cx);
+        });
+        if let Some((toggle, ix)) = takeover {
+            self.autos[ix].on = false;
+            update_camera(cx, |state| state.commit_camera_auto(&key, toggle, false));
+        }
+        update_camera(cx, |state| {
+            state.commit_camera_control(&key, control, value);
+        });
+        self.sync_active_custom_app(cx);
+        true
+    }
+
+    fn sync_active_custom_app(&self, cx: &mut App) {
+        let Some(key) = self.key.clone() else {
+            return;
+        };
+        let mut snap = CameraControls::default();
+        for slider in &self.sliders {
+            snap.0.insert(
+                slider.control.name().to_string(),
+                from_slider(slider.state.read(cx).value().start()),
+            );
+        }
+        for row in &self.autos {
+            snap.0
+                .insert(row.toggle.name().to_string(), i32::from(row.on));
+        }
+        update_camera(cx, |state| {
+            let Some(active) = state.camera_active_profile(&key) else {
+                return;
+            };
+            if state.camera_profiles(&key).contains_key(&active) {
+                state.save_camera_profile(&key, &active, snap);
+            }
+        });
+    }
+
+    fn resync_after_failed_write_app(&mut self, cx: &mut App) {
+        self.uid = None;
+        if let Some(key) = self.key.take() {
+            update_camera(cx, |state| state.set_camera_active_profile(&key, None));
+        }
     }
 
     /// The current auto state gating `control`, if the device has that toggle.
@@ -862,17 +999,21 @@ fn control_row(
                 .child(Slider::new(&slider.state).horizontal()),
         )
         .child(
-            div()
+            BaseButton::new(("camera-control-value", ix))
                 .w(px(36.))
                 .flex_shrink_0()
-                .text_right()
+                .justify_end()
                 .text_body()
                 .text_color(if dimmed {
                     pal.text_muted
                 } else {
                     rgb(ACCENT_BLUE).into()
                 })
-                .child(format!("{value}")),
+                .accessibility_label(format!("Set {} value", slider.label))
+                .child(format!("{value}"))
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    panel.open_value_dialog(ix, window, cx);
+                })),
         );
 
     // Every row carries the trailing Auto column — empty for controls without
