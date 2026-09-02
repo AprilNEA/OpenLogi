@@ -19,7 +19,6 @@
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -49,6 +48,11 @@ use crate::{autostart, overlay, server};
 /// process that has opened no device and prompted for nothing.
 #[cfg(target_os = "macos")]
 const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A failed event-tap install is normally transient (for example while the
+/// session's Accessibility service is settling). Keep trying while the hook
+/// is still wanted instead of waiting for another permission edge.
+const HOOK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Walk the whole lifecycle: bootstrap, gate, arm, run. This is the async
 /// core's entry point; `main` only decides which thread it runs on.
@@ -208,6 +212,8 @@ impl Wanted {
             ring_haptics,
             demand,
         } = core;
+        let accessibility_granted =
+            observable.read(|snapshot| snapshot.status.accessibility_granted);
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);
@@ -223,6 +229,7 @@ impl Wanted {
                 uninstalled,
                 hook: None,
                 capture_mouse_events,
+                accessibility_granted,
                 device_io_gate,
             },
         }
@@ -250,6 +257,7 @@ struct Running {
     /// revoke or session inactivation (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    accessibility_granted: bool,
     device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
@@ -261,6 +269,8 @@ impl Armed {
         #[cfg(target_os = "macos")]
         request_input_monitoring().await;
         let mut device_io_gate = running.device_io_gate.clone();
+        let mut hook_retry = tokio::time::interval(HOOK_RETRY_INTERVAL);
+        hook_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // HID++ watchers need no Accessibility — start them up front.
         startup::spawn_hidpp_watchers(&running.shared, &running.inputs);
@@ -276,7 +286,7 @@ impl Armed {
                     #[cfg(target_os = "macos")]
                     {
                         match device_io {
-                            Some(allowed) => running.apply_device_io(allowed).await,
+                            Some(_) => running.apply_device_io().await,
                             None => running.shut_down("device I/O lifecycle ended"),
                         }
                     }
@@ -284,6 +294,9 @@ impl Armed {
                     if device_io.is_none() {
                         break;
                     }
+                }
+                _ = hook_retry.tick(), if running.should_retry_hook() => {
+                    running.apply_accessibility(Hook::has_accessibility()).await;
                 }
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
@@ -366,9 +379,9 @@ impl Running {
     /// in an inactive user's agent lets that agent suppress the active user's
     /// physical wheel and post the replacement into the wrong session.
     #[cfg(target_os = "macos")]
-    async fn apply_device_io(&mut self, allowed: bool) {
-        if allowed {
-            self.apply_accessibility(Hook::has_accessibility()).await;
+    async fn apply_device_io(&mut self) {
+        if self.device_io_gate.allows_io() {
+            self.apply_accessibility(self.accessibility_granted).await;
             return;
         }
 
@@ -378,8 +391,30 @@ impl Running {
             .await
             .set_os_mouse_hook_available(false);
         self.observable
-            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+            .set_accessibility_and_hook(self.accessibility_granted, false);
         info!("inactive session — OS input hook released");
+    }
+
+    /// Whether a missing macOS hook still has all prerequisites and should be
+    /// retried. The Accessibility watcher reports only stable permission
+    /// changes, so a transient install failure needs this independent retry
+    /// path to recover without another session or permission transition.
+    fn should_retry_hook(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            hook_should_retry(
+                hook_should_be_installed(
+                    self.capture_mouse_events,
+                    self.accessibility_granted,
+                    self.device_io_gate.allows_io(),
+                ),
+                self.hook.as_ref().is_some_and(Hook::is_running),
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     }
 
     /// Fold one inventory-watcher event into the orchestrator.
@@ -443,16 +478,24 @@ impl Running {
     /// observation can claim the hook is installed without the permission it
     /// requires.
     async fn apply_accessibility(&mut self, granted: bool) {
+        self.accessibility_granted = granted;
         let should_install = hook_should_be_installed(
             self.capture_mouse_events,
             granted,
             self.device_io_gate.allows_io(),
         );
-        if !should_install {
+        let hook_stopped = self.hook.as_ref().is_some_and(|hook| !hook.is_running());
+        if !should_install || hook_stopped {
             self.stop_hook();
         }
         if should_install && self.hook.is_none() {
             self.hook = self.start_hook();
+        }
+        // The session callback can publish a suspend while the synchronous
+        // native install is in progress. Never leave a newly created global
+        // tap behind once the gate has closed.
+        if should_install && !self.device_io_gate.allows_io() {
+            self.stop_hook();
         }
         self.orchestrator
             .lock()
@@ -504,6 +547,12 @@ const fn hook_should_be_installed(
     capture_mouse_events && accessibility_granted && device_io_allowed
 }
 
+/// A failed install is retryable only while the hook is still wanted and no
+/// live handle exists.
+const fn hook_should_retry(hook_wanted: bool, hook_running: bool) -> bool {
+    hook_wanted && !hook_running
+}
+
 /// Prompt for Accessibility when the enabled mouse hook needs it.
 fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
@@ -543,7 +592,7 @@ async fn request_input_monitoring() {
 
 #[cfg(test)]
 mod tests {
-    use super::hook_should_be_installed;
+    use super::{hook_should_be_installed, hook_should_retry};
 
     #[test]
     fn hook_requires_capture_permission_and_active_session() {
@@ -551,5 +600,12 @@ mod tests {
         assert!(!hook_should_be_installed(false, true, true));
         assert!(!hook_should_be_installed(true, false, true));
         assert!(!hook_should_be_installed(true, true, false));
+    }
+
+    #[test]
+    fn failed_hook_install_is_retryable_while_prerequisites_hold() {
+        assert!(hook_should_retry(true, false));
+        assert!(!hook_should_retry(true, true));
+        assert!(!hook_should_retry(false, false));
     }
 }

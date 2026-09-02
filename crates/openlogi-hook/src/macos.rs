@@ -662,6 +662,10 @@ impl HookBackend for Backend {
         }
     }
 
+    fn is_running(inner: &HookInner) -> bool {
+        inner.signals.phase() == TapPhase::Armed
+    }
+
     /// Check whether this process can still install the hook's event tap.
     ///
     /// `AXIsProcessTrusted()` alone is not that answer: it keeps returning `true`
