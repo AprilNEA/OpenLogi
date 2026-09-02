@@ -668,6 +668,12 @@ const fn hook_should_be_installed(
     capture_mouse_events && accessibility_granted && device_io_allowed
 }
 
+/// A failed install is retryable only while the hook is still wanted and no
+/// live handle exists.
+const fn hook_should_retry(hook_wanted: bool, hook_running: bool) -> bool {
+    hook_wanted && !hook_running
+}
+
 /// Prompt for Accessibility when the enabled mouse hook needs it.
 fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
