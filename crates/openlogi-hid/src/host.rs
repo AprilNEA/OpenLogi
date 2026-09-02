@@ -23,7 +23,7 @@ use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, CrownInfo, CrownMode, Dpi, DpiInfo, FeatureEntry, FirmwareEntity,
+    self as device, CrownEvent, CrownInfo, CrownMode, Dpi, DpiInfo, FeatureEntry, FirmwareEntity,
     HapticWaveform, LightingMethod, LitraModel, ReprogControlEntry, ScrollResolution,
     ScrollWheelMode, SetCrownMode,
 };
@@ -137,6 +137,18 @@ pub async fn set_crown_mode(
     mode: SetCrownMode,
 ) -> Result<CrownMode, WriteError> {
     device::set_crown_mode(&*native_backend(), route, mode).await
+}
+
+/// Divert the crown on the device `route` reaches, collect up to `max_events`
+/// events (or stop early once `timeout` elapses), then restore its original
+/// reporting mode. Protocol-level smoke test, not the production capture path
+/// — see [`device::sample_crown_events`].
+pub async fn sample_crown_events(
+    route: &DeviceRoute,
+    max_events: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<CrownEvent>, WriteError> {
+    device::sample_crown_events(&*native_backend(), route, max_events, timeout).await
 }
 
 /// Set the Fn-key inversion of the keyboard `route` reaches.
