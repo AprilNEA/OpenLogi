@@ -12,6 +12,7 @@ use openlogi_core::touchpad::{
     GestureRecognition, TouchContact, TouchFrame, TouchpadGestureRecognizer,
 };
 use openlogi_hid::CapturedInput;
+use openlogi_hid::thumbwheel::WheelResolution;
 use tracing::debug;
 
 use self::momentum::TouchpadMomentum;
@@ -626,26 +627,7 @@ impl InputDispatcher {
                 increments,
                 resolution,
             } => {
-                let Some(rotation) = WheelRotation::from_increments(increments) else {
-                    return;
-                };
-                let button = rotation.button();
-                let configuration = WheelConfiguration::for_plan(plan);
-                let action = configuration.action(rotation);
-                let wheels = self.wheels.for_session(session);
-                match wheels.advance(
-                    rotation,
-                    action,
-                    ScrollScale::new(resolution, configuration.sensitivity),
-                    Instant::now(),
-                ) {
-                    WheelOutput::Idle => {}
-                    WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
-                    WheelOutput::FireAction => {
-                        debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                        self.outputs.actions.dispatch(action, Some(key));
-                    }
-                }
+                self.dispatch_scroll(session, plan, increments, resolution, key);
             }
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
@@ -684,6 +666,39 @@ impl InputDispatcher {
                 self.cancel_touchpad_stroke(session, plan, key);
             }
             CapturedInput::TouchpadDroppedFrames(_) => {}
+        }
+    }
+
+    /// Route one thumb-wheel rotation through the per-session accumulator:
+    /// post the scaled scroll, or fire the bound action once its travel
+    /// crosses the threshold.
+    fn dispatch_scroll(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        increments: i16,
+        resolution: WheelResolution,
+        key: &str,
+    ) {
+        let Some(rotation) = WheelRotation::from_increments(increments) else {
+            return;
+        };
+        let button = rotation.button();
+        let configuration = WheelConfiguration::for_plan(plan);
+        let action = configuration.action(rotation);
+        let wheels = self.wheels.for_session(session);
+        match wheels.advance(
+            rotation,
+            action,
+            ScrollScale::new(resolution, configuration.sensitivity),
+            Instant::now(),
+        ) {
+            WheelOutput::Idle => {}
+            WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
+            WheelOutput::FireAction => {
+                debug!(key, ?button, action = %action.label(), "thumb wheel → action");
+                self.outputs.actions.dispatch(action, Some(key));
+            }
         }
     }
 
