@@ -471,17 +471,29 @@ fn thumbwheel_input(
         .then_some(CapturedInput::ButtonPulse(ButtonId::Thumbwheel))
 }
 
-/// Cross-event edge state for the crown's press and touch sensor.
-///
-/// Rotation needs no entry here: unlike the button and touch fields, which
-/// only matter on their `Start`/`Stop` transition, the crown's own report
-/// already carries the button state alongside any rotation in the same
-/// payload, so [`handle_crown_event`] reads it fresh from each event instead
-/// of tracking it across events.
+/// Cross-event session state for the crown's press and touch sensor. Both
+/// sessions defer their commit to release — see
+/// [`CrownSession::released_cleanly`].
 #[derive(Default)]
 struct CrownEdgeState {
-    button_down: bool,
-    touching: bool,
+    /// Tracks [`ButtonId::Crown`] held, disqualified by rotation: rotating
+    /// while held turns a press into a press+rotate gesture, so it must not
+    /// also fire the plain click — see [`handle_crown_event`].
+    press: CrownSession,
+    /// Tracks capacitive contact, disqualified by the button or rotation
+    /// being active: pressing or rotating the crown always touches it first,
+    /// so without this, [`ButtonId::CrownTouch`] would fire on every press
+    /// and every rotation too — see [`handle_crown_event`].
+    touch: CrownSession,
+}
+
+/// One held/touch session: `active` tracks whether it is currently ongoing,
+/// `had_activity` accumulates whether anything disqualifying happened during
+/// it.
+#[derive(Default)]
+struct CrownSession {
+    active: bool,
+    had_activity: bool,
 }
 
 /// Whether `button` represents the crown currently held down, folding
@@ -537,7 +549,7 @@ fn crown_rotation_button(amount: i8, held: bool) -> ButtonId {
 ///
 /// Takes the two fields directly rather than a [`CrownUpdate`] so it is
 /// testable without constructing one, which is `#[non_exhaustive]` outside
-/// `openlogi-hidpp` (same reason as [`crown_edge`]).
+/// `openlogi-hidpp` (same reason as [`CrownSession::released_cleanly`]).
 fn crown_rotation_amount(
     relative_slot_rotation: i8,
     relative_ratchet_rotation: i8,
@@ -589,26 +601,45 @@ fn handle_crown_poll(
     handle_crown_event(state, update, ratchet_mode, sink);
 }
 
-/// Diff `now` against `current`'s tracked value, updating it and returning
-/// the edge to send, if any — a `false → true` transition is a down edge, a
-/// `true → false` transition is an up edge, and no change sends nothing.
-/// Pulled out of [`handle_crown_event`] purely so it is testable without
-/// constructing a [`CrownUpdate`], which is `#[non_exhaustive]` outside
-/// `openlogi-hidpp`.
-fn crown_edge(current: &mut bool, now: bool, button: ButtonId) -> Option<CapturedInput> {
-    if now == *current {
-        return None;
+impl CrownSession {
+    /// Advance this session by one report: `now_active` is this update's raw
+    /// session state (button held, or touch contact), `now_disqualified` is
+    /// this update's disqualifying signal — rotation, for the press session
+    /// ([`ButtonId::Crown`]); button-held-or-rotating, for the touch session
+    /// ([`ButtonId::CrownTouch`]) — see [`handle_crown_event`]. Returns
+    /// whether a *clean* session — nothing disqualifying, for its whole
+    /// duration — just ended, which is the only time the caller commits a
+    /// Down+Up pair.
+    ///
+    /// Commit is deferred to the end of the session rather than a `Down` at
+    /// start followed by an unconditional `Up`: at start it is not yet known
+    /// whether the session will stay clean, and emitting `Down` early and
+    /// then suppressing `Up` on a dirty session would leave the runtime
+    /// button dispatcher (`agent-core::runtime::button`) thinking the button
+    /// is still held forever. The tradeoff is that a real hold duration can
+    /// no longer be timed for [`ButtonId::Crown`] or [`ButtonId::CrownTouch`]
+    /// — both fire as a zero-duration Down/Up pair, so neither can dispatch
+    /// [`Binding::LongPress`](openlogi_core::binding::Binding::LongPress),
+    /// unlike every other button.
+    fn released_cleanly(&mut self, now_active: bool, now_disqualified: bool) -> bool {
+        let was_active = self.active;
+        if now_active && !was_active {
+            // A new session starts clean regardless of what came before —
+            // reset *before* applying this report's activity below, so
+            // activity that shares the report where the session starts still
+            // counts against it.
+            self.had_activity = false;
+        }
+        if now_disqualified {
+            self.had_activity = true;
+        }
+        self.active = now_active;
+        was_active && !now_active && !self.had_activity
     }
-    *current = now;
-    Some(if now {
-        CapturedInput::ButtonDown(button)
-    } else {
-        CapturedInput::ButtonUp(button)
-    })
 }
 
 /// Convert one `CrownUpdate` into edges and pulses, updating `state` for the
-/// button/touch transitions it observed.
+/// button/touch sessions it observed.
 ///
 /// Rotation dispatches [`crown_rotation_amount`]'s pulses: the crown's
 /// physical ratchet already gives the "one notch, one trigger" feel the bound
@@ -621,20 +652,29 @@ fn handle_crown_event(
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
     let now_down = crown_button_held(update.button);
-    if let Some(input) = crown_edge(&mut state.button_down, now_down, ButtonId::Crown) {
-        let _ = sink.send(input);
-    }
-
-    let now_touching = crown_touching(update.touch);
-    if let Some(input) = crown_edge(&mut state.touching, now_touching, ButtonId::CrownTouch) {
-        let _ = sink.send(input);
-    }
-
     let amount = crown_rotation_amount(
         update.relative_slot_rotation,
         update.relative_ratchet_rotation,
         ratchet_mode,
     );
+
+    // A press that also rotates is a press+rotate gesture, not a plain
+    // click: only a press with no rotation for its whole duration fires
+    // `ButtonId::Crown`.
+    if state.press.released_cleanly(now_down, amount != 0) {
+        let _ = sink.send(CapturedInput::ButtonDown(ButtonId::Crown));
+        let _ = sink.send(CapturedInput::ButtonUp(ButtonId::Crown));
+    }
+
+    let now_touching = crown_touching(update.touch);
+    if state
+        .touch
+        .released_cleanly(now_touching, now_down || amount != 0)
+    {
+        let _ = sink.send(CapturedInput::ButtonDown(ButtonId::CrownTouch));
+        let _ = sink.send(CapturedInput::ButtonUp(ButtonId::CrownTouch));
+    }
+
     if amount != 0 {
         let button = crown_rotation_button(amount, now_down);
         for _ in 0..amount.unsigned_abs() {

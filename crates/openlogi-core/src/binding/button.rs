@@ -75,9 +75,16 @@ pub enum ButtonId {
     /// [`ButtonId::WheelTiltLeft`].
     WheelTiltRight,
     /// The Craft keyboard's rotary crown, pressed — HID++ `0x4600 Crown`
-    /// (`ButtonState::Press`/`Release`/`LongPress`). Supports
-    /// [`Binding::LongPress`](crate::binding::Binding::LongPress) like any
-    /// other button; a separate `CrownLongPress` variant is unnecessary.
+    /// (`ButtonState::Press`/`Release`/`LongPress`). Rotating the crown while
+    /// held turns it into [`ButtonId::CrownPressRotateClockwise`] /
+    /// [`ButtonId::CrownPressRotateCounterclockwise`] instead, so this only
+    /// dispatches for a *clean* press — no rotation for as long as it was
+    /// held — committed as a Down/Up pair together once released. Because of
+    /// that deferred commit, unlike every other button,
+    /// [`Binding::LongPress`](crate::binding::Binding::LongPress) cannot time
+    /// a real hold duration here; see
+    /// `session::gesture::CrownSession::released_cleanly` in
+    /// `openlogi-device`.
     Crown,
     /// Rotating the crown clockwise — `0x4600`'s
     /// `relative_slot_rotation` reporting positive for a physical clockwise
@@ -91,8 +98,11 @@ pub enum ButtonId {
     CrownRotateCounterclockwise,
     /// A finger touching the crown (`0x4600`'s capacitive touch sensor,
     /// `touch: ActivityState`) — distinct from [`ButtonId::Crown`], which is
-    /// the mechanical click. Dispatches on the `Start`/`Stop` edge like any
-    /// other button; `Active` is the held state in between.
+    /// the mechanical click. Pressing or rotating the crown always touches it
+    /// first, so this only dispatches for a *clean* touch — one where the
+    /// button was never held and no rotation happened for as long as contact
+    /// lasted — committed as a Down/Up pair together once contact ends; see
+    /// `session::gesture::CrownSession::released_cleanly` in `openlogi-device`.
     CrownTouch,
     /// Rotating the crown clockwise while it is held pressed — a distinct
     /// bindable control from [`ButtonId::CrownRotateClockwise`], the same way

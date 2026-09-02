@@ -1069,21 +1069,99 @@ fn crown_rotation_amount_uses_slot_in_free_mode() {
     assert_eq!(crown_rotation_amount(3, 0, RatchetMode::Free), 3);
 }
 
+/// A session with no disqualifying activity for its whole duration is
+/// "clean" — [`CrownSession::released_cleanly`] must say so, but only once
+/// the session actually ends, not at its start or while it is still ongoing.
 #[test]
-fn crown_edge_fires_only_on_transition() {
-    let mut down = false;
-    assert_eq!(crown_edge(&mut down, false, ButtonId::Crown), None);
-    assert_eq!(
-        crown_edge(&mut down, true, ButtonId::Crown),
-        Some(CapturedInput::ButtonDown(ButtonId::Crown))
+fn crown_session_fires_only_for_a_clean_session_at_release() {
+    let mut session = CrownSession::default();
+    assert!(
+        !session.released_cleanly(true, false),
+        "session-start must not commit anything yet"
     );
-    assert_eq!(
-        crown_edge(&mut down, true, ButtonId::Crown),
-        None,
-        "a repeated held state must not refire the down edge"
+    assert!(
+        !session.released_cleanly(true, false),
+        "an ongoing session with no activity must not commit anything either"
     );
-    assert_eq!(
-        crown_edge(&mut down, false, ButtonId::Crown),
-        Some(CapturedInput::ButtonUp(ButtonId::Crown))
+    assert!(
+        session.released_cleanly(false, false),
+        "a clean session must commit once it ends"
     );
+}
+
+/// Disqualifying activity partway through a session must suppress its commit
+/// once it ends.
+#[test]
+fn crown_session_is_suppressed_by_activity_during_it() {
+    let mut session = CrownSession::default();
+    assert!(!session.released_cleanly(true, false));
+    assert!(
+        !session.released_cleanly(true, true),
+        "activity mid-session must not commit anything itself"
+    );
+    assert!(
+        !session.released_cleanly(false, false),
+        "a dirty session must not fire a clean commit"
+    );
+}
+
+/// The activity that disqualifies a session can arrive in the very same
+/// report that reports the session ending (the encoder's last residual tick
+/// as the finger lifts off, or the last partial rotation before release) —
+/// it must still suppress the commit.
+#[test]
+fn crown_session_activity_in_the_release_report_itself_still_suppresses_it() {
+    let mut session = CrownSession::default();
+    assert!(!session.released_cleanly(true, false));
+    assert!(!session.released_cleanly(false, true));
+}
+
+/// Activity recorded before a session ever started (or after a prior session
+/// already ended) must not leak into the next session's clean/dirty verdict.
+#[test]
+fn crown_session_activity_flag_resets_for_a_new_session() {
+    let mut session = CrownSession::default();
+    // Activity with no session in progress at all must not taint a later,
+    // unrelated one.
+    assert!(!session.released_cleanly(false, true));
+    assert!(!session.released_cleanly(true, false));
+    assert!(session.released_cleanly(false, false));
+
+    // A dirty session followed by a fresh, clean one: the second must still
+    // fire even though the first did not.
+    assert!(!session.released_cleanly(true, true));
+    assert!(!session.released_cleanly(false, false));
+    assert!(!session.released_cleanly(true, false));
+    assert!(session.released_cleanly(false, false));
+}
+
+/// Wired to [`CrownEdgeState::touch`]: pressing or rotating the crown always
+/// touches it first, so a touch that turned into a press or a rotation must
+/// not also fire [`ButtonId::CrownTouch`] once contact ends.
+#[test]
+fn crown_touch_is_suppressed_by_press_or_rotation_during_it() {
+    let mut state = CrownEdgeState::default();
+    assert!(!state.touch.released_cleanly(true, false));
+    assert!(!state.touch.released_cleanly(true, true));
+    assert!(!state.touch.released_cleanly(false, false));
+}
+
+/// Wired to [`CrownEdgeState::press`]: a press that also rotated must not
+/// also fire [`ButtonId::Crown`]'s own click once released — it dispatched
+/// as a press+rotate pulse instead.
+#[test]
+fn crown_press_is_suppressed_by_rotation_during_it() {
+    let mut state = CrownEdgeState::default();
+    assert!(!state.press.released_cleanly(true, false));
+    assert!(!state.press.released_cleanly(true, true));
+    assert!(!state.press.released_cleanly(false, false));
+}
+
+/// A clean press — held with no rotation — must still fire
+/// [`ButtonId::Crown`] once released.
+#[test]
+fn crown_press_fires_for_a_clean_press() {
+    let mut state = CrownEdgeState::default();
+    assert!(!state.press.released_cleanly(true, false));
+    assert!(state.press.released_cleanly(false, false));
 }
