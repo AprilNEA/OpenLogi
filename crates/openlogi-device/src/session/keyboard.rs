@@ -46,8 +46,9 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// The divertable keyboard F-row controls OpenLogi models, as
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+/// positions are the Signature-series layout, except the Calculator key, which
+/// is a hotkey beside the numpad rather than an F-row key.
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 10] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
@@ -57,6 +58,12 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
     (0x00e7, ButtonId::KeyMute),
     (0x00e8, ButtonId::KeyVolumeDown),
     (0x00e9, ButtonId::KeyVolumeUp),
+    // Last, matching the order of `ButtonId::KEYBOARD_KEYS`. In the keyboard's
+    // macOS mode the firmware emits nothing for this control, so diversion is
+    // the only way to reach it at all; in Windows mode it natively sends
+    // consumer usage `0x0192` (`AL Calculator`), which diversion suppresses —
+    // and, as for every key here, only once the user binds it.
+    (0x000a, ButtonId::KeyCalculator),
 ];
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
