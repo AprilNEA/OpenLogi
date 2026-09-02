@@ -207,8 +207,8 @@ backstop, not a substitute for running the gate yourself after a rebase.
 5. If wire types changed: `PROTOCOL_VERSION` bumped and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `crates/openlogi-ipc/AGENTS.md`.
-6. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
-   as `en.yml` (new keys at the same position); run `cargo test -p openlogi-ui locale`
+6. If locales changed: every `crates/openlogi-ui/locales/*.toml` carries the same keys
+   as `en.toml` (new keys at the same position); run `cargo test -p openlogi-ui locale`
    for catalog parity and `cargo test -p openlogi-desktop i18n` for catalog wiring and
    desktop resolution — see `.claude/rules/i18n.md`.
 7. Only then `git push` / force-push to the PR branch.

@@ -84,21 +84,21 @@ impl ThumbwheelPreset {
     }
 
     #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) const fn translation_key(self) -> &'static str {
         match self {
-            Self::BackForward => "Back / Forward",
-            Self::UndoRedo => "Undo / Redo",
-            Self::BrowserHistory => "Browser Back / Forward",
-            Self::Tabs => "Previous / Next Tab",
-            Self::Desktops => "Previous / Next Desktop",
-            Self::Tracks => "Previous / Next Track",
-            Self::Volume => "Volume Down / Up",
-            Self::VolumeReversed => "Volume Up / Down",
-            Self::CycleDpi => "Cycle DPI Presets",
-            Self::VerticalScroll => "Vertical Scroll",
-            Self::VerticalScrollReversed => "Vertical Scroll (Reversed)",
-            Self::HorizontalScroll => "Horizontal Scroll",
-            Self::HorizontalScrollReversed => "Horizontal Scroll (Reversed)",
+            Self::BackForward => "pointer.back_forward",
+            Self::UndoRedo => "pointer.undo_redo",
+            Self::BrowserHistory => "pointer.browser_back_forward",
+            Self::Tabs => "pointer.previous_next_tab",
+            Self::Desktops => "pointer.previous_next_desktop",
+            Self::Tracks => "pointer.previous_next_track",
+            Self::Volume => "pointer.volume_down_up",
+            Self::VolumeReversed => "pointer.volume_up_down",
+            Self::CycleDpi => "pointer.cycle_dpi_presets",
+            Self::VerticalScroll => "pointer.vertical_scroll",
+            Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
+            Self::HorizontalScroll => "pointer.horizontal_scroll",
+            Self::HorizontalScrollReversed => "pointer.horizontal_scroll_reversed",
         }
     }
 

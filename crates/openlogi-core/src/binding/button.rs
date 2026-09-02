@@ -168,6 +168,35 @@ impl ButtonId {
             ButtonId::HapticPanel => "Haptic Panel",
         }
     }
+
+    /// Stable catalog key for the localized button label.
+    #[must_use]
+    pub fn translation_key(self) -> &'static str {
+        match self {
+            ButtonId::LeftClick => "actions.left_click",
+            ButtonId::RightClick => "actions.right_click",
+            ButtonId::MiddleClick => "actions.middle_click",
+            ButtonId::WheelTiltLeft => "actions.tilt_left",
+            ButtonId::WheelTiltRight => "actions.tilt_right",
+            ButtonId::Back => "actions.back",
+            ButtonId::Forward => "actions.forward",
+            ButtonId::DpiToggle => "actions.dpi_toggle",
+            ButtonId::Thumbwheel => "pointer.thumb_wheel",
+            ButtonId::ThumbwheelScrollUp => "pointer.thumb_wheel_up",
+            ButtonId::ThumbwheelScrollDown => "pointer.thumb_wheel_down",
+            ButtonId::GestureButton => "actions.gesture_button",
+            ButtonId::KeySearch => "keyboard.search_key",
+            ButtonId::KeyDictation => "keyboard.dictation_key",
+            ButtonId::KeyEmoji => "keyboard.emoji_key",
+            ButtonId::KeyScreenCapture => "keyboard.screen_capture_key",
+            ButtonId::KeyMicMute => "keyboard.mic_mute_key",
+            ButtonId::KeyPlayPause => "keyboard.play_pause_key",
+            ButtonId::KeyMute => "keyboard.mute_key",
+            ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
+            ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
+            ButtonId::HapticPanel => "actions.haptic_panel",
+        }
+    }
 }
 
 impl fmt::Display for ButtonId {

@@ -188,7 +188,7 @@ impl SettingsView {
         let activation_obs = Self::observe_registration_status(window, cx);
 
         let theme_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter themes…")));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("appearance.filter_themes")));
         cx.subscribe(&theme_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -446,7 +446,7 @@ pub fn open(cx: &mut App) {
 /// The window's native title — one definition for open and the live-language
 /// retitle ([`windows::retitle_open`]), so the two cannot drift.
 pub(crate) fn window_title() -> SharedString {
-    tr!("Settings")
+    tr!("app.settings")
 }
 
 pub fn open_at(page: SettingsPage, cx: &mut App) {
@@ -467,7 +467,7 @@ impl Render for SettingsView {
         theme::apply_ui_scale(window, cx);
         crate::ui::components::localize_placeholder(
             &self.theme_search,
-            tr!("Filter themes…"),
+            tr!("appearance.filter_themes"),
             window,
             cx,
         );
@@ -541,7 +541,7 @@ impl Render for SettingsView {
                         .top_0()
                         .left_0()
                         .right_0()
-                        .child(windows::aux_title_bar(tr!("Settings"), cx)),
+                        .child(windows::aux_title_bar(tr!("app.settings"), cx)),
                 )
             })
             .child(settings)
