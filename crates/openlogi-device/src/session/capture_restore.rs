@@ -6,6 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, RwLock, Weak};
 
 use hidpp::channel::HidppChannel;
+use hidpp::feature::{CreatableFeature, gaming_g_keys::GamingGKeysFeature};
 use thiserror::Error;
 
 use crate::backend::BackendError;
@@ -135,6 +136,7 @@ pub struct PendingCaptureRestore {
     retired_policy: RetiredChannelPolicy,
     reprog: Option<ReprogRestore>,
     thumb_index: Option<u8>,
+    gaming_g_keys_index: Option<u8>,
 }
 
 impl fmt::Debug for PendingCaptureRestore {
@@ -149,6 +151,7 @@ impl fmt::Debug for PendingCaptureRestore {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_gaming_g_keys", &self.gaming_g_keys_index.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -158,8 +161,9 @@ impl PendingCaptureRestore {
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb_index: Option<u8>,
+        gaming_g_keys_index: Option<u8>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+        if reprog.is_none() && thumb_index.is_none() && gaming_g_keys_index.is_none() {
             return None;
         }
         Some(Self {
@@ -168,6 +172,7 @@ impl PendingCaptureRestore {
             retired_policy: RetiredChannelPolicy::ReplacementOnly,
             reprog,
             thumb_index,
+            gaming_g_keys_index,
         })
     }
 
@@ -225,8 +230,12 @@ impl PendingCaptureRestore {
             }
         }
         if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, feature_index);
             restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        }
+        if let Some(feature_index) = self.gaming_g_keys_index {
+            let g_keys = GamingGKeysFeature::new(channel, device_index, feature_index);
+            restored &= restore_result(g_keys.set_software_control(false).await, "gaming G-keys");
         }
         restored
     }

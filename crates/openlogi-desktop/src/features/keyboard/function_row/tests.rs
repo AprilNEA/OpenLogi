@@ -19,6 +19,46 @@ fn hover_or_selection_highlights_a_key() {
 }
 
 #[test]
+fn takeover_and_mode_gate_the_editable_gaming_keys() {
+    let available = GamingKeysAvailable {
+        g_row: true,
+        mode: true,
+        macro_record: true,
+    };
+
+    assert!(!gaming_selection_ok(
+        Some(ButtonId::KeyG1),
+        available,
+        false,
+        GamingKeyMode::Profiles,
+    ));
+    assert!(gaming_selection_ok(
+        Some(ButtonId::KeyG1),
+        available,
+        true,
+        GamingKeyMode::Profiles,
+    ));
+    assert!(!gaming_selection_ok(
+        Some(ButtonId::KeyM2),
+        available,
+        true,
+        GamingKeyMode::Profiles,
+    ));
+    assert!(gaming_selection_ok(
+        Some(ButtonId::KeyM2),
+        available,
+        true,
+        GamingKeyMode::NineButtons,
+    ));
+    assert!(gaming_selection_ok(
+        Some(ButtonId::KeyMr),
+        available,
+        true,
+        GamingKeyMode::NineButtons,
+    ));
+}
+
+#[test]
 fn function_row_covers_esc_through_f19() {
     let labels: Vec<&str> = FUNCTION_KEYS.iter().map(|(label, _)| *label).collect();
 

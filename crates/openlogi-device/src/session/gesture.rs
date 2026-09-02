@@ -534,6 +534,7 @@ impl ArmedControls {
             retired,
             reprog,
             thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
+            None,
         )
     }
 
