@@ -420,6 +420,185 @@ fn default_invert_scroll_is_omitted_from_toml() {
 }
 
 #[test]
+fn gaming_g_key_software_control_is_explicit_and_roundtrips() {
+    let mut cfg = Config::default();
+    assert!(!cfg.g_key_software_control("keyboard"));
+
+    cfg.set_binding(
+        "keyboard",
+        ButtonId::KeyG1,
+        Binding::Single(Action::MissionControl),
+    );
+    let default_body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !default_body.contains("g_key_software_control"),
+        "saved bindings alone must keep firmware ownership"
+    );
+
+    cfg.set_g_key_software_control("keyboard", true);
+    let restored = write_and_read(&cfg);
+    assert!(restored.g_key_software_control("keyboard"));
+    assert!(!restored.g_key_software_control("another-keyboard"));
+}
+
+#[test]
+fn gaming_modes_roundtrip_with_independent_bindings() {
+    let mut cfg = Config::default();
+    cfg.set_g_key_binding(
+        "keyboard",
+        GKeyProfile::M1,
+        ButtonId::KeyG1,
+        Binding::Single(Action::VolumeUp),
+    );
+    cfg.set_g_key_binding(
+        "keyboard",
+        GKeyProfile::M2,
+        ButtonId::KeyG1,
+        Binding::Single(Action::VolumeDown),
+    );
+    cfg.set_g_key_profile_name("keyboard", GKeyProfile::M1, Some("Work".into()));
+    cfg.set_g_key_profile_name("keyboard", GKeyProfile::M2, Some("Gaming".into()));
+    cfg.set_gaming_button_binding("keyboard", ButtonId::KeyG1, Binding::Single(Action::Copy));
+    cfg.set_gaming_button_binding(
+        "keyboard",
+        ButtonId::KeyM2,
+        Binding::Single(Action::ShowDesktop),
+    );
+    cfg.set_gaming_key_mode("keyboard", GamingKeyMode::NineButtons);
+
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored
+            .g_key_bindings_for("keyboard", GKeyProfile::M1)
+            .get(&ButtonId::KeyG1)
+            .map(Binding::click_action),
+        Some(Action::VolumeUp)
+    );
+    assert_eq!(
+        restored
+            .g_key_bindings_for("keyboard", GKeyProfile::M2)
+            .get(&ButtonId::KeyG1)
+            .map(Binding::click_action),
+        Some(Action::VolumeDown)
+    );
+    assert_eq!(
+        restored
+            .gaming_button_bindings_for("keyboard")
+            .get(&ButtonId::KeyG1)
+            .map(Binding::click_action),
+        Some(Action::Copy)
+    );
+    assert_eq!(
+        restored
+            .gaming_button_bindings_for("keyboard")
+            .get(&ButtonId::KeyM2)
+            .map(Binding::click_action),
+        Some(Action::ShowDesktop)
+    );
+    assert_eq!(
+        restored.gaming_key_mode("keyboard"),
+        GamingKeyMode::NineButtons
+    );
+    assert_eq!(
+        restored.g_key_profile_name("keyboard", GKeyProfile::M1),
+        Some("Work")
+    );
+    assert_eq!(
+        restored.g_key_profile_name("keyboard", GKeyProfile::M2),
+        Some("Gaming")
+    );
+}
+
+#[test]
+fn legacy_flat_g_key_binding_migrates_to_m1() {
+    let cfg: Config = toml::from_str(
+        r#"
+schema_version = 7
+
+[devices.keyboard.bindings]
+KeyG1 = "VolumeUp"
+"#,
+    )
+    .expect("legacy G-key config should parse");
+
+    assert!(!cfg.bindings_for("keyboard").contains_key(&ButtonId::KeyG1));
+    assert_eq!(
+        cfg.g_key_bindings_for("keyboard", GKeyProfile::M1)
+            .get(&ButtonId::KeyG1)
+            .map(Binding::click_action),
+        Some(Action::VolumeUp)
+    );
+}
+
+#[test]
+fn schema_v8_gaming_bindings_seed_both_v9_modes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+schema_version = 8
+
+[devices.keyboard.g_key_profiles.M1]
+KeyG1 = "VolumeUp"
+
+[devices.keyboard.bindings]
+KeyM2 = "ShowDesktop"
+KeyMr = "Copy"
+"#,
+    )
+    .expect("write v8 config");
+
+    let migrated = Config::load_from_path(&path).expect("load v8 config");
+    assert_eq!(
+        migrated
+            .g_key_bindings_for("keyboard", GKeyProfile::M1)
+            .get(&ButtonId::KeyG1)
+            .map(Binding::click_action),
+        Some(Action::VolumeUp)
+    );
+    let nine = migrated.gaming_button_bindings_for("keyboard");
+    assert_eq!(
+        nine.get(&ButtonId::KeyG1).map(Binding::click_action),
+        Some(Action::VolumeUp)
+    );
+    assert_eq!(
+        nine.get(&ButtonId::KeyM2).map(Binding::click_action),
+        Some(Action::ShowDesktop)
+    );
+    assert_eq!(
+        nine.get(&ButtonId::KeyMr).map(Binding::click_action),
+        Some(Action::Copy)
+    );
+    assert!(
+        !migrated
+            .bindings_for("keyboard")
+            .contains_key(&ButtonId::KeyM2)
+    );
+}
+
+#[test]
+fn schema_v9_rejects_the_removed_per_m_key_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+schema_version = 9
+
+[devices.keyboard]
+m_key_shortcuts = ["M2"]
+"#,
+    )
+    .expect("write v9 config");
+
+    assert_matches!(
+        Config::load_from_path(&path).expect_err("v9 legacy mode must fail"),
+        ConfigError::ObsoleteField { .. }
+    );
+}
+
+#[test]
 fn scroll_resolution_roundtrips_all_three_states() {
     let mut cfg = Config::default();
     assert_eq!(cfg.scroll_resolution("mouse"), None);
@@ -585,6 +764,9 @@ fn device_identity_roundtrips_and_is_iterable() {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            g_keys: false,
+            m_keys: false,
+            macro_record: false,
         },
         light_capabilities: None,
         driver_id: None,

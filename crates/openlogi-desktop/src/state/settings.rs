@@ -3,8 +3,8 @@
 use super::{AppState, StateEvent};
 use gpui::Context;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
-    UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GKeyProfile,
+    GamingKeyMode, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -199,6 +199,60 @@ impl AppState {
         self.config
             .edit(|config| config.set_device_enabled(key, enabled));
         self.persist_and_reload("device enabled");
+    }
+
+    /// Whether the user explicitly gave OpenLogi row-wide ownership of this
+    /// device's gaming G-keys.
+    #[must_use]
+    pub fn g_key_software_control(&self, key: &str) -> bool {
+        self.config.g_key_software_control(key)
+    }
+
+    /// Persist the explicit row-wide G-key ownership choice and reload the
+    /// agent so HID++ software control is enabled or restored immediately.
+    pub fn set_g_key_software_control(&mut self, key: &str, enabled: bool) {
+        if self.config.g_key_software_control(key) == enabled {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_g_key_software_control(key, enabled));
+        self.persist_and_reload("gaming G-key software control");
+    }
+
+    /// Current official-profile or nine-button interpretation.
+    #[must_use]
+    pub fn gaming_key_mode(&self, key: &str) -> GamingKeyMode {
+        self.config.gaming_key_mode(key)
+    }
+
+    /// Switch the cluster between official profiles and nine independent keys.
+    pub fn set_gaming_key_mode(&mut self, key: &str, mode: GamingKeyMode) {
+        if self.config.gaming_key_mode(key) == mode {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_gaming_key_mode(key, mode));
+        self.persist_and_reload("gaming key mode");
+    }
+
+    /// Local display name for one official M-key profile.
+    #[must_use]
+    pub fn g_key_profile_name(&self, key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.config.g_key_profile_name(key, profile)
+    }
+
+    /// Persist a trimmed profile name. Blank text clears the optional name.
+    pub fn set_g_key_profile_name(&mut self, key: &str, profile: GKeyProfile, name: &str) {
+        let name = match name.trim() {
+            "" => None,
+            value => Some(value.to_string()),
+        };
+        if self.config.g_key_profile_name(key, profile) == name.as_deref() {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_g_key_profile_name(key, profile, name));
+        self.persist_config("gaming G-key profile name");
     }
 
     /// The effective thumb-wheel sensitivity for `key` (its per-device

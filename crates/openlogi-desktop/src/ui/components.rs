@@ -246,6 +246,7 @@ type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 pub(crate) struct MenuRow {
     base: BaseButton,
     selected: bool,
+    disabled: bool,
     children: Vec<AnyElement>,
     on_click: Option<ClickHandler>,
 }
@@ -255,6 +256,7 @@ impl MenuRow {
         Self {
             base: BaseButton::new(id),
             selected: false,
+            disabled: false,
             children: Vec::new(),
             on_click: None,
         }
@@ -288,6 +290,13 @@ impl Selectable for MenuRow {
     }
 }
 
+impl Disableable for MenuRow {
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
 impl ParentElement for MenuRow {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);
@@ -308,6 +317,7 @@ impl RenderOnce for MenuRow {
         let selected = self.selected;
         self.base
             .selected(selected)
+            .disabled(self.disabled)
             .aria_selected(selected)
             .w_full()
             .flex()

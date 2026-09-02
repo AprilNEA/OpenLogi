@@ -11,15 +11,17 @@
 //! excludes) both. Like the gesture watcher, this needs no macOS Accessibility
 //! permission — the key events arrive over HID++.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
+use openlogi_core::config::{GKeyProfile, GamingKeyMode};
 use openlogi_hid::{
     CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
-    DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session_with_registry,
+    DeviceRoute, KeyboardCaptureTargets, PendingCaptureRestore,
+    run_keyboard_capture_session_with_registry,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -41,8 +43,18 @@ pub struct KeyboardSpec {
     pub route: DeviceRoute,
     /// `0x1b04` control ID → button, for exactly the bound keys.
     pub wanted: BTreeMap<u16, ButtonId>,
+    /// Bound `0x8010` gaming keys to report in software-control mode.
+    pub wanted_g_keys: BTreeSet<ButtonId>,
+    /// `0x8020` M-keys and `0x8030` MR key whose events must be observed.
+    pub wanted_aux_keys: BTreeSet<ButtonId>,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
+    /// G1-G5 bindings for each software profile.
+    pub g_key_profiles: BTreeMap<GKeyProfile, BTreeMap<ButtonId, Binding>>,
+    /// Current official-profile or nine-button interpretation.
+    pub gaming_key_mode: GamingKeyMode,
+    /// Independent bindings used by the nine-button mode.
+    pub gaming_button_bindings: BTreeMap<ButtonId, Binding>,
 }
 
 /// Read-only, lossless, coalescing view of the keyboard-capture spec.
@@ -54,6 +66,8 @@ pub type SharedKeyboardSpec = watch::Receiver<Option<Arc<KeyboardSpec>>>;
 struct KeyboardTarget {
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
+    wanted_g_keys: BTreeSet<ButtonId>,
+    wanted_aux_keys: BTreeSet<ButtonId>,
 }
 
 impl KeyboardTarget {
@@ -61,6 +75,8 @@ impl KeyboardTarget {
         Self {
             route: spec.route.clone(),
             wanted: spec.wanted.clone(),
+            wanted_g_keys: spec.wanted_g_keys.clone(),
+            wanted_aux_keys: spec.wanted_aux_keys.clone(),
         }
     }
 }
@@ -69,6 +85,9 @@ impl KeyboardTarget {
 struct KeyboardDispatchPlan {
     config_key: String,
     bindings: BTreeMap<ButtonId, Binding>,
+    g_key_profiles: BTreeMap<GKeyProfile, BTreeMap<ButtonId, Binding>>,
+    gaming_key_mode: GamingKeyMode,
+    gaming_button_bindings: BTreeMap<ButtonId, Binding>,
 }
 type RunningKeyboardSession = CaptureSession<KeyboardTarget, KeyboardDispatchPlan>;
 
@@ -97,6 +116,7 @@ struct KeyboardManagerState {
     pending_restore: Option<PendingRestore>,
     restart_at: Option<tokio::time::Instant>,
     dispatcher: ActionDispatcher,
+    active_g_key_profile: GKeyProfile,
 }
 
 struct KeyboardSessionChannels {
@@ -149,11 +169,21 @@ fn dispatch_input(
     session: &HidppSessionId,
     input: CapturedInput,
     bindings: &KeyboardDispatchPlan,
+    active_profile: &mut GKeyProfile,
     dispatcher: &ActionDispatcher,
 ) {
     match input {
         CapturedInput::ButtonDown(button) => {
-            let binding = bindings.bindings.get(&button);
+            if let Some(profile) = profile_selected_by(button, bindings) {
+                *active_profile = profile;
+                dispatcher.cancel_hidpp_session(session);
+                info!(
+                    profile = profile.label(),
+                    "keyboard M key → selected G-key profile"
+                );
+                return;
+            }
+            let binding = binding_for_button(bindings, *active_profile, button);
             if let Some(binding) = binding {
                 info!(button = %button, action = %binding.click_action().label(), "keyboard key → handling binding");
             } else {
@@ -170,6 +200,35 @@ fn dispatch_input(
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
         | CapturedInput::ThumbwheelDirection { .. } => {}
+    }
+}
+
+fn profile_selected_by(button: ButtonId, bindings: &KeyboardDispatchPlan) -> Option<GKeyProfile> {
+    if bindings.gaming_key_mode == GamingKeyMode::Profiles {
+        GKeyProfile::from_button(button)
+    } else {
+        None
+    }
+}
+
+fn binding_for_button(
+    bindings: &KeyboardDispatchPlan,
+    active_profile: GKeyProfile,
+    button: ButtonId,
+) -> Option<&Binding> {
+    if bindings.gaming_key_mode == GamingKeyMode::NineButtons {
+        return bindings.gaming_button_bindings.get(&button);
+    }
+    if matches!(
+        button,
+        ButtonId::KeyG1 | ButtonId::KeyG2 | ButtonId::KeyG3 | ButtonId::KeyG4 | ButtonId::KeyG5
+    ) {
+        bindings
+            .g_key_profiles
+            .get(&active_profile)
+            .and_then(|profile| profile.get(&button))
+    } else {
+        bindings.bindings.get(&button)
     }
 }
 
@@ -196,6 +255,9 @@ fn wanted_session_for(
             KeyboardDispatchPlan {
                 config_key: spec.config_key.clone(),
                 bindings: spec.bindings.clone(),
+                g_key_profiles: spec.g_key_profiles.clone(),
+                gaming_key_mode: spec.gaming_key_mode,
+                gaming_button_bindings: spec.gaming_button_bindings.clone(),
             },
         )
     })
@@ -224,6 +286,7 @@ impl KeyboardManagerState {
             pending_restore: None,
             restart_at: None,
             dispatcher,
+            active_g_key_profile: GKeyProfile::M1,
         }
     }
 
@@ -343,6 +406,7 @@ impl KeyboardManagerState {
                     running.id(),
                     input.input,
                     running.dispatch(),
+                    &mut self.active_g_key_profile,
                     &self.dispatcher,
                 );
                 false
@@ -522,12 +586,18 @@ fn spawn_session(
     let done_id = id.clone();
     let route = target.route.clone();
     let wanted = target.wanted.clone();
+    let wanted_g_keys = target.wanted_g_keys.clone();
+    let wanted_aux_keys = target.wanted_aux_keys.clone();
     let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
         let pending_restore = match run_keyboard_capture_session_with_registry(
             route,
-            wanted,
+            KeyboardCaptureTargets {
+                reprog: wanted,
+                gaming: wanted_g_keys,
+                gaming_aux: wanted_aux_keys,
+            },
             sink,
             stop_rx,
             slot,

@@ -10,21 +10,23 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
+use openlogi_core::config::{
+    Config, GKeyProfile, GamingKeyMode, LightSettings, ScrollResolution, canonical_device_key,
+};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    GAMING_AUX_KEYS, GAMING_G_KEYS, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -348,14 +350,57 @@ impl Orchestrator {
             })
             .copied()
             .collect();
-        if wanted.is_empty() {
+        let wanted_g_keys = dev
+            .capabilities
+            .filter(|capabilities| {
+                capabilities.g_keys && self.config.g_key_software_control(&dev.config_key)
+            })
+            .map_or_else(BTreeSet::new, |_| {
+                // HID++ 0x8010 exposes row-wide ownership only. Never infer
+                // that destructive hand-off from saved per-key bindings: the
+                // user must explicitly opt this device into software control.
+                GAMING_G_KEYS.iter().map(|(_, button)| *button).collect()
+            });
+        let g_key_profiles: BTreeMap<_, _> = GKeyProfile::ALL
+            .into_iter()
+            .filter_map(|profile| {
+                let bindings = self.config.g_key_bindings_for(&dev.config_key, profile);
+                (!bindings.is_empty()).then_some((profile, bindings))
+            })
+            .collect();
+        let gaming_key_mode = self.config.gaming_key_mode(&dev.config_key);
+        let gaming_button_bindings = self.config.gaming_button_bindings_for(&dev.config_key);
+        let software_control_active = !wanted_g_keys.is_empty();
+        let wanted_aux_keys = dev.capabilities.map_or_else(BTreeSet::new, |capabilities| {
+            GAMING_AUX_KEYS
+                .into_iter()
+                .filter(|button| match button {
+                    ButtonId::KeyM1 | ButtonId::KeyM2 | ButtonId::KeyM3 => capabilities.m_keys,
+                    ButtonId::KeyMr => capabilities.macro_record,
+                    _ => false,
+                })
+                .filter(|button| {
+                    software_control_active
+                        && match gaming_key_mode {
+                            GamingKeyMode::Profiles => GKeyProfile::from_button(*button).is_some(),
+                            GamingKeyMode::NineButtons => true,
+                        }
+                })
+                .collect()
+        });
+        if wanted.is_empty() && wanted_g_keys.is_empty() && wanted_aux_keys.is_empty() {
             return None;
         }
         Some(KeyboardSpec {
             config_key: dev.config_key.clone(),
             route: dev.route.clone()?,
             wanted,
+            wanted_g_keys,
+            wanted_aux_keys,
             bindings,
+            g_key_profiles,
+            gaming_key_mode,
+            gaming_button_bindings,
         })
     }
 

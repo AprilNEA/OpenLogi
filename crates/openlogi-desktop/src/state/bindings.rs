@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use gpui::App;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, KeyTrigger};
+use openlogi_core::config::{Config, GKeyProfile, KeyTrigger};
 use tracing::debug;
 
 use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
@@ -224,6 +224,66 @@ impl AppState {
         });
         // The agent owns the hook; have it rebuild its live map from config.
         self.persist_and_reload("binding");
+    }
+
+    /// The action assigned to one G key in one M-key profile.
+    #[must_use]
+    pub fn g_key_binding(&self, profile: GKeyProfile, button: ButtonId) -> Option<Action> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        self.config
+            .g_key_bindings_for(key, profile)
+            .get(&button)
+            .map(Binding::click_action)
+    }
+
+    /// Persist one G-key action in the selected M-key profile.
+    pub fn commit_g_key_binding(&mut self, profile: GKeyProfile, button: ButtonId, action: Action) {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!(
+                ?button,
+                profile = profile.label(),
+                "no persistent device key — G-key binding ignored"
+            );
+            return;
+        };
+        self.config.edit(|config| {
+            config.set_g_key_binding(&key, profile, button, Binding::Single(action));
+        });
+        self.persist_and_reload("gaming G-key profile binding");
+    }
+
+    /// One action from the independent nine-button configuration.
+    #[must_use]
+    pub fn gaming_button_binding(&self, button: ButtonId) -> Option<Action> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        self.config
+            .gaming_button_bindings_for(key)
+            .get(&button)
+            .map(Binding::click_action)
+    }
+
+    /// Persist one independent gaming-button action without touching profiles.
+    pub fn commit_gaming_button_binding(&mut self, button: ButtonId, action: Action) {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!(?button, "no persistent device key — gaming binding ignored");
+            return;
+        };
+        self.config.edit(|config| {
+            config.set_gaming_button_binding(&key, button, Binding::Single(action));
+        });
+        self.persist_and_reload("gaming nine-button binding");
     }
 
     /// Drop `button`'s override in the open per-app profile, so it inherits the

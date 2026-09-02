@@ -14,6 +14,66 @@ use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirecti
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::Dpi;
 
+/// One of the three G-key function sets selected by the keyboard's M keys.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum GKeyProfile {
+    /// The default G-key function set, selected by M1.
+    #[default]
+    M1,
+    /// The second G-key function set, selected by M2.
+    M2,
+    /// The third G-key function set, selected by M3.
+    M3,
+}
+
+/// How OpenLogi interprets a gaming keyboard's G/M/MR key cluster.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GamingKeyMode {
+    /// M1-M3 select three independent G1-G5 function sets.
+    #[default]
+    Profiles,
+    /// G1-G5, M1-M3, and MR are nine independent programmable buttons.
+    NineButtons,
+}
+
+impl GKeyProfile {
+    /// All profiles in their physical-key order.
+    pub const ALL: [Self; 3] = [Self::M1, Self::M2, Self::M3];
+
+    /// The physical M key which normally selects this profile.
+    #[must_use]
+    pub const fn button(self) -> ButtonId {
+        match self {
+            Self::M1 => ButtonId::KeyM1,
+            Self::M2 => ButtonId::KeyM2,
+            Self::M3 => ButtonId::KeyM3,
+        }
+    }
+
+    /// The profile selected by `button`, when it is an M key.
+    #[must_use]
+    pub const fn from_button(button: ButtonId) -> Option<Self> {
+        match button {
+            ButtonId::KeyM1 => Some(Self::M1),
+            ButtonId::KeyM2 => Some(Self::M2),
+            ButtonId::KeyM3 => Some(Self::M3),
+            _ => None,
+        }
+    }
+
+    /// Stable user-facing key label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::M1 => "M1",
+            Self::M2 => "M2",
+            Self::M3 => "M3",
+        }
+    }
+}
+
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
 /// completes — or while the device is asleep and can't be probed at all.
@@ -140,6 +200,30 @@ pub struct DeviceConfig {
     /// is only serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    /// Whether OpenLogi may enable HID++ `0x8010` software control for the
+    /// device's entire G-key row. The protocol exposes no per-key ownership,
+    /// so this explicit opt-in prevents one saved binding from silently
+    /// disabling unrelated onboard G-key actions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub g_key_software_control: bool,
+    /// G1-G5 bindings for each M-key profile. An absent profile is an empty
+    /// function set; M1 remains the active set when the agent starts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub g_key_profiles: BTreeMap<GKeyProfile, BTreeMap<ButtonId, Binding>>,
+    /// Optional local display names for the three M-key profiles.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub g_key_profile_names: BTreeMap<GKeyProfile, String>,
+    /// Whether the cluster uses official M-key profiles or nine independent
+    /// buttons. Both binding stores remain intact when this changes.
+    #[serde(default, skip_serializing_if = "is_default_gaming_key_mode")]
+    pub gaming_key_mode: GamingKeyMode,
+    /// The nine independent bindings used by [`GamingKeyMode::NineButtons`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gaming_button_bindings: BTreeMap<ButtonId, Binding>,
+    /// Deserialize-only carrier for schema-v8's per-M-key shortcut choices.
+    /// The v9 migration turns any such choice into [`GamingKeyMode::NineButtons`].
+    #[serde(skip_serializing)]
+    pub(super) legacy_m_key_shortcuts: std::collections::BTreeSet<GKeyProfile>,
     /// User-assigned name for this physical device. The persisted
     /// [`DeviceIdentity::display_name`] remains the hardware model name so an
     /// inventory refresh can never overwrite this alias or mistake it for
@@ -349,6 +433,12 @@ impl Default for DeviceConfig {
             // A fresh entry (e.g. created by a first DPI write) must stay
             // managed — `enabled: false` is an explicit user choice only.
             enabled: true,
+            g_key_software_control: false,
+            g_key_profiles: BTreeMap::new(),
+            g_key_profile_names: BTreeMap::new(),
+            gaming_key_mode: GamingKeyMode::Profiles,
+            gaming_button_bindings: BTreeMap::new(),
+            legacy_m_key_shortcuts: std::collections::BTreeSet::new(),
             custom_name: None,
             gesture_owner: None,
             identity: None,
@@ -396,6 +486,14 @@ fn is_true(b: &bool) -> bool {
 )]
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_default_gaming_key_mode(mode: &GamingKeyMode) -> bool {
+    *mode == GamingKeyMode::default()
 }
 
 fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Vec<Dpi>, D::Error>
@@ -493,12 +591,25 @@ struct RawDeviceConfig {
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
+    g_key_software_control: bool,
+    #[serde(default)]
+    g_key_profiles: BTreeMap<GKeyProfile, BTreeMap<ButtonId, Binding>>,
+    #[serde(default)]
+    g_key_profile_names: BTreeMap<GKeyProfile, String>,
+    #[serde(default)]
+    gaming_key_mode: GamingKeyMode,
+    #[serde(default)]
+    gaming_button_bindings: BTreeMap<ButtonId, Binding>,
+    #[serde(default, rename = "m_key_shortcuts")]
+    legacy_m_key_shortcuts: std::collections::BTreeSet<GKeyProfile>,
+    #[serde(default)]
     custom_name: Option<String>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
     fn from(raw: RawDeviceConfig) -> Self {
         let mut bindings = raw.bindings; // the v2 map wins on every key.
+        let mut g_key_profiles = raw.g_key_profiles;
 
         // Re-home the legacy flat gesture map under `GestureButton`. This MUST
         // happen before folding `button_bindings`, so a legacy single
@@ -526,9 +637,30 @@ impl From<RawDeviceConfig> for DeviceConfig {
             }
             bindings.entry(button).or_insert(Binding::Single(action));
         }
+        let m1 = g_key_profiles.entry(GKeyProfile::M1).or_default();
+        for button in [
+            ButtonId::KeyG1,
+            ButtonId::KeyG2,
+            ButtonId::KeyG3,
+            ButtonId::KeyG4,
+            ButtonId::KeyG5,
+        ] {
+            if let Some(binding) = bindings.remove(&button) {
+                m1.entry(button).or_insert(binding);
+            }
+        }
+        if m1.is_empty() {
+            g_key_profiles.remove(&GKeyProfile::M1);
+        }
 
         DeviceConfig {
             enabled: raw.enabled,
+            g_key_software_control: raw.g_key_software_control,
+            g_key_profiles,
+            g_key_profile_names: raw.g_key_profile_names,
+            gaming_key_mode: raw.gaming_key_mode,
+            gaming_button_bindings: raw.gaming_button_bindings,
+            legacy_m_key_shortcuts: raw.legacy_m_key_shortcuts,
             custom_name: raw.custom_name,
             gesture_owner: raw.gesture_owner,
             identity: raw.identity.map(DeviceIdentity::without_unit_identifiers),
