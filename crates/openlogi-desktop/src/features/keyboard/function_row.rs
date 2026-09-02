@@ -30,7 +30,11 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Disableable as _, Selectable as _, h_flex, input::InputState, v_flex};
+use gpui_component::{
+    Disableable as _, Selectable as _, Sizable as _, h_flex,
+    input::{Input, InputEvent, InputState},
+    v_flex,
+};
 use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{GKeyProfile, GamingKeyMode, KeyModifiers, KeyTrigger};
 use openlogi_core::device::Capabilities;
@@ -112,6 +116,7 @@ struct GamingEditorState {
     software_control: bool,
     mode: GamingKeyMode,
     profile_bindings: std::collections::BTreeMap<ButtonId, Action>,
+    profile_names: std::collections::BTreeMap<GKeyProfile, String>,
     nine_button_bindings: std::collections::BTreeMap<ButtonId, Action>,
 }
 
@@ -173,6 +178,8 @@ const KEYS_VERTICAL_RESERVE: f32 = 224.;
 const KEYBOARD_MIN_IMG_H: f32 = 160.;
 const KEY_CALLOUT_W: f32 = 60.;
 const KEY_CALLOUT_H: f32 = 48.;
+const PROFILE_M_CALLOUT_W: f32 = 80.;
+const GAMING_CALLOUT_GAP: f32 = 6.;
 const KEY_CALLOUT_TOP_UPPER: f32 = 4.;
 const KEY_CALLOUT_TOP_LOWER: f32 = 50.;
 const G913_FUNCTION_CALLOUT_OFFSET: f32 = 54.;
@@ -198,6 +205,11 @@ const EVEN_SPACING_START: f32 = 0.04;
 const EVEN_SPACING_END: f32 = 0.96;
 
 /// The function-row remapper view.
+struct ProfileNameInput {
+    input: Entity<InputState>,
+    _input_events: Subscription,
+}
+
 pub struct FunctionRowView {
     /// The single selected key index (0 = Esc), or `None` when nothing is
     /// selected (no panel shown).
@@ -217,6 +229,9 @@ pub struct FunctionRowView {
     text_state: Option<Entity<InputState>>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
+    /// Always-visible inline M-profile name inputs, keyed by M1/M2/M3.
+    profile_name_inputs: std::collections::BTreeMap<GKeyProfile, ProfileNameInput>,
+    profile_name_input_device: Option<String>,
     _state_obs: Subscription,
 }
 
@@ -244,6 +259,8 @@ impl FunctionRowView {
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
+            profile_name_inputs: std::collections::BTreeMap::new(),
+            profile_name_input_device: None,
             _state_obs: state_obs,
         }
     }
@@ -277,6 +294,47 @@ impl FunctionRowView {
             self.selected_g_profile = profile;
             self.selected_g_key = None;
             cx.notify();
+        }
+    }
+
+    fn sync_g_profile_name_inputs(
+        &mut self,
+        device_key: Option<String>,
+        profile_names: &std::collections::BTreeMap<GKeyProfile, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.profile_name_input_device != device_key {
+            self.profile_name_inputs.clear();
+            self.profile_name_input_device.clone_from(&device_key);
+        }
+        if device_key.is_none() {
+            return;
+        }
+
+        for profile in GKeyProfile::ALL {
+            if self.profile_name_inputs.contains_key(&profile) {
+                continue;
+            }
+            let current_name = profile_names.get(&profile).cloned().unwrap_or_default();
+            let input = cx.new(|cx| {
+                let profile_name_placeholder = tr!("keyboard.profile_name_placeholder");
+                let mut input = InputState::new(window, cx).placeholder(profile_name_placeholder);
+                input.set_value(current_name, window, cx);
+                input
+            });
+            let input_events = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    persist_g_profile_name(profile, input.read(cx).value().to_string(), cx);
+                }
+            });
+            self.profile_name_inputs.insert(
+                profile,
+                ProfileNameInput {
+                    input,
+                    _input_events: input_events,
+                },
+            );
         }
     }
 
@@ -364,21 +422,44 @@ impl Render for FunctionRowView {
         reason = "the GPUI render pass assembles one coordinated keyboard inspector tree"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = AppState::try_read(cx);
-        let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
-        let bindings = state.map(AppState::keyboard_bindings);
         let selected_g_profile = self.selected_g_profile;
-        let gaming = gaming_editor_state(state, selected_g_profile);
-        let glow = state.and_then(|state| {
-            state
-                .current_record()
-                .and_then(|record| keyboard_glow(state, record))
-        });
+        let (asset, bindings, gaming, glow, profile_name_device_key) = {
+            let state = AppState::try_read(cx);
+            (
+                state.and_then(|state| state.current_record()?.asset.clone()),
+                state.map(|state| state.keyboard_bindings().clone()),
+                gaming_editor_state(state, selected_g_profile),
+                state.and_then(|state| {
+                    state
+                        .current_record()
+                        .and_then(|record| keyboard_glow(state, record))
+                }),
+                state
+                    .and_then(AppState::current_record)
+                    .and_then(DeviceRecord::persistent_config_key)
+                    .map(str::to_string),
+            )
+        };
+        let asset = asset.as_ref();
+        let bindings = bindings.as_ref();
 
         let viewport_h = f32::from(window.viewport_size().height);
         let render_size = keyboard_render_size(asset, viewport_h);
         let points = key_points(asset);
         let has_g913_layout = asset.is_some_and(is_g913_asset);
+        self.sync_g_profile_name_inputs(
+            (has_g913_layout && gaming.mode == GamingKeyMode::Profiles && gaming.software_control)
+                .then_some(profile_name_device_key)
+                .flatten(),
+            &gaming.profile_names,
+            window,
+            cx,
+        );
+        let profile_name_inputs = self
+            .profile_name_inputs
+            .iter()
+            .map(|(profile, editor)| (*profile, editor.input.clone()))
+            .collect();
         let image_path = asset.map(|asset| asset.image_path.clone());
         let slots: Vec<KeySlot> = FUNCTION_KEYS
             .iter()
@@ -450,7 +531,8 @@ impl Render for FunctionRowView {
                 .gaming_slots(gaming_slots)
                 .selected_g(self.selected_g_key)
                 .hovered_g(hovered_g)
-                .gaming_mode(gaming.mode);
+                .gaming_mode(gaming.mode)
+                .profile_name_inputs(profile_name_inputs);
         let panel = self
             .selected_g_key
             .map(|button| {
@@ -520,6 +602,23 @@ fn gaming_editor_state(state: Option<&AppState>, profile: GKeyProfile) -> Gaming
                 .collect()
         })
         .unwrap_or_default();
+    let profile_names = state
+        .and_then(|state| {
+            let key = state
+                .current_record()
+                .and_then(DeviceRecord::persistent_config_key)?;
+            Some(
+                GKeyProfile::ALL
+                    .into_iter()
+                    .filter_map(|profile| {
+                        state
+                            .g_key_profile_name(key, profile)
+                            .map(|name| (profile, name.to_string()))
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
     let nine_button_bindings = state
         .map(|state| {
             GAMING_KEYS
@@ -538,6 +637,7 @@ fn gaming_editor_state(state: Option<&AppState>, profile: GKeyProfile) -> Gaming
         software_control,
         mode,
         profile_bindings,
+        profile_names,
         nine_button_bindings,
     }
 }
@@ -648,6 +748,7 @@ struct KeyboardPane {
     selected_g: Option<ButtonId>,
     hovered_g: Option<ButtonId>,
     gaming_mode: GamingKeyMode,
+    profile_name_inputs: std::collections::BTreeMap<GKeyProfile, Entity<InputState>>,
     view: Entity<FunctionRowView>,
 }
 
@@ -670,6 +771,7 @@ impl KeyboardPane {
             selected_g: None,
             hovered_g: None,
             gaming_mode: GamingKeyMode::Profiles,
+            profile_name_inputs: std::collections::BTreeMap::new(),
             view,
         }
     }
@@ -709,6 +811,15 @@ impl KeyboardPane {
         self.gaming_mode = mode;
         self
     }
+
+    #[must_use]
+    fn profile_name_inputs(
+        mut self,
+        inputs: std::collections::BTreeMap<GKeyProfile, Entity<InputState>>,
+    ) -> Self {
+        self.profile_name_inputs = inputs;
+        self
+    }
 }
 
 impl RenderOnce for KeyboardPane {
@@ -719,6 +830,7 @@ impl RenderOnce for KeyboardPane {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (img_w, img_h) = self.render_size;
         let img_path = self.image_path;
+        let profile_name_inputs = self.profile_name_inputs;
         let view_clone = self.view;
         let selected = self.selected;
         let hovered = self.hovered;
@@ -740,10 +852,43 @@ impl RenderOnce for KeyboardPane {
         let pane_w = image_left + img_w;
         let gaming_bottom = gaming_slots
             .iter()
-            .map(|slot| gaming_callout_position(slot).1 + KEY_CALLOUT_H)
+            .map(|slot| gaming_callout_position(slot, gaming_mode).1 + KEY_CALLOUT_H)
             .fold(0., f32::max);
         let pane_h = (callout_band_h + img_h).max(gaming_bottom);
         let pal = theme::palette(cx);
+        let mut profile_name_overlays = Vec::new();
+        for slot in &gaming_slots {
+            let Some(profile) = (gaming_mode == GamingKeyMode::Profiles)
+                .then(|| GKeyProfile::from_button(slot.button))
+                .flatten()
+            else {
+                continue;
+            };
+            let (left, top) = gaming_callout_position(slot, gaming_mode);
+            let width = gaming_callout_width(slot.button, gaming_mode);
+            let Some(input) = profile_name_inputs.get(&profile) else {
+                continue;
+            };
+            profile_name_overlays.push(
+                div()
+                    .absolute()
+                    .left(px(left + 4.))
+                    .top(px(top + 22.))
+                    .w(px(width - 8.))
+                    .h(px(24.))
+                    .child(
+                        Input::new(input)
+                            .small()
+                            .w_full()
+                            .h(px(24.))
+                            .aria_label(tr!(
+                                "keyboard.set_profile_name",
+                                profile => profile.label()
+                            )),
+                    )
+                    .into_any_element(),
+            );
+        }
 
         div()
             .relative()
@@ -779,7 +924,7 @@ impl RenderOnce for KeyboardPane {
                 gaming_slots.clone(),
                 selected_g,
                 hovered_g,
-                callout_band_h,
+                (gaming_mode, callout_band_h),
                 image_left,
                 (pane_w, pane_h),
                 (img_w, img_h),
@@ -846,6 +991,9 @@ impl RenderOnce for KeyboardPane {
                         )
                     })),
             )
+            // Profile-name inputs render last so canvases and keyboard key
+            // overlays cannot intercept editing in the M-card name fields.
+            .children(profile_name_overlays)
     }
 }
 
@@ -966,23 +1114,74 @@ struct GamingKeyCallout {
 }
 
 impl RenderOnce for GamingKeyCallout {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the M-key card renders independent fixed-size profile and name targets"
+    )]
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
         let button = self.slot.button;
-        let (left, top) = gaming_callout_position(&self.slot);
+        let mode = self.mode;
+        let profile = (mode == GamingKeyMode::Profiles)
+            .then(|| GKeyProfile::from_button(button))
+            .flatten();
+        let (left, top) = gaming_callout_position(&self.slot, mode);
+        let width = gaming_callout_width(button, mode);
         let view_hover = self.view.clone();
+        let view_select = self.view.clone();
         let view_click = self.view;
         let binding = self.slot.binding;
         let binding_icon = self.slot.binding_icon;
         let highlighted = self.highlighted;
-        let mode = self.mode;
+        let name_target =
+            h_flex()
+                .id(("gaming-key-binding", gaming_key_id(button)))
+                .w_full()
+                .h(px(20.))
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .gap(px(2.))
+                .max_w(px(width - 8.))
+                .when_some(binding_icon, |row, icon| {
+                    row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
+                        if highlighted {
+                            rgb(ACCENT_BLUE).into()
+                        } else {
+                            pal.text_muted
+                        },
+                    ))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_caption()
+                        .text_color(if highlighted {
+                            rgb(ACCENT_BLUE).into()
+                        } else {
+                            pal.text_muted
+                        })
+                        .child(binding),
+                )
+                .when(profile.is_some(), |row| {
+                    row.cursor_pointer().child(
+                        svg()
+                            .path("action-icons/pencil.svg")
+                            .size(px(10.))
+                            .flex_none()
+                            .text_color(pal.text_muted),
+                    )
+                });
 
         v_flex()
             .id(("gaming-key-callout", gaming_key_id(button)))
             .absolute()
             .top(px(top))
             .left(px(left))
-            .w(px(KEY_CALLOUT_W))
+            .w(px(width))
             .h(px(KEY_CALLOUT_H))
             .px_1()
             .justify_center()
@@ -1009,7 +1208,12 @@ impl RenderOnce for GamingKeyCallout {
                 })
             })
             .child(
-                div()
+                h_flex()
+                    .id(("gaming-profile-select", gaming_key_id(button)))
+                    .w_full()
+                    .h(px(20.))
+                    .flex_none()
+                    .justify_center()
                     .text_caption()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if highlighted {
@@ -1017,44 +1221,27 @@ impl RenderOnce for GamingKeyCallout {
                     } else {
                         pal.text_primary
                     })
-                    .child(button.label()),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.))
-                    .max_w(px(KEY_CALLOUT_W - 8.))
-                    .when_some(binding_icon, |row, icon| {
-                        row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
-                            if highlighted {
-                                rgb(ACCENT_BLUE).into()
-                            } else {
-                                pal.text_muted
-                            },
-                        ))
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_caption()
-                            .text_color(if highlighted {
-                                rgb(ACCENT_BLUE).into()
-                            } else {
-                                pal.text_muted
+                    .child(button.label())
+                    .when_some(profile, move |row, profile| {
+                        row.role(Role::Button)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(pal.control_hover))
+                            .on_click(move |_, _, cx| {
+                                view_select.update(cx, |view, cx| {
+                                    view.select_g_profile(profile, cx);
+                                });
                             })
-                            .child(binding),
-                    ),
+                    }),
             )
+            .child(name_target)
             .on_hover(move |hovered, _window, cx| {
                 let next = (*hovered).then_some(button);
                 view_hover.update(cx, |v, vcx| v.set_hovered_g_key(next, vcx));
             })
-            .on_click(move |_ev, _window, cx| {
-                view_click.update(cx, |v, vcx| activate_gaming_key(v, button, mode, vcx));
+            .when(profile.is_none(), |card| {
+                card.on_click(move |_ev, _window, cx| {
+                    view_click.update(cx, |v, vcx| activate_gaming_key(v, button, mode, vcx));
+                })
             })
     }
 }
@@ -1284,7 +1471,7 @@ fn gaming_leader_canvas(
     slots: Vec<GamingKeySlot>,
     selected: Option<ButtonId>,
     hovered: Option<ButtonId>,
-    callout_band_h: f32,
+    (mode, callout_band_h): (GamingKeyMode, f32),
     image_left: f32,
     (pane_w, pane_h): (f32, f32),
     (img_w, img_h): (f32, f32),
@@ -1308,7 +1495,7 @@ fn gaming_leader_canvas(
                     binding_icon: None,
                     active,
                 };
-                let (left, top) = gaming_callout_position(&slot);
+                let (left, top) = gaming_callout_position(&slot, mode);
                 let key_x = image_left + x_frac * img_w;
                 let key_y = callout_band_h + y_frac * img_h;
                 let (start, elbow) = if GAMING_AUX_KEYS.contains(&button) {
@@ -1359,8 +1546,13 @@ fn gaming_key_is_highlighted(
     active || selected == Some(button) || hovered == Some(button)
 }
 
-fn gaming_callout_position(slot: &GamingKeySlot) -> (f32, f32) {
-    const LEFTS: [f32; 5] = [4., 70., 136., 202., 268.];
+fn gaming_callout_position(slot: &GamingKeySlot, mode: GamingKeyMode) -> (f32, f32) {
+    const NINE_BUTTON_LEFTS: [f32; 5] = [4., 70., 136., 202., 268.];
+    const PROFILE_LEFTS: [f32; 3] = [
+        4.,
+        4. + PROFILE_M_CALLOUT_W + GAMING_CALLOUT_GAP,
+        4. + 2. * (PROFILE_M_CALLOUT_W + GAMING_CALLOUT_GAP),
+    ];
     const G_STEP: f32 = KEY_CALLOUT_H + GAMING_G_CALLOUT_GAP;
     const G_TOPS: [f32; 5] = [
         GAMING_G_CALLOUT_TOP,
@@ -1373,14 +1565,32 @@ fn gaming_callout_position(slot: &GamingKeySlot) -> (f32, f32) {
         .iter()
         .position(|candidate| *candidate == slot.button)
     {
-        return (LEFTS[index], GAMING_M_CALLOUT_TOP);
+        let left = if mode == GamingKeyMode::Profiles {
+            PROFILE_LEFTS[index.min(PROFILE_LEFTS.len() - 1)]
+        } else {
+            NINE_BUTTON_LEFTS[index]
+        };
+        return (left, GAMING_M_CALLOUT_TOP);
     }
     let index = GAMING_KEYS
         .iter()
         .position(|candidate| *candidate == slot.button)
         .unwrap_or(0);
     // M2 is the visual anchor for the physical G-key column.
-    (LEFTS[1], G_TOPS[index])
+    let m2_left = if mode == GamingKeyMode::Profiles {
+        PROFILE_LEFTS[1]
+    } else {
+        NINE_BUTTON_LEFTS[1]
+    };
+    (m2_left, G_TOPS[index])
+}
+
+fn gaming_callout_width(button: ButtonId, mode: GamingKeyMode) -> f32 {
+    if mode == GamingKeyMode::Profiles && GKeyProfile::from_button(button).is_some() {
+        PROFILE_M_CALLOUT_W
+    } else {
+        KEY_CALLOUT_W
+    }
 }
 
 fn gaming_key_id(button: ButtonId) -> usize {
@@ -1785,6 +1995,20 @@ fn gaming_mode_selector(
         )
 }
 
+fn persist_g_profile_name(profile: GKeyProfile, name: String, cx: &mut App) {
+    AppState::update(cx, |state, cx| {
+        let device = state.current_record().and_then(|record| {
+            record
+                .persistent_config_key()
+                .map(|key| (key.to_string(), record.device_key()))
+        });
+        if let Some((config_key, device_key)) = device {
+            state.set_g_key_profile_name(&config_key, profile, &name);
+            cx.emit(StateEvent::BindingsChanged(device_key));
+        }
+    });
+}
+
 fn g_profile_selector(selected: GKeyProfile, view: &Entity<FunctionRowView>) -> impl IntoElement {
     h_flex()
         .w_full()
@@ -2006,7 +2230,12 @@ fn g913_gaming_slots(
                 x_frac: [576., 714., 853.][index] / 3600.,
                 y_frac: 97. / 1125.,
                 binding: if gaming.mode == GamingKeyMode::Profiles {
-                    SharedString::from("")
+                    GKeyProfile::from_button(button)
+                        .and_then(|profile| gaming.profile_names.get(&profile))
+                        .map_or_else(
+                            || tr!("keyboard.click_to_set_profile_name"),
+                            |name| SharedString::from(name.clone()),
+                        )
                 } else {
                     binding_label(action)
                 },

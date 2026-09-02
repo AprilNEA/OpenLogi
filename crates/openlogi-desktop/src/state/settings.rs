@@ -3,8 +3,8 @@
 use super::{AppState, StateEvent};
 use gpui::Context;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GamingKeyMode,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GKeyProfile,
+    GamingKeyMode, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -233,6 +233,26 @@ impl AppState {
         self.config
             .edit(|config| config.set_gaming_key_mode(key, mode));
         self.persist_and_reload("gaming key mode");
+    }
+
+    /// Local display name for one official M-key profile.
+    #[must_use]
+    pub fn g_key_profile_name(&self, key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.config.g_key_profile_name(key, profile)
+    }
+
+    /// Persist a trimmed profile name. Blank text clears the optional name.
+    pub fn set_g_key_profile_name(&mut self, key: &str, profile: GKeyProfile, name: &str) {
+        let name = match name.trim() {
+            "" => None,
+            value => Some(value.to_string()),
+        };
+        if self.config.g_key_profile_name(key, profile) == name.as_deref() {
+            return;
+        }
+        self.config
+            .edit(|config| config.set_g_key_profile_name(key, profile, name));
+        self.persist_config("gaming G-key profile name");
     }
 
     /// The effective thumb-wheel sensitivity for `key` (its per-device

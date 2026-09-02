@@ -210,6 +210,9 @@ pub struct DeviceConfig {
     /// function set; M1 remains the active set when the agent starts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub g_key_profiles: BTreeMap<GKeyProfile, BTreeMap<ButtonId, Binding>>,
+    /// Optional local display names for the three M-key profiles.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub g_key_profile_names: BTreeMap<GKeyProfile, String>,
     /// Whether the cluster uses official M-key profiles or nine independent
     /// buttons. Both binding stores remain intact when this changes.
     #[serde(default, skip_serializing_if = "is_default_gaming_key_mode")]
@@ -432,6 +435,7 @@ impl Default for DeviceConfig {
             enabled: true,
             g_key_software_control: false,
             g_key_profiles: BTreeMap::new(),
+            g_key_profile_names: BTreeMap::new(),
             gaming_key_mode: GamingKeyMode::Profiles,
             gaming_button_bindings: BTreeMap::new(),
             legacy_m_key_shortcuts: std::collections::BTreeSet::new(),
@@ -591,6 +595,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     g_key_profiles: BTreeMap<GKeyProfile, BTreeMap<ButtonId, Binding>>,
     #[serde(default)]
+    g_key_profile_names: BTreeMap<GKeyProfile, String>,
+    #[serde(default)]
     gaming_key_mode: GamingKeyMode,
     #[serde(default)]
     gaming_button_bindings: BTreeMap<ButtonId, Binding>,
@@ -651,6 +657,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             enabled: raw.enabled,
             g_key_software_control: raw.g_key_software_control,
             g_key_profiles,
+            g_key_profile_names: raw.g_key_profile_names,
             gaming_key_mode: raw.gaming_key_mode,
             gaming_button_bindings: raw.gaming_button_bindings,
             legacy_m_key_shortcuts: raw.legacy_m_key_shortcuts,

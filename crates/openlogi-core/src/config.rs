@@ -79,9 +79,9 @@ use settings::GestureOwner;
 /// v5 adds the app-wide `ui_scale` preference. Older files default to the
 /// standard 100% scale.
 ///
-/// Per-device custom names and the Home gallery view preference are optional
-/// and did not require a version bump: absent fields use the model name and
-/// responsive grid respectively.
+/// Per-device custom names, G-key profile names, and the Home gallery view
+/// preference are optional and did not require a version bump: absent fields
+/// use the model name, unnamed M1-M3 profiles, and responsive grid respectively.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer
@@ -1110,6 +1110,34 @@ impl Config {
             .entry(profile)
             .or_default()
             .insert(button, binding);
+    }
+
+    /// Local display name for one M-key profile.
+    #[must_use]
+    pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.g_key_profile_names.get(&profile))
+            .map(String::as_str)
+    }
+
+    /// Store or clear the local display name for one M-key profile.
+    pub fn set_g_key_profile_name(
+        &mut self,
+        device_key: &str,
+        profile: GKeyProfile,
+        name: Option<String>,
+    ) {
+        let names = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profile_names;
+        if let Some(name) = name {
+            names.insert(profile, name);
+        } else {
+            names.remove(&profile);
+        }
     }
 
     /// Current interpretation of the device's gaming-key cluster.

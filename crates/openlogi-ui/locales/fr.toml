@@ -536,6 +536,10 @@ application_folder_path_or_url = "Application, chemin de dossier ou URL"
 open_application_or_folder = "Ouvrir une application ou un dossier"
 
 [keyboard]
+click_to_set_profile_name = "Click to set"
+set_profile_name = "Set %{profile} profile name"
+profile_name_placeholder = "For example: Work"
+profile_name_description = "Leave blank to clear the local profile name."
 editor_unavailable = "Editor unavailable"
 no_keyboard_image_available = "No keyboard image available"
 search_key = "Search Key"

@@ -9,7 +9,7 @@
 use crate::binding::{Action, ButtonId};
 use crate::config::{Config, DeviceConfig};
 #[cfg(test)]
-use crate::config::{LightSettings, Lighting, LinkConfig};
+use crate::config::{GKeyProfile, LightSettings, Lighting, LinkConfig};
 use crate::device::Capabilities;
 use crate::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 #[cfg(test)]
@@ -394,6 +394,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
     fold_map_field!(camera_profiles);
+    fold_map_field!(g_key_profile_names);
 }
 
 #[cfg(test)]
@@ -692,6 +693,31 @@ mod tests {
             config.devices["unit:6be9d300"].custom_name.as_deref(),
             Some("Desk mouse"),
             "the user's alias survives the fold"
+        );
+    }
+
+    #[test]
+    fn folding_keeps_local_g_key_profile_names() {
+        let mut config = Config::default();
+        let legacy = DeviceConfig {
+            g_key_profile_names: [(GKeyProfile::M2, "Work".to_string())]
+                .into_iter()
+                .collect(),
+            ..DeviceConfig::default()
+        };
+        config
+            .devices
+            .insert("receiver:82839805:slot:1".to_string(), legacy);
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+
+        assert_eq!(
+            config.g_key_profile_name("unit:6be9d300", GKeyProfile::M2),
+            Some("Work")
         );
     }
 

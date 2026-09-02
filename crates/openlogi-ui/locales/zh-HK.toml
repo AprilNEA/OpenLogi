@@ -536,6 +536,10 @@ application_folder_path_or_url = "應用程式、資料夾路徑或 URL"
 open_application_or_folder = "開啟應用程式或資料夾"
 
 [keyboard]
+click_to_set_profile_name = "按一下設定"
+set_profile_name = "設定 %{profile} 設定檔名稱"
+profile_name_placeholder = "例如：工作"
+profile_name_description = "留空即可清除儲存在本機的設定檔名稱。"
 editor_unavailable = "Editor unavailable"
 no_keyboard_image_available = "No keyboard image available"
 search_key = "Search Key"

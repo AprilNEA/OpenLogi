@@ -1,7 +1,59 @@
 use super::*;
+use gpui::{Focusable as _, TestAppContext};
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
+use openlogi_core::config::Config;
 use openlogi_core::device::DeviceKind;
 use std::path::PathBuf;
+
+use crate::services::assets::AssetResolver;
+use crate::state::ConfigPersistence;
+
+fn install_app_state(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = cx.new(|_| {
+            AppState::with_runtime(
+                Config::ephemeral(),
+                &[],
+                &[],
+                &cache,
+                &[],
+                ConfigPersistence::MemoryOnly,
+                commands,
+            )
+        });
+        AppState::set_global(state, cx);
+    });
+}
+
+#[gpui::test]
+fn profile_name_inputs_are_created_and_accept_focus(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+
+    cx.update(|window, cx| {
+        let input = view.update(cx, |view, cx| {
+            view.sync_g_profile_name_inputs(
+                Some("test-device".to_string()),
+                &std::collections::BTreeMap::new(),
+                window,
+                cx,
+            );
+            view.profile_name_inputs
+                .get(&GKeyProfile::M1)
+                .expect("M1 profile-name input should exist")
+                .input
+                .clone()
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        assert_eq!(view.read(cx).profile_name_inputs.len(), 3);
+        assert!(input.read(cx).focus_handle(cx).is_focused(window));
+    });
+}
 
 #[test]
 fn clicking_the_selected_key_closes_the_panel() {
@@ -180,6 +232,7 @@ fn g913_gaming_diagram_maps_m_above_g_to_physical_keycaps() {
         software_control: true,
         mode: GamingKeyMode::NineButtons,
         profile_bindings: std::collections::BTreeMap::new(),
+        profile_names: std::collections::BTreeMap::new(),
         nine_button_bindings: std::collections::BTreeMap::new(),
     };
 
@@ -190,11 +243,11 @@ fn g913_gaming_diagram_maps_m_above_g_to_physical_keycaps() {
     assert_eq!(slots[3].button, ButtonId::KeyMr);
     assert_eq!(slots[4].button, ButtonId::KeyG1);
     assert_eq!(slots[8].button, ButtonId::KeyG5);
-    let first_mode_position = gaming_callout_position(&slots[0]);
-    let second_mode_position = gaming_callout_position(&slots[1]);
-    let first_g_position = gaming_callout_position(&slots[4]);
-    let second_g_position = gaming_callout_position(&slots[5]);
-    let last_g_position = gaming_callout_position(&slots[8]);
+    let first_mode_position = gaming_callout_position(&slots[0], gaming.mode);
+    let second_mode_position = gaming_callout_position(&slots[1], gaming.mode);
+    let first_g_position = gaming_callout_position(&slots[4], gaming.mode);
+    let second_g_position = gaming_callout_position(&slots[5], gaming.mode);
+    let last_g_position = gaming_callout_position(&slots[8], gaming.mode);
     assert!(
         first_mode_position.1 < first_g_position.1,
         "M keys stay above the G column"
@@ -242,6 +295,42 @@ fn g913_mode_keys_do_not_draw_keyboard_leaders() {
     assert!(!gaming_key_has_leader(ButtonId::KeyM3));
     assert!(gaming_key_has_leader(ButtonId::KeyMr));
     assert!(gaming_key_has_leader(ButtonId::KeyG1));
+}
+
+#[test]
+fn g913_mode_keys_show_saved_profile_names() {
+    let gaming = GamingEditorState {
+        available: GamingKeysAvailable {
+            g_row: true,
+            mode: true,
+            macro_record: true,
+        },
+        software_control: true,
+        mode: GamingKeyMode::Profiles,
+        profile_bindings: std::collections::BTreeMap::new(),
+        profile_names: [(GKeyProfile::M2, "Work".to_string())]
+            .into_iter()
+            .collect(),
+        nine_button_bindings: std::collections::BTreeMap::new(),
+    };
+
+    let slots = g913_gaming_slots(Some(&g913_asset()), &gaming, GKeyProfile::M2);
+
+    assert_eq!(slots[0].binding.as_ref(), "Click to set");
+    assert_eq!(slots[1].binding.as_ref(), "Work");
+    assert_eq!(slots[2].binding.as_ref(), "Click to set");
+    let m1 = gaming_callout_position(&slots[0], gaming.mode);
+    let m2 = gaming_callout_position(&slots[1], gaming.mode);
+    let m3 = gaming_callout_position(&slots[2], gaming.mode);
+    let g1 = gaming_callout_position(&slots[3], gaming.mode);
+    assert_approx_eq(
+        gaming_callout_width(ButtonId::KeyM1, gaming.mode),
+        PROFILE_M_CALLOUT_W,
+    );
+    assert_approx_eq(m2.0 - m1.0 - PROFILE_M_CALLOUT_W, GAMING_CALLOUT_GAP);
+    assert_approx_eq(m3.0 - m2.0 - PROFILE_M_CALLOUT_W, GAMING_CALLOUT_GAP);
+    assert_approx_eq(m2.0, g1.0);
+    assert!(m3.0 + PROFILE_M_CALLOUT_W < G913_G_KEY_GUTTER_W);
 }
 
 /// The same depot's `metadata.json` is authored against a *different*

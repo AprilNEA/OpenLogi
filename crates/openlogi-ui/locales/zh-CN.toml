@@ -536,6 +536,10 @@ application_folder_path_or_url = "应用、文件夹路径或 URL"
 open_application_or_folder = "打开应用或文件夹"
 
 [keyboard]
+click_to_set_profile_name = "点击设置"
+set_profile_name = "设置 %{profile} 配置名称"
+profile_name_placeholder = "点击修改"
+profile_name_description = "留空即可清除保存在本地的配置名称。"
 editor_unavailable = "编辑器不可用"
 no_keyboard_image_available = "无可用键盘图片"
 search_key = "搜索键"

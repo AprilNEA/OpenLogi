@@ -456,6 +456,8 @@ fn gaming_modes_roundtrip_with_independent_bindings() {
         ButtonId::KeyG1,
         Binding::Single(Action::VolumeDown),
     );
+    cfg.set_g_key_profile_name("keyboard", GKeyProfile::M1, Some("Work".into()));
+    cfg.set_g_key_profile_name("keyboard", GKeyProfile::M2, Some("Gaming".into()));
     cfg.set_gaming_button_binding("keyboard", ButtonId::KeyG1, Binding::Single(Action::Copy));
     cfg.set_gaming_button_binding(
         "keyboard",
@@ -496,6 +498,14 @@ fn gaming_modes_roundtrip_with_independent_bindings() {
     assert_eq!(
         restored.gaming_key_mode("keyboard"),
         GamingKeyMode::NineButtons
+    );
+    assert_eq!(
+        restored.g_key_profile_name("keyboard", GKeyProfile::M1),
+        Some("Work")
+    );
+    assert_eq!(
+        restored.g_key_profile_name("keyboard", GKeyProfile::M2),
+        Some("Gaming")
     );
 }
 
