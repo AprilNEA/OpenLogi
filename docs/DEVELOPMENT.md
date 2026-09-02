@@ -6,6 +6,8 @@ build instructions, see the [README](../README.md).
 ## Toolchain
 
 - Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
+- Protocol Buffers compiler (`protoc` 21.12 or newer), used by `buffa-build`
+  to generate the `openlogi-flow` wire types from its authoritative schema
 - macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
   Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
   version floor is `actool`, which packaging uses to compile the app icon from
@@ -27,7 +29,7 @@ Nix/devenv is optional. A normal Rust toolchain is enough.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # macOS: full Xcode 26+ with the Metal Toolchain (not only Command Line Tools)
 # Linux: see system libraries under Toolchain above
-# optional helpers: brew install cmake create-dmg sccache
+# macOS build tools: brew install cmake protobuf create-dmg sccache
 git clone https://github.com/AprilNEA/OpenLogi
 cd OpenLogi
 cargo run -p openlogi --release -- list
@@ -40,7 +42,7 @@ and keep working.
 
 ### With devenv (optional)
 
-`devenv.nix` provisions sccache, the stable Rust toolchain, platform libraries,
+`devenv.nix` provisions sccache, protoc, the stable Rust toolchain, platform libraries,
 nfpm on Linux, and the macOS packaging/env helpers GPUI needs
 (`create-dmg`, `DEVELOPER_DIR`, and `SDKROOT`). Tasks:
 
@@ -180,6 +182,7 @@ crates/
   openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
   openlogi-assets/  device-render registry schema + cached HTTP fetch from OpenLogi asset mirrors
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
+  openlogi-flow/    Flow protobuf protocol, framing, pairing, identity, and QUIC transport
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
