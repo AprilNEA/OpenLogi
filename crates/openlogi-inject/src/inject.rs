@@ -470,20 +470,24 @@ pub fn post_touchpad_scroll(delta: ScrollDelta) {
     }
 }
 
-/// Axis of a native macOS DockSwipe animation (macOS 27+ WindowServer).
+/// Axis of a native macOS gesture stream. `Horizontal`, `Vertical`, and
+/// `Pinch` are DockSwipe motions (macOS 27+ WindowServer animations); `Zoom`
+/// is the AppKit magnify gesture, posted as a separate event shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DockSwipeMotion {
+pub enum GestureMotion {
     /// Side-to-side finger travel: switches between Spaces.
     Horizontal,
     /// Up-and-down finger travel: Mission Control / App Exposé.
     Vertical,
     /// Contact spread: Show Desktop (closing) / Launchpad (spreading).
     Pinch,
+    /// Contact spread driving the magnify gesture: pinch-zoom in apps.
+    Zoom,
 }
 
-/// Lifecycle role of one streamed DockSwipe event.
+/// Lifecycle role of one streamed gesture event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DockSwipePhase {
+pub enum GesturePhase {
     /// First event of a gesture; resets progress and cancels pending end resends.
     Began,
     /// Continuation event; `delta` is added to the accumulated progress.
@@ -513,28 +517,47 @@ pub fn dock_swipe_supported() -> bool {
 /// supersedes the previous owner's animation, and the previous owner's later
 /// frames are rejected.
 ///
-/// `delta` is the progress increment of a [`DockSwipePhase::Changed`] frame
-/// (1.0 ≈ one screen width); on [`DockSwipePhase::Began`] it seeds the
+/// `delta` is the progress increment of a [`GesturePhase::Changed`] frame
+/// (1.0 ≈ one screen width); on [`GesturePhase::Began`] it seeds the
 /// accumulated progress — the vertical consumer ignores a zero-progress Began.
 /// Returns `false` when the platform cannot stream, the event was dropped, or
-/// `owner` no longer owns the stream; a `false` on [`DockSwipePhase::Began`]
+/// `owner` no longer owns the stream; a `false` on [`GesturePhase::Began`]
 /// means the caller should fall back to the bound action's discrete dispatch.
 #[expect(
     clippy::must_use_candidate,
     reason = "streaming frames are fire-and-forget; only a failed begin changes dispatch behavior"
 )]
-pub fn post_dock_swipe(
-    owner: u64,
-    motion: DockSwipeMotion,
-    phase: DockSwipePhase,
-    delta: f64,
-) -> bool {
+pub fn post_dock_swipe(owner: u64, motion: GestureMotion, phase: GesturePhase, delta: f64) -> bool {
     cfg_select! {
         target_os = "macos" => {
             macos::dockswipe::post(owner, motion, phase, delta)
         }
         _ => {
             let _ = (owner, motion, phase, delta);
+            false
+        }
+    }
+}
+
+/// Stream one native magnify (pinch-zoom) event toward the frontmost app.
+///
+/// `magnification` is this event's relative scale delta — `0.1` grows the
+/// content 10%; apps accumulate the deltas of [`GesturePhase::Changed`]
+/// frames, so a [`GesturePhase::Began`] should carry `0.0`. Unlike DockSwipe,
+/// the magnify gesture still reads plain CGEvent fields on macOS 27 — no
+/// SkyLight bridge or IOHIDEvent attachment involved. Returns `false` only
+/// off macOS; a failed post degrades through the caller's discrete fallback.
+#[expect(
+    clippy::must_use_candidate,
+    reason = "streaming frames are fire-and-forget; only a failed begin changes dispatch behavior"
+)]
+pub fn post_magnify(phase: GesturePhase, magnification: f64) -> bool {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::magnify::post(phase, magnification)
+        }
+        _ => {
+            let _ = (phase, magnification);
             false
         }
     }
@@ -624,7 +647,7 @@ mod tests {
     fn dockswipe_smoke_streams_one_horizontal_space_swipe() {
         use std::time::Duration;
 
-        use super::{DockSwipeMotion, DockSwipePhase, dock_swipe_supported, post_dock_swipe};
+        use super::{GestureMotion, GesturePhase, dock_swipe_supported, post_dock_swipe};
 
         assert!(
             dock_swipe_supported(),
@@ -632,14 +655,14 @@ mod tests {
         );
         for i in 0..=16_u32 {
             let (phase, delta) = match i {
-                0 => (DockSwipePhase::Began, 0.65 / 16.0),
-                16 => (DockSwipePhase::End, 0.0),
-                _ => (DockSwipePhase::Changed, 0.65 / 16.0),
+                0 => (GesturePhase::Began, 0.65 / 16.0),
+                16 => (GesturePhase::End, 0.0),
+                _ => (GesturePhase::Changed, 0.65 / 16.0),
             };
             assert!(
                 post_dock_swipe(
                     0x00_00_00_00_00_00_00_01,
-                    DockSwipeMotion::Horizontal,
+                    GestureMotion::Horizontal,
                     phase,
                     delta,
                 ),

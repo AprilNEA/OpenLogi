@@ -98,7 +98,7 @@ impl SessionWheels {
     }
 }
 
-use openlogi_inject::DockSwipePhase;
+use openlogi_inject::{GestureMotion, GesturePhase};
 
 /// One routed outcome of feeding a frame (or a stroke boundary) to a
 /// session's touchpad runtime.
@@ -171,7 +171,7 @@ impl TouchpadRuntime {
         frame: &TouchFrame,
         current_bindings: &BTreeMap<ButtonId, Action>,
         actions_enabled: bool,
-        native_streaming: bool,
+        dock_swipe_streaming: bool,
     ) -> TouchpadOutcome {
         if self.frozen_bindings.is_none() {
             self.frozen_bindings = Some(current_bindings.clone());
@@ -203,19 +203,18 @@ impl TouchpadRuntime {
                 // dispatch back as the fallback. The plan consults the
                 // trigger's sibling too: a commit on an unbound direction
                 // still opens the pair's stream, and a pair the system
-                // cannot honor exactly stays discrete.
-                match (native_streaming, self.swipe_plan(trigger)) {
-                    (true, Some(plan)) => {
-                        let (swipe, seeded) =
-                            ActiveSwipe::new(frame, plan, trigger, self.spread_bank.take());
-                        self.stream = Some(swipe);
-                        outcome.stream = seeded.unwrap_or_default();
-                    }
-                    (_, _) => {
-                        if let Some((trigger, action)) = self.action(trigger) {
-                            outcome.routed = TouchpadOutput::Action { trigger, action };
-                        }
-                    }
+                // cannot honor exactly stays discrete. Only the DockSwipe
+                // motions need the macOS 27 bridge — magnify reads plain
+                // CGEvent fields wherever the OS runs.
+                if let Some(plan) = self.swipe_plan(trigger)
+                    && (dock_swipe_streaming || !plan.needs_dock_swipe_bridge())
+                {
+                    let (swipe, seeded) =
+                        ActiveSwipe::new(frame, plan, trigger, self.spread_bank.take());
+                    self.stream = Some(swipe);
+                    outcome.stream = seeded.unwrap_or_default();
+                } else if let Some((trigger, action)) = self.action(trigger) {
+                    outcome.routed = TouchpadOutput::Action { trigger, action };
                 }
             }
             GestureRecognition::Scroll { dx_um, dy_um } => {
@@ -527,12 +526,12 @@ impl InputDispatcher {
                         .suppress_taps(TAP_SUPPRESSION_AFTER_GLIDE);
                 }
                 let tuning = TouchpadScrollTuning::from_plan(plan);
-                let native_streaming = openlogi_inject::dock_swipe_supported();
+                let dock_swipe_streaming = openlogi_inject::dock_swipe_supported();
                 let outcome = self.touchpads.for_session(session).update(
                     &frame,
                     &plan.touchpad_bindings,
                     touchpad_actions_enabled,
-                    native_streaming,
+                    dock_swipe_streaming,
                 );
                 Self::execute_touchpad_outcome(
                     &self.outputs,
@@ -682,13 +681,28 @@ impl InputDispatcher {
     ) {
         let owner = session.epoch();
         match &outcome.stream {
+            SwipeOutput::Begin {
+                motion: GestureMotion::Zoom,
+                progress,
+            } => {
+                // Magnify: Began carries no scale — apps accumulate Changed
+                // deltas only — so the opening delta follows immediately as
+                // the first Changed frame.
+                if openlogi_inject::post_magnify(GesturePhase::Began, 0.0)
+                    && openlogi_inject::post_magnify(GesturePhase::Changed, *progress)
+                {
+                    debug!(key, "touchpad pinch → native magnify zoom");
+                } else {
+                    tracing::warn!(key, "native magnify zoom failed to begin");
+                    if let Some((trigger, action)) = touchpads.begin_failed(session, *progress) {
+                        debug!(key, %trigger, action = %action.label(), "touchpad pinch → discrete fallback");
+                        outputs.actions.dispatch(&action, Some(key));
+                    }
+                }
+            }
             SwipeOutput::Begin { motion, progress } => {
-                if openlogi_inject::post_dock_swipe(
-                    owner,
-                    *motion,
-                    DockSwipePhase::Began,
-                    *progress,
-                ) {
+                if openlogi_inject::post_dock_swipe(owner, *motion, GesturePhase::Began, *progress)
+                {
                     debug!(key, ?motion, "touchpad swipe → native DockSwipe animation");
                 } else {
                     tracing::warn!(key, ?motion, "native dock swipe failed to begin");
@@ -708,21 +722,33 @@ impl InputDispatcher {
         match *stream {
             SwipeOutput::Idle => {}
             SwipeOutput::Begin { .. } => unreachable!("handled by execute_touchpad_outcome"),
+            SwipeOutput::Advance {
+                motion: GestureMotion::Zoom,
+                delta,
+            } => {
+                openlogi_inject::post_magnify(GesturePhase::Changed, delta);
+            }
             SwipeOutput::Advance { motion, delta } => {
-                openlogi_inject::post_dock_swipe(owner, motion, DockSwipePhase::Changed, delta);
+                openlogi_inject::post_dock_swipe(owner, motion, GesturePhase::Changed, delta);
+            }
+            SwipeOutput::Finish {
+                motion: GestureMotion::Zoom,
+                end,
+            } => {
+                openlogi_inject::post_magnify(end.as_gesture_phase(), 0.0);
             }
             SwipeOutput::Finish {
                 motion,
                 end: SwipeEnd::AtRelease,
             } => {
-                openlogi_inject::post_dock_swipe(owner, motion, DockSwipePhase::End, 0.0);
+                openlogi_inject::post_dock_swipe(owner, motion, GesturePhase::End, 0.0);
             }
             SwipeOutput::Finish {
                 motion,
                 end: SwipeEnd::Cancelled,
             } => {
                 debug!(key, ?motion, "touchpad swipe animation cancelled");
-                openlogi_inject::post_dock_swipe(owner, motion, DockSwipePhase::Cancel, 0.0);
+                openlogi_inject::post_dock_swipe(owner, motion, GesturePhase::Cancel, 0.0);
             }
         }
     }

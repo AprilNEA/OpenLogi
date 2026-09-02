@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::touchpad::{TouchContact, TouchFrame};
-use openlogi_inject::DockSwipeMotion;
+use openlogi_inject::{GestureMotion, GesturePhase};
 
 /// One pad-width of travel equals one progress unit; the constants mirror the
 /// target Casa Touch pad (2775 × 1786 @ 600 dpi ≈ 117 × 76 mm) until real
@@ -52,15 +52,15 @@ pub(super) enum SwipeOutput {
     Idle,
     /// `progress` is the opening frame's travel; later frames stream deltas.
     Begin {
-        motion: DockSwipeMotion,
+        motion: GestureMotion,
         progress: f64,
     },
     Advance {
-        motion: DockSwipeMotion,
+        motion: GestureMotion,
         delta: f64,
     },
     Finish {
-        motion: DockSwipeMotion,
+        motion: GestureMotion,
         end: SwipeEnd,
     },
 }
@@ -71,6 +71,17 @@ pub(super) enum SwipeOutput {
 pub(super) enum SwipeEnd {
     AtRelease,
     Cancelled,
+}
+
+impl SwipeEnd {
+    /// Magnify has no spring-back: a release ends the zoom where it stands,
+    /// whatever the release direction.
+    pub(super) fn as_gesture_phase(self) -> GesturePhase {
+        match self {
+            SwipeEnd::AtRelease => GesturePhase::End,
+            SwipeEnd::Cancelled => GesturePhase::Cancel,
+        }
+    }
 }
 
 /// Direction along a pair's gesture axis.
@@ -105,7 +116,7 @@ enum GestureAxis {
 /// The native swipe-commit consumer an action maps onto, with the motion
 /// progress sign it commits at. Flipping a sign anchor re-anchors the table
 /// if hardware verification disagrees.
-fn swipe_consumer(action: &Action) -> Option<(DockSwipeMotion, i8)> {
+fn swipe_consumer(action: &Action) -> Option<(GestureMotion, i8)> {
     /// Fingers right commit the next Space.
     const NEXT_DESKTOP_SIGN: i8 = 1;
     /// Spreading drives positive scale progress, which the Dock resolves as
@@ -113,13 +124,17 @@ fn swipe_consumer(action: &Action) -> Option<(DockSwipeMotion, i8)> {
     /// macOS 26+ replacement). Hardware-verified on macOS 27 — the opposite
     /// of the native trackpad's finger mapping.
     const SHOW_DESKTOP_SIGN: i8 = 1;
+    /// Spreading commits zoom-in: magnification grows content.
+    const ZOOM_IN_SIGN: i8 = 1;
     match action {
-        Action::NextDesktop => Some((DockSwipeMotion::Horizontal, NEXT_DESKTOP_SIGN)),
-        Action::PreviousDesktop => Some((DockSwipeMotion::Horizontal, -NEXT_DESKTOP_SIGN)),
-        Action::MissionControl => Some((DockSwipeMotion::Vertical, 1)),
-        Action::AppExpose => Some((DockSwipeMotion::Vertical, -1)),
-        Action::ShowDesktop => Some((DockSwipeMotion::Pinch, SHOW_DESKTOP_SIGN)),
-        Action::LaunchpadShow => Some((DockSwipeMotion::Pinch, -SHOW_DESKTOP_SIGN)),
+        Action::NextDesktop => Some((GestureMotion::Horizontal, NEXT_DESKTOP_SIGN)),
+        Action::PreviousDesktop => Some((GestureMotion::Horizontal, -NEXT_DESKTOP_SIGN)),
+        Action::MissionControl => Some((GestureMotion::Vertical, 1)),
+        Action::AppExpose => Some((GestureMotion::Vertical, -1)),
+        Action::ShowDesktop => Some((GestureMotion::Pinch, SHOW_DESKTOP_SIGN)),
+        Action::LaunchpadShow => Some((GestureMotion::Pinch, -SHOW_DESKTOP_SIGN)),
+        Action::ZoomIn => Some((GestureMotion::Zoom, ZOOM_IN_SIGN)),
+        Action::ZoomOut => Some((GestureMotion::Zoom, -ZOOM_IN_SIGN)),
         _ => None,
     }
 }
@@ -203,7 +218,7 @@ pub(super) struct SwipeStreamPlan {
     /// Travel along the axis that equals one progress unit, micrometres —
     /// pinch pairs carry both directions' divisors.
     travel: AxisTravel,
-    motion: DockSwipeMotion,
+    motion: GestureMotion,
     /// Whether finger travel maps onto motion progress negated, solved from
     /// the bindings so each bound side commits its own action.
     flipped: bool,
@@ -315,6 +330,20 @@ impl SwipeStreamPlan {
             0.0
         }
     }
+
+    /// Zoom streams decline the banked seed: an accumulated catch-up is a
+    /// visible pop in content scale, unlike a dock reveal's positional
+    /// animation where the jump reads as responsiveness. A fast zoom flick
+    /// instead falls to its discrete fallback, which works on every host.
+    fn takes_banked_seed(&self) -> bool {
+        self.motion != GestureMotion::Zoom
+    }
+
+    /// Whether streaming this plan needs the macOS 27 DockSwipe bridge.
+    /// Magnify reads plain CGEvent fields and works wherever the OS runs.
+    pub(super) fn needs_dock_swipe_bridge(&self) -> bool {
+        self.motion != GestureMotion::Zoom
+    }
 }
 
 /// The finger side a commit sign belongs to: positive progress commits on
@@ -361,7 +390,7 @@ impl ActiveSwipe {
     ) -> (Self, Option<SwipeOutput>) {
         let centroid = frame_centroid(frame.contacts());
         let mut seed = 0.0;
-        if banked_spread_um != 0.0 {
+        if banked_spread_um != 0.0 && plan.takes_banked_seed() {
             let raw = banked_spread_um / plan.travel.divisor_for(banked_spread_um);
             let mapped = if plan.flipped { -raw } else { raw };
             seed = mapped.clamp(plan.lower_bound(), plan.upper_bound());

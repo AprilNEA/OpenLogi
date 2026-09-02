@@ -1517,3 +1517,4 @@ mod symbolic_hotkey {
 }
 
 pub(in crate::inject) mod dockswipe;
+pub(in crate::inject) mod magnify;

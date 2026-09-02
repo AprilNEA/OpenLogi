@@ -16,7 +16,7 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2_foundation::NSProcessInfo;
 
-use crate::inject::{DockSwipeMotion, DockSwipePhase};
+use crate::inject::{GestureMotion, GesturePhase};
 
 // IOHIDEventTypes.h: Velocity = 9, DockSwipe = 23; a field id is
 // (type << 16) | index, and the phase rides in options bits 24–31.
@@ -82,19 +82,22 @@ pub(in crate::inject) fn supported() -> bool {
 
 pub(in crate::inject) fn post(
     owner: u64,
-    motion: DockSwipeMotion,
-    phase: DockSwipePhase,
+    motion: GestureMotion,
+    phase: GesturePhase,
     delta: f64,
 ) -> bool {
-    if phase == DockSwipePhase::Began {
-        return post_began(owner, motion, delta);
+    let Some(motion_id) = motion_id(motion) else {
+        tracing::warn!(?motion, "the gesture has no DockSwipe motion");
+        return false;
+    };
+    if phase == GesturePhase::Began {
+        return post_began(owner, motion_id, delta);
     }
-    let motion_id = motion_id(motion);
     let Ok(mut stream) = STREAM.lock() else {
         tracing::warn!("dock swipe stream mutex poisoned");
         return false;
     };
-    let event_plan = if phase == DockSwipePhase::Changed {
+    let event_plan = if phase == GesturePhase::Changed {
         stream.advance(owner, delta)
     } else {
         stream.finish(owner, phase)
@@ -105,7 +108,7 @@ pub(in crate::inject) fn post(
     };
     drop(stream);
     let posted = post_event(motion_id, &event_plan);
-    if posted && let DockSwipePhase::End | DockSwipePhase::Cancel = phase {
+    if posted && let GesturePhase::End | GesturePhase::Cancel = phase {
         schedule_end_resend(motion_id, event_plan);
     }
     if !posted {
@@ -115,23 +118,25 @@ pub(in crate::inject) fn post(
 }
 
 /// IOHIDGestureMotion values: HorizontalX = 1, VerticalY = 2, Scale = 3.
-fn motion_id(motion: DockSwipeMotion) -> isize {
+/// Magnify gestures ride a different event and have no DockSwipe motion.
+fn motion_id(motion: GestureMotion) -> Option<isize> {
     match motion {
-        DockSwipeMotion::Horizontal => 1,
-        DockSwipeMotion::Vertical => 2,
-        DockSwipeMotion::Pinch => 3,
+        GestureMotion::Horizontal => Some(1),
+        GestureMotion::Vertical => Some(2),
+        GestureMotion::Pinch => Some(3),
+        GestureMotion::Zoom => None,
     }
 }
 
 /// Open a gesture transactionally: ownership commits only if the Began
 /// event delivers, so a failed post leaves the previous owner's gesture alive.
-fn post_began(owner: u64, motion: DockSwipeMotion, delta: f64) -> bool {
+fn post_began(owner: u64, motion_id: isize, delta: f64) -> bool {
     let Ok(mut stream) = STREAM.lock() else {
         tracing::warn!("dock swipe stream mutex poisoned");
         return false;
     };
     post_began_with(&mut stream, owner, delta, |plan| {
-        post_event(motion_id(motion), &plan)
+        post_event(motion_id, &plan)
     })
 }
 
@@ -194,7 +199,7 @@ impl Stream {
         })
     }
 
-    fn finish(&mut self, owner: u64, phase: DockSwipePhase) -> Option<EventPlan> {
+    fn finish(&mut self, owner: u64, phase: GesturePhase) -> Option<EventPlan> {
         if self.owner != owner {
             return None;
         }
@@ -209,9 +214,9 @@ impl Stream {
 }
 
 /// Mac Mouse Fix's release rule: moving with the travel commits, otherwise it springs back.
-fn release_phase(phase: DockSwipePhase, progress: f64, last_delta: f64) -> u32 {
+fn release_phase(phase: GesturePhase, progress: f64, last_delta: f64) -> u32 {
     let commits = match phase {
-        DockSwipePhase::Cancel => false,
+        GesturePhase::Cancel => false,
         _ => progress != 0.0 && last_delta.signum() == progress.signum(),
     };
     if commits {
@@ -401,7 +406,7 @@ mod tests {
         FIELD_VELOCITY_X, PHASE_BEGAN, PHASE_CANCELLED, PHASE_ENDED, PHASE_SHIFT, Stream,
         post_began_with, release_phase,
     };
-    use crate::inject::DockSwipePhase;
+    use crate::inject::GesturePhase;
 
     #[test]
     fn failed_began_delivery_leaves_the_previous_owner_intact() {
@@ -412,9 +417,9 @@ mod tests {
         // Owner 2's failed Began commits nothing: owner 1 keeps the stream.
         assert!(!post_began_with(&mut stream, 2, 0.2, |_| false));
         assert!(stream.advance(1, -0.05).is_some());
-        assert!(stream.finish(1, DockSwipePhase::End).is_some());
+        assert!(stream.finish(1, GesturePhase::End).is_some());
         assert!(stream.advance(2, 0.2).is_none());
-        assert!(stream.finish(2, DockSwipePhase::Cancel).is_none());
+        assert!(stream.finish(2, GesturePhase::Cancel).is_none());
     }
 
     #[test]
@@ -442,25 +447,25 @@ mod tests {
         let released = u64::from(PHASE_ENDED) << PHASE_SHIFT;
         let cancelled = u64::from(PHASE_CANCELLED) << PHASE_SHIFT;
         assert_eq!(
-            u64::from(release_phase(DockSwipePhase::End, 0.5, 0.1)) << PHASE_SHIFT,
+            u64::from(release_phase(GesturePhase::End, 0.5, 0.1)) << PHASE_SHIFT,
             released
         );
         assert_eq!(
-            u64::from(release_phase(DockSwipePhase::End, -0.5, -0.1)) << PHASE_SHIFT,
+            u64::from(release_phase(GesturePhase::End, -0.5, -0.1)) << PHASE_SHIFT,
             released
         );
         assert_eq!(
-            u64::from(release_phase(DockSwipePhase::End, 0.5, -0.1)) << PHASE_SHIFT,
+            u64::from(release_phase(GesturePhase::End, 0.5, -0.1)) << PHASE_SHIFT,
             cancelled,
             "a release moving against the travel springs back"
         );
         assert_eq!(
-            u64::from(release_phase(DockSwipePhase::End, 0.0, 0.1)) << PHASE_SHIFT,
+            u64::from(release_phase(GesturePhase::End, 0.0, 0.1)) << PHASE_SHIFT,
             cancelled,
             "no accumulated progress cannot commit"
         );
         assert_eq!(
-            u64::from(release_phase(DockSwipePhase::Cancel, 0.5, 0.1)) << PHASE_SHIFT,
+            u64::from(release_phase(GesturePhase::Cancel, 0.5, 0.1)) << PHASE_SHIFT,
             cancelled,
             "an explicit cancel always springs back"
         );

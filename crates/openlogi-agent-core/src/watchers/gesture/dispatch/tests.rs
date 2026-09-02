@@ -1,6 +1,6 @@
 use openlogi_core::touchpad::{TouchContact, TouchFrame};
 use openlogi_hid::thumbwheel::WheelResolution;
-use openlogi_inject::DockSwipeMotion;
+use openlogi_inject::GestureMotion;
 
 use super::wheel::{ScrollScale, WheelOutput, WheelRotation};
 use super::*;
@@ -262,7 +262,7 @@ fn native_swipe_streams_progress_instead_of_dispatching() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             progress: 10_000.0 / 117_000.0,
         }
     );
@@ -275,7 +275,7 @@ fn native_swipe_streams_progress_instead_of_dispatching() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             delta: 5_000.0 / 117_000.0,
         }
     );
@@ -285,7 +285,7 @@ fn native_swipe_streams_progress_instead_of_dispatching() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Finish {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             end: SwipeEnd::AtRelease,
         }
     );
@@ -574,7 +574,7 @@ fn left_swipes_stream_negative_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             progress: -10_000.0 / 117_000.0,
         }
     );
@@ -678,7 +678,7 @@ fn vertical_up_swipes_stream_positive_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 10_000.0 / 75_600.0,
         }
     );
@@ -691,7 +691,7 @@ fn vertical_up_swipes_stream_positive_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             delta: 5_000.0 / 75_600.0,
         }
     );
@@ -719,7 +719,7 @@ fn vertical_down_swipes_stream_negative_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: -10_000.0 / 75_600.0,
         }
     );
@@ -748,7 +748,7 @@ fn cross_axis_pair_streams_the_vertical_motion() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 10_000.0 / 117_000.0,
         }
     );
@@ -780,7 +780,7 @@ fn dropped_frame_cancel_keeps_the_stream_running() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Finish {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             end: SwipeEnd::AtRelease,
         }
     );
@@ -815,7 +815,7 @@ fn contact_set_change_does_not_jump_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             progress: 5_000.0 / 117_000.0,
         }
     );
@@ -843,7 +843,7 @@ fn session_teardown_cancels_the_running_animation() {
     assert_eq!(
         runtime.terminate().stream,
         SwipeOutput::Finish {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             end: SwipeEnd::Cancelled,
         }
     );
@@ -898,7 +898,7 @@ fn four_finger_swipes_stream_like_three_finger_ones() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             progress: -10_000.0 / 117_000.0,
         }
     );
@@ -979,7 +979,7 @@ fn unbound_side_clamps_progress_at_zero() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 20_000.0 / 75_600.0,
         }
     );
@@ -995,7 +995,7 @@ fn unbound_side_clamps_progress_at_zero() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             delta: -20_000.0 / 75_600.0,
         }
     );
@@ -1014,7 +1014,7 @@ fn unbound_side_clamps_progress_at_zero() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Finish {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             end: SwipeEnd::AtRelease,
         }
     );
@@ -1044,7 +1044,7 @@ fn a_reversed_binding_flips_the_travel_mapping() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             progress: 10_000.0 / 117_000.0,
         }
     );
@@ -1077,7 +1077,7 @@ fn a_fully_bound_pair_streams_both_directions() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             progress: 10_000.0 / 117_000.0,
         }
     );
@@ -1094,7 +1094,7 @@ fn a_fully_bound_pair_streams_both_directions() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Horizontal,
+            motion: GestureMotion::Horizontal,
             delta: -30_000.0 / 117_000.0,
         }
     );
@@ -1179,7 +1179,7 @@ fn show_desktop_on_a_swipe_pair_streams_the_scale_motion() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Pinch,
+            motion: GestureMotion::Pinch,
             progress: 10_000.0 / 75_600.0,
         }
     );
@@ -1204,7 +1204,7 @@ fn the_launchpad_desktop_pair_streams_the_scale_motion() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Pinch,
+            motion: GestureMotion::Pinch,
             progress: -10_000.0 / 30_000.0,
         }
     );
@@ -1212,38 +1212,56 @@ fn the_launchpad_desktop_pair_streams_the_scale_motion() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Pinch,
+            motion: GestureMotion::Pinch,
             delta: -10_000.0 / 30_000.0,
         }
     );
 }
 
 #[test]
-fn pinch_bound_to_zoom_stays_discrete() {
+fn pinch_bound_to_zoom_streams_magnification() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchOut, Action::ZoomIn)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
+
+    // Zoom takes no banked seed — an accumulated catch-up is a visible pop
+    // in content scale — so the commit frame stays quiet and the first
+    // post-commit spread opens the stream as a magnify delta.
+    let outcome = runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
+    assert_eq!(outcome, idle());
+
+    let outcome = runtime.update(&spread_frame(90_000, 2, 30_000), &bindings, true, true);
+    assert_eq!(outcome.routed, TouchpadOutput::Idle);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: GestureMotion::Zoom,
+            progress: 10_000.0 / 30_000.0,
+        }
+    );
+    let outcome = runtime.update(&spread_frame(120_000, 2, 40_000), &bindings, true, true);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Advance {
+            motion: GestureMotion::Zoom,
+            delta: 10_000.0 / 30_000.0,
+        }
+    );
+}
+
+#[test]
+fn a_fast_zoom_flick_falls_back_to_discrete() {
     let trigger = ButtonId::TouchpadTwoFingerPinchOut;
     let bindings = BTreeMap::from([(trigger, Action::ZoomIn)]);
     let mut runtime = TouchpadRuntime::default();
-    runtime.update(
-        &frame(
-            0,
-            vec![contact(1, 40_000, 50_000), contact(2, 60_000, 50_000)],
-        ),
-        &bindings,
-        true,
-        true,
-    );
+    runtime.update(&spread_frame(0, 2, 10_000), &bindings, true, true);
 
-    // Spreading past the pinch threshold commits PinchOut, but ZoomIn has no
-    // native swipe-commit consumer — the pair stays discrete.
-    let outcome = runtime.update(
-        &frame(
-            60_000,
-            vec![contact(1, 30_000, 50_000), contact(2, 70_000, 50_000)],
-        ),
-        &bindings,
-        true,
-        true,
-    );
+    // A flick that commits on its last frame of travel never opens the
+    // stream: the release fires the bound zoom step discretely — a working
+    // fallback on every host, unlike the Launchpad no-op.
+    let outcome = runtime.update(&spread_frame(60_000, 2, 20_000), &bindings, true, true);
+    assert_eq!(outcome, idle());
+    let outcome = runtime.end(true);
     assert_eq!(
         outcome.routed,
         TouchpadOutput::Action {
@@ -1252,6 +1270,26 @@ fn pinch_bound_to_zoom_stays_discrete() {
         }
     );
     assert_eq!(outcome.stream, SwipeOutput::Idle);
+}
+
+#[test]
+fn zoom_streams_without_the_dock_swipe_bridge() {
+    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchIn, Action::ZoomOut)]);
+    let mut runtime = TouchpadRuntime::default();
+    runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, false);
+    runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, false);
+
+    // Magnify reads plain CGEvent fields — it needs none of the macOS 27
+    // SkyLight machinery the DockSwipe motions do, so the bridge flag does
+    // not gate it.
+    let outcome = runtime.update(&spread_frame(90_000, 2, 8_000), &bindings, true, false);
+    assert_eq!(
+        outcome.stream,
+        SwipeOutput::Begin {
+            motion: GestureMotion::Zoom,
+            progress: -10_000.0 / 15_000.0,
+        }
+    );
 }
 
 /// Contacts symmetric around the pad centre whose mean distance from it —
@@ -1288,7 +1326,7 @@ fn pinch_out_bound_to_mission_control_streams_the_vertical_motion() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 10_000.0 / 30_000.0,
         }
     );
@@ -1296,7 +1334,7 @@ fn pinch_out_bound_to_mission_control_streams_the_vertical_motion() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             delta: 10_000.0 / 30_000.0,
         }
     );
@@ -1315,7 +1353,7 @@ fn pinch_in_bound_to_app_expose_streams_negative_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: -12_000.0 / 15_000.0,
         }
     );
@@ -1323,7 +1361,7 @@ fn pinch_in_bound_to_app_expose_streams_negative_progress() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             delta: -10_000.0 / 15_000.0,
         }
     );
@@ -1341,7 +1379,7 @@ fn a_reversed_pinch_binding_flips_the_travel_mapping() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 12_000.0 / 15_000.0,
         }
     );
@@ -1368,7 +1406,7 @@ fn the_unbound_pinch_side_clamps_progress_at_zero() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 16_000.0 / 30_000.0,
         }
     );
@@ -1384,7 +1422,7 @@ fn four_finger_pinches_plan_their_own_pair() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             progress: 10_000.0 / 25_000.0,
         }
     );
@@ -1392,7 +1430,7 @@ fn four_finger_pinches_plan_their_own_pair() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Advance {
-            motion: DockSwipeMotion::Vertical,
+            motion: GestureMotion::Vertical,
             delta: 10_000.0 / 25_000.0,
         }
     );
@@ -1413,7 +1451,7 @@ fn a_fast_close_banks_pre_commit_travel_and_begins_at_commit() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Begin {
-            motion: DockSwipeMotion::Pinch,
+            motion: GestureMotion::Pinch,
             progress: -8_000.0 / 10_000.0,
         }
     );
@@ -1423,7 +1461,7 @@ fn a_fast_close_banks_pre_commit_travel_and_begins_at_commit() {
     assert_eq!(
         outcome.stream,
         SwipeOutput::Finish {
-            motion: DockSwipeMotion::Pinch,
+            motion: GestureMotion::Pinch,
             end: SwipeEnd::AtRelease,
         }
     );

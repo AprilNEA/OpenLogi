@@ -35,6 +35,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
 | `openlogi-inject/src/inject/macos/dockswipe.rs` | the macOS 27 DockSwipe gesture stream (SkyLight `SLEventSetIOHIDEvent` + the private `HIDEvent` class) |
+| `openlogi-inject/src/inject/macos/magnify.rs` | the field-based magnify (pinch-zoom) gesture stream (CGEvent field setters on CoreGraphics) |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
