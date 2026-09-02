@@ -23,6 +23,26 @@ fn after_kick(
     hold.accumulate(0, 0)
 }
 
+#[test]
+fn senderless_buttons_follow_the_platform_source_policy() {
+    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
+}
+
+#[test]
+fn attributed_sources_still_follow_the_device_policy() {
+    let trackpad = EventDevice {
+        product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+        ..EventDevice::default()
+    };
+    let logitech_mouse = EventDevice {
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+
+    assert!(!button_source_may_remap(Some(&trackpad)));
+    assert!(button_source_may_remap(Some(&logitech_mouse)));
+}
+
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
 // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
 // commit with the exact press and held button, and matching the release.
@@ -232,9 +252,7 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
             (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
             (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
         ]),
-        gestures: BTreeMap::new(),
-        gesture_sensitivity: GestureSensitivity::DEFAULT,
-        gesture_axis_bias: GestureAxisBias::DEFAULT,
+        ..HookMaps::default()
     };
     assert_eq!(
         rebound_thumbwheel_action(&maps, 1.0),
@@ -245,6 +263,41 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
         Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
     );
     assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
+}
+
+#[test]
+fn rebound_horizontal_wheel_uses_the_selected_devices_polarity() {
+    let maps = HookMaps {
+        bindings: BTreeMap::from([
+            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
+        ]),
+        selected_device: Some("mx3".to_owned()),
+        thumbwheel_positive_is_forward: BTreeMap::from([("mx3".to_owned(), true)]),
+        ..HookMaps::default()
+    };
+    assert_eq!(
+        rebound_thumbwheel_action(&maps, 1.0),
+        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+    );
+    assert_eq!(
+        rebound_thumbwheel_action(&maps, -1.0),
+        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+    );
+}
+
+#[test]
+fn rebound_horizontal_wheel_does_not_guess_a_selected_devices_polarity() {
+    let maps = HookMaps {
+        bindings: BTreeMap::from([
+            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
+        ]),
+        selected_device: Some("not-learned-yet".to_owned()),
+        ..HookMaps::default()
+    };
+    assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
+    assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
 }
 
 #[test]
@@ -260,9 +313,7 @@ fn native_thumbwheel_scroll_stays_os_native() {
                 default_binding(ButtonId::ThumbwheelScrollDown).into(),
             ),
         ]),
-        gestures: BTreeMap::new(),
-        gesture_sensitivity: GestureSensitivity::DEFAULT,
-        gesture_axis_bias: GestureAxisBias::DEFAULT,
+        ..HookMaps::default()
     };
     assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
     assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);

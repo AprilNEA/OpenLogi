@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_camera::Camera;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+};
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
     VerticalScrollSensitivity,
@@ -521,6 +523,82 @@ fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
     assert!(
         state.config.bindings_for(KNOWN_MOUSE_KEY).is_empty(),
         "the device's global bindings must be untouched"
+    );
+}
+
+fn ring_action(action: Action) -> RingAction {
+    RingAction::new(action).expect("test action must be valid in the Actions Ring")
+}
+
+#[test]
+fn an_unsaved_action_ring_profile_inherits_default_until_its_first_edit() {
+    let mut state = state_with_a_known_mouse();
+    let inherited = state.current_action_ring_layout();
+
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+
+    assert_eq!(state.current_action_ring_layout(), inherited);
+    assert!(
+        state.current_action_ring().per_app.is_empty(),
+        "selecting an application must not persist an unchanged layout"
+    );
+
+    state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
+
+    let ring = state.current_action_ring();
+    let safari = ring
+        .per_app
+        .get("com.apple.Safari")
+        .expect("the first edit creates the application layout");
+    assert_eq!(
+        ring.default, inherited,
+        "the default layout stays unchanged"
+    );
+    assert_eq!(safari.slots[&ActionRingSlot::Top].action(), &Action::NewTab);
+    assert_eq!(
+        safari.slots[&ActionRingSlot::Bottom],
+        inherited.slots[&ActionRingSlot::Bottom],
+        "the application profile starts as a complete copy of Default"
+    );
+}
+
+#[test]
+fn an_action_ring_icon_edit_targets_the_open_application_layout() {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+
+    state.commit_action_ring_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
+
+    let ring = state.current_action_ring();
+    assert_eq!(ring.default.slots[&ActionRingSlot::Top].custom_icon(), None);
+    assert_eq!(
+        ring.per_app["com.apple.Safari"].slots[&ActionRingSlot::Top].custom_icon(),
+        Some(ActionRingIcon::Keyboard)
+    );
+}
+
+#[test]
+fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_binding(ButtonId::Back, Action::Undo);
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+    state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
+
+    state.remove_editing_action_ring_profile();
+
+    assert_eq!(state.editing_action_ring_app(), None);
+    assert!(state.current_action_ring().per_app.is_empty());
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
+    );
+    assert_eq!(
+        state.editing_app(),
+        Some("com.apple.Safari"),
+        "the Buttons editor keeps its independent scope"
     );
 }
 

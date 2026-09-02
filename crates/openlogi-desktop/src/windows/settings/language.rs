@@ -19,7 +19,7 @@ impl SelectItem for LanguageOption {
 
     fn title(&self) -> SharedString {
         if self.localize_label {
-            SharedString::from(rust_i18n::t!("Follow system").into_owned())
+            SharedString::from(rust_i18n::t!("appearance.follow_system").into_owned())
         } else {
             SharedString::from(self.label)
         }

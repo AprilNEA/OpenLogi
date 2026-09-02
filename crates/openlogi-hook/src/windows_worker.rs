@@ -1,7 +1,10 @@
 //! Pure lifecycle state for the Windows hook worker.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "windows")]
 use std::sync::{Mutex, PoisonError};
+
+use crate::ForegroundApp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WorkerPhase {
@@ -40,6 +43,61 @@ pub(super) const fn worker_transition(phase: WorkerPhase, event: WorkerEvent) ->
     }
 }
 
+/// Coalesces a burst of native notifications until their queued snapshot has
+/// been delivered by the owning message pump.
+pub(super) struct NotificationLatch {
+    pending: AtomicBool,
+}
+
+impl NotificationLatch {
+    pub(super) const fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    /// Claim responsibility for queueing the next delivery.
+    pub(super) fn claim(&self) -> bool {
+        !self.pending.swap(true, Ordering::AcqRel)
+    }
+
+    /// Allow a later native notification to queue another delivery.
+    pub(super) fn delivered(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+/// The last semantic foreground snapshot delivered by the Windows observer.
+pub(super) struct ForegroundChanges {
+    published: PublishedForeground,
+}
+
+enum PublishedForeground {
+    NotYet,
+    Value(Option<ForegroundApp>),
+}
+
+impl Default for ForegroundChanges {
+    fn default() -> Self {
+        Self {
+            published: PublishedForeground::NotYet,
+        }
+    }
+}
+
+impl ForegroundChanges {
+    pub(super) fn observe(&mut self, current: Option<&ForegroundApp>) -> bool {
+        if matches!(
+            &self.published,
+            PublishedForeground::Value(published) if published.as_ref() == current
+        ) {
+            return false;
+        }
+        self.published = PublishedForeground::Value(current.cloned());
+        true
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(super) struct WorkerStatus {
     phase: Mutex<WorkerPhase>,
@@ -69,6 +127,10 @@ impl WorkerStatus {
 mod tests {
     use super::*;
 
+    fn app(id: &str) -> ForegroundApp {
+        ForegroundApp::unnamed(id.to_owned())
+    }
+
     #[test]
     fn worker_stop_has_an_explicit_terminal_path() {
         let running = worker_transition(WorkerPhase::Starting, WorkerEvent::Started);
@@ -96,5 +158,30 @@ mod tests {
                 "teardown must not revive a failed worker"
             );
         }
+    }
+
+    #[test]
+    fn notification_bursts_queue_one_delivery_until_observed() {
+        let latch = NotificationLatch::new();
+
+        assert!(latch.claim());
+        assert!(!latch.claim());
+        assert!(!latch.claim());
+        latch.delivered();
+        assert!(latch.claim());
+    }
+
+    #[test]
+    fn foreground_changes_publish_the_initial_snapshot_and_semantic_changes() {
+        let mut changes = ForegroundChanges::default();
+
+        assert!(changes.observe(None));
+        assert!(!changes.observe(None));
+        let one = app("c:\\apps\\one.exe");
+        assert!(changes.observe(Some(&one)));
+        assert!(!changes.observe(Some(&one)));
+        let two = app("c:\\apps\\two.exe");
+        assert!(changes.observe(Some(&two)));
+        assert!(changes.observe(None));
     }
 }

@@ -1047,6 +1047,144 @@ Click = \"Paste\"
 }
 
 #[test]
+fn migrates_pre_v7_thumbwheel_defaults_to_normalised_native_direction() {
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+}
+
+#[test]
+fn migrates_a_pre_v7_per_app_pair_that_was_effectively_default() {
+    // The app overrides only one half; the other old default comes from a
+    // custom global pair. The migration must materialise both new defaults in
+    // the app so it remains native without changing the custom global profile.
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"NextTab\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+
+[devices.\"unit:6be9d300\".per_app_bindings.\"com.example.Editor\"]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let app = cfg.effective_bindings("unit:6be9d300", Some("com.example.Editor"));
+    assert_eq!(
+        app.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+    assert_eq!(
+        app.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        cfg.bindings_for("unit:6be9d300")
+            .get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::NextTab)),
+        "the custom global pair must stay literal"
+    );
+}
+
+#[test]
+fn pre_v7_thumbwheel_migration_leaves_a_custom_pair_unchanged() {
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"NextTab\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::NextTab))
+    );
+}
+
+#[test]
+fn pre_v7_thumbwheel_migration_preserves_non_single_binding_shapes() {
+    let v6 = "\
+schema_version = 6
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = { short = \"HorizontalScrollRight\", long = \"NextTab\" }
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v6).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v6");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    let Some(Binding::LongPress(up)) = bindings.get(&ButtonId::ThumbwheelScrollUp) else {
+        panic!("custom long-press binding must keep its shape");
+    };
+    assert_eq!(up.short(), &Action::HorizontalScrollRight);
+    assert_eq!(up.long(), &Action::NextTab);
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+}
+
+#[test]
+fn v7_reversed_thumbwheel_pair_survives_reload() {
+    let v7 = "\
+schema_version = 7
+
+[devices.\"unit:6be9d300\".bindings]
+ThumbwheelScrollUp = \"HorizontalScrollRight\"
+ThumbwheelScrollDown = \"HorizontalScrollLeft\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, v7).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load v7");
+    let bindings = cfg.bindings_for("unit:6be9d300");
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::HorizontalScrollRight))
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::HorizontalScrollLeft))
+    );
+}
+
+#[test]
 fn migration_gesture_map_wins_over_legacy_single_gesture_button_entry() {
     // The data-loss guard: when a legacy single button_bindings[GestureButton]
     // entry coexists with a gesture_bindings map (reachable via hand-edited

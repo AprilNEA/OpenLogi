@@ -202,9 +202,10 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
   statics.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
-  `AXIsProcessTrusted[WithOptions]` and the two extern statics they need
-  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and `NSString::to_str(pool)`
-  (the borrow is tied to the pool).
+  the `NSWorkspace` activation-observer registration and typed notification
+  payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they
+  need (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and
+  `NSString::to_str(pool)` (the borrow is tied to the pool).
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
@@ -235,9 +236,11 @@ code on a bare thread does, because the framework still autoreleases internal
 temporaries. The three places that keep an explicit `objc2::rc::autoreleasepool`,
 and the only ones that should:
 
-- `openlogi-hook`'s `frontmost_application` — a watcher thread with no run loop,
-  and `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
-  localized name).
+- `openlogi-hook`'s frontmost-application reads and activation observer — the
+  watcher and notification callback may run on threads with no run loop, and
+  `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
+  localized name). Registration and removal use the same boundary so AppKit's
+  internal autoreleased temporaries are drained as well.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is

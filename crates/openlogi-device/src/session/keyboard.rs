@@ -28,11 +28,18 @@ use openlogi_core::binding::ButtonId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use super::gesture::{CaptureChannel, CapturedInput, GestureError, enumerate_controls, restore};
-use crate::ChannelRegistry;
-use crate::SharedChannel;
-use crate::backend::HidBackend;
+use super::capture_restore::{
+    ArmedReporting, CaptureStop, ReprogRestore, divert_change, drop_listener_after,
+    restore_after_stop, rollback_capture_start, stop_for_current_publication,
+    wait_for_channel_change,
+};
+use super::gesture::{
+    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
+    PendingCaptureRestore, enumerate_controls,
+};
+use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
@@ -67,12 +74,26 @@ pub async fn run_keyboard_capture_session(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
-) -> Result<(), GestureError> {
+    device_io: DeviceIoGate,
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if !device_io.allows_io() {
+        return Err(device_io_suspended().into());
+    }
     let chan = open_route_channel(backend, &route)
-        .await?
+        .await
+        .map_err(GestureError::from)?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());
-    run_keyboard_capture_session_on(route, shared, wanted, sink, shutdown, channel_slot).await
+    run_keyboard_capture_session_on(
+        shared,
+        wanted,
+        sink,
+        shutdown,
+        channel_slot,
+        None,
+        device_io,
+    )
+    .await
 }
 
 /// Run keyboard capture on the exact channel currently published by `registry`.
@@ -87,23 +108,37 @@ pub async fn run_keyboard_capture_session_with_registry(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
     registry: &ChannelRegistry,
-) -> Result<(), GestureError> {
+    device_io: DeviceIoGate,
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
         .ok_or(GestureError::DeviceNotFound)?;
-    run_keyboard_capture_session_on(route, shared, wanted, sink, shutdown, channel_slot).await
+    run_keyboard_capture_session_on(
+        shared,
+        wanted,
+        sink,
+        shutdown,
+        channel_slot,
+        Some(registry),
+        device_io,
+    )
+    .await
 }
 
 async fn run_keyboard_capture_session_on(
-    route: DeviceRoute,
     shared: SharedChannel,
     wanted: BTreeMap<u16, ButtonId>,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
-) -> Result<(), GestureError> {
+    registry: Option<&ChannelRegistry>,
+    device_io: DeviceIoGate,
+) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    if !device_io.allows_io() {
+        return Err(device_io_suspended().into());
+    }
     let chan = Arc::clone(shared.channel());
-    let device_index = route.device_index();
+    let device_index = shared.device_index();
     let device = Device::new(Arc::clone(&chan), device_index)
         .await
         .map_err(|_| GestureError::DeviceUnreachable(device_index))?;
@@ -116,16 +151,23 @@ async fn run_keyboard_capture_session_on(
         .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
     let rc = ReprogControlsV4::new(Arc::clone(&chan), device_index, info.index);
     let controls = enumerate_controls(&rc).await?;
-
-    let diverted = arm_keys(&rc, &controls, &wanted).await?;
+    let mut armed = ArmedKeys {
+        controls: rc,
+        reporting: Vec::new(),
+        diverted: BTreeMap::new(),
+    };
+    if let Err(error) = arm_keys(&controls, &wanted, &mut armed).await {
+        let pending = armed.into_pending(&shared);
+        return Err(rollback_capture_start(error, pending, &shared, registry).await);
+    }
 
     // Physical press state per CID. Behind a `Mutex` because the channel's
     // read thread invokes the listener by shared reference.
     let held: Arc<Mutex<BTreeSet<u16>>> = Arc::new(Mutex::new(BTreeSet::new()));
-    let feature_index = info.index;
+    let feature_index = armed.controls.feature_index();
     let listener = chan.add_msg_listener_guarded({
         let held = Arc::clone(&held);
-        let diverted = diverted.clone();
+        let diverted = armed.diverted.clone();
         let sink = sink.clone();
         move |raw, matched| {
             if matched {
@@ -156,44 +198,33 @@ async fn run_keyboard_capture_session_on(
         .ok()
         .flatten()
         .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
-    let wake_events = wireless.as_ref().map(EmittingFeature::listen);
 
     // Publish this keyboard's open channel so hardware writes (Fn-lock)
     // reuse it instead of opening the same HID node a second time. Cleared
     // on the way out.
     if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(shared);
+        *slot = Some(shared.clone());
     }
 
     info!(
         index = device_index,
-        keys = diverted.len(),
-        wake_rearm = wake_events.is_some(),
+        keys = armed.diverted.len(),
+        wake_rearm = wireless.is_some(),
         "keyboard key capture active"
     );
-    let mut shutdown = shutdown;
-    match wake_events {
-        None => {
-            let _ = shutdown.await;
-        }
-        Some(wake_events) => loop {
-            tokio::select! {
-                _ = &mut shutdown => break,
-                event = wake_events.recv() => {
-                    let Ok(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
-                        // Emitter gone (feature dropped) — nothing left to
-                        // watch; fall back to a plain shutdown wait.
-                        let _ = shutdown.await;
-                        break;
-                    };
-                    info!(?broadcast, "keyboard reconnected — re-arming key diversion");
-                    rearm_keys(&rc, &diverted).await;
-                }
-            }
+    let stop = monitor_keyboard_capture(
+        KeyboardMonitor {
+            armed: &armed,
+            device_index,
+            registry,
+            shared: &shared,
         },
-    }
+        wireless,
+        shutdown,
+        device_io,
+    )
+    .await;
 
-    drop(listener);
     // The slot is a last-writer-wins cell, so a sibling session may have
     // published its own channel after ours. Clear it only while it still
     // holds *this* session's channel — evicting the sibling's would silently
@@ -206,11 +237,69 @@ async fn run_keyboard_capture_session_on(
     {
         *slot = None;
     }
-    for &cid in diverted.keys() {
-        restore(rc.undivert_cid(cid).await, "keyboard key");
-    }
+    let pending = armed.into_pending(&shared);
+    // Keep accepting edges until firmware restoration is complete. The agent
+    // drains this listener's forwarding task before publishing ordered Done,
+    // so this session remains the sole owner of every input captured while
+    // its controls could still be diverted.
+    let outcome = drop_listener_after(
+        listener,
+        restore_after_stop(stop, pending, &shared, registry),
+    )
+    .await;
     debug!(index = device_index, "keyboard key capture stopped");
-    Ok(())
+    Ok(outcome)
+}
+
+struct KeyboardMonitor<'a> {
+    armed: &'a ArmedKeys,
+    device_index: u8,
+    registry: Option<&'a ChannelRegistry>,
+    shared: &'a SharedChannel,
+}
+
+async fn monitor_keyboard_capture(
+    context: KeyboardMonitor<'_>,
+    wireless: Option<WirelessDeviceStatusFeature>,
+    shutdown: oneshot::Receiver<()>,
+    mut device_io: DeviceIoGate,
+) -> CaptureStop {
+    let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        if !device_io.allows_io() && !device_io.wait_until_allowed().await {
+            return stop_for_current_publication(context.registry, context.shared);
+        }
+        tokio::select! {
+            biased;
+
+            allowed = device_io.changed() => {
+                if allowed.is_none() {
+                    return stop_for_current_publication(context.registry, context.shared);
+                }
+            }
+            _ = &mut shutdown => {
+                return stop_for_current_publication(context.registry, context.shared);
+            }
+            transition = wait_for_channel_change(context.registry, context.shared) => {
+                info!(index = context.device_index, "inventory replaced or removed keyboard capture channel — restarting session");
+                return transition;
+            }
+            event = async {
+                match wake_events.as_ref() {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
+                    wake_events = None;
+                    continue;
+                };
+                info!(?broadcast, "keyboard reconnected — re-arming key diversion");
+                rearm_keys(context.armed, &device_io).await;
+            }
+        }
+    }
 }
 
 /// Diff one full diverted-control snapshot into exactly one edge per physical
@@ -237,22 +326,47 @@ fn emit_button_edges(
     }
 }
 
-/// Divert every wanted control the keyboard exposes as divertable, returning
-/// the armed `CID → ButtonId` subset. Missing / non-divertable controls are
-/// skipped with a debug log, so a partially-supported keyboard degrades per
-/// key rather than failing whole.
+struct ArmedKeys {
+    controls: ReprogControlsV4,
+    reporting: Vec<ArmedReporting>,
+    diverted: BTreeMap<u16, ButtonId>,
+}
+
+impl ArmedKeys {
+    fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
+        let feature_index = self.controls.feature_index();
+        PendingCaptureRestore::new(
+            retired,
+            ReprogRestore::new(feature_index, self.reporting),
+            None,
+        )
+    }
+}
+
+/// Divert every wanted control the keyboard exposes, adding successful CIDs to
+/// dispatch state and every possibly-applied write to rollback state. Missing
+/// or non-divertable controls are skipped so support degrades per key.
 async fn arm_keys(
-    rc: &ReprogControlsV4,
     controls: &[reprog_controls::CtrlIdInfo],
     wanted: &BTreeMap<u16, ButtonId>,
-) -> Result<BTreeMap<u16, ButtonId>, GestureError> {
-    let mut diverted = BTreeMap::new();
+    armed: &mut ArmedKeys,
+) -> Result<(), GestureError> {
     for (&cid, &button) in wanted {
         if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-            rc.divert_cid(cid)
+            let original = armed
+                .controls
+                .get_cid_reporting(cid)
+                .await
+                .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+            // A transport failure does not prove the firmware rejected the
+            // command, so include this CID in rollback before writing.
+            armed.reporting.push(ArmedReporting { cid, original });
+            armed
+                .controls
+                .set_cid_reporting_full(cid, divert_change(original, false))
                 .await
                 .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            diverted.insert(cid, button);
+            armed.diverted.insert(cid, button);
         } else {
             debug!(
                 cid = format_args!("{cid:#06x}"),
@@ -260,25 +374,36 @@ async fn arm_keys(
             );
         }
     }
-    Ok(diverted)
+    Ok(())
 }
 
 /// Re-issue diversion for every armed control after a device power-cycle.
 /// Failures are logged, not propagated — the next reconnection broadcast
 /// retries.
-async fn rearm_keys(rc: &ReprogControlsV4, diverted: &BTreeMap<u16, ButtonId>) {
+async fn rearm_keys(armed: &ArmedKeys, device_io: &DeviceIoGate) {
     // A settling pause: the broadcast arrives the instant the link is back,
     // occasionally before the device accepts feature writes again.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    for &cid in diverted.keys() {
-        if let Err(e) = rc.divert_cid(cid).await {
+    if !device_io.allows_io() {
+        return;
+    }
+    for &reporting in &armed.reporting {
+        if let Err(e) = armed
+            .controls
+            .set_cid_reporting_full(reporting.cid, divert_change(reporting.original, false))
+            .await
+        {
             warn!(
-                cid = format_args!("{cid:#06x}"),
+                cid = format_args!("{:#06x}", reporting.cid),
                 error = ?e,
                 "re-divert after wake failed — key stays native until next wake"
             );
         }
     }
+}
+
+fn device_io_suspended() -> GestureError {
+    GestureError::Hid(BackendError::Backend("host device I/O is suspended".into()))
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hidpp::protocol::v10::{Message, MessageHeader};
 use hidpp::receiver::unifying::{Event as UnifyingEvent, decode_notification};
@@ -9,9 +10,10 @@ use openlogi_core::device::{
 };
 
 use super::cache::{
-    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
-    keep_known_capabilities,
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_INTERVAL, backfill_identity,
+    is_stale, keep_known_capabilities,
 };
+use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
 use super::probe::{
     NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
@@ -26,11 +28,12 @@ use crate::channel::scripted::{
 };
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
-fn cache_entry(probed_tick: u64) -> Cached {
+fn cache_entry() -> Cached {
     Cached {
         probe: ProbedFeatures::default(),
         battery: None,
-        probed_tick,
+        events: EventFeatureIndices::default(),
+        probed_at: Instant::now(),
     }
 }
 
@@ -53,7 +56,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
         receiver_uid: "DA2699E1".into(),
         slot: 1,
     };
-    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry(0))]);
+    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry())]);
     assert!(
         !e.cache_dirty,
         "non-persistable fresh probe dirtied the cache"
@@ -71,7 +74,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
     let bolt = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
-    e.apply_outcomes(vec![CacheOutcome::Fresh(bolt, cache_entry(0))]);
+    e.apply_outcomes(vec![CacheOutcome::Fresh(bolt, cache_entry())]);
     assert!(
         e.cache_dirty,
         "persistable fresh probe must dirty the cache"
@@ -84,7 +87,7 @@ fn cache_entry_survives_grace_then_evicts() {
     let key = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
-    e.cache.insert(key.clone(), cache_entry(0));
+    e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
     // Missing for the whole grace window: kept.
     for _ in 0..CACHE_MISS_GRACE {
@@ -106,7 +109,7 @@ fn cache_entry_survives_grace_then_evicts() {
 fn being_seen_resets_the_miss_counter() {
     let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
     let key = CacheKey::Bolt { unit_id: [9; 4] };
-    e.cache.insert(key.clone(), cache_entry(0));
+    e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
     let seen: HashSet<CacheKey> = std::iter::once(key.clone()).collect();
     e.evict_unseen(&nobody); // miss 1
@@ -121,37 +124,39 @@ fn being_seen_resets_the_miss_counter() {
 }
 
 #[test]
-fn cached_probe_is_reused_until_refresh_ticks() {
+fn cached_probe_is_reused_until_refresh_interval() {
+    let probed_at = Instant::now();
     let cached = Cached {
         probe: ProbedFeatures::default(),
         battery: None,
-        probed_tick: 10,
+        events: EventFeatureIndices::default(),
+        probed_at,
     };
-    assert!(!is_stale(&cached, 10), "same tick is fresh");
+    assert!(!is_stale(&cached, probed_at), "same instant is fresh");
     assert!(
-        !is_stale(&cached, 10 + REFRESH_TICKS - 1),
+        !is_stale(&cached, probed_at + Duration::from_secs(29)),
         "just under the window is still fresh"
     );
     assert!(
-        is_stale(&cached, 10 + REFRESH_TICKS),
+        is_stale(&cached, probed_at + REFRESH_INTERVAL),
         "at the window the probe is refreshed"
     );
 }
 
 #[test]
 fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
-    let cached = cache_entry(10);
+    let cached = cache_entry();
     assert_eq!(
-        unifying_probe_budget(Some(&cached), 10),
+        unifying_probe_budget(Some(&cached), cached.probed_at),
         UNIFYING_CACHED_SLOT_PROBE
     );
     assert_eq!(
-        unifying_probe_budget(Some(&cached), 10 + REFRESH_TICKS),
+        unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL),
         UNIFYING_SLOT_PROBE,
         "stale entries still get enough time for a full feature walk"
     );
     assert_eq!(
-        unifying_probe_budget(None, 10),
+        unifying_probe_budget(None, Instant::now()),
         UNIFYING_SLOT_PROBE,
         "first sight still gets the full feature-walk budget"
     );
@@ -179,7 +184,7 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
     let writes_before = handle.written_reports().len();
 
     let cache = HashMap::new();
-    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache, 0)
+    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache, Instant::now(), None)
         .await
         .expect("an offline slot still surfaces from its re-broadcast");
 
@@ -588,7 +593,7 @@ fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> Pro
 }
 
 /// A control-table read that fails half way reads exactly like "no haptic
-/// panel", and the answer is memoized for `REFRESH_TICKS` — so the Actions Ring
+/// panel", and the answer is memoized for `REFRESH_INTERVAL` — so the Actions Ring
 /// binding would vanish from the GUI for half a minute on a device that has it.
 #[test]
 fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {

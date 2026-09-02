@@ -57,13 +57,15 @@ pub fn default_binding(button: ButtonId) -> Action {
                       not because the control stays native like the keyboard arm below"
         )]
         ButtonId::Thumbwheel => Action::None,
-        // The thumb wheel scrolls horizontally by default: rotating it produces
-        // continuous horizontal scroll, with "up" → right and "down" → left.
-        // The wheel watcher renders these two actions as smooth, sensitivity-
-        // scaled scrolling rather than the discrete per-press burst a button
-        // would get (see `watchers::gesture`).
-        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
-        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
+        // The thumb wheel scrolls horizontally in firmware: "up" (forward)
+        // scrolls left and "down" scrolls right. The device capture boundary
+        // normalises model-specific `0x2150 default_dir` polarity before these
+        // bindings are resolved, so the same physical direction reaches the
+        // same default on every model. The wheel watcher renders these actions
+        // as smooth, sensitivity-scaled scrolling rather than the discrete
+        // per-press burst a button would get (see `watchers::gesture`).
+        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollLeft,
+        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollRight,
         ButtonId::GestureButton => Action::MissionControl,
         ButtonId::HapticPanel => Action::ShowActionsRing,
         // Keyboard keys stay on their native firmware function until the user

@@ -26,7 +26,7 @@ use tokio::{
 use tracing::{debug, info};
 
 use crate::{
-    ChannelPool, DeviceRoute,
+    ChannelPool, DeviceIoGate, DeviceRoute,
     backend::BackendError,
     reprog_controls::{self, ReprogControlsV4},
 };
@@ -105,7 +105,13 @@ pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
     shutdown: oneshot::Receiver<HostSwitchStopReason>,
     channel_pool: ChannelPool,
+    mut device_io: DeviceIoGate,
 ) -> Result<Option<u8>, HostSwitchError> {
+    if !device_io.allows_io() {
+        return Err(HostSwitchError::Hid(BackendError::Backend(
+            "host device I/O is suspended".into(),
+        )));
+    }
     let channel = open_channel(&channel_pool, &keyboard, "opening keyboard channel")
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
@@ -160,7 +166,7 @@ pub async fn run_host_switch_session(
     };
 
     drop(listener);
-    if outcome.1 {
+    if outcome.1 && device_io.wait_until_allowed().await {
         restore_host_controls(&controls, armed).await;
     }
     Ok(outcome.0)

@@ -9,13 +9,14 @@ authors.workspace = true
 description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux via evdev+uinput; Windows via WH_MOUSE_LL."
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.8.1" }
-openlogi-inject = { path = "../openlogi-inject", version = "0.8.1" }
+openlogi-core = { path = "../openlogi-core", version = "0.8.3" }
+openlogi-inject = { path = "../openlogi-inject", version = "0.8.3" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }
+futures-lite = { workspace = true }
 libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
@@ -28,6 +29,7 @@ ctrlc = "3"
 # CGEventTap stays on core-graphics/core-foundation (the freeze-hazard run-loop
 # machinery). The frontmost-app read uses objc2 (NSWorkspace) so no raw `objc`.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { workspace = true }
 core-graphics = { workspace = true }
 core-foundation = { workspace = true }
 # For `ForeignType::as_ptr` on `CGEvent` (to reach the raw `CGEventRef` for the
@@ -37,11 +39,19 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber"] }
+objc2-foundation = { workspace = true, features = [
+    "block2",
+    "NSDictionary",
+    "NSNotification",
+    "NSOperation",
+    "NSString",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

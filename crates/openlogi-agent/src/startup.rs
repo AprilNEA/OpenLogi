@@ -134,6 +134,7 @@ impl InputServices {
             shared.capture_channel.clone(),
             shared.channel_registry.clone(),
             shared.receiver_access.clone(),
+            shared.device_io.clone(),
             sender,
         ) {
             Ok(runtime) => runtime,
@@ -170,21 +171,29 @@ impl InputServices {
 /// Start the HID++ background sessions that do not need Accessibility.
 pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
     watchers::gesture::spawn(
-        shared.capture_plans.clone(),
+        &shared.capture_plans,
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
-        GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
+        shared.channel_registry.clone(),
+        shared.device_io.clone(),
+        GestureOutputs::new(
+            inputs.dispatcher.clone(),
+            inputs.scroll_input.clone(),
+            shared.hook_maps.clone(),
+        ),
     );
     watchers::host_switch::spawn(
-        shared.host_switch_links.clone(),
+        &shared.host_switch_links,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
+        shared.device_io.clone(),
     );
     watchers::keyboard::spawn(
-        shared.keyboard_spec.clone(),
+        &shared.keyboard_spec,
         shared.keyboard_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
+        shared.device_io.clone(),
         inputs.dispatcher.clone(),
     );
 }
@@ -224,7 +233,10 @@ pub(crate) enum Watcher {
 /// stream.
 pub(crate) fn spawn_state_watchers(
     shared: &SharedRuntime,
-) -> impl Stream<Item = WatcherEvent> + Unpin + use<> {
+) -> (
+    impl Stream<Item = WatcherEvent> + Unpin + use<>,
+    watchers::inventory::InventoryRefresh,
+) {
     fn tagged<T: Send + 'static>(
         rx: tokio::sync::mpsc::UnboundedReceiver<T>,
         source: Watcher,
@@ -237,12 +249,13 @@ pub(crate) fn spawn_state_watchers(
         .chain(stream::iter([WatcherEvent::Lost(source)]))
         .boxed()
     }
-    stream::select_all([
+    let inventory = watchers::inventory::spawn_with_registry(
+        shared.channel_registry.clone(),
+        shared.device_io.clone(),
+    );
+    let streams = stream::select_all([
         tagged(
-            watchers::inventory::spawn_with_registry(
-                Duration::from_secs(2),
-                shared.channel_registry.clone(),
-            ),
+            inventory.events,
             Watcher::Inventory,
             WatcherEvent::Inventory,
         ),
@@ -252,7 +265,7 @@ pub(crate) fn spawn_state_watchers(
             WatcherEvent::Camera,
         ),
         tagged(
-            watchers::foreground_app::spawn(Duration::from_secs(1)),
+            watchers::foreground_app::spawn(),
             Watcher::App,
             WatcherEvent::App,
         ),
@@ -266,7 +279,8 @@ pub(crate) fn spawn_state_watchers(
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
-    ])
+    ]);
+    (streams, inventory.refresh)
 }
 
 /// Seed the permission facts with non-prompting reads, so a client that

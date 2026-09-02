@@ -33,6 +33,8 @@ use crate::{
     KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
+pub(crate) mod foreground;
+
 const WHEEL_DELTA: f64 = 120.0;
 
 thread_local! {
@@ -275,7 +277,7 @@ fn hook_thread(
 
     worker.transition(WorkerEvent::Started);
     let _ = ready.send(Ok(thread_id));
-    let exit = message_loop();
+    let exit = message_loop(|_| false);
 
     let failure = match exit {
         MessageLoopExit::Quit => {
@@ -307,7 +309,7 @@ enum MessageLoopExit {
     Failed(u32),
 }
 
-fn message_loop() -> MessageLoopExit {
+fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) -> MessageLoopExit {
     let mut msg = MSG::default();
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
@@ -320,6 +322,9 @@ fn message_loop() -> MessageLoopExit {
             // SAFETY: GetLastError reads the calling thread's last-error code
             // immediately after the failed GetMessageW call.
             return MessageLoopExit::Failed(unsafe { GetLastError() });
+        }
+        if handle_thread_message(&msg) {
+            continue;
         }
         // SAFETY: `msg` was just populated by GetMessageW and outlives the call.
         unsafe { TranslateMessage(&raw const msg) };

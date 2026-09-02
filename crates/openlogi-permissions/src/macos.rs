@@ -64,7 +64,7 @@ pub fn camera() -> PermissionStatus {
 /// For Accessibility the pane is all this offers — the agent owns the
 /// CGEventTap, so the prompt must run there. When the row is missing from the
 /// list entirely, see the TCC rules in
-/// `crates/openlogi-desktop/src/platform/AGENTS.md`.
+/// `.claude/skills/openlogi-macos-permissions/SKILL.md`.
 pub fn open_pane(permission: Permission) {
     let anchor = match permission {
         Permission::Accessibility => "Privacy_Accessibility",

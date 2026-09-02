@@ -5,27 +5,25 @@
 //! sessions stop, then wait for an exclusive write lease.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, watch};
 
 /// Coordinates exclusive access to the receiver HID node.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ReceiverAccess {
     inner: Arc<ReceiverAccessInner>,
 }
 
-#[derive(Default)]
 struct ReceiverAccessInner {
     lease: Arc<RwLock<()>>,
-    exclusive_requests: Arc<ExclusiveRequests>,
+    requests: watch::Sender<ReceiverRequestState>,
 }
 
-#[derive(Default)]
-struct ExclusiveRequests {
-    total: AtomicUsize,
-    pairing: AtomicUsize,
-    host_transition: AtomicUsize,
+/// Authoritative count of queued or active exclusive receiver requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReceiverRequestState {
+    pairing: usize,
+    host_transition: usize,
 }
 
 /// Operation requiring sole ownership of a receiver transport.
@@ -38,21 +36,28 @@ pub enum ExclusiveAccessReason {
 }
 
 impl ExclusiveAccessReason {
-    fn counter(self, requests: &ExclusiveRequests) -> &AtomicUsize {
+    fn count_mut(self, requests: &mut ReceiverRequestState) -> &mut usize {
         match self {
-            Self::Pairing => &requests.pairing,
-            Self::HostTransition => &requests.host_transition,
+            Self::Pairing => &mut requests.pairing,
+            Self::HostTransition => &mut requests.host_transition,
         }
     }
 }
 
-impl ExclusiveRequests {
-    fn any(&self) -> bool {
-        self.total.load(Ordering::Acquire) != 0
+impl ReceiverRequestState {
+    /// Whether any exclusive operation is queued or active.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.pairing != 0 || self.host_transition != 0
     }
 
-    fn requested(&self, reason: ExclusiveAccessReason) -> bool {
-        reason.counter(self).load(Ordering::Acquire) != 0
+    /// Whether an operation for `reason` is queued or active.
+    #[must_use]
+    pub fn requested(self, reason: ExclusiveAccessReason) -> bool {
+        match reason {
+            ExclusiveAccessReason::Pairing => self.pairing != 0,
+            ExclusiveAccessReason::HostTransition => self.host_transition != 0,
+        }
     }
 }
 
@@ -67,23 +72,41 @@ pub struct ExclusiveReceiverLease {
     _request: ExclusiveRequest,
 }
 
+impl Default for ReceiverAccess {
+    fn default() -> Self {
+        let (requests, _) = watch::channel(ReceiverRequestState::default());
+        Self {
+            inner: Arc::new(ReceiverAccessInner {
+                lease: Arc::new(RwLock::new(())),
+                requests,
+            }),
+        }
+    }
+}
+
 impl ReceiverAccess {
     /// Whether any exclusive operation is waiting for or holding receiver access.
     #[must_use]
     pub fn exclusive_requested(&self) -> bool {
-        self.inner.exclusive_requests.any()
+        self.request_state().any()
     }
 
     /// Whether `reason` is waiting for or holding receiver access.
     #[must_use]
     pub fn requested(&self, reason: ExclusiveAccessReason) -> bool {
-        self.inner.exclusive_requests.requested(reason)
+        self.request_state().requested(reason)
+    }
+
+    /// Subscribe to requested-state changes, starting with the current counts.
+    #[must_use]
+    pub fn subscribe_requests(&self) -> watch::Receiver<ReceiverRequestState> {
+        self.inner.requests.subscribe()
     }
 
     /// Try to acquire receiver access for a pooled HID++ session.
     ///
     /// Capture is opportunistic: if pairing is waiting or active, capture should
-    /// stay idle and retry on its next management tick.
+    /// stay idle until the next requested-state reconciliation.
     #[must_use]
     pub fn try_acquire_for_session(&self) -> Option<SessionReceiverLease> {
         if self.exclusive_requested() {
@@ -111,34 +134,43 @@ impl ReceiverAccess {
     /// If the returned future is cancelled while waiting, the pairing request is
     /// withdrawn automatically so capture can resume.
     pub async fn acquire_exclusive(&self, reason: ExclusiveAccessReason) -> ExclusiveReceiverLease {
-        let request = ExclusiveRequest::new(Arc::clone(&self.inner.exclusive_requests), reason);
+        let request = ExclusiveRequest::new(self.inner.requests.clone(), reason);
         let guard = Arc::clone(&self.inner.lease).write_owned().await;
         ExclusiveReceiverLease {
             _guard: guard,
             _request: request,
         }
     }
+
+    fn request_state(&self) -> ReceiverRequestState {
+        *self.inner.requests.borrow()
+    }
 }
 
 struct ExclusiveRequest {
-    requests: Arc<ExclusiveRequests>,
+    requests: watch::Sender<ReceiverRequestState>,
     reason: ExclusiveAccessReason,
 }
 
 impl ExclusiveRequest {
-    fn new(requests: Arc<ExclusiveRequests>, reason: ExclusiveAccessReason) -> Self {
-        requests.total.fetch_add(1, Ordering::AcqRel);
-        reason.counter(&requests).fetch_add(1, Ordering::AcqRel);
+    fn new(requests: watch::Sender<ReceiverRequestState>, reason: ExclusiveAccessReason) -> Self {
+        requests.send_if_modified(|state| {
+            let count = reason.count_mut(state);
+            *count += 1;
+            true
+        });
         Self { requests, reason }
     }
 }
 
 impl Drop for ExclusiveRequest {
     fn drop(&mut self) {
-        self.reason
-            .counter(&self.requests)
-            .fetch_sub(1, Ordering::AcqRel);
-        self.requests.total.fetch_sub(1, Ordering::AcqRel);
+        self.requests.send_if_modified(|state| {
+            let count = self.reason.count_mut(state);
+            debug_assert!(*count != 0, "every request drop has a matching begin");
+            *count -= 1;
+            true
+        });
     }
 }
 
@@ -207,11 +239,11 @@ mod tests {
     fn same_reason_overlap_stays_requested_until_every_request_drops() {
         let access = ReceiverAccess::default();
         let first = ExclusiveRequest::new(
-            Arc::clone(&access.inner.exclusive_requests),
+            access.inner.requests.clone(),
             ExclusiveAccessReason::Pairing,
         );
         let second = ExclusiveRequest::new(
-            Arc::clone(&access.inner.exclusive_requests),
+            access.inner.requests.clone(),
             ExclusiveAccessReason::Pairing,
         );
 
@@ -221,6 +253,33 @@ mod tests {
 
         drop(second);
         assert!(!access.exclusive_requested());
+    }
+
+    #[tokio::test]
+    async fn request_begin_and_end_publish_immediately() {
+        let access = ReceiverAccess::default();
+        let mut requests = access.subscribe_requests();
+
+        let request = ExclusiveRequest::new(
+            access.inner.requests.clone(),
+            ExclusiveAccessReason::Pairing,
+        );
+        requests
+            .changed()
+            .await
+            .expect("request publication should remain open");
+        assert!(
+            requests
+                .borrow_and_update()
+                .requested(ExclusiveAccessReason::Pairing)
+        );
+
+        drop(request);
+        requests
+            .changed()
+            .await
+            .expect("request publication should remain open");
+        assert!(!requests.borrow_and_update().any());
     }
 
     #[tokio::test]

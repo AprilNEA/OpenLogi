@@ -55,6 +55,18 @@ impl DecodeEvent for WirelessDeviceStatusEvent {
     }
 }
 
+impl WirelessDeviceStatusEvent {
+    /// Decodes one event payload for this feature, or returns `None` for an
+    /// unsupported event function.
+    ///
+    /// Consumers that already own a channel-level listener can use this
+    /// without constructing a second [`WirelessDeviceStatusFeature`].
+    #[must_use]
+    pub fn decode(function_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        <Self as DecodeEvent>::decode(function_id, payload)
+    }
+}
+
 /// Represents an event emitted by the [`WirelessDeviceStatusFeature`]
 /// feature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

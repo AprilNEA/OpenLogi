@@ -19,6 +19,9 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 #[cfg(target_os = "windows")]
+use openlogi_device::DeviceIoGate;
+
+#[cfg(target_os = "windows")]
 use super::windows_hid::NativeHidWriter;
 
 #[cfg(target_os = "windows")]
@@ -95,6 +98,7 @@ pub(super) struct WindowsHidppChannel {
     /// `inventory::ledger` evict this channel — the node-vanish path never
     /// fires for a cabled device whose receiver keeps the HID node enumerated.
     connected: AtomicBool,
+    device_io: DeviceIoGate,
 }
 
 #[cfg(target_os = "windows")]
@@ -102,6 +106,7 @@ impl WindowsHidppChannel {
     pub(super) async fn open(
         long_dev: &async_hid::Device,
         long_info: DeviceInfo,
+        device_io: DeviceIoGate,
     ) -> Result<Self, async_hid::HidError> {
         let short_dev = find_windows_short_collection(&long_info).await?;
         let (long_reader, long_writer) = long_dev.open().await?;
@@ -146,6 +151,7 @@ impl WindowsHidppChannel {
             short,
             long,
             connected: AtomicBool::new(true),
+            device_io,
         })
     }
 
@@ -247,6 +253,9 @@ impl RawHidChannel for WindowsHidppChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        if !self.device_io.allows_io() {
+            return Err(super::device_io_error());
+        }
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
             Some(ReportEndpoint::Long) => Some(&self.long),
@@ -262,6 +271,9 @@ impl RawHidChannel for WindowsHidppChannel {
             )
         })?;
 
+        if !self.device_io.allows_io() {
+            return Err(super::device_io_error());
+        }
         let result = endpoint.write_report(src).await;
         if let Err(e) = &result
             && is_permanent_disconnect(e.as_ref())

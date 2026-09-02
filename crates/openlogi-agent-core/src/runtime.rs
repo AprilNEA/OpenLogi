@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_hid::{CaptureChannel, ChannelRegistry};
+use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate};
 use tracing::{info, warn};
 
 use self::button::{
@@ -62,6 +62,7 @@ struct ActionExecutor {
     capture: CaptureChannel,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
+    device_io: DeviceIoGate,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
@@ -106,6 +107,7 @@ impl ActionExecutor {
                     &self.capture,
                     &self.registry,
                     &self.receiver_access,
+                    &self.device_io,
                     target,
                 );
                 return;
@@ -135,6 +137,7 @@ impl ActionExecutor {
                 &self.capture,
                 &self.registry,
                 &self.receiver_access,
+                &self.device_io,
                 target,
                 dpi,
             );
@@ -217,6 +220,7 @@ impl ActionRuntime {
         capture: CaptureChannel,
         registry: ChannelRegistry,
         receiver_access: ReceiverAccess,
+        device_io: DeviceIoGate,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
@@ -224,6 +228,7 @@ impl ActionRuntime {
             capture,
             registry,
             receiver_access,
+            device_io,
             action_ring,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());

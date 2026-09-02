@@ -50,6 +50,11 @@ use settings::GestureOwner;
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v7 aligns the thumb-wheel scroll defaults with its normalised physical
+/// direction. Pre-v7 explicit default pairs are migrated in device and
+/// per-application profiles so they remain native rather than becoming a
+/// reversal (see `Config::migrate_thumbwheel_native_direction`).
+///
 /// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
 ///
 /// v5 also drops the transport prefix from `direct:` keys: `direct:046d:c08d:unit:6be9d300`
@@ -87,7 +92,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -512,6 +517,68 @@ impl Config {
             for target in &mut device.host_switch_targets {
                 if let Some((new, _)) = renames.get(target) {
                     *target = new.clone();
+                }
+            }
+        }
+    }
+
+    /// Preserve the native behavior of explicit pre-v7 thumb-wheel defaults.
+    ///
+    /// Before v7 the built-in pair was forward/up → right and backward/down →
+    /// left. Because that pair equaled the defaults, an explicit copy in either
+    /// a device or per-app profile kept the wheel native. v7 swaps the defaults
+    /// after normalising device polarity; leaving an old pair in place would
+    /// now request a real reversal. Rewrite only profiles whose effective pair
+    /// was exactly the old default. Mixed/custom pairs already had literal
+    /// diverted semantics and must remain untouched.
+    #[cfg(feature = "fs")]
+    fn migrate_thumbwheel_native_direction(&mut self) {
+        let old_up = Action::HorizontalScrollRight;
+        let old_down = Action::HorizontalScrollLeft;
+        let new_up = Action::HorizontalScrollLeft;
+        let new_down = Action::HorizontalScrollRight;
+        let is_old_default = |binding: Option<&Binding>, old: &Action| match binding {
+            None => true,
+            Some(Binding::Single(action)) => action == old,
+            Some(Binding::Gesture(_) | Binding::LongPress(_)) => false,
+        };
+
+        for device in self.devices.values_mut() {
+            let global_up_is_old =
+                is_old_default(device.bindings.get(&ButtonId::ThumbwheelScrollUp), &old_up);
+            let global_down_is_old = is_old_default(
+                device.bindings.get(&ButtonId::ThumbwheelScrollDown),
+                &old_down,
+            );
+
+            for overlay in device.per_app_bindings.values_mut() {
+                let overrides_direction = overlay.contains_key(&ButtonId::ThumbwheelScrollUp)
+                    || overlay.contains_key(&ButtonId::ThumbwheelScrollDown);
+                let effective_up_is_old = overlay
+                    .get(&ButtonId::ThumbwheelScrollUp)
+                    .map_or(global_up_is_old, |action| action == &old_up);
+                let effective_down_is_old = overlay
+                    .get(&ButtonId::ThumbwheelScrollDown)
+                    .map_or(global_down_is_old, |action| action == &old_down);
+                if overrides_direction && effective_up_is_old && effective_down_is_old {
+                    // Write the complete pair. This also handles a profile that
+                    // reached the old defaults by overriding one half of a
+                    // custom global pair and inheriting the other half.
+                    overlay.insert(ButtonId::ThumbwheelScrollUp, new_up.clone());
+                    overlay.insert(ButtonId::ThumbwheelScrollDown, new_down.clone());
+                }
+            }
+
+            if global_up_is_old && global_down_is_old {
+                if let Some(Binding::Single(action)) =
+                    device.bindings.get_mut(&ButtonId::ThumbwheelScrollUp)
+                {
+                    *action = new_up.clone();
+                }
+                if let Some(Binding::Single(action)) =
+                    device.bindings.get_mut(&ButtonId::ThumbwheelScrollDown)
+                {
+                    *action = new_down.clone();
                 }
             }
         }

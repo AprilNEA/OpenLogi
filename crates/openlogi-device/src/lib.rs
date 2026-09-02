@@ -17,6 +17,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod channel;
+mod device_io;
 
 pub mod backend;
 pub mod backlight;
@@ -37,6 +38,7 @@ pub use channel::route::{
     speaks_unifying_protocol,
 };
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel};
+pub use device_io::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};
@@ -48,7 +50,10 @@ pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
-pub use session::gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
+pub use session::gesture::{
+    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
+    PendingCaptureRestore, run_capture_session, run_capture_session_with_registry_spec,
+};
 pub use session::host_switch::{
     HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
 };
