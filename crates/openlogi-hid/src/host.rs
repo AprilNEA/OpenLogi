@@ -23,8 +23,9 @@ use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, CrownInfo, CrownMode, Dpi, DpiInfo, FeatureEntry, FirmwareEntity,
+    HapticWaveform, LightingMethod, LitraModel, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -117,6 +118,17 @@ pub async fn set_scroll_wheel_mode(
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
+}
+
+/// Read the crown's capabilities and slot/ratchet counts on the device
+/// `route` reaches.
+pub async fn get_crown_info(route: &DeviceRoute) -> Result<CrownInfo, WriteError> {
+    device::get_crown_info(&*native_backend(), route).await
+}
+
+/// Read the crown's current mode on the device `route` reaches.
+pub async fn get_crown_mode(route: &DeviceRoute) -> Result<CrownMode, WriteError> {
+    device::get_crown_mode(&*native_backend(), route).await
 }
 
 /// Set the Fn-key inversion of the keyboard `route` reaches.
