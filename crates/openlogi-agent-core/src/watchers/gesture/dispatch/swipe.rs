@@ -35,10 +35,10 @@ use openlogi_inject::DockSwipeMotion;
 /// geometry is plumbed through.
 const HORIZONTAL_PAD_TRAVEL_UM: f64 = 117_000.0;
 const VERTICAL_PAD_TRAVEL_UM: f64 = 75_600.0;
-/// One full open↔close spread span equals one progress unit. A hardware
-/// tuning constant: the native pinch reveal tracks roughly this much spread
-/// change across the whole gesture.
-const PINCH_SPREAD_TRAVEL_UM: f64 = 40_000.0;
+/// This much spread change equals one progress unit. Hardware-tuned on the
+/// Casa Touch: the full ~40 mm open↔close span revealed only a quarter of
+/// the native animation, so one unit per quarter span.
+const PINCH_SPREAD_TRAVEL_UM: f64 = 10_000.0;
 
 /// One routed step of a session's swipe stream.
 #[derive(Debug, Default, PartialEq)]

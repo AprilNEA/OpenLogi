@@ -1204,7 +1204,7 @@ fn the_launchpad_desktop_pair_streams_the_scale_motion() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Pinch,
-            progress: -10_000.0 / 40_000.0,
+            progress: -10_000.0 / 10_000.0,
         }
     );
 }
@@ -1283,7 +1283,7 @@ fn pinch_out_bound_to_mission_control_streams_the_vertical_motion() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 40_000.0,
+            progress: 10_000.0 / 10_000.0,
         }
     );
 }
@@ -1300,7 +1300,7 @@ fn pinch_in_bound_to_app_expose_streams_negative_progress() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: -10_000.0 / 40_000.0,
+            progress: -10_000.0 / 10_000.0,
         }
     );
 }
@@ -1319,7 +1319,7 @@ fn a_reversed_pinch_binding_flips_the_travel_mapping() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 40_000.0,
+            progress: 10_000.0 / 10_000.0,
         }
     );
 }
@@ -1345,7 +1345,7 @@ fn the_unbound_pinch_side_clamps_progress_at_zero() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 16_000.0 / 40_000.0,
+            progress: 16_000.0 / 10_000.0,
         }
     );
 }
@@ -1362,7 +1362,7 @@ fn four_finger_pinches_plan_their_own_pair() {
         outcome.stream,
         SwipeOutput::Begin {
             motion: DockSwipeMotion::Vertical,
-            progress: 10_000.0 / 40_000.0,
+            progress: 10_000.0 / 10_000.0,
         }
     );
 }
