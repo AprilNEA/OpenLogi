@@ -80,11 +80,11 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
         | ButtonId::KeyVolumeUp => Action::None,
-        // The crown reports press/rotation only while diverted, and diverting
-        // it forfeits whatever its native firmware behavior is — same
-        // tradeoff as the keyboard keys above, so it gets the same inert
-        // default: stay native until the user explicitly binds one of the
-        // three controls.
+        // The crown reports touch/press/rotation only while diverted, and
+        // diverting it forfeits whatever its native firmware behavior is —
+        // same tradeoff as the keyboard keys above, so every crown control
+        // gets the same inert default: stay native until the user explicitly
+        // binds one of them.
         #[expect(
             clippy::match_same_arms,
             reason = "same None value as the keyboard keys above for a different reason (native \
@@ -93,7 +93,10 @@ pub fn default_binding(button: ButtonId) -> Action {
         )]
         ButtonId::Crown
         | ButtonId::CrownRotateClockwise
-        | ButtonId::CrownRotateCounterclockwise => Action::None,
+        | ButtonId::CrownRotateCounterclockwise
+        | ButtonId::CrownTouch
+        | ButtonId::CrownPressRotateClockwise
+        | ButtonId::CrownPressRotateCounterclockwise => Action::None,
     }
 }
 

@@ -87,10 +87,21 @@ pub enum ButtonId {
     CrownRotateClockwise,
     /// Rotating the crown counterclockwise (`relative_slot_rotation`
     /// positive).
+    CrownRotateCounterclockwise,
+    /// A finger touching the crown (`0x4600`'s capacitive touch sensor,
+    /// `touch: ActivityState`) — distinct from [`ButtonId::Crown`], which is
+    /// the mechanical click. Dispatches on the `Start`/`Stop` edge like any
+    /// other button; `Active` is the held state in between.
+    CrownTouch,
+    /// Rotating the crown clockwise while it is held pressed — a distinct
+    /// bindable control from [`ButtonId::CrownRotateClockwise`], the same way
+    /// a modifier changes what a key does.
+    CrownPressRotateClockwise,
+    /// Rotating the crown counterclockwise while it is held pressed.
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    CrownRotateCounterclockwise,
+    CrownPressRotateCounterclockwise,
 }
 
 impl ButtonId {
@@ -129,15 +140,18 @@ impl ButtonId {
         ButtonId::KeyVolumeUp,
     ];
 
-    /// The Craft keyboard's rotary crown: press and its two rotation
-    /// directions. Kept out of [`ButtonId::ALL`] for the same reason as
-    /// [`ButtonId::KEYBOARD_KEYS`] — it lives on the keyboard, not the mouse
-    /// popover, and stays native (never diverted) until the user binds one of
-    /// these.
-    pub const CROWN_CONTROLS: [ButtonId; 3] = [
+    /// The Craft keyboard's rotary crown: touch, press, plain rotation, and
+    /// press-held rotation. Kept out of [`ButtonId::ALL`] for the same reason
+    /// as [`ButtonId::KEYBOARD_KEYS`] — it lives on the keyboard, not the
+    /// mouse popover, and stays native (never diverted) until the user binds
+    /// one of these.
+    pub const CROWN_CONTROLS: [ButtonId; 6] = [
+        ButtonId::CrownTouch,
         ButtonId::Crown,
         ButtonId::CrownRotateClockwise,
         ButtonId::CrownRotateCounterclockwise,
+        ButtonId::CrownPressRotateClockwise,
+        ButtonId::CrownPressRotateCounterclockwise,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -194,6 +208,9 @@ impl ButtonId {
             ButtonId::Crown => "Crown",
             ButtonId::CrownRotateClockwise => "Crown Clockwise",
             ButtonId::CrownRotateCounterclockwise => "Crown Counterclockwise",
+            ButtonId::CrownTouch => "Crown Touch",
+            ButtonId::CrownPressRotateClockwise => "Crown Press + Clockwise",
+            ButtonId::CrownPressRotateCounterclockwise => "Crown Press + Counterclockwise",
         }
     }
 
@@ -226,6 +243,9 @@ impl ButtonId {
             ButtonId::Crown => "keyboard.crown",
             ButtonId::CrownRotateClockwise => "keyboard.crown_clockwise",
             ButtonId::CrownRotateCounterclockwise => "keyboard.crown_counterclockwise",
+            ButtonId::CrownTouch => "keyboard.crown_touch",
+            ButtonId::CrownPressRotateClockwise => "keyboard.crown_press_clockwise",
+            ButtonId::CrownPressRotateCounterclockwise => "keyboard.crown_press_counterclockwise",
         }
     }
 }
