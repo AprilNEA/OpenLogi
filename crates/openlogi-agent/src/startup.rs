@@ -16,6 +16,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
+use openlogi_agent_core::watchers::shutdown::{StopOutcome, WatcherHandle};
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
@@ -168,9 +169,46 @@ impl InputServices {
     }
 }
 
+/// Graceful-shutdown handles for the three firmware-owning HID++ managers.
+pub(crate) struct HidppWatcherHandles {
+    gesture: WatcherHandle,
+    host_switch: WatcherHandle,
+    keyboard: WatcherHandle,
+}
+
+impl HidppWatcherHandles {
+    /// Stop all managers concurrently with the bounded policy for a terminal
+    /// process exit.
+    pub(crate) async fn stop_and_wait(self) {
+        let _outcomes = tokio::join!(
+            self.gesture.stop_and_wait("gesture"),
+            self.host_switch.stop_and_wait("host-switch"),
+            self.keyboard.stop_and_wait("keyboard"),
+        );
+    }
+
+    /// Stop all managers concurrently and retain firmware ownership past the
+    /// diagnostic deadline before starting any replacement process image.
+    pub(crate) async fn stop_and_wait_confirmed(self) -> bool {
+        let (gesture, host_switch, keyboard) = tokio::join!(
+            self.gesture.stop_and_wait_confirmed("gesture"),
+            self.host_switch.stop_and_wait_confirmed("host-switch"),
+            self.keyboard.stop_and_wait_confirmed("keyboard"),
+        );
+        all_stopped(gesture, host_switch, keyboard)
+    }
+}
+
+fn all_stopped(gesture: StopOutcome, host_switch: StopOutcome, keyboard: StopOutcome) -> bool {
+    gesture.is_stopped() && host_switch.is_stopped() && keyboard.is_stopped()
+}
+
 /// Start the HID++ background sessions that do not need Accessibility.
-pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
-    watchers::gesture::spawn(
+pub(crate) fn spawn_hidpp_watchers(
+    shared: &SharedRuntime,
+    inputs: &InputServices,
+) -> HidppWatcherHandles {
+    let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
@@ -182,13 +220,13 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
             shared.hook_maps.clone(),
         ),
     );
-    watchers::host_switch::spawn(
+    let host_switch = watchers::host_switch::spawn(
         &shared.host_switch_links,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
         shared.device_io.clone(),
     );
-    watchers::keyboard::spawn(
+    let keyboard = watchers::keyboard::spawn(
         &shared.keyboard_spec,
         shared.keyboard_channel.clone(),
         shared.receiver_access.clone(),
@@ -196,6 +234,11 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
         shared.device_io.clone(),
         inputs.dispatcher.clone(),
     );
+    HidppWatcherHandles {
+        gesture,
+        host_switch,
+        keyboard,
+    }
 }
 
 /// One tagged event from the per-source state watchers.

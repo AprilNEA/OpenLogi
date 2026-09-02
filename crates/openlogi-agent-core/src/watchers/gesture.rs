@@ -39,6 +39,7 @@ use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
 use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
+use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
@@ -87,6 +88,7 @@ impl GestureOutputs {
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
+#[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
     capture_channel: CaptureChannel,
@@ -94,9 +96,11 @@ pub fn spawn(
     channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     outputs: GestureOutputs,
-) {
+) -> WatcherHandle {
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -105,19 +109,27 @@ pub fn spawn(
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "capture watcher: could not build tokio runtime");
+                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
                 return;
             }
         };
-        runtime.block_on(manage(
-            plans,
+        let completion = runtime.block_on(manage(GestureManagerContext {
+            capture_plans: plans,
             capture_channel,
             receiver_access,
             receiver_requests,
             channel_registry,
             device_io,
             outputs,
-        ));
+            shutdown: shutdown_rx,
+        }));
+        // Detached session tasks belong to this current-thread runtime. Drop
+        // it before acknowledging so even an unexpected manager return cannot
+        // leave a late firmware writer behind the process boundary.
+        drop(runtime);
+        let _ = shutdown_done_tx.send(completion);
     });
+    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
 }
 
 type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
@@ -158,6 +170,17 @@ struct SessionChannels {
     capture: CaptureChannel,
     registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
+}
+
+struct GestureManagerContext {
+    capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_channel: CaptureChannel,
+    receiver_access: ReceiverAccess,
+    receiver_requests: watch::Receiver<ReceiverRequestState>,
+    channel_registry: openlogi_hid::ChannelRegistry,
+    device_io: DeviceIoGate,
+    outputs: GestureOutputs,
+    shutdown: oneshot::Receiver<()>,
 }
 
 /// Forward one capture session's inputs onto the manager's ordered event
@@ -499,18 +522,76 @@ impl GestureManagerState {
     }
 }
 
+/// Stop every tracked capture epoch and wait until each session task has
+/// reported ordered completion. Retain and retry pending restore tokens until
+/// the firmware ownership has been released.
+async fn drain_for_shutdown(
+    state: &mut GestureManagerState,
+    event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    receiver_access: &ReceiverAccess,
+    receiver_requests: &watch::Receiver<ReceiverRequestState>,
+    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    channels: &SessionChannels,
+) {
+    for session in state.sessions.values_mut() {
+        reconcile_session(session, None, &mut state.input_dispatcher);
+    }
+    while !state.sessions.is_empty() {
+        let Some(event) = event_rx.recv().await else {
+            break;
+        };
+        state.handle_session_event(
+            event,
+            channels.device_io.allows_io(),
+            receiver_requests,
+            capture_plans,
+        );
+    }
+
+    state.expedite_pending_restores();
+    if !state.pending_restores.is_empty() {
+        warn!(
+            pending = state.pending_restores.len(),
+            "capture watcher is waiting for pending firmware restoration before stopping"
+        );
+    }
+    let mut device_io = channels.device_io.clone();
+    while !state.pending_restores.is_empty() {
+        if !device_io.allows_io() && !device_io.wait_until_allowed().await {
+            // A closed suspended gate cannot prove firmware is native. The
+            // process lifecycle bounds terminal exits; confirmed replacement
+            // deliberately remains here rather than losing these tokens.
+            std::future::pending::<()>().await;
+        }
+        if let Some(_lease) = acquire_session_lease(receiver_access, &mut state.lease) {
+            retry_pending_restores(
+                &mut state.pending_restores,
+                &channels.registry,
+                Instant::now(),
+            )
+            .await;
+        }
+        if !state.pending_restores.is_empty() {
+            tokio::time::sleep(RETRY_DELAY).await;
+            state.expedite_pending_restores();
+        }
+    }
+}
+
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
-async fn manage(
-    mut capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    capture_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
-    mut receiver_requests: watch::Receiver<ReceiverRequestState>,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    mut device_io: DeviceIoGate,
-    outputs: GestureOutputs,
-) {
+async fn manage(context: GestureManagerContext) -> ManagerCompletion {
+    let GestureManagerContext {
+        mut capture_plans,
+        capture_channel,
+        receiver_access,
+        mut receiver_requests,
+        channel_registry,
+        mut device_io,
+        outputs,
+        mut shutdown,
+    } = context;
     let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let mut registry_changes = channel_registry.subscribe();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -556,6 +637,20 @@ async fn manage(
         }
 
         tokio::select! {
+            biased;
+
+            _ = &mut shutdown => {
+                drain_for_shutdown(
+                    &mut state,
+                    &mut event_rx,
+                    &receiver_access,
+                    &receiver_requests,
+                    &capture_plans,
+                    &channels,
+                )
+                .await;
+                return ManagerCompletion::Graceful;
+            }
             Some(event) = event_rx.recv() => {
                 reconcile |= state.handle_session_event(
                     event,
@@ -566,23 +661,23 @@ async fn manage(
             }
             result = capture_plans.changed() => match result {
                 Ok(()) => reconcile = true,
-                Err(_) => return,
+                Err(_) => return ManagerCompletion::Unexpected,
             },
             result = receiver_requests.changed() => match result {
                 Ok(()) => reconcile = true,
-                Err(_) => return,
+                Err(_) => return ManagerCompletion::Unexpected,
             },
             allowed = device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
                 Some(false) => {}
-                None => return,
+                None => return ManagerCompletion::Unexpected,
             },
             open = wait_for_registry_change(
                 &mut registry_changes,
                 !state.pending_restores.is_empty(),
             ) => {
                 if !open {
-                    return;
+                    return ManagerCompletion::Unexpected;
                 }
                 if device_io.allows_io() {
                     state.expedite_pending_restores();

@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
+use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
@@ -106,11 +107,23 @@ struct KeyboardSessionChannels {
     events: mpsc::UnboundedSender<KeyboardSessionEvent>,
 }
 
+struct KeyboardManagerContext {
+    spec: watch::Receiver<Option<Arc<KeyboardSpec>>>,
+    keyboard_channel: CaptureChannel,
+    receiver_access: ReceiverAccess,
+    receiver_requests: watch::Receiver<ReceiverRequestState>,
+    registry: ChannelRegistry,
+    device_io: DeviceIoGate,
+    dispatcher: ActionDispatcher,
+    shutdown: oneshot::Receiver<()>,
+}
+
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Spawn the keyboard-capture manager thread. It owns a current-thread tokio
 /// runtime that keeps one capture session pointed at the bound keyboard and
 /// dispatches each captured key press.
+#[must_use]
 pub fn spawn(
     spec: &SharedKeyboardSpec,
     keyboard_channel: CaptureChannel,
@@ -118,9 +131,11 @@ pub fn spawn(
     registry: ChannelRegistry,
     device_io: DeviceIoGate,
     dispatcher: ActionDispatcher,
-) {
+) -> WatcherHandle {
     let spec = spec.clone();
     let receiver_requests = receiver_access.subscribe_requests();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -129,10 +144,11 @@ pub fn spawn(
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "keyboard watcher: could not build tokio runtime");
+                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
                 return;
             }
         };
-        runtime.block_on(manage(
+        let completion = runtime.block_on(manage(KeyboardManagerContext {
             spec,
             keyboard_channel,
             receiver_access,
@@ -140,8 +156,15 @@ pub fn spawn(
             registry,
             device_io,
             dispatcher,
-        ));
+            shutdown: shutdown_rx,
+        }));
+        // Completion is a process-replacement boundary: acknowledge only
+        // after the runtime has cancelled any detached task left by an
+        // unexpected manager return.
+        drop(runtime);
+        let _ = shutdown_done_tx.send(completion);
     });
+    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
 }
 
 /// Route one accepted keyboard edge through the shared HID++ lifecycle.
@@ -387,18 +410,73 @@ fn next_deadline(
     pending_restore.into_iter().chain(restart_at).min()
 }
 
+/// Retire the tracked keyboard epoch, preserve its ordered input ownership
+/// until completion, then retain and retry any firmware restore token until
+/// ownership has been released.
+async fn drain_for_shutdown(
+    state: &mut KeyboardManagerState,
+    event_rx: &mut mpsc::UnboundedReceiver<KeyboardSessionEvent>,
+    receiver_access: &ReceiverAccess,
+    receiver_requests: &watch::Receiver<ReceiverRequestState>,
+    spec: &watch::Receiver<Option<Arc<KeyboardSpec>>>,
+    channels: &KeyboardSessionChannels,
+) {
+    if let Some(running) = state.current.as_mut() {
+        reconcile_session(running, None, &state.dispatcher);
+    }
+    while state.current.is_some() {
+        let Some(event) = event_rx.recv().await else {
+            break;
+        };
+        state.handle_session_event(
+            event,
+            channels.device_io.allows_io(),
+            receiver_requests,
+            spec,
+        );
+    }
+
+    if state.pending_restore.is_some() {
+        warn!("keyboard watcher is waiting for pending firmware restoration before stopping");
+    }
+    let mut device_io = channels.device_io.clone();
+    while state.pending_restore.is_some() {
+        if !device_io.allows_io() && !device_io.wait_until_allowed().await {
+            // A closed suspended gate cannot prove firmware is native. The
+            // process lifecycle bounds terminal exits; confirmed replacement
+            // deliberately remains here rather than losing this token.
+            std::future::pending::<()>().await;
+        }
+        if let Some(_lease) = receiver_access.try_acquire_for_session()
+            && let Some(pending) = state.pending_restore.take()
+            && let CaptureSessionOutcome::RestorePending(token) =
+                pending.token.retry(&channels.registry).await
+        {
+            state.pending_restore = Some(PendingRestore {
+                token,
+                retry_at: tokio::time::Instant::now() + RETRY_DELAY,
+            });
+        }
+        if state.pending_restore.is_some() {
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+    }
+}
+
 /// Keep one keyboard capture session alive for the published spec, restarting
 /// it when the keyboard or its bound-key set changes, and dispatch incoming
 /// presses. Runs for the lifetime of the process.
-async fn manage(
-    mut spec: watch::Receiver<Option<Arc<KeyboardSpec>>>,
-    keyboard_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
-    mut receiver_requests: watch::Receiver<ReceiverRequestState>,
-    registry: ChannelRegistry,
-    mut device_io: DeviceIoGate,
-    dispatcher: ActionDispatcher,
-) {
+async fn manage(context: KeyboardManagerContext) -> ManagerCompletion {
+    let KeyboardManagerContext {
+        mut spec,
+        keyboard_channel,
+        receiver_access,
+        mut receiver_requests,
+        registry,
+        mut device_io,
+        dispatcher,
+        mut shutdown,
+    } = context;
     let (events, mut event_rx) = mpsc::unbounded_channel::<KeyboardSessionEvent>();
     let mut registry_changes = registry.subscribe();
     let channels = KeyboardSessionChannels {
@@ -439,6 +517,20 @@ async fn manage(
         }
 
         tokio::select! {
+            biased;
+
+            _ = &mut shutdown => {
+                drain_for_shutdown(
+                    &mut state,
+                    &mut event_rx,
+                    &receiver_access,
+                    &receiver_requests,
+                    &spec,
+                    &channels,
+                )
+                .await;
+                return ManagerCompletion::Graceful;
+            }
             Some(event) = event_rx.recv() => {
                 reconcile |= state.handle_session_event(
                     event,
@@ -449,23 +541,23 @@ async fn manage(
             }
             result = spec.changed() => match result {
                 Ok(()) => reconcile = true,
-                Err(_) => return,
+                Err(_) => return ManagerCompletion::Unexpected,
             },
             result = receiver_requests.changed() => match result {
                 Ok(()) => reconcile = true,
-                Err(_) => return,
+                Err(_) => return ManagerCompletion::Unexpected,
             },
             allowed = device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
                 Some(false) => {}
-                None => return,
+                None => return ManagerCompletion::Unexpected,
             },
             open = wait_for_registry_change(
                 &mut registry_changes,
                 state.pending_restore.is_some(),
             ) => {
                 if !open {
-                    return;
+                    return ManagerCompletion::Unexpected;
                 }
                 if device_io.allows_io() {
                     state.expedite_pending_restore();

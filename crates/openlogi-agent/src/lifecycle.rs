@@ -5,15 +5,15 @@
 //! ```text
 //! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──► Running ──► exit
 //!         │                 │                                         │
-//!         └─ init failed    └─ dormant start nobody wanted            └─ signal / uninstall
+//!         └─ init failed    └─ dormant start nobody wanted            └─ signal / process request
 //! ```
 //!
 //! The moves are the type protection for these lifecycle contracts: the
-//! uninstall receiver travels inside the states (gate consumes it first, then
-//! the run loop — no third consumer can exist), the demand channel dies at
+//! shutdown-request receiver travels inside the states (gate consumes it first,
+//! then the run loop — no third consumer can exist), the demand channel dies at
 //! [`Wanted::arm`], and arming without settling the dormancy question is
-//! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is
-//! the gate. Moving `Armed` into `Running` also hands the single-consumer resume
+//! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is the
+//! gate. Moving `Armed` into `Running` also hands the single-consumer resume
 //! stream to inventory exactly once. The gate *waits* only on macOS, where the
 //! sunk launch-at-login switch makes an unwanted login start possible; Windows
 //! and Linux only ever start wanted, so their gate passes unconditionally.
@@ -32,16 +32,13 @@ use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh}
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
 #[cfg(target_os = "macos")]
 use openlogi_ipc::ClientKind;
 
-#[cfg(target_os = "macos")]
-use crate::binary_watch;
-use crate::shutdown::{self, ShutdownSignals};
-use crate::startup::{self, Core, InputServices};
+use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
+use crate::startup::{self, Core, HidppWatcherHandles, InputServices};
 use crate::{autostart, overlay, server};
 
 /// How long a dormant agent waits before leaving — generous next to the
@@ -54,7 +51,7 @@ const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
     config: Config,
-    uninstalled: UnboundedReceiver<()>,
+    shutdown_requests: ShutdownRequests,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
@@ -63,7 +60,7 @@ pub(crate) async fn run(
 
     let Some(booted) = Booted::bootstrap(
         config,
-        uninstalled,
+        shutdown_requests,
         #[cfg(target_os = "macos")]
         armed_tx,
     )
@@ -86,7 +83,9 @@ pub(crate) async fn run(
 struct Booted {
     core: Core,
     signals: ShutdownSignals,
-    uninstalled: UnboundedReceiver<()>,
+    /// The sole receiver for tray, uninstall, and replacement requests. It
+    /// moves through the typestates with process-resource ownership.
+    shutdown_requests: ShutdownRequests,
     /// The hook kill-switch, startup-only on purpose: flipping it requires
     /// an agent restart, which the config docs state.
     capture_mouse_events: bool,
@@ -100,7 +99,7 @@ struct Booted {
 impl Booted {
     async fn bootstrap(
         config: Config,
-        uninstalled: UnboundedReceiver<()>,
+        shutdown_requests: ShutdownRequests,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
@@ -111,7 +110,7 @@ impl Booted {
         Some(Self {
             core,
             signals: ShutdownSignals::install(),
-            uninstalled,
+            shutdown_requests,
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             launch_at_login,
@@ -154,9 +153,25 @@ impl Booted {
                     info!("shutdown signal while dormant — exiting");
                     return None;
                 }
-                Some(()) = self.uninstalled.recv() => {
-                    info!("uninstalled while dormant — exiting");
-                    return None;
+                Some(request) = self.shutdown_requests.recv() => match request {
+                    ShutdownRequest::TrayQuit { core_guard } => {
+                        let _core_guard = core_guard;
+                        info!("tray quit while dormant — exiting");
+                        return None;
+                    }
+                    ShutdownRequest::Uninstalled => {
+                        info!("uninstalled while dormant — exiting");
+                        return None;
+                    }
+                    ShutdownRequest::Restart { path, retry } => {
+                        info!(path = %path.display(), "executable changed while dormant — scheduling relaunch");
+                        if let Err(error) = crate::binary_watch::schedule(&path) {
+                            warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
+                            let _ = retry.send(());
+                        } else {
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -182,7 +197,7 @@ impl Wanted {
         let Booted {
             core,
             signals,
-            uninstalled,
+            shutdown_requests,
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
@@ -214,7 +229,8 @@ impl Wanted {
                 inputs,
                 ring_haptics,
                 signals,
-                uninstalled,
+                shutdown_requests,
+                hidpp_watchers: None,
                 hook: None,
                 capture_mouse_events,
             },
@@ -238,7 +254,8 @@ struct Running {
     inputs: InputServices,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
-    uninstalled: UnboundedReceiver<()>,
+    shutdown_requests: ShutdownRequests,
+    hidpp_watchers: Option<HidppWatcherHandles>,
     /// The OS hook, installed once Accessibility is granted and dropped on
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
@@ -251,10 +268,17 @@ impl Armed {
     async fn run(self) {
         let Self { mut running } = self;
         #[cfg(target_os = "macos")]
-        request_input_monitoring().await;
+        if request_input_monitoring_and_schedule_relaunch().await {
+            running
+                .shut_down("Input Monitoring permission relaunch", None)
+                .await;
+        }
 
         // HID++ watchers need no Accessibility — start them up front.
-        startup::spawn_hidpp_watchers(&running.shared, &running.inputs);
+        running.hidpp_watchers = Some(startup::spawn_hidpp_watchers(
+            &running.shared,
+            &running.inputs,
+        ));
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
 
         info!("openlogi-agent started");
@@ -266,10 +290,12 @@ impl Armed {
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
                 }
-                () = running.signals.recv() => running.shut_down("shutdown signal"),
-                // Uninstalled while running — leave through the same door so
-                // the event tap goes with us (#807).
-                Some(()) = running.uninstalled.recv() => running.shut_down("the app was uninstalled"),
+                () = running.signals.recv() => {
+                    running.shut_down("shutdown signal", None).await;
+                }
+                Some(request) = running.shutdown_requests.recv() => {
+                    running.handle_shutdown_request(request).await;
+                }
                 else => break,
             }
         }
@@ -439,8 +465,119 @@ impl Running {
         self.inputs.scroll_input.cancel_hooks();
     }
 
-    fn shut_down(&mut self, reason: &str) -> ! {
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason)
+    async fn handle_shutdown_request(&mut self, request: ShutdownRequest) {
+        match request {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            ShutdownRequest::TrayQuit { core_guard } => {
+                self.shut_down("tray quit", Some(core_guard)).await;
+            }
+            // Uninstalled while running — leave through the same door so the
+            // event tap and firmware diversions go with us (#807, #1097).
+            ShutdownRequest::Uninstalled => {
+                self.shut_down("the app was uninstalled", None).await;
+            }
+            ShutdownRequest::Restart { path, retry } => self.restart(path, retry).await,
+        }
+    }
+
+    /// Stop the HID++ watcher fleet with the bounded policy for a terminal
+    /// process exit. `None` means arming never reached watcher startup.
+    async fn stop_hidpp_watchers(&mut self) {
+        let Some(watchers) = self.hidpp_watchers.take() else {
+            return;
+        };
+        watchers.stop_and_wait().await;
+    }
+
+    /// A new process image must not inherit unresolved firmware ownership,
+    /// even when restoring it exceeds the terminal-exit deadline.
+    async fn stop_hidpp_watchers_confirmed(&mut self) -> bool {
+        let Some(watchers) = self.hidpp_watchers.take() else {
+            return true;
+        };
+        watchers.stop_and_wait_confirmed().await
+    }
+
+    /// Resolve firmware ownership before replacement and restore the current
+    /// image's managers if ordered teardown could not be confirmed.
+    async fn prepare_process_replacement(&mut self) -> bool {
+        let stopped = self.stop_hidpp_watchers_confirmed().await;
+        if !stopped {
+            self.restart_hidpp_watchers();
+        }
+        stopped
+    }
+
+    fn restart_hidpp_watchers(&mut self) {
+        self.hidpp_watchers = Some(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    async fn restart(&mut self, path: std::path::PathBuf, retry: tokio::sync::oneshot::Sender<()>) {
+        info!(path = %path.display(), "executable changed — draining HID++ sessions before exec");
+        if !self.prepare_process_replacement().await {
+            warn!(
+                path = %path.display(),
+                "one or more HID++ managers did not complete graceful teardown — refusing exec and retrying"
+            );
+            let _ = retry.send(());
+            return;
+        }
+
+        let error = crate::binary_watch::replace_process(&path);
+        warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
+        self.restart_hidpp_watchers();
+        let _ = retry.send(());
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn restart(&mut self, path: std::path::PathBuf, retry: tokio::sync::oneshot::Sender<()>) {
+        info!(path = %path.display(), "executable changed — draining HID++ sessions before macOS relaunch");
+        if !self.prepare_process_replacement().await {
+            warn!(
+                path = %path.display(),
+                "one or more HID++ managers did not complete graceful teardown — refusing relaunch and retrying"
+            );
+            let _ = retry.send(());
+            return;
+        }
+        if let Err(error) = crate::binary_watch::schedule(&path) {
+            warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
+            self.restart_hidpp_watchers();
+            let _ = retry.send(());
+            return;
+        }
+        self.exit_after_replacement_teardown("binary update");
+    }
+
+    #[cfg(not(unix))]
+    async fn restart(&mut self, path: std::path::PathBuf, retry: tokio::sync::oneshot::Sender<()>) {
+        info!(path = %path.display(), "executable changed — draining HID++ sessions before the updated agent starts");
+        if !self.prepare_process_replacement().await {
+            warn!(
+                path = %path.display(),
+                "one or more HID++ managers did not complete graceful teardown — refusing replacement and retrying"
+            );
+            let _ = retry.send(());
+            return;
+        }
+        self.exit_after_replacement_teardown("binary update");
+    }
+
+    async fn shut_down(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        self.stop_hidpp_watchers().await;
+        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)
+    }
+
+    /// End after [`Self::prepare_process_replacement`] resolved firmware
+    /// ownership, so a successor starts from native device state.
+    #[cfg(any(target_os = "macos", not(unix)))]
+    fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
+        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
     }
 }
 
@@ -459,7 +596,7 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
 /// binary the user authorizes. A newly granted permission requires a process
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
-async fn request_input_monitoring() {
+async fn request_input_monitoring_and_schedule_relaunch() -> bool {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
@@ -472,11 +609,12 @@ async fn request_input_monitoring() {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
+            Ok(true) => return crate::binary_watch::schedule_after_input_monitoring_grant(),
             Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");
             }
         }
     }
+    false
 }

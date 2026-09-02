@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess, ReceiverRequestState};
 
 const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,14 +31,17 @@ pub struct HostSwitchLink {
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
 /// Spawn the host switch session manager.
+#[must_use]
 pub fn spawn(
     links: &HostSwitchLinks,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
-) {
+) -> WatcherHandle {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -46,17 +50,25 @@ pub fn spawn(
             Ok(runtime) => runtime,
             Err(error) => {
                 warn!(%error, "host switch watcher: could not build tokio runtime");
+                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
                 return;
             }
         };
-        runtime.block_on(manage(
+        let completion = runtime.block_on(manage(
             links,
             channel_pool,
             receiver_access,
             receiver_requests,
             device_io,
+            shutdown_rx,
         ));
+        // A manager return can strand detached session tasks. Destroy their
+        // runtime before telling a recoverable process replacement that no old
+        // firmware writer remains.
+        drop(runtime);
+        let _ = shutdown_done_tx.send(completion);
     });
+    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
 }
 
 struct HostSwitchManagerState {
@@ -141,7 +153,8 @@ async fn manage(
     receiver_access: ReceiverAccess,
     mut receiver_requests: watch::Receiver<ReceiverRequestState>,
     mut device_io: DeviceIoGate,
-) {
+    mut shutdown: oneshot::Receiver<()>,
+) -> ManagerCompletion {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionCompletion>();
     let mut state = HostSwitchManagerState::new();
     let mut reconcile = true;
@@ -174,6 +187,12 @@ async fn manage(
         }
 
         tokio::select! {
+            biased;
+
+            _ = &mut shutdown => {
+                stop_all(&mut state.sessions, HostSwitchStopReason::Graceful).await;
+                return ManagerCompletion::Graceful;
+            }
             Some(completion) = done_rx.recv() => {
                 if let Some(index) = state.sessions
                     .iter()
@@ -183,7 +202,7 @@ async fn manage(
                     let _ = completed.task.await;
                     if let Some((link, host)) = completion.request {
                         if !device_io.wait_until_allowed().await {
-                            return;
+                            return ManagerCompletion::Unexpected;
                         }
                         stop_all(&mut state.sessions, HostSwitchStopReason::Graceful).await;
                         run_transition(
@@ -202,20 +221,20 @@ async fn manage(
             }
             result = links.changed() => {
                 if result.is_err() {
-                    return;
+                    return ManagerCompletion::Unexpected;
                 }
                 reconcile = true;
             }
             result = receiver_requests.changed() => {
                 if result.is_err() {
-                    return;
+                    return ManagerCompletion::Unexpected;
                 }
                 reconcile = true;
             }
             allowed = device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
                 Some(false) => {}
-                None => return,
+                None => return ManagerCompletion::Unexpected,
             },
             () = wait_for_deadline(deadline) => {
                 reconcile = true;

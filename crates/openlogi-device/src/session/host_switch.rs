@@ -51,6 +51,7 @@ const HOST_TASK_IDS: [(reprog_controls::TaskId, u8); 3] = [
     (reprog_controls::task_ids::HOST_SWITCH_CHANNEL_3, 2),
 ];
 const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const RESTORE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 enum ReportingMode {
@@ -129,7 +130,7 @@ pub async fn run_host_switch_session(
     .ok_or(HostSwitchError::UnsupportedKeyboard)?;
     let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
 
-    let armed = arm_host_controls(&controls).await?;
+    let armed = arm_host_controls(&controls, &mut device_io).await?;
     if armed.is_empty() {
         return Err(HostSwitchError::UnsupportedKeyboard);
     }
@@ -166,8 +167,8 @@ pub async fn run_host_switch_session(
     };
 
     drop(listener);
-    if outcome.1 && device_io.wait_until_allowed().await {
-        restore_host_controls(&controls, armed).await;
+    if outcome.1 {
+        restore_host_controls_until_complete(&controls, armed, &mut device_io).await;
     }
     Ok(outcome.0)
 }
@@ -212,10 +213,11 @@ pub async fn switch_linked_hosts(
 
 async fn arm_host_controls(
     controls: &ReprogControlsV4,
+    device_io: &mut DeviceIoGate,
 ) -> Result<Vec<ArmedControl>, HostSwitchError> {
     let mut armed = Vec::new();
     if let Err(error) = arm_host_controls_inner(controls, &mut armed).await {
-        restore_host_controls(controls, armed).await;
+        restore_host_controls_until_complete(controls, armed, device_io).await;
         return Err(error);
     }
     Ok(armed)
@@ -288,7 +290,11 @@ async fn arm_host_controls_inner(
     Ok(())
 }
 
-async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedControl>) {
+async fn restore_host_controls(
+    controls: &ReprogControlsV4,
+    armed: Vec<ArmedControl>,
+) -> Vec<ArmedControl> {
+    let mut pending = Vec::new();
     for control in armed {
         let mut restored = restore_host_control(controls, control).await;
         if restored.is_err() {
@@ -300,6 +306,27 @@ async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedCont
                 cid = control.cid,
                 "could not restore host switch control"
             );
+            pending.push(control);
+        }
+    }
+    pending
+}
+
+async fn restore_host_controls_until_complete(
+    controls: &ReprogControlsV4,
+    mut pending: Vec<ArmedControl>,
+    device_io: &mut DeviceIoGate,
+) {
+    while !pending.is_empty() {
+        if !device_io.wait_until_allowed().await {
+            // Firmware ownership cannot be discarded. A terminal process exit
+            // is bounded by its caller; a process replacement waits here
+            // rather than starting from a still-diverted baseline.
+            std::future::pending::<()>().await;
+        }
+        pending = restore_host_controls(controls, pending).await;
+        if !pending.is_empty() {
+            tokio::time::sleep(RESTORE_RETRY_DELAY).await;
         }
     }
 }
