@@ -174,6 +174,8 @@ impl TouchpadRuntime {
         dock_swipe_streaming: bool,
     ) -> TouchpadOutcome {
         if self.frozen_bindings.is_none() {
+            // Stroke boundary: the first frame after end/cancel re-freezes
+            // and re-banks.
             self.frozen_bindings = Some(current_bindings.clone());
             self.frozen_actions_enabled = actions_enabled;
             self.spread_bank.reset();
@@ -198,16 +200,14 @@ impl TouchpadRuntime {
             GestureRecognition::Gesture(trigger)
                 if self.frozen_actions_enabled && actions_enabled =>
             {
-                // DockSwipe End commits the action; Began waits for first
-                // in-bounds travel, so a streaming pair holds its discrete
-                // dispatch back as the fallback. The plan consults the
-                // trigger's sibling too: a commit on an unbound direction
-                // still opens the pair's stream, and a pair the system
-                // cannot honor exactly stays discrete. Only the DockSwipe
-                // motions need the macOS 27 bridge — magnify reads plain
-                // CGEvent fields wherever the OS runs.
+                // A streaming pair holds its discrete dispatch back as the
+                // Begin-failure fallback. The plan consults the trigger's
+                // sibling: a commit on an unbound direction still opens the
+                // stream, and a pair the system cannot honor exactly stays
+                // discrete. Magnify needs none of the macOS 27 DockSwipe
+                // bridge.
                 if let Some(plan) = self.swipe_plan(trigger)
-                    && (dock_swipe_streaming || !plan.needs_dock_swipe_bridge())
+                    && (dock_swipe_streaming || plan.is_magnify())
                 {
                     let (swipe, seeded) =
                         ActiveSwipe::new(frame, plan, trigger, self.spread_bank.take());
@@ -253,7 +253,6 @@ impl TouchpadRuntime {
             .take()
             .map_or((SwipeOutput::Idle, None), ActiveSwipe::release);
         self.frozen_bindings = None;
-        self.spread_bank.reset();
         self.frozen_actions_enabled = false;
         TouchpadOutcome {
             routed: terminal.unwrap_or_else(|| {
@@ -273,7 +272,6 @@ impl TouchpadRuntime {
         let terminal = self.close_scroll_stream(false);
         self.recognizer.cancel();
         self.frozen_bindings = None;
-        self.spread_bank.reset();
         self.frozen_actions_enabled = false;
         TouchpadOutcome {
             routed: terminal.unwrap_or(TouchpadOutput::Idle),
@@ -685,9 +683,8 @@ impl InputDispatcher {
                 motion: GestureMotion::Zoom,
                 progress,
             } => {
-                // Magnify: Began carries no scale — apps accumulate Changed
-                // deltas only — so the opening delta follows immediately as
-                // the first Changed frame.
+                // Began carries no scale — apps accumulate Changed deltas —
+                // so the opening delta follows as the first Changed frame.
                 if openlogi_inject::post_magnify(GesturePhase::Began, 0.0)
                     && openlogi_inject::post_magnify(GesturePhase::Changed, *progress)
                 {

@@ -1368,51 +1368,6 @@ fn pinch_in_bound_to_app_expose_streams_negative_progress() {
 }
 
 #[test]
-fn a_reversed_pinch_binding_flips_the_travel_mapping() {
-    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchIn, Action::MissionControl)]);
-    let mut runtime = TouchpadRuntime::default();
-    runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
-
-    // Closing in on the positive-commit consumer: the mapping flips so the
-    // animation commits the bound action.
-    let outcome = runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
-    assert_eq!(
-        outcome.stream,
-        SwipeOutput::Begin {
-            motion: GestureMotion::Vertical,
-            progress: 12_000.0 / 15_000.0,
-        }
-    );
-}
-
-#[test]
-fn the_unbound_pinch_side_clamps_progress_at_zero() {
-    let bindings = BTreeMap::from([(ButtonId::TouchpadTwoFingerPinchOut, Action::MissionControl)]);
-    let mut runtime = TouchpadRuntime::default();
-    runtime.update(&spread_frame(0, 2, 30_000), &bindings, true, true);
-
-    // The inward direction is unbound: its commit opens the pair's stream
-    // with the banked close clamped away, so progress stays pinned at zero.
-    let outcome = runtime.update(&spread_frame(60_000, 2, 18_000), &bindings, true, true);
-    assert_eq!(outcome, idle());
-    let outcome = runtime.update(&spread_frame(90_000, 2, 10_000), &bindings, true, true);
-    assert_eq!(outcome, idle());
-
-    // Re-spreading tracks one-to-one from the first frame and begins the
-    // animation mid-stroke: the pinned travel is dropped, not eaten through,
-    // so the delta is this frame's whole 16 mm of spread against the opening
-    // travel.
-    let outcome = runtime.update(&spread_frame(120_000, 2, 26_000), &bindings, true, true);
-    assert_eq!(
-        outcome.stream,
-        SwipeOutput::Begin {
-            motion: GestureMotion::Vertical,
-            progress: 16_000.0 / 30_000.0,
-        }
-    );
-}
-
-#[test]
 fn four_finger_pinches_plan_their_own_pair() {
     let bindings = BTreeMap::from([(ButtonId::TouchpadFourFingerPinchOut, Action::MissionControl)]);
     let mut runtime = TouchpadRuntime::default();

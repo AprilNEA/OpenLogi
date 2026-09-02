@@ -1,28 +1,22 @@
 //! Pair-planned native gesture streaming.
 //!
-//! A DockSwipe animation belongs to a gesture *pair* — the left/right or
-//! up/down directions of one finger count, or that count's pinch in/out —
-//! not to a single direction: the recognizer commits one direction, but
-//! every frame after the commit drives the pair's one shared progress
-//! stream, so an unbound side still follows the finger and springs back at
-//! release instead of dying silently.
+//! A gesture stream belongs to a *pair* — the left/right or up/down
+//! directions of one finger count, or that count's pinch in/out — not to a
+//! single direction: the recognizer commits one direction, but every frame
+//! after the commit drives the pair's one shared progress stream, so an
+//! unbound side still follows the finger and springs back at release
+//! instead of dying silently.
 //!
-//! A pair streams only when the system can honor every bound direction: each
-//! bound action needs a native swipe-commit consumer (desktop switching on
-//! the horizontal motion, Mission Control / App Exposé on the vertical one)
-//! and all of them must share one motion, with the travel mapping solved so
+//! A pair streams only when the system can honor every bound direction:
+//! each bound action needs a native gesture consumer (desktop switching,
+//! Mission Control / App Exposé, the Dock's scale reveal, magnify zoom),
+//! all of them must share one motion, and the travel mapping must solve so
 //! each bound side commits its own binding. Anything else — no binding on
-//! the pair, a keyboard-style action, mixed motions, or the same commit sign
-//! demanded twice — keeps the pair discrete, so an animation can never
+//! the pair, a keyboard-style action, mixed motions, or the same commit
+//! sign demanded twice — keeps the pair discrete, so a stream can never
 //! commit an outcome the user did not bind. A bound pair whose one side is
 //! unbound clamps progress at zero on that side: the finger can pull the
 //! animation back, never push it past its start.
-//!
-//! Pinch pairs stream the same way — the motion follows the bound actions'
-//! consumer, and spread change drives the scale motion's progress, which
-//! the Dock maps to Show Desktop (closing) and Launchpad, or its macOS 26+
-//! replacement (spreading). A pinch bound to a zoom action keeps the
-//! discrete dispatch, matching the pair defaults.
 
 use std::collections::BTreeMap;
 
@@ -35,18 +29,13 @@ use openlogi_inject::{GestureMotion, GesturePhase};
 /// geometry is plumbed through.
 const HORIZONTAL_PAD_TRAVEL_UM: f64 = 117_000.0;
 const VERTICAL_PAD_TRAVEL_UM: f64 = 75_600.0;
-/// Spread change equal to one progress unit, per pinch finger count and
-/// direction: a close runs over the short travel between resting spread and
-/// fingers-touching, a spread over the wide travel it has room for, so the
-/// two directions normalize separately. Hardware-tuned on the Casa Touch.
+/// Spread change per progress unit, direction-split per finger count — a
+/// close has less room than a spread. Hardware-tuned on the Casa Touch.
 const TWO_FINGER_PINCH_CLOSE_TRAVEL_UM: f64 = 15_000.0;
 const TWO_FINGER_PINCH_OPEN_TRAVEL_UM: f64 = 30_000.0;
 const FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM: f64 = 10_000.0;
 const FOUR_FINGER_PINCH_OPEN_TRAVEL_UM: f64 = 25_000.0;
-/// Spread change equal to one unit of magnification — the zoom motion's
-/// own travel, direction-split like the reveal's but tuned for content
-/// scale instead of an animation position. Hardware-tuned on the Casa
-/// Touch.
+/// Spread change per unit of magnification, tuned for content scale.
 const ZOOM_OPEN_TRAVEL_UM: f64 = 15_000.0;
 const ZOOM_CLOSE_TRAVEL_UM: f64 = 7_500.0;
 
@@ -56,7 +45,8 @@ pub(super) enum SwipeOutput {
     /// Nothing to stream for this frame.
     #[default]
     Idle,
-    /// `progress` is the opening frame's travel; later frames stream deltas.
+    /// `progress` is the stream's opening progress: a banked seed, or the
+    /// first in-bounds delta. Later frames stream deltas.
     Begin {
         motion: GestureMotion,
         progress: f64,
@@ -125,10 +115,8 @@ enum GestureAxis {
 fn swipe_consumer(action: &Action) -> Option<(GestureMotion, i8)> {
     /// Fingers right commit the next Space.
     const NEXT_DESKTOP_SIGN: i8 = 1;
-    /// Spreading drives positive scale progress, which the Dock resolves as
-    /// Show Desktop; closing drives negative, resolving as Launchpad (its
-    /// macOS 26+ replacement). Hardware-verified on macOS 27 — the opposite
-    /// of the native trackpad's finger mapping.
+    /// Positive scale progress resolves as Show Desktop, negative as
+    /// Launchpad — hardware-verified opposite of the native finger mapping.
     const SHOW_DESKTOP_SIGN: i8 = 1;
     /// Spreading commits zoom-in: magnification grows content.
     const ZOOM_IN_SIGN: i8 = 1;
@@ -233,26 +221,28 @@ pub(super) struct SwipeStreamPlan {
     negative: Option<(ButtonId, Action)>,
 }
 
-/// The travel that equals one progress unit. Pinch travel is
-/// direction-split: closing and spreading normalize against their own
-/// divisors, chosen by each delta's physical direction.
+/// Travel in micrometres that equals one progress unit, per direction:
+/// closing and spreading normalize against their own divisors, chosen by
+/// each delta's physical sign. Linear axes carry the same divisor twice.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum AxisTravel {
-    Linear(f64),
-    Pinch { close: f64, spread: f64 },
+struct AxisTravel {
+    close: f64,
+    spread: f64,
 }
 
 impl AxisTravel {
+    fn uniform(travel: f64) -> Self {
+        Self {
+            close: travel,
+            spread: travel,
+        }
+    }
+
     fn divisor_for(self, travel_um: f64) -> f64 {
-        match self {
-            AxisTravel::Linear(travel) => travel,
-            AxisTravel::Pinch { close, spread } => {
-                if travel_um < 0.0 {
-                    close
-                } else {
-                    spread
-                }
-            }
+        if travel_um < 0.0 {
+            self.close
+        } else {
+            self.spread
         }
     }
 }
@@ -294,21 +284,20 @@ impl SwipeStreamPlan {
                 negative = Some((button, action.clone()));
             }
         }
-        // Travel follows the motion the bindings resolved to: zoom pairs
-        // gain magnification, dock-reveal pairs keep their validated
-        // per-count travel.
+        // Travel follows the resolved motion: zoom gains its magnification
+        // tuning, dock reveals keep their per-count travel.
         let travel = match (axis, motion) {
-            (GestureAxis::Horizontal, _) => AxisTravel::Linear(HORIZONTAL_PAD_TRAVEL_UM),
-            (GestureAxis::Vertical, _) => AxisTravel::Linear(VERTICAL_PAD_TRAVEL_UM),
-            (GestureAxis::Pinch, Some(GestureMotion::Zoom)) => AxisTravel::Pinch {
+            (GestureAxis::Horizontal, _) => AxisTravel::uniform(HORIZONTAL_PAD_TRAVEL_UM),
+            (GestureAxis::Vertical, _) => AxisTravel::uniform(VERTICAL_PAD_TRAVEL_UM),
+            (GestureAxis::Pinch, Some(GestureMotion::Zoom)) => AxisTravel {
                 close: ZOOM_CLOSE_TRAVEL_UM,
                 spread: ZOOM_OPEN_TRAVEL_UM,
             },
-            (GestureAxis::Pinch, _) if two_finger => AxisTravel::Pinch {
+            (GestureAxis::Pinch, _) if two_finger => AxisTravel {
                 close: TWO_FINGER_PINCH_CLOSE_TRAVEL_UM,
                 spread: TWO_FINGER_PINCH_OPEN_TRAVEL_UM,
             },
-            (GestureAxis::Pinch, _) => AxisTravel::Pinch {
+            (GestureAxis::Pinch, _) => AxisTravel {
                 close: FOUR_FINGER_PINCH_CLOSE_TRAVEL_UM,
                 spread: FOUR_FINGER_PINCH_OPEN_TRAVEL_UM,
             },
@@ -341,18 +330,10 @@ impl SwipeStreamPlan {
         }
     }
 
-    /// Zoom streams decline the banked seed: an accumulated catch-up is a
-    /// visible pop in content scale, unlike a dock reveal's positional
-    /// animation where the jump reads as responsiveness. A fast zoom flick
-    /// instead falls to its discrete fallback, which works on every host.
-    fn takes_banked_seed(&self) -> bool {
-        self.motion != GestureMotion::Zoom
-    }
-
-    /// Whether streaming this plan needs the macOS 27 DockSwipe bridge.
-    /// Magnify reads plain CGEvent fields and works wherever the OS runs.
-    pub(super) fn needs_dock_swipe_bridge(&self) -> bool {
-        self.motion != GestureMotion::Zoom
+    /// Whether this plan streams through the magnify event instead of a
+    /// DockSwipe motion.
+    pub(super) fn is_magnify(&self) -> bool {
+        self.motion == GestureMotion::Zoom
     }
 }
 
@@ -369,10 +350,9 @@ fn commit_side(commit_sign: i8) -> Side {
 /// A committed gesture streaming its pair's animation, anchored at the
 /// commit frame and advanced by every later frame of the stroke. A pinch
 /// commit arrives with the stroke's banked spread, so the travel the
-/// recognizer threshold consumed still counts: a fast close that crosses
-/// the threshold near the end of its range begins the stream with real
-/// progress instead of falling to a discrete dispatch that some consumers
-/// cannot even perform (Launchpad is a no-op on macOS 26+).
+/// recognizer threshold consumed still counts — without it, a fast close
+/// crossing the threshold at the end of its range would fall to a discrete
+/// dispatch some consumers cannot perform (Launchpad is a no-op on 26+).
 pub(super) struct ActiveSwipe {
     plan: SwipeStreamPlan,
     /// The direction the recognizer committed on, whose binding a
@@ -388,10 +368,9 @@ pub(super) struct ActiveSwipe {
 }
 
 impl ActiveSwipe {
-    /// Anchor the stream at the commit frame. `banked_spread_um` is the
-    /// stroke's accumulated pinch spread at that moment; when it maps to
-    /// in-bounds progress the returned `Begin` opens the animation on the
-    /// commit frame itself.
+    /// Anchor the stream at the commit frame; a non-zero banked spread that
+    /// maps to in-bounds progress returns the `Begin` opening the animation
+    /// on the commit frame itself.
     pub(super) fn new(
         frame: &TouchFrame,
         plan: SwipeStreamPlan,
@@ -400,7 +379,9 @@ impl ActiveSwipe {
     ) -> (Self, Option<SwipeOutput>) {
         let centroid = frame_centroid(frame.contacts());
         let mut seed = 0.0;
-        if banked_spread_um != 0.0 && plan.takes_banked_seed() {
+        // Magnify declines the seed: the catch-up would pop the content
+        // scale, and its discrete fallback works on every host.
+        if banked_spread_um != 0.0 && !plan.is_magnify() {
             let raw = banked_spread_um / plan.travel.divisor_for(banked_spread_um);
             let mapped = if plan.flipped { -raw } else { raw };
             seed = mapped.clamp(plan.lower_bound(), plan.upper_bound());
@@ -425,10 +406,8 @@ impl ActiveSwipe {
     }
 
     /// Fold one frame into the stream. A contact-set change re-anchors
-    /// without progress; frames whose clamped progress does not move — no
-    /// travel, or an unbound sign held past zero — emit nothing. Pinned
-    /// travel is dropped rather than deferred: once the finger re-enters a
-    /// bound sign, the animation tracks it one-to-one from that frame.
+    /// without progress; pinned travel is dropped, not deferred — re-entry
+    /// tracks the finger one-to-one from that frame.
     #[expect(
         clippy::cast_precision_loss,
         reason = "centroid and spread deltas are bounded by the pad size; f64 precision is ample"
@@ -453,12 +432,9 @@ impl ActiveSwipe {
         self.centroid_um = centroid;
         self.spread_um = spread;
         let candidate = self.progress + mapped;
-        // An unbound sign cannot cross zero: it may be pulled back to it,
-        // never past it, so the release rule springs the stroke back instead
-        // of committing a direction the user left unbound. Unclipped frames
-        // stream the mapped travel itself — bit-identical to the raw
-        // division — while a clipped one falls back to the progress
-        // difference it actually achieved.
+        // An unbound sign stops at zero, so the release springs it back.
+        // Unclipped deltas stream the raw division bit-identically; a
+        // clipped one carries the progress difference it achieved.
         let (lower, upper) = (self.plan.lower_bound(), self.plan.upper_bound());
         let clipped = candidate < lower || candidate > upper;
         let next = if clipped {
@@ -488,11 +464,9 @@ impl ActiveSwipe {
         })
     }
 
-    /// Resolve the stroke's lift. An opened stream hands the commit-versus-
-    /// spring-back decision to the injector; one that never produced
-    /// in-bounds travel opened no animation at all, so its committed
-    /// direction's binding fires discretely — an ultra-short stroke must not
-    /// lose it.
+    /// Resolve the stroke's lift: an opened stream hands commit-versus-
+    /// spring-back to the injector, an unopened one fires its committed
+    /// binding discretely.
     pub(super) fn release(self) -> (SwipeOutput, Option<(ButtonId, Action)>) {
         if !self.opened {
             return (SwipeOutput::Idle, self.committed_binding());
@@ -565,10 +539,10 @@ fn frame_spread(contacts: &[TouchContact], centroid: (i64, i64)) -> f64 {
         / contacts.len() as f64
 }
 
-/// Banks a stroke's spread change frame by frame, so a pinch commit can
-/// seed its stream with the travel the recognizer threshold consumed.
-/// Contact-set changes skip their frame's delta, exactly like the stream's
-/// own tracking, so a finger landing mid-stroke cannot fake banked travel.
+/// Banks a stroke's spread change frame by frame, so a pinch commit seeds
+/// its stream with the travel the recognizer threshold consumed. A
+/// contact-set change skips its frame's delta — a finger landing
+/// mid-stroke cannot fake banked travel.
 #[derive(Default)]
 pub(super) struct SpreadBank {
     anchor: Option<(Box<[u8]>, f64)>,

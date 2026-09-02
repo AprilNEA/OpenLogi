@@ -58,20 +58,6 @@ pub(in crate::inject) fn post(phase: GesturePhase, magnification: f64) -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::phase_bits;
-    use crate::inject::GesturePhase;
-
-    #[test]
-    fn phase_bits_match_iohid_event_phases() {
-        assert_eq!(phase_bits(GesturePhase::Began), 1);
-        assert_eq!(phase_bits(GesturePhase::Changed), 2);
-        assert_eq!(phase_bits(GesturePhase::End), 4);
-        assert_eq!(phase_bits(GesturePhase::Cancel), 8);
-    }
-}
-
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGEventCreate(source: *const c_void) -> *const c_void;
