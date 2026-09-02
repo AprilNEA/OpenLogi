@@ -146,11 +146,11 @@ pub fn spawn(
 /// Route one accepted keyboard edge through the shared HID++ lifecycle.
 fn dispatch_input(
     session: &HidppSessionId,
-    input: CapturedInput,
+    input: &CapturedInput,
     spec: &KeyboardSpec,
     dispatcher: &ActionDispatcher,
 ) {
-    match input {
+    match *input {
         CapturedInput::ButtonDown(button) => {
             let binding = spec.bindings.get(&button);
             if let Some(binding) = binding {
@@ -220,7 +220,7 @@ async fn manage(
                 let Some(live_spec) = live_spec else {
                     continue;
                 };
-                dispatch_input(&input.session, input.input, &live_spec, &dispatcher);
+                dispatch_input(&input.session, &input.input, &live_spec, &dispatcher);
             }
             _ = ticker.tick() => {
                 // While pairing is waiting or active, release the capture

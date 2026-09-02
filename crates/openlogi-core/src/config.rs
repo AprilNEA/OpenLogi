@@ -33,8 +33,9 @@ pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerErro
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
-    Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
+    GestureAxisBias, GestureSensitivity, Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
+    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::binding::{
@@ -963,6 +964,52 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective gesture sensitivity for `device_key`: the device's
+    /// override when set, else the app-wide default.
+    #[must_use]
+    pub fn gesture_sensitivity(&self, device_key: &str) -> GestureSensitivity {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.gesture_sensitivity)
+            .unwrap_or(self.app_settings.gesture_sensitivity)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s gesture sensitivity
+    /// override.
+    pub fn set_device_gesture_sensitivity(
+        &mut self,
+        device_key: &str,
+        sensitivity: Option<GestureSensitivity>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gesture_sensitivity = sensitivity;
+    }
+
+    /// The effective gesture axis bias for `device_key`: the device's
+    /// override when set, else the app-wide default.
+    #[must_use]
+    pub fn gesture_axis_bias(&self, device_key: &str) -> GestureAxisBias {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.gesture_axis_bias)
+            .unwrap_or(self.app_settings.gesture_axis_bias)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s gesture axis bias
+    /// override.
+    pub fn set_device_gesture_axis_bias(
+        &mut self,
+        device_key: &str,
+        bias: Option<GestureAxisBias>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gesture_axis_bias = bias;
     }
 }
 

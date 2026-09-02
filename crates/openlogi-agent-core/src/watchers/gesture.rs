@@ -123,6 +123,8 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
             .map(|(cid, _)| cid)
             .collect(),
         divert_buttons: plan.divert_buttons.clone(),
+        gesture_sensitivity: plan.gesture_sensitivity,
+        gesture_axis_bias: plan.gesture_axis_bias,
     }
 }
 

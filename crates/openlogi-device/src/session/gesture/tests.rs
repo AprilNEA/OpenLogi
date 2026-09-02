@@ -76,13 +76,49 @@ fn release() -> RawControlEvent {
 /// dedicated edge tests below.
 fn next_gesture(
     rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
-) -> Result<CapturedInput, mpsc::error::TryRecvError> {
+) -> Result<(ButtonId, GestureDirection), mpsc::error::TryRecvError> {
     loop {
         let input = rx.try_recv()?;
-        if matches!(input, CapturedInput::Gesture(..)) {
-            return Ok(input);
+        if let CapturedInput::Gesture(button, direction, _) = input {
+            return Ok((button, direction));
         }
     }
+}
+
+/// Feed a gesture-button swipe, including a discarded contact-kick sample.
+fn feed_gesture_swipe(
+    acc: &mut CaptureAccum,
+    gesture_cids: &[u16],
+    dx: i16,
+    dy: i16,
+    tx: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    // Mechanical thumb-press kick — logged but not accumulated.
+    handle_reprog(
+        acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        gesture_cids,
+        &[],
+        &[],
+        tx,
+    );
+    handle_reprog(
+        acc,
+        RawControlEvent::RawXy { dx, dy },
+        gesture_cids,
+        &[],
+        &[],
+        tx,
+    );
+    // A second kept sample confirms direction after settle/hold is satisfied.
+    handle_reprog(
+        acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        gesture_cids,
+        &[],
+        &[],
+        tx,
+    );
 }
 
 #[test]
@@ -99,28 +135,15 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::GestureButton,
-            GestureDirection::Click
-        )),
+        Ok((ButtonId::GestureButton, GestureDirection::Click)),
         "the released holder still clicks"
     );
 
     acc.backdate_hold_for_test();
-    handle_reprog(
-        &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
-        BOTH,
-        &[],
-        &[],
-        &tx,
-    );
+    feed_gesture_swipe(&mut acc, BOTH, 120, 5, &tx);
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::HapticPanel,
-            GestureDirection::Right
-        )),
+        Ok((ButtonId::HapticPanel, GestureDirection::Right)),
         "the taken-over hold dispatches through the panel's own map"
     );
 
@@ -158,20 +181,10 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
     // The panel lifts; the surviving hold accumulates again.
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
     acc.backdate_hold_for_test();
-    handle_reprog(
-        &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
-        BOTH,
-        &[],
-        &[],
-        &tx,
-    );
+    feed_gesture_swipe(&mut acc, BOTH, 120, 5, &tx);
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::GestureButton,
-            GestureDirection::Right
-        )),
+        Ok((ButtonId::GestureButton, GestureDirection::Right)),
         "the original hold resumes once the overlap ends"
     );
 }
@@ -188,10 +201,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
     handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::GestureButton,
-            GestureDirection::Click
-        )),
+        Ok((ButtonId::GestureButton, GestureDirection::Click)),
         "the swapped-out holder still clicks"
     );
 
@@ -219,10 +229,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
     );
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::HapticPanel,
-            GestureDirection::Right
-        ))
+        Ok((ButtonId::HapticPanel, GestureDirection::Right))
     );
 }
 
@@ -244,10 +251,7 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
 
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::GestureButton,
-            GestureDirection::Click
-        ))
+        Ok((ButtonId::GestureButton, GestureDirection::Click))
     );
     assert!(
         next_gesture(&mut rx).is_err(),
@@ -263,21 +267,11 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     // Pretend the button has been held well past the swipe gate.
     acc.backdate_hold_for_test();
-    handle_reprog(
-        &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
-        GESTURE,
-        &[],
-        &[],
-        &tx,
-    );
+    feed_gesture_swipe(&mut acc, GESTURE, 120, 5, &tx);
 
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::GestureButton,
-            GestureDirection::Right
-        ))
+        Ok((ButtonId::GestureButton, GestureDirection::Right))
     );
 
     handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
@@ -318,10 +312,7 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
 
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::HapticPanel,
-            GestureDirection::Up
-        ))
+        Ok((ButtonId::HapticPanel, GestureDirection::Up))
     );
 
     handle_reprog(&mut acc, release(), PANEL, &[], &[], &tx);
@@ -341,10 +332,7 @@ fn a_quick_panel_tap_is_a_click() {
 
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::HapticPanel,
-            GestureDirection::Click
-        ))
+        Ok((ButtonId::HapticPanel, GestureDirection::Click))
     );
     assert!(
         next_gesture(&mut rx).is_err(),
@@ -387,22 +375,31 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     );
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::HapticPanel,
-            GestureDirection::Right
-        ))
+        Ok((ButtonId::HapticPanel, GestureDirection::Right))
     );
 }
 
 #[test]
-fn the_dedicated_buttons_first_sample_is_not_discarded() {
-    // The discard is a panel quirk: the dedicated button's raw-XY stream is
-    // relative from the first sample, which must keep committing as-is.
+fn the_dedicated_buttons_first_sample_is_a_discarded_contact_kick() {
+    // The dedicated gesture button's first raw-XY packet is the mechanical
+    // thumb-press kick and must not contribute to travel totals.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 300, dy: 0 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "the contact kick alone must not commit"
+    );
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -411,14 +408,21 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
         &[],
         &tx,
     );
+    // With hold already satisfied, one kept sample + fast travel can commit via
+    // hold/bypass confirmation; a zero confirmation packet also works.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
 
     assert_eq!(
         next_gesture(&mut rx),
-        Ok(CapturedInput::Gesture(
-            ButtonId::GestureButton,
-            GestureDirection::Right
-        )),
-        "the dedicated button's very first sample still counts"
+        Ok((ButtonId::GestureButton, GestureDirection::Right)),
+        "post-kick travel commits the real direction"
     );
 }
 

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::{GestureAxisBias, GestureSensitivity, KeyModifiers, KeyTrigger};
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -36,6 +36,10 @@ pub struct HookMaps {
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
     /// instead — it never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Configured gesture sensitivity for hold gating and travel thresholds.
+    pub gesture_sensitivity: GestureSensitivity,
+    /// Configured gesture axis bias balancing horizontal vs vertical recognition.
+    pub gesture_axis_bias: GestureAxisBias,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -117,13 +121,19 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken) {
+    fn begin(
+        &mut self,
+        button: ButtonId,
+        press: PressToken,
+        sensitivity: GestureSensitivity,
+        axis_bias: GestureAxisBias,
+    ) {
         self.current = Some(GestureHold {
             button,
             started_at: Instant::now(),
             press,
         });
-        self.swipe.begin();
+        self.swipe.begin_with_config(sensitivity, axis_bias);
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
@@ -131,9 +141,12 @@ impl HoldState {
     /// or `None` while still too short, already fired, or not holding.
     fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(PressToken, ButtonId, GestureDirection)> {
         let held = self.current.as_ref()?;
-        self.swipe
-            .accumulate(dx, dy)
-            .map(|dir| (held.press.clone(), held.button, dir))
+        let button = held.button;
+        let press = held.press.clone();
+        if let Some(dir) = self.swipe.accumulate(dx, dy) {
+            return Some((press, button, dir));
+        }
+        None
     }
 
     /// End the hold for `button`, returning its exact token and whether it was a
@@ -260,7 +273,11 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press));
+                let (sensitivity, axis_bias) = hooks.try_read().map_or(
+                    (GestureSensitivity::DEFAULT, GestureAxisBias::DEFAULT),
+                    |m| (m.gesture_sensitivity, m.gesture_axis_bias),
+                );
+                HOLD.with_borrow_mut(|h| h.begin(id, press, sensitivity, axis_bias));
                 return EventDisposition::Suppress;
             }
             return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));

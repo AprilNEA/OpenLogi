@@ -139,7 +139,7 @@ impl InputDispatcher {
             return;
         };
         match input {
-            CapturedInput::Gesture(button, direction) => {
+            CapturedInput::Gesture(button, direction, _trace) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;

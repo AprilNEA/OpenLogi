@@ -28,6 +28,7 @@ fn workflow() -> Option<String> {
 /// again.
 fn workflow_commands(workflow: &str) -> String {
     workflow
+        .replace("\\\r\n", " ")
         .replace("\\\n", " ")
         .split_whitespace()
         .collect::<Vec<_>>()
