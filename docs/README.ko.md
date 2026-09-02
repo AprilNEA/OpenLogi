@@ -48,7 +48,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 
 - Logi Bolt 수신기, Unifying 수신기, Bluetooth, 유선으로 연결된 기기를 지원하며 배터리 잔량과 충전 상태 표시
 - OS 입력 훅을 통한 버튼 리매핑: 내장 액션 카탈로그 + 사용자 지정 키보드 단축키(TOML 작성)¹
-- 앱 포커스 시 자동 전환되는 앱별 프로필 오버레이(macOS + Windows; Linux는 X11 / XWayland 전용)
+- 앱 포커스 시 자동 전환되는 앱별 프로필 오버레이(macOS + Windows; Linux는 GNOME(번들 Shell 확장), wlroots 컴포지터 또는 X11 / XWayland)
 - Litra 조명: 전원, 밝기, 색온도 제어와 카메라 사용에 연동한 자동 켜기 / 끄기
 
 **마우스**
@@ -111,7 +111,9 @@ sudo dpkg -i openlogi_*.deb
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
 
-# Arch Linux
+# Arch Linux — AUR에서 설치(시스템과 함께 업데이트됨):
+paru -S openlogi-bin   # or: yay -S openlogi-bin
+# …또는 릴리스 패키지를 직접 설치:
 sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 
