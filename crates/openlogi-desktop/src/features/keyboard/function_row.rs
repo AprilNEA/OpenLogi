@@ -96,6 +96,10 @@ const GAMING_AUX_KEYS: [ButtonId; 4] = [
     ButtonId::KeyMr,
 ];
 
+/// Keeps the keyboard model stationary while the user switches gaming modes.
+const GAMING_MODE_CARD_H: f32 = 68.;
+const GAMING_MODE_CONTENT_H: f32 = 170.;
+
 #[derive(Clone, Copy, Default)]
 struct GamingKeysAvailable {
     g_row: bool,
@@ -125,6 +129,8 @@ struct GamingControlsState<'a> {
     selected_profile: GKeyProfile,
     profile_bindings: &'a std::collections::BTreeMap<ButtonId, Action>,
     nine_button_bindings: &'a std::collections::BTreeMap<ButtonId, Action>,
+    /// The keyboard pane itself renders physical G/M key callouts.
+    device_diagram: bool,
 }
 
 impl GamingKeysAvailable {
@@ -153,8 +159,12 @@ const SLIDE_MS: u64 = 180;
 const KEYBOARD_W: f32 = 700.;
 /// Render size when no asset resolved: the placeholder box.
 const FALLBACK_KEYBOARD_SIZE: (f32, f32) = (KEYBOARD_W, 220.);
-/// Space above the keyboard reserved for function-key callouts.
+/// Standard space above the keyboard reserved for function-key callouts.
 const CALLOUT_BAND_H: f32 = 118.;
+/// G913 adds one M-key lane above the function row. Its G-key callouts use a
+/// dedicated gutter beside the keyboard, matching the physical left column.
+const G913_CALLOUT_BAND_H: f32 = 172.;
+const G913_G_KEY_GUTTER_W: f32 = 280.;
 /// Vertical chrome around the keyboard pane (header, tab strip, screen
 /// padding, footer) — the viewport height minus this and the callout band is
 /// what the render may occupy before it scales down to fit.
@@ -165,6 +175,12 @@ const KEY_CALLOUT_W: f32 = 60.;
 const KEY_CALLOUT_H: f32 = 48.;
 const KEY_CALLOUT_TOP_UPPER: f32 = 4.;
 const KEY_CALLOUT_TOP_LOWER: f32 = 50.;
+const G913_FUNCTION_CALLOUT_OFFSET: f32 = 54.;
+/// Centres M1-M3 between the two staggered rows of function-key callouts.
+const GAMING_M_CALLOUT_TOP: f32 = 81.;
+/// Leaves a clear lane below the M row before the vertical G-key column.
+const GAMING_G_CALLOUT_TOP: f32 = 141.;
+const GAMING_G_CALLOUT_GAP: f32 = 12.;
 const KEY_TARGET_W: f32 = 30.;
 const KEY_TARGET_H: f32 = 30.;
 const KEY_HOTSPOT_DOT: f32 = 12.;
@@ -193,6 +209,8 @@ pub struct FunctionRowView {
     /// The hovered function-row key index, shared by callout bubbles, key hit
     /// zones, and leader lines.
     hovered_key: Option<usize>,
+    /// Hovered G/M/MR key on a device-specific keyboard diagram.
+    hovered_g_key: Option<ButtonId>,
     /// Which power-user editor is showing in the panel, if any.
     active_editor: Option<PowerUserKind>,
     /// Lazily-created [`InputState`] for the text editors.
@@ -222,6 +240,7 @@ impl FunctionRowView {
             selected_g_key: None,
             selected_g_profile: GKeyProfile::M1,
             hovered_key: None,
+            hovered_g_key: None,
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
@@ -275,6 +294,13 @@ impl FunctionRowView {
     pub(crate) fn set_hovered_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
         if self.hovered_key != idx {
             self.hovered_key = idx;
+            cx.notify();
+        }
+    }
+
+    fn set_hovered_g_key(&mut self, button: Option<ButtonId>, cx: &mut Context<Self>) {
+        if self.hovered_g_key != button {
+            self.hovered_g_key = button;
             cx.notify();
         }
     }
@@ -352,6 +378,7 @@ impl Render for FunctionRowView {
         let viewport_h = f32::from(window.viewport_size().height);
         let render_size = keyboard_render_size(asset, viewport_h);
         let points = key_points(asset);
+        let has_g913_layout = asset.is_some_and(is_g913_asset);
         let image_path = asset.map(|asset| asset.image_path.clone());
         let slots: Vec<KeySlot> = FUNCTION_KEYS
             .iter()
@@ -374,6 +401,7 @@ impl Render for FunctionRowView {
                 }
             })
             .collect();
+        let gaming_slots = g913_gaming_slots(asset, &gaming, selected_g_profile);
 
         self.normalize_selection(
             slots.len(),
@@ -383,6 +411,7 @@ impl Render for FunctionRowView {
         );
         let selected = self.selected_key;
         let hovered = self.hovered_key;
+        let hovered_g = self.hovered_g_key;
         let active_editor = self.active_editor;
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
@@ -417,7 +446,11 @@ impl Render for FunctionRowView {
         let keyboard =
             KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
                 .selected(selected)
-                .hovered(hovered);
+                .hovered(hovered)
+                .gaming_slots(gaming_slots)
+                .selected_g(self.selected_g_key)
+                .hovered_g(hovered_g)
+                .gaming_mode(gaming.mode);
         let panel = self
             .selected_g_key
             .map(|button| {
@@ -439,6 +472,7 @@ impl Render for FunctionRowView {
                     selected_profile: selected_g_profile,
                     profile_bindings: &gaming.profile_bindings,
                     nine_button_bindings: &gaming.nine_button_bindings,
+                    device_diagram: has_g913_layout,
                 },
                 &view,
                 cx,
@@ -546,6 +580,17 @@ struct KeySlot {
     binding_icon: Option<&'static str>,
 }
 
+/// One G913-specific G/M key and the physical centre of its keycap.
+#[derive(Clone)]
+struct GamingKeySlot {
+    button: ButtonId,
+    x_frac: f32,
+    y_frac: f32,
+    binding: SharedString,
+    binding_icon: Option<&'static str>,
+    active: bool,
+}
+
 /// The two-pane row: keyboard photo + an optional side panel.
 #[derive(IntoElement)]
 struct InspectorRow {
@@ -594,11 +639,15 @@ impl RenderOnce for InspectorRow {
 #[derive(IntoElement)]
 struct KeyboardPane {
     slots: Vec<KeySlot>,
+    gaming_slots: Vec<GamingKeySlot>,
     image_path: Option<std::path::PathBuf>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     render_size: (f32, f32),
     selected: Option<usize>,
     hovered: Option<usize>,
+    selected_g: Option<ButtonId>,
+    hovered_g: Option<ButtonId>,
+    gaming_mode: GamingKeyMode,
     view: Entity<FunctionRowView>,
 }
 
@@ -612,11 +661,15 @@ impl KeyboardPane {
     ) -> Self {
         Self {
             slots,
+            gaming_slots: Vec::new(),
             image_path,
             glow,
             render_size,
             selected: None,
             hovered: None,
+            selected_g: None,
+            hovered_g: None,
+            gaming_mode: GamingKeyMode::Profiles,
             view,
         }
     }
@@ -632,26 +685,75 @@ impl KeyboardPane {
         self.hovered = hovered.into();
         self
     }
+
+    #[must_use]
+    fn gaming_slots(mut self, slots: Vec<GamingKeySlot>) -> Self {
+        self.gaming_slots = slots;
+        self
+    }
+
+    #[must_use]
+    fn selected_g(mut self, selected: Option<ButtonId>) -> Self {
+        self.selected_g = selected;
+        self
+    }
+
+    #[must_use]
+    fn hovered_g(mut self, hovered: Option<ButtonId>) -> Self {
+        self.hovered_g = hovered;
+        self
+    }
+
+    #[must_use]
+    fn gaming_mode(mut self, mode: GamingKeyMode) -> Self {
+        self.gaming_mode = mode;
+        self
+    }
 }
 
 impl RenderOnce for KeyboardPane {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the keyboard image, both callout layers, and shared hit targets form one overlay"
+    )]
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (img_w, img_h) = self.render_size;
         let img_path = self.image_path;
         let view_clone = self.view;
         let selected = self.selected;
         let hovered = self.hovered;
+        let selected_g = self.selected_g;
+        let hovered_g = self.hovered_g;
+        let gaming_mode = self.gaming_mode;
+        let gaming_slots = self.gaming_slots;
+        let has_gaming_layout = !gaming_slots.is_empty();
+        let callout_band_h = if has_gaming_layout {
+            G913_CALLOUT_BAND_H
+        } else {
+            CALLOUT_BAND_H
+        };
+        let image_left = if has_gaming_layout {
+            G913_G_KEY_GUTTER_W
+        } else {
+            0.
+        };
+        let pane_w = image_left + img_w;
+        let gaming_bottom = gaming_slots
+            .iter()
+            .map(|slot| gaming_callout_position(slot).1 + KEY_CALLOUT_H)
+            .fold(0., f32::max);
+        let pane_h = (callout_band_h + img_h).max(gaming_bottom);
         let pal = theme::palette(cx);
 
         div()
             .relative()
-            .w(px(img_w))
-            .h(px(CALLOUT_BAND_H + img_h))
+            .w(px(pane_w))
+            .h(px(pane_h))
             .child(
             div()
                 .absolute()
-                .top(px(CALLOUT_BAND_H))
-                .left(px(0.))
+                .top(px(callout_band_h))
+                .left(px(image_left))
                 .w(px(img_w))
                 .h(px(img_h))
                 // The keyboard's RGB paints *behind* the render, so the opaque
@@ -667,6 +769,19 @@ impl RenderOnce for KeyboardPane {
                 self.slots.clone(),
                 selected,
                 hovered,
+                callout_band_h,
+                has_gaming_layout,
+                image_left,
+                pane_w,
+                (img_w, img_h),
+            ))
+            .child(gaming_leader_canvas(
+                gaming_slots.clone(),
+                selected_g,
+                hovered_g,
+                callout_band_h,
+                image_left,
+                (pane_w, pane_h),
                 (img_w, img_h),
             ))
             .children({
@@ -679,22 +794,57 @@ impl RenderOnce for KeyboardPane {
                         count,
                         highlighted,
                         img_w,
+                        left_offset: image_left,
+                        top_offset: if has_gaming_layout {
+                            G913_FUNCTION_CALLOUT_OFFSET
+                        } else {
+                            0.
+                        },
                         view: view_for_callouts.clone(),
                     }
+                })
+            })
+            .children({
+                let view_for_callouts = view_clone.clone();
+                gaming_slots.iter().cloned().map(move |slot| GamingKeyCallout {
+                    highlighted: gaming_key_is_highlighted(
+                        slot.button,
+                        slot.active,
+                        selected_g,
+                        hovered_g,
+                    ),
+                    slot,
+                    mode: gaming_mode,
+                    view: view_for_callouts.clone(),
                 })
             })
             // Click-targets overlay, centered on each key's marker point.
             .child(
                 div()
                     .absolute()
-                    .top(px(CALLOUT_BAND_H))
-                    .left(px(0.))
+                    .top(px(callout_band_h))
+                    .left(px(image_left))
                     .w(px(img_w))
                     .h(px(img_h))
                     .children(self.slots.into_iter().map(|slot| {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
                     key_click_target(slot, highlighted, (img_w, img_h), &view_clone)
-                })),
+                }))
+                    .children(gaming_slots.into_iter().map(|slot| {
+                        let highlighted = gaming_key_is_highlighted(
+                            slot.button,
+                            slot.active,
+                            selected_g,
+                            hovered_g,
+                        );
+                        gaming_key_click_target(
+                            slot,
+                            highlighted,
+                            gaming_mode,
+                            (img_w, img_h),
+                            &view_clone,
+                        )
+                    })),
             )
     }
 }
@@ -706,6 +856,8 @@ struct KeyCallout {
     count: usize,
     highlighted: bool,
     img_w: f32,
+    left_offset: f32,
+    top_offset: f32,
     view: Entity<FunctionRowView>,
 }
 
@@ -713,8 +865,8 @@ impl RenderOnce for KeyCallout {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
         let idx = self.slot.idx;
-        let left = callout_left_px(idx, self.count, self.img_w, KEY_CALLOUT_W);
-        let top = callout_top_px(idx);
+        let left = self.left_offset + callout_left_px(idx, self.count, self.img_w, KEY_CALLOUT_W);
+        let top = callout_top_px(idx) + self.top_offset;
         let view_hover = self.view.clone();
         let view_click = self.view;
         let binding = self.slot.binding;
@@ -803,6 +955,125 @@ impl RenderOnce for KeyCallout {
     }
 }
 
+/// A G913 G/M key callout. The fixed M lane sits above the fixed G lane, so
+/// switching between profile and nine-button modes never moves the keyboard.
+#[derive(IntoElement)]
+struct GamingKeyCallout {
+    slot: GamingKeySlot,
+    highlighted: bool,
+    mode: GamingKeyMode,
+    view: Entity<FunctionRowView>,
+}
+
+impl RenderOnce for GamingKeyCallout {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let button = self.slot.button;
+        let (left, top) = gaming_callout_position(&self.slot);
+        let view_hover = self.view.clone();
+        let view_click = self.view;
+        let binding = self.slot.binding;
+        let binding_icon = self.slot.binding_icon;
+        let highlighted = self.highlighted;
+        let mode = self.mode;
+
+        v_flex()
+            .id(("gaming-key-callout", gaming_key_id(button)))
+            .absolute()
+            .top(px(top))
+            .left(px(left))
+            .w(px(KEY_CALLOUT_W))
+            .h(px(KEY_CALLOUT_H))
+            .px_1()
+            .justify_center()
+            .items_center()
+            .gap(px(1.))
+            .rounded_md()
+            .border_1()
+            .border_color(if highlighted {
+                rgb(ACCENT_BLUE).into()
+            } else {
+                pal.border
+            })
+            .bg(if highlighted {
+                theme::accent_tint()
+            } else {
+                pal.control
+            })
+            .cursor_pointer()
+            .hover(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.control_hover
+                })
+            })
+            .child(
+                div()
+                    .text_caption()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if highlighted {
+                        rgb(ACCENT_BLUE).into()
+                    } else {
+                        pal.text_primary
+                    })
+                    .child(button.label()),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(2.))
+                    .max_w(px(KEY_CALLOUT_W - 8.))
+                    .when_some(binding_icon, |row, icon| {
+                        row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
+                            if highlighted {
+                                rgb(ACCENT_BLUE).into()
+                            } else {
+                                pal.text_muted
+                            },
+                        ))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_caption()
+                            .text_color(if highlighted {
+                                rgb(ACCENT_BLUE).into()
+                            } else {
+                                pal.text_muted
+                            })
+                            .child(binding),
+                    ),
+            )
+            .on_hover(move |hovered, _window, cx| {
+                let next = (*hovered).then_some(button);
+                view_hover.update(cx, |v, vcx| v.set_hovered_g_key(next, vcx));
+            })
+            .on_click(move |_ev, _window, cx| {
+                view_click.update(cx, |v, vcx| activate_gaming_key(v, button, mode, vcx));
+            })
+    }
+}
+
+fn activate_gaming_key(
+    view: &mut FunctionRowView,
+    button: ButtonId,
+    mode: GamingKeyMode,
+    cx: &mut Context<FunctionRowView>,
+) {
+    if mode == GamingKeyMode::Profiles
+        && let Some(profile) = GKeyProfile::from_button(button)
+    {
+        view.select_g_profile(profile, cx);
+    } else {
+        view.select_g_key(button, cx);
+    }
+}
+
 /// One invisible click-target over a function key. Selecting it opens the
 /// panel; hover/selection draws only a subtle keycap ring on the photo.
 fn key_click_target(
@@ -862,6 +1133,62 @@ fn key_click_target(
         })
 }
 
+fn gaming_key_click_target(
+    slot: GamingKeySlot,
+    highlighted: bool,
+    mode: GamingKeyMode,
+    (img_w, img_h): (f32, f32),
+    view: &Entity<FunctionRowView>,
+) -> impl IntoElement {
+    let button = slot.button;
+    let view_hover = view.clone();
+    let view_click = view.clone();
+    let left = key_target_left_px(slot.x_frac, img_w, KEY_TARGET_W);
+    let top = key_target_top_px(slot.y_frac, img_h, KEY_TARGET_H);
+
+    div()
+        .id(("gaming-key-target", gaming_key_id(button)))
+        .absolute()
+        .top(px(top))
+        .left(px(left))
+        .w(px(KEY_TARGET_W))
+        .h(px(KEY_TARGET_H))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when(highlighted, |el| {
+            el.child(
+                div()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(KEY_HOTSPOT_DOT))
+                            .h(px(KEY_HOTSPOT_DOT))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(gpui::Hsla::from(rgb(ACCENT_BLUE)))
+                            .bg(gpui::Hsla::from(rgb(ACCENT_BLUE))),
+                    )
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme::accent_tint_hover())
+                    .bg(theme::accent_tint()),
+            )
+        })
+        .on_hover(move |hovered, _window, cx| {
+            let next = (*hovered).then_some(button);
+            view_hover.update(cx, |v, vcx| v.set_hovered_g_key(next, vcx));
+        })
+        .on_click(move |_ev, _window, cx| {
+            view_click.update(cx, |v, vcx| activate_gaming_key(v, button, mode, vcx));
+        })
+}
+
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
@@ -869,10 +1196,18 @@ fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the GPUI canvas needs both pane and image coordinate systems plus interaction state"
+)]
 fn keyboard_leader_canvas(
     slots: Vec<KeySlot>,
     selected: Option<usize>,
     hovered: Option<usize>,
+    callout_band_h: f32,
+    gaming_layout: bool,
+    image_left: f32,
+    pane_w: f32,
     (img_w, img_h): (f32, f32),
 ) -> impl IntoElement {
     let guides: Vec<(usize, f32, f32)> =
@@ -881,32 +1216,54 @@ fn keyboard_leader_canvas(
         move |_bounds, _, _| (guides, selected, hovered),
         move |bounds, payload, window, _app| {
             let (guides, selected, hovered) = payload;
-            paint_keyboard_leaders(bounds, guides, selected, hovered, (img_w, img_h), window);
+            paint_keyboard_leaders(
+                bounds,
+                guides,
+                selected,
+                hovered,
+                callout_band_h,
+                gaming_layout,
+                image_left,
+                (img_w, img_h),
+                window,
+            );
         },
     )
     .absolute()
     .inset_0()
-    .w(px(img_w))
-    .h(px(CALLOUT_BAND_H + img_h))
+    .w(px(pane_w))
+    .h(px(callout_band_h + img_h))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GPUI canvas painting receives geometry and transient interaction state separately"
+)]
 fn paint_keyboard_leaders(
     bounds: Bounds<gpui::Pixels>,
     guides: Vec<(usize, f32, f32)>,
     selected: Option<usize>,
     hovered: Option<usize>,
+    callout_band_h: f32,
+    gaming_layout: bool,
+    image_left: f32,
     (img_w, img_h): (f32, f32),
     window: &mut Window,
 ) {
     let count = guides.len();
     for (idx, x_frac, y_frac) in guides {
         let highlighted = key_is_highlighted(idx, selected, hovered);
-        let key_x = x_frac * img_w;
-        let key_y = CALLOUT_BAND_H + (y_frac * img_h);
-        let callout_x = callout_center_x(idx, count, img_w);
-        let callout_bottom = callout_top_px(idx) + KEY_CALLOUT_H;
+        let key_x = image_left + x_frac * img_w;
+        let key_y = callout_band_h + (y_frac * img_h);
+        let callout_x = image_left + callout_center_x(idx, count, img_w);
+        let top_offset = if gaming_layout {
+            G913_FUNCTION_CALLOUT_OFFSET
+        } else {
+            0.
+        };
+        let callout_bottom = callout_top_px(idx) + top_offset + KEY_CALLOUT_H;
         let start = bounds.origin + point(px(callout_x), px(callout_bottom));
-        let elbow = bounds.origin + point(px(callout_x), px(CALLOUT_BAND_H - 14.));
+        let elbow = bounds.origin + point(px(callout_x), px(callout_band_h - 14.));
         let end = bounds.origin + point(px(key_x), px(key_y));
 
         let mut path = PathBuilder::stroke(if highlighted { px(2.) } else { px(1.) });
@@ -920,6 +1277,124 @@ fn paint_keyboard_leaders(
                 window.paint_path(path, hsla(0., 0., 0.55, 0.35));
             }
         }
+    }
+}
+
+fn gaming_leader_canvas(
+    slots: Vec<GamingKeySlot>,
+    selected: Option<ButtonId>,
+    hovered: Option<ButtonId>,
+    callout_band_h: f32,
+    image_left: f32,
+    (pane_w, pane_h): (f32, f32),
+    (img_w, img_h): (f32, f32),
+) -> impl IntoElement {
+    let guides: Vec<(ButtonId, f32, f32, bool)> = slots
+        .iter()
+        .filter(|slot| gaming_key_has_leader(slot.button))
+        .map(|slot| (slot.button, slot.x_frac, slot.y_frac, slot.active))
+        .collect();
+    canvas(
+        move |_bounds, _, _| (guides, selected, hovered),
+        move |bounds, payload, window, _app| {
+            let (guides, selected, hovered) = payload;
+            for (button, x_frac, y_frac, active) in guides {
+                let highlighted = active || selected == Some(button) || hovered == Some(button);
+                let slot = GamingKeySlot {
+                    button,
+                    x_frac,
+                    y_frac,
+                    binding: SharedString::from(""),
+                    binding_icon: None,
+                    active,
+                };
+                let (left, top) = gaming_callout_position(&slot);
+                let key_x = image_left + x_frac * img_w;
+                let key_y = callout_band_h + y_frac * img_h;
+                let (start, elbow) = if GAMING_AUX_KEYS.contains(&button) {
+                    let callout_x = left + KEY_CALLOUT_W / 2.;
+                    (
+                        point(px(callout_x), px(top + KEY_CALLOUT_H)),
+                        Some(point(px(callout_x), px(callout_band_h - 14.))),
+                    )
+                } else {
+                    let callout_y = top + KEY_CALLOUT_H / 2.;
+                    (point(px(left + KEY_CALLOUT_W), px(callout_y)), None)
+                };
+                let mut path = PathBuilder::stroke(if highlighted { px(2.) } else { px(1.) });
+                path.move_to(bounds.origin + start);
+                if let Some(elbow) = elbow {
+                    path.line_to(bounds.origin + elbow);
+                }
+                path.line_to(bounds.origin + point(px(key_x), px(key_y)));
+                if let Ok(path) = path.build() {
+                    window.paint_path(
+                        path,
+                        if highlighted {
+                            rgb(ACCENT_BLUE).into()
+                        } else {
+                            hsla(0., 0., 0.55, 0.35)
+                        },
+                    );
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .w(px(pane_w))
+    .h(px(pane_h))
+}
+
+fn gaming_key_has_leader(button: ButtonId) -> bool {
+    !matches!(button, ButtonId::KeyM1 | ButtonId::KeyM2 | ButtonId::KeyM3)
+}
+
+fn gaming_key_is_highlighted(
+    button: ButtonId,
+    active: bool,
+    selected: Option<ButtonId>,
+    hovered: Option<ButtonId>,
+) -> bool {
+    active || selected == Some(button) || hovered == Some(button)
+}
+
+fn gaming_callout_position(slot: &GamingKeySlot) -> (f32, f32) {
+    const LEFTS: [f32; 5] = [4., 70., 136., 202., 268.];
+    const G_STEP: f32 = KEY_CALLOUT_H + GAMING_G_CALLOUT_GAP;
+    const G_TOPS: [f32; 5] = [
+        GAMING_G_CALLOUT_TOP,
+        GAMING_G_CALLOUT_TOP + G_STEP,
+        GAMING_G_CALLOUT_TOP + 2. * G_STEP,
+        GAMING_G_CALLOUT_TOP + 3. * G_STEP,
+        GAMING_G_CALLOUT_TOP + 4. * G_STEP,
+    ];
+    if let Some(index) = GAMING_AUX_KEYS
+        .iter()
+        .position(|candidate| *candidate == slot.button)
+    {
+        return (LEFTS[index], GAMING_M_CALLOUT_TOP);
+    }
+    let index = GAMING_KEYS
+        .iter()
+        .position(|candidate| *candidate == slot.button)
+        .unwrap_or(0);
+    // M2 is the visual anchor for the physical G-key column.
+    (LEFTS[1], G_TOPS[index])
+}
+
+fn gaming_key_id(button: ButtonId) -> usize {
+    match button {
+        ButtonId::KeyG1 => 0,
+        ButtonId::KeyG2 => 1,
+        ButtonId::KeyG3 => 2,
+        ButtonId::KeyG4 => 3,
+        ButtonId::KeyG5 => 4,
+        ButtonId::KeyM1 => 5,
+        ButtonId::KeyM2 => 6,
+        ButtonId::KeyM3 => 7,
+        ButtonId::KeyMr => 8,
+        _ => 9,
     }
 }
 
@@ -1086,7 +1561,7 @@ impl FunctionRowView {
 }
 
 fn gaming_key_strip(
-    label: SharedString,
+    label: Option<SharedString>,
     element_id: &'static str,
     keys: &[ButtonId],
     state: GamingStripState<'_>,
@@ -1099,13 +1574,15 @@ fn gaming_key_strip(
         .max_w(px(KEYBOARD_W))
         .gap_2()
         .mb_3()
-        .child(
-            div()
-                .text_caption()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(pal.text_muted)
-                .child(label),
-        )
+        .when_some(label, |strip, label| {
+            strip.child(
+                div()
+                    .text_caption()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(pal.text_muted)
+                    .child(label),
+            )
+        })
         .child(
             h_flex()
                 .gap_2()
@@ -1157,56 +1634,71 @@ fn gaming_key_controls(
         .when(state.available.g_row && state.software_control, |layout| {
             layout
                 .child(gaming_mode_selector(state.mode, cx))
-                .when(state.mode == GamingKeyMode::Profiles, |layout| {
-                    layout
-                        .child(g_profile_selector(state.selected_profile, view))
-                        .child(gaming_key_strip(
-                            tr!("keyboard.g_key_profile", profile => state.selected_profile.label()),
-                            "gaming-g-key",
-                            &GAMING_KEYS,
-                            GamingStripState {
-                                enabled: true,
-                                selected: state.selected,
-                                bindings: Some(state.profile_bindings),
-                            },
-                            view,
-                            cx,
-                        ))
+                .when(!state.device_diagram, |layout| {
+                    layout.child(gaming_mode_content(&state, view, cx))
                 })
-                .when(state.mode == GamingKeyMode::NineButtons, |layout| {
-                    let mut aux_keys = Vec::new();
-                    if state.available.mode {
-                        aux_keys.extend_from_slice(&GAMING_AUX_KEYS[..3]);
-                    }
-                    if state.available.macro_record {
-                        aux_keys.push(ButtonId::KeyMr);
-                    }
-                    layout
-                        .child(gaming_key_strip(
-                            tr!("keyboard.gaming_nine_buttons"),
-                            "gaming-nine-g-key",
-                            &GAMING_KEYS,
-                            GamingStripState {
-                                enabled: true,
-                                selected: state.selected,
-                                bindings: Some(state.nine_button_bindings),
-                            },
-                            view,
-                            cx,
-                        ))
-                        .child(gaming_key_strip(
-                            "M1–M3 / MR".into(),
-                            "gaming-nine-aux-key",
-                            &aux_keys,
-                            GamingStripState {
-                                enabled: true,
-                                selected: state.selected,
-                                bindings: Some(state.nine_button_bindings),
-                            },
-                            view,
-                            cx,
-                        ))
-                })
+        })
+}
+
+fn gaming_mode_content(
+    state: &GamingControlsState<'_>,
+    view: &Entity<FunctionRowView>,
+    cx: &mut Context<FunctionRowView>,
+) -> impl IntoElement {
+    let mut aux_keys = Vec::new();
+    if state.available.mode {
+        aux_keys.extend_from_slice(&GAMING_AUX_KEYS[..3]);
+    }
+    if state.available.macro_record {
+        aux_keys.push(ButtonId::KeyMr);
+    }
+
+    v_flex()
+        .w_full()
+        .max_w(px(KEYBOARD_W))
+        .h(px(GAMING_MODE_CONTENT_H))
+        .when(state.mode == GamingKeyMode::Profiles, |layout| {
+            layout
+                .child(g_profile_selector(state.selected_profile, view))
+                .child(gaming_key_strip(
+                    Some(tr!("keyboard.g_key_profile", profile => state.selected_profile.label())),
+                    "gaming-g-key",
+                    &GAMING_KEYS,
+                    GamingStripState {
+                        enabled: true,
+                        selected: state.selected,
+                        bindings: Some(state.profile_bindings),
+                    },
+                    view,
+                    cx,
+                ))
+        })
+        .when(state.mode == GamingKeyMode::NineButtons, |layout| {
+            layout
+                .child(gaming_key_strip(
+                    Some(tr!("keyboard.gaming_nine_buttons")),
+                    "gaming-nine-aux-key",
+                    &aux_keys,
+                    GamingStripState {
+                        enabled: true,
+                        selected: state.selected,
+                        bindings: Some(state.nine_button_bindings),
+                    },
+                    view,
+                    cx,
+                ))
+                .child(gaming_key_strip(
+                    None,
+                    "gaming-nine-g-key",
+                    &GAMING_KEYS,
+                    GamingStripState {
+                        enabled: true,
+                        selected: state.selected,
+                        bindings: Some(state.nine_button_bindings),
+                    },
+                    view,
+                    cx,
+                ))
         })
 }
 
@@ -1219,6 +1711,7 @@ fn gaming_mode_selector(
         ChoiceCard::new(id, title.clone())
             .selected(selected == mode)
             .w(px(290.))
+            .h(px(GAMING_MODE_CARD_H))
             .p_3()
             .gap_1()
             .rounded_lg()
@@ -1471,6 +1964,91 @@ struct KeyPoint {
     y_frac: f32,
 }
 
+fn is_g913_asset(asset: &ResolvedAsset) -> bool {
+    asset.depot.eq_ignore_ascii_case("g913")
+        || asset.display_name.eq_ignore_ascii_case("g913")
+        || asset.display_name.eq_ignore_ascii_case("g915")
+}
+
+/// Curated keycap centres measured against the official 3600x1125 G913
+/// `front.png`. The depot's bundled metadata only contains G1-G5 and was
+/// authored against a different 3850x1202 canvas, so the generic marker
+/// resolver cannot safely infer this board's complete top row.
+fn g913_function_key_points() -> Vec<KeyPoint> {
+    const X: [f32; 13] = [
+        320., 567., 715., 864., 1013., 1240., 1388., 1535., 1683., 1914., 2063., 2211., 2359.,
+    ];
+    X.into_iter()
+        .map(|x| KeyPoint {
+            x_frac: x / 3600.,
+            y_frac: 270. / 1125.,
+        })
+        .collect()
+}
+
+fn g913_gaming_slots(
+    asset: Option<&ResolvedAsset>,
+    gaming: &GamingEditorState,
+    selected_profile: GKeyProfile,
+) -> Vec<GamingKeySlot> {
+    if !asset.is_some_and(is_g913_asset) || !gaming.software_control {
+        return Vec::new();
+    }
+
+    let mut slots = Vec::new();
+    if gaming.available.mode {
+        for (index, button) in GAMING_AUX_KEYS[..3].iter().copied().enumerate() {
+            let action = (gaming.mode == GamingKeyMode::NineButtons)
+                .then(|| gaming.nine_button_bindings.get(&button))
+                .flatten();
+            slots.push(GamingKeySlot {
+                button,
+                x_frac: [576., 714., 853.][index] / 3600.,
+                y_frac: 97. / 1125.,
+                binding: if gaming.mode == GamingKeyMode::Profiles {
+                    SharedString::from("")
+                } else {
+                    binding_label(action)
+                },
+                binding_icon: action.map(action_icon_path),
+                active: gaming.mode == GamingKeyMode::Profiles
+                    && GKeyProfile::from_button(button) == Some(selected_profile),
+            });
+        }
+    }
+    if gaming.mode == GamingKeyMode::NineButtons && gaming.available.macro_record {
+        let action = gaming.nine_button_bindings.get(&ButtonId::KeyMr);
+        slots.push(GamingKeySlot {
+            button: ButtonId::KeyMr,
+            x_frac: 992. / 3600.,
+            y_frac: 97. / 1125.,
+            binding: binding_label(action),
+            binding_icon: action.map(action_icon_path),
+            active: false,
+        });
+    }
+    if gaming.available.g_row {
+        for (index, button) in GAMING_KEYS.into_iter().enumerate() {
+            let bindings = match gaming.mode {
+                GamingKeyMode::Profiles => &gaming.profile_bindings,
+                GamingKeyMode::NineButtons => &gaming.nine_button_bindings,
+            };
+            let action = bindings.get(&button);
+            // G1-G5 centres come from the depot metadata's authored canvas.
+            let marker_y = [483., 637., 791., 945., 1099.][index];
+            slots.push(GamingKeySlot {
+                button,
+                x_frac: 154. / 3850.,
+                y_frac: marker_y / 1202.,
+                binding: binding_label(action),
+                binding_icon: action.map(action_icon_path),
+                active: false,
+            });
+        }
+    }
+    slots
+}
+
 /// Resolve key marker points as fractions [0..1] of the rendered image, along
 /// with how many top-row keys the board exposes (`points.len()` — the visible
 /// prefix of [`FUNCTION_KEYS`]). Prefer asset metadata's top-row markers —
@@ -1478,6 +2056,9 @@ struct KeyPoint {
 /// depots (G513) — and fall back to even spacing on the same row.
 fn key_points(asset: Option<&ResolvedAsset>) -> Vec<KeyPoint> {
     if let Some(a) = asset {
+        if is_g913_asset(a) {
+            return g913_function_key_points();
+        }
         if let Some(points) = legacy_pixel_key_points(a) {
             return points;
         }

@@ -149,6 +149,101 @@ fn g513_pixel_markers_resolve_esc_plus_f1_to_f12() {
     );
 }
 
+#[test]
+fn g913_uses_its_real_esc_and_f1_to_f12_layout() {
+    let asset = g913_asset();
+
+    let points = key_points(Some(&asset));
+    let labels: Vec<&str> = FUNCTION_KEYS
+        .iter()
+        .zip(&points)
+        .map(|((label, _), _)| *label)
+        .collect();
+
+    assert_eq!(points.len(), 13, "G913 has Esc plus F1-F12");
+    assert_eq!(labels.first(), Some(&"Esc"));
+    assert_eq!(labels.last(), Some(&"F12"));
+    assert!(!labels.contains(&"F13"));
+    assert_approx_eq(points[0].x_frac, 320. / 3600.);
+    assert_approx_eq(points[12].x_frac, 2359. / 3600.);
+}
+
+#[test]
+fn g913_gaming_diagram_maps_m_above_g_to_physical_keycaps() {
+    let asset = g913_asset();
+    let gaming = GamingEditorState {
+        available: GamingKeysAvailable {
+            g_row: true,
+            mode: true,
+            macro_record: true,
+        },
+        software_control: true,
+        mode: GamingKeyMode::NineButtons,
+        profile_bindings: std::collections::BTreeMap::new(),
+        nine_button_bindings: std::collections::BTreeMap::new(),
+    };
+
+    let slots = g913_gaming_slots(Some(&asset), &gaming, GKeyProfile::M2);
+
+    assert_eq!(slots.len(), 9);
+    assert_eq!(slots[0].button, ButtonId::KeyM1);
+    assert_eq!(slots[3].button, ButtonId::KeyMr);
+    assert_eq!(slots[4].button, ButtonId::KeyG1);
+    assert_eq!(slots[8].button, ButtonId::KeyG5);
+    let first_mode_position = gaming_callout_position(&slots[0]);
+    let second_mode_position = gaming_callout_position(&slots[1]);
+    let first_g_position = gaming_callout_position(&slots[4]);
+    let second_g_position = gaming_callout_position(&slots[5]);
+    let last_g_position = gaming_callout_position(&slots[8]);
+    assert!(
+        first_mode_position.1 < first_g_position.1,
+        "M keys stay above the G column"
+    );
+    assert!(
+        first_g_position.0 + KEY_CALLOUT_W < G913_G_KEY_GUTTER_W,
+        "G keys keep visible distance from the keyboard image"
+    );
+    assert_approx_eq(
+        second_mode_position.0 - first_mode_position.0 - KEY_CALLOUT_W,
+        6.,
+    );
+    let upper_function_center =
+        G913_FUNCTION_CALLOUT_OFFSET + KEY_CALLOUT_TOP_UPPER + KEY_CALLOUT_H / 2.;
+    let lower_function_center =
+        G913_FUNCTION_CALLOUT_OFFSET + KEY_CALLOUT_TOP_LOWER + KEY_CALLOUT_H / 2.;
+    assert_approx_eq(
+        first_mode_position.1 + KEY_CALLOUT_H / 2.,
+        f32::midpoint(upper_function_center, lower_function_center),
+    );
+    assert_approx_eq(second_mode_position.0, first_g_position.0);
+    assert_approx_eq(
+        second_g_position.1 - first_g_position.1 - KEY_CALLOUT_H,
+        12.,
+    );
+    let g1_physical_y = G913_CALLOUT_BAND_H + slots[4].y_frac * 218.75;
+    assert!(
+        first_g_position.1 + KEY_CALLOUT_H < g1_physical_y,
+        "G-key leader slopes down-right from the callout to the keycap"
+    );
+    let keyboard_bottom = G913_CALLOUT_BAND_H + 218.75;
+    assert!(
+        last_g_position.1 < keyboard_bottom && last_g_position.1 + KEY_CALLOUT_H > keyboard_bottom,
+        "G5 straddles the keyboard's lower-left edge"
+    );
+    assert_approx_eq(slots[0].x_frac, 576. / 3600.);
+    assert_approx_eq(slots[4].x_frac, 154. / 3850.);
+    assert_approx_eq(slots[8].y_frac, 1099. / 1202.);
+}
+
+#[test]
+fn g913_mode_keys_do_not_draw_keyboard_leaders() {
+    assert!(!gaming_key_has_leader(ButtonId::KeyM1));
+    assert!(!gaming_key_has_leader(ButtonId::KeyM2));
+    assert!(!gaming_key_has_leader(ButtonId::KeyM3));
+    assert!(gaming_key_has_leader(ButtonId::KeyMr));
+    assert!(gaming_key_has_leader(ButtonId::KeyG1));
+}
+
 /// The same depot's `metadata.json` is authored against a *different*
 /// render (the G512 banner). Its origin doesn't match the cached PNG, so
 /// the markers must be rejected in favour of the even-spacing fallback
@@ -278,6 +373,20 @@ fn legacy_asset(
         },
         png_width: png.0,
         png_height: png.1,
+    }
+}
+
+fn g913_asset() -> ResolvedAsset {
+    ResolvedAsset {
+        depot: "g913".to_string(),
+        display_name: "G915".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: PathBuf::from("/tmp/g913.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: Metadata { images: Vec::new() },
+        png_width: 3600,
+        png_height: 1125,
     }
 }
 
