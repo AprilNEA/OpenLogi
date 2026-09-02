@@ -187,6 +187,9 @@ fn tabs_follow_capabilities_not_kind() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -209,6 +212,9 @@ fn keyboard_without_asset_hides_buttons_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -229,6 +235,9 @@ fn keyboard_with_buttons_shows_keys_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));

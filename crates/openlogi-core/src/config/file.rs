@@ -278,6 +278,9 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 6 {
         config.migrate_thumbwheel_native_direction();
     }
+    if header.schema_version <= 8 {
+        config.migrate_gaming_key_modes();
+    }
     config.repair_duplicate_routes();
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
@@ -299,6 +302,7 @@ fn reject_obsolete_fields(path: &Path, source: &str, version: u32) -> Result<(),
             ("button_bindings", 1),
             ("gesture_bindings", 1),
             ("gesture_owner", 3),
+            ("m_key_shortcuts", 8),
         ] {
             if version > last_version && device.contains_key(field) {
                 return Err(ConfigError::ObsoleteField {

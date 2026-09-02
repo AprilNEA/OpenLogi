@@ -23,7 +23,9 @@ mod settings;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+pub use device::{
+    DeviceConfig, DeviceIdentity, GKeyProfile, GamingKeyMode, LinkConfig, LinkOverrides,
+};
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
@@ -48,6 +50,14 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v9 replaces per-M-key shortcut choices with one persistent two-mode model:
+/// official M1-M3 profiles or nine independent G/M/MR buttons. Both modes keep
+/// their own bindings while the user switches between them.
+///
+/// v8 moves G1-G5 bindings into three explicit M-key profiles and records
+/// which M keys act as shortcuts instead of profile selectors. Legacy flat
+/// G-key bindings become the M1 profile during deserialization.
 ///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
@@ -91,7 +101,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +186,13 @@ impl Config {
     /// [`Self::set_gesture_direction`] to edit one direction of a gesture
     /// binding in place).
     pub fn set_binding(&mut self, device_key: &str, button: ButtonId, binding: Binding) {
+        if matches!(
+            button,
+            ButtonId::KeyG1 | ButtonId::KeyG2 | ButtonId::KeyG3 | ButtonId::KeyG4 | ButtonId::KeyG5
+        ) {
+            self.set_g_key_binding(device_key, GKeyProfile::M1, button, binding);
+            return;
+        }
         self.devices
             .entry(device_key.to_string())
             .or_default()
@@ -580,6 +597,33 @@ impl Config {
                     *action = new_down.clone();
                 }
             }
+        }
+    }
+
+    /// Build schema-v9's independent nine-button store from the mappings that
+    /// schema v8 kept in the M1 profile and the generic binding map.
+    #[cfg(feature = "fs")]
+    fn migrate_gaming_key_modes(&mut self) {
+        for device in self.devices.values_mut() {
+            if device.gaming_button_bindings.is_empty() {
+                if let Some(m1) = device.g_key_profiles.get(&GKeyProfile::M1) {
+                    device.gaming_button_bindings.extend(m1.clone());
+                }
+                for button in [
+                    ButtonId::KeyM1,
+                    ButtonId::KeyM2,
+                    ButtonId::KeyM3,
+                    ButtonId::KeyMr,
+                ] {
+                    if let Some(binding) = device.bindings.remove(&button) {
+                        device.gaming_button_bindings.insert(button, binding);
+                    }
+                }
+            }
+            if !device.legacy_m_key_shortcuts.is_empty() {
+                device.gaming_key_mode = GamingKeyMode::NineButtons;
+            }
+            device.legacy_m_key_shortcuts.clear();
         }
     }
 
@@ -1007,6 +1051,105 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .enabled = enabled;
+    }
+
+    /// Whether the user explicitly allowed OpenLogi to take row-wide software
+    /// control of this device's G-keys.
+    #[must_use]
+    pub fn g_key_software_control(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|device| device.g_key_software_control)
+    }
+
+    /// Persist the explicit row-wide G-key software-control choice.
+    pub fn set_g_key_software_control(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_software_control = enabled;
+    }
+
+    /// G-key bindings stored for one M-key profile.
+    #[must_use]
+    pub fn g_key_bindings_for(
+        &self,
+        device_key: &str,
+        profile: GKeyProfile,
+    ) -> BTreeMap<ButtonId, Binding> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.g_key_profiles.get(&profile))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Store one G-key binding in the selected M-key profile.
+    pub fn set_g_key_binding(
+        &mut self,
+        device_key: &str,
+        profile: GKeyProfile,
+        button: ButtonId,
+        binding: Binding,
+    ) {
+        debug_assert!(
+            matches!(
+                button,
+                ButtonId::KeyG1
+                    | ButtonId::KeyG2
+                    | ButtonId::KeyG3
+                    | ButtonId::KeyG4
+                    | ButtonId::KeyG5
+            ),
+            "only G1-G5 belong in a G-key profile"
+        );
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profiles
+            .entry(profile)
+            .or_default()
+            .insert(button, binding);
+    }
+
+    /// Current interpretation of the device's gaming-key cluster.
+    #[must_use]
+    pub fn gaming_key_mode(&self, device_key: &str) -> GamingKeyMode {
+        self.devices
+            .get(device_key)
+            .map_or_else(GamingKeyMode::default, |device| device.gaming_key_mode)
+    }
+
+    /// Switch between official profiles and nine independent buttons without
+    /// changing either mode's saved mappings.
+    pub fn set_gaming_key_mode(&mut self, device_key: &str, mode: GamingKeyMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_key_mode = mode;
+    }
+
+    /// Nine-button bindings stored independently of the official profiles.
+    #[must_use]
+    pub fn gaming_button_bindings_for(&self, device_key: &str) -> BTreeMap<ButtonId, Binding> {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gaming_button_bindings.clone())
+            .unwrap_or_default()
+    }
+
+    /// Store one action in the nine-button mode without touching profiles.
+    pub fn set_gaming_button_binding(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        binding: Binding,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_button_bindings
+            .insert(button, binding);
     }
 
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
