@@ -95,6 +95,8 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::PageUp => "PageUp",
+        Shortcut::PageDown => "PageDown",
     };
     parse_shortcut(text)
 }

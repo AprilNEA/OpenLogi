@@ -187,6 +187,13 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Emit the keyboard's Page Up key (USB HID usage `0x4b`).
+    ///
+    /// The same physical key on every OS, so it shares one chord across the
+    /// inject backends rather than being a per-platform named shortcut.
+    PageUp,
+    /// Emit the keyboard's Page Down key (USB HID usage `0x4e`).
+    PageDown,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -257,6 +264,8 @@ macro_rules! for_each_unit_action {
             PrevTab "Previous Tab" "actions.previous_tab" Browser PreviousTab,
             ReloadPage "Reload Page" "actions.reload_page" Browser Reload,
             // Navigation
+            PageUp "Page Up" Navigation ArrowUp,
+            PageDown "Page Down" Navigation ArrowDown,
             MissionControl "Mission Control" "actions.mission_control" Navigation Grid,
             AppExpose "App Exposé" "actions.app_expose" Navigation Layers,
             PreviousDesktop "Previous Desktop" "actions.previous_desktop" Navigation PreviousDesktop,
