@@ -187,6 +187,7 @@ fn tabs_follow_capabilities_not_kind() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        crown: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -209,6 +210,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        crown: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -229,10 +231,50 @@ fn keyboard_with_buttons_shows_keys_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        crown: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
     assert!(!tabs.contains(&DetailTab::Buttons));
+}
+
+/// The Crown tab gates on the measured `crown` capability, independent of the
+/// Keys tab (a keyboard with a dial but no separately reprogrammable F-row,
+/// or vice versa, still gets exactly the panel its capabilities support).
+#[test]
+fn keyboard_with_crown_shows_crown_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        lighting: false,
+        scroll_inversion: false,
+        hires_wheel: false,
+        thumbwheel: false,
+        haptic_feedback: false,
+        haptic_panel: false,
+        crown: true,
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+    assert!(tabs.contains(&DetailTab::Crown));
+    assert!(tabs.contains(&DetailTab::Keys));
+}
+
+/// A keyboard without a crown never gets the tab, even with other buttons.
+#[test]
+fn keyboard_without_crown_hides_crown_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        lighting: false,
+        scroll_inversion: false,
+        hires_wheel: false,
+        thumbwheel: false,
+        haptic_feedback: false,
+        haptic_panel: false,
+        crown: false,
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+    assert!(!tabs.contains(&DetailTab::Crown));
 }
 
 /// Each panel is independent: a lighting-only device (e.g. a keyboard with

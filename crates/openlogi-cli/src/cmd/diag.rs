@@ -12,6 +12,7 @@ use openlogi_hid::{DeviceRoute, dump_features};
 
 pub mod battery;
 pub mod controls;
+pub mod crown;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
@@ -34,6 +35,8 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Read the HID++ 0x4600 Crown capabilities and current mode.
+    Crown(crown::CrownArgs),
 }
 
 impl DiagCmd {
@@ -46,6 +49,7 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::Crown(args) => crown::run(args).await,
         }
     }
 }

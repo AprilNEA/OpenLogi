@@ -23,8 +23,9 @@ use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, CrownEvent, CrownInfo, CrownMode, Dpi, DpiInfo, FeatureEntry, FirmwareEntity,
+    HapticWaveform, LightingMethod, LitraModel, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode, SetCrownMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -117,6 +118,37 @@ pub async fn set_scroll_wheel_mode(
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
+}
+
+/// Read the crown's capabilities and slot/ratchet counts on the device
+/// `route` reaches.
+pub async fn get_crown_info(route: &DeviceRoute) -> Result<CrownInfo, WriteError> {
+    device::get_crown_info(&*native_backend(), route).await
+}
+
+/// Read the crown's current mode on the device `route` reaches.
+pub async fn get_crown_mode(route: &DeviceRoute) -> Result<CrownMode, WriteError> {
+    device::get_crown_mode(&*native_backend(), route).await
+}
+
+/// Write the crown's mode on the device `route` reaches, verified by read-back.
+pub async fn set_crown_mode(
+    route: &DeviceRoute,
+    mode: SetCrownMode,
+) -> Result<CrownMode, WriteError> {
+    device::set_crown_mode(&*native_backend(), route, mode).await
+}
+
+/// Divert the crown on the device `route` reaches, collect up to `max_events`
+/// events (or stop early once `timeout` elapses), then restore its original
+/// reporting mode. Protocol-level smoke test, not the production capture path
+/// — see [`device::sample_crown_events`].
+pub async fn sample_crown_events(
+    route: &DeviceRoute,
+    max_events: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<CrownEvent>, WriteError> {
+    device::sample_crown_events(&*native_backend(), route, max_events, timeout).await
 }
 
 /// Set the Fn-key inversion of the keyboard `route` reaches.

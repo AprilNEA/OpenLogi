@@ -170,6 +170,18 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    // Every crown control (touch, press, both rotation directions, and their
+    // press-held pairs) stays native until the user binds at least one of
+    // them — same "leaves the default" test as the thumb wheel above, plus
+    // the long-press check `divert_buttons` already uses: a Crown binding
+    // whose short action matches the default but carries a long action must
+    // still divert, or the runtime never sees the second edge it needs.
+    let crown_bindings_nondefault = ButtonId::CROWN_CONTROLS.iter().any(|button| {
+        bindings.get(button).is_some_and(|binding| {
+            matches!(binding, Binding::LongPress(_))
+                || binding.click_action() != default_binding(*button)
+        })
+    });
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -184,6 +196,7 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                capture_crown: crown_bindings_nondefault,
             },
             rearm_generation,
         },

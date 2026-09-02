@@ -133,6 +133,12 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read Crown capabilities. Appended last — variant order is wire format.
+    ReadCrownInfo,
+    /// Read the current Crown mode. Appended last — variant order is wire format.
+    ReadCrownMode,
+    /// Write and verify the Crown mode. Appended last — variant order is wire format.
+    WriteCrownMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
