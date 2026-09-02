@@ -73,10 +73,22 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// Keyboard "Calculator" control (CID `0x000a`, firmware task
+    /// `CALCULATOR`) — Logi metadata slot `SLOT_NAME_CALCULATOR`. Not an F-row
+    /// key: it sits in the hotkey cluster above/right of the numpad on boards
+    /// like the ERGO K860 and MX Keys S, and is absent from the Signature
+    /// series.
+    ///
+    /// In the keyboard's macOS mode the firmware emits no HID usage at all for
+    /// this key, so diversion is the only way to reach it — an OS-level hook
+    /// has no event to intercept. Logitech documents the same constraint from
+    /// the other side, listing the Calculator key as one that requires their
+    /// software on macOS while working out of the box on Windows.
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    KeyCalculator,
 }
 
 impl ButtonId {
@@ -103,7 +115,7 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 10] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -113,6 +125,10 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+        // Last: not part of the Signature F-row that seeded this list — the
+        // Calculator key lives in the hotkey cluster beside the numpad. Kept in
+        // the same order as `KEYBOARD_KEY_CIDS` in `openlogi-device`.
+        ButtonId::KeyCalculator,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -165,6 +181,7 @@ impl ButtonId {
             ButtonId::KeyMute => "Mute Key",
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
+            ButtonId::KeyCalculator => "Calculator Key",
             ButtonId::HapticPanel => "Haptic Panel",
         }
     }
@@ -194,6 +211,7 @@ impl ButtonId {
             ButtonId::KeyMute => "keyboard.mute_key",
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
+            ButtonId::KeyCalculator => "keyboard.calculator_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
         }
     }
