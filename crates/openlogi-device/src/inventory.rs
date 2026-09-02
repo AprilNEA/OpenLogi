@@ -32,13 +32,23 @@ pub mod standalone;
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
-use probe::{NodeProbe, probe_one};
+use probe::{NodeProbe, ProbeVerdict, probe_one};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
 /// be asleep) need a generous window to wake and respond to the arrival
 /// ping; we err on the side of waiting.
 const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
+
+/// A Unifying receiver can transiently stall the first arrival-trigger write
+/// while its previous scan settles. Retry once inside the same probe instead
+/// of making the inventory ledger treat that single write as a dead channel.
+const UNIFYING_TRIGGER_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+/// One device-arrival trigger addresses the receiver itself and should ACK
+/// immediately. Keep each attempt well inside the enclosing receiver probe
+/// budget so a slow write still retains its liveness-aware probe verdict.
+const UNIFYING_TRIGGER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Maximum number of pairing slots a Bolt receiver supports. We iterate this
 /// range to surface paired-but-offline devices that won't fire arrival events.
@@ -337,6 +347,18 @@ fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
     ledger.settle(node, false, None).inventory
 }
 
+fn settle_probe<Node: Eq + Hash + Clone>(
+    ledger: &mut NodeLedger<Node>,
+    node: &Node,
+    verdict: ProbeVerdict,
+    inventory: Option<DeviceInventory>,
+) -> ledger::SettledNode {
+    match verdict {
+        ProbeVerdict::AliveButIncomplete => ledger.settle_arrival_replay_failure(node),
+        verdict => ledger.settle(node, verdict.is_healthy(), inventory),
+    }
+}
+
 /// Enumerate all Logitech HID++ receivers visible to the current process and
 /// the devices paired to each.
 ///
@@ -601,6 +623,11 @@ impl Enumerator {
             }
             match backend.open_hidpp(&info).await {
                 Ok(Some(channel)) => {
+                    // A channel that actually opened must not inherit probe or
+                    // arrival-replay eviction counts from its predecessor.
+                    // Inventory replay remains bounded until a probe produces
+                    // a new authoritative snapshot.
+                    self.ledger.reset_channel_failures_after_open(&node);
                     // Attach before the first feature/register check. Receiver
                     // events are recognizable immediately; per-device feature
                     // indexes are registered during the ensuing table walk.
@@ -764,9 +791,7 @@ impl Enumerator {
             all_complete &= probe.verdict.is_complete();
             all_healthy &= probe.verdict.is_healthy();
             outcomes.extend(probe.outcomes);
-            let settled = self
-                .ledger
-                .settle(&node, probe.verdict.is_healthy(), probe.inventory);
+            let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
             // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second
