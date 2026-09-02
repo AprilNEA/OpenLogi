@@ -179,6 +179,14 @@ impl CaptureAccum {
     }
 }
 
+fn capture_accum_for(spec: &CaptureSpec) -> CaptureAccum {
+    CaptureAccum {
+        sensitivity: spec.gesture_sensitivity,
+        axis_bias: spec.gesture_axis_bias,
+        ..CaptureAccum::default()
+    }
+}
+
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
 /// [`ButtonId`] its press dispatches as. A button is diverted per device only
 /// when its binding leaves the default, so an unbound button keeps its native
@@ -331,11 +339,7 @@ async fn run_capture_session_on(
         *slot = Some(shared.clone());
     }
 
-    let accum = Arc::new(Mutex::new(CaptureAccum {
-        sensitivity: spec.gesture_sensitivity,
-        axis_bias: spec.gesture_axis_bias,
-        ..CaptureAccum::default()
-    }));
+    let accum = Arc::new(Mutex::new(capture_accum_for(&spec)));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
     let gesture_cids = armed.gesture_cids.clone();
     let gesture_button_set = armed.gesture_button_cids.clone();
