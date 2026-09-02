@@ -39,7 +39,11 @@ pub use openlogi_core::scroll::ScrollDelta;
 /// sources (IOKit, evdev) hand it back as a `u32`.
 pub const LOGITECH_VENDOR_ID: u32 = openlogi_core::hid::LOGITECH_VENDOR_ID as u32;
 
-/// Cursor position in the operating system's global screen coordinate space.
+/// Cursor position in the operating system's global screen coordinate space,
+/// scaled so it lines up with GPUI's own logical (DIP) display bounds — the
+/// Windows backend divides physical `GetCursorPos` pixels by the cursor's
+/// monitor DPI scale to match; macOS `CGEvent` points and Linux root-window
+/// coordinates are already resolution-independent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CursorPosition {
     /// Horizontal screen coordinate.
