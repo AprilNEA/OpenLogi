@@ -89,6 +89,13 @@ impl AgentServer {
     }
 }
 
+fn disable_keys_device<'a>(
+    shared: &'a SharedRuntime,
+    route: &'a DeviceRoute,
+) -> hardware::DeviceOp<'a> {
+    shared.keyboard_device(route)
+}
+
 #[expect(
     clippy::unused_async_trait_impl,
     reason = "the handlers that only read cached state need no await, but the RPC \
@@ -205,6 +212,31 @@ impl Agent for AgentServer {
             .device(&route)
             .run(HidppOperation::ReadSmartShift, |c| async move {
                 openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        disable_keys_device(&self.shared, &route)
+            .run(HidppOperation::ReadDisableKeys, |channel| async move {
+                openlogi_hid::get_disable_keys_on(&channel).await
+            })
+            .await
+    }
+
+    async fn set_disable_keys(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        desired: openlogi_hid::DisableKeysMask,
+    ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
+        disable_keys_device(&self.shared, &route)
+            .run(HidppOperation::WriteDisableKeys, |channel| async move {
+                openlogi_hid::set_disable_keys_on(&channel, desired).await
             })
             .await
     }
@@ -598,8 +630,85 @@ pub async fn run(server: AgentServer) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
+    use super::{
+        ARM_BUDGET, Budget, Config, DeviceRoute, HidppOperation, ObservableState, Orchestrator,
+        PLAY_BUDGET, disable_keys_device,
+    };
+    use openlogi_device::test_support::publish_scripted_channel;
+    use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
+
+    fn disable_keys_response(request: &[u8]) -> Option<Vec<u8>> {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let mut payload = [0u8; 16];
+        match (request[2], request[3] >> 4) {
+            (0x00, 0x01) => payload[0] = 4,
+            (0x00, 0x00) => {
+                if u16::from_be_bytes([request[4], request[5]]) == 0x4521 {
+                    payload[0] = 0x05;
+                }
+            }
+            (0x05, 0x00) => payload[0] = 0xa1,
+            (0x05, 0x01) => payload[0] = 0x80,
+            _ => return None,
+        }
+
+        let mut response = vec![0u8; 7];
+        response[0] = 0x10;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload[..3]);
+        Some(response)
+    }
+
+    #[tokio::test]
+    async fn disable_keys_real_server_route_uses_only_keyboard_channel() {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        };
+        let observable = Arc::new(ObservableState::new("test".to_string()));
+        let shared = Orchestrator::new(Config::default(), observable).shared();
+        let generic_route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb023,
+        };
+        let (generic, generic_reports) = publish_scripted_channel(
+            &shared.channel_registry,
+            "generic",
+            generic_route,
+            disable_keys_response,
+        )
+        .await;
+        let (keyboard, keyboard_reports) = publish_scripted_channel(
+            &shared.channel_registry,
+            "keyboard",
+            route.clone(),
+            disable_keys_response,
+        )
+        .await;
+        *shared
+            .capture_channel
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(generic);
+        *shared
+            .keyboard_channel
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(keyboard);
+
+        let state = disable_keys_device(&shared, &route)
+            .run(HidppOperation::ReadDisableKeys, |channel| async move {
+                openlogi_hid::get_disable_keys_on(&channel).await
+            })
+            .await
+            .expect("real-server Disable Keys read");
+
+        assert_eq!(state.supported.bits(), 0xa1);
+        assert_eq!(state.disabled.bits(), 0x80);
+        assert!(generic_reports.written_reports().is_empty());
+        assert!(!keyboard_reports.written_reports().is_empty());
+    }
 
     /// Attempts share one allowance, so the second gets what the first left —
     /// not another full one, which is how three retries came to outlast the

@@ -86,7 +86,9 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     assert!(state.app_settings().smooth_scroll);
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::ReloadConfig)
+        Ok(crate::services::ipc::Command::ReloadConfig(
+            crate::services::ipc::ConfigReloadContext::General
+        ))
     ));
 
     state.set_smooth_scroll(true);

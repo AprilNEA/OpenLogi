@@ -5394,6 +5394,7 @@ dependencies = [
  "opener",
  "openlogi-agent-core",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-ipc",

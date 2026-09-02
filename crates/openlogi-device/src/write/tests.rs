@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use super::*;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::per_key_lighting::FramePersistence;
@@ -17,6 +19,7 @@ use crate::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
+use openlogi_core::hid::DisableKeysMask;
 
 const TEST_THRESHOLD: SmartShiftThreshold = match SmartShiftThreshold::try_new(10) {
     Ok(value) => value,
@@ -26,6 +29,95 @@ const TEST_TORQUE: TunableTorque = match TunableTorque::try_new(33) {
     Ok(value) => value,
     Err(_) => panic!("valid test SmartShift torque"),
 };
+
+fn disable_keys_response(request: &[u8], disabled: &AtomicU8, mismatch: bool) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    match (request[2], request[3] >> 4) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            if u16::from_be_bytes([request[4], request[5]]) == 0x4521 {
+                payload[0] = 0x05;
+            }
+        }
+        (0x05, 0x00) => payload[0] = 0xa1,
+        (0x05, 0x01) => payload[0] = disabled.load(Ordering::SeqCst),
+        (0x05, 0x02) => {
+            payload[0] = request[4];
+            disabled.store(if mismatch { 0x01 } else { request[4] }, Ordering::SeqCst);
+        }
+        _ => return None,
+    }
+
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload[..3]);
+    Some(response)
+}
+
+async fn disable_keys_channel(
+    mismatch: bool,
+) -> (
+    SharedChannel,
+    crate::channel::scripted::ScriptedRawHidHandle,
+) {
+    let disabled = Arc::new(AtomicU8::new(0xe0));
+    let responder_disabled = Arc::clone(&disabled);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        disable_keys_response(request, &responder_disabled, mismatch)
+    });
+    let channel = scripted_channel(raw).await;
+    (
+        SharedChannel::new(
+            channel,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb35b,
+            },
+        ),
+        handle,
+    )
+}
+
+#[tokio::test]
+async fn disable_keys_reads_exact_raw_masks() -> Result<(), WriteError> {
+    let (shared, _) = disable_keys_channel(false).await;
+    let state = get_disable_keys_on(&shared).await?;
+    assert_eq!(state.supported.bits(), 0xa1);
+    assert_eq!(state.disabled.bits(), 0xe0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn disable_keys_write_mask_is_capability_bounded() -> Result<(), WriteError> {
+    let (shared, handle) = disable_keys_channel(false).await;
+    let state = set_disable_keys_on(&shared, DisableKeysMask::CAPS_LOCK).await?;
+    assert_eq!(state.disabled.bits(), 0xa1);
+    let writes = handle.written_reports();
+    let set = writes
+        .iter()
+        .find(|report| report[2] == 0x05 && report[3] >> 4 == 0x02)
+        .expect("setDisabledKeys report");
+    assert_eq!(set[4], 0xa1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn disable_keys_mismatch_checks_complete_supported_mask() {
+    let (shared, _) = disable_keys_channel(true).await;
+    assert!(matches!(
+        set_disable_keys_on(&shared, DisableKeysMask::CAPS_LOCK).await,
+        Err(WriteError::WriteNotApplied {
+            operation: HidppOperation::WriteDisableKeys,
+            feature_hex: 0x4521,
+            expected: 0xa1,
+            actual: 0x01,
+        })
+    ));
+}
 
 #[test]
 fn smartshift_and_wheel_mode_byte_encodings_match() {

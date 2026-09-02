@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo, LightCommand, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
@@ -38,6 +39,26 @@ use openlogi_ipc::{
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
+
+use crate::state::DeviceKey;
+
+/// Complete identity of one Disable Keys write/reload transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DisableKeysRequestContext {
+    pub(crate) key: DeviceKey,
+    pub(crate) route: DeviceRoute,
+    pub(crate) route_generation: u64,
+    pub(crate) request_id: u64,
+}
+
+/// Correlation scope for a config reload result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigReloadContext {
+    /// Existing application-wide reload behavior.
+    General,
+    /// Reload following one confirmed Disable Keys transaction.
+    DisableKeys(DisableKeysRequestContext),
+}
 
 /// Minimum gap between agent-launch attempts while the socket is unreachable.
 /// Long enough that a missing or crash-looping binary can't be respawned in a
@@ -91,8 +112,16 @@ pub enum GuiUpdate {
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
+    /// Result of a guarded Disable Keys replacement.
+    DisableKeysWriteResult {
+        context: DisableKeysRequestContext,
+        result: Result<DisableKeysState, WriteError>,
+    },
     /// Whether the agent adopted the config currently on disk.
-    ConfigReloadResult(Result<(), ConfigReloadError>),
+    ConfigReloadResult {
+        context: ConfigReloadContext,
+        result: Result<(), ConfigReloadError>,
+    },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
@@ -113,7 +142,12 @@ pub enum Command {
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
     ),
-    ReloadConfig,
+    ReadDisableKeys(
+        DeviceRoute,
+        oneshot::Sender<Result<DisableKeysState, WriteError>>,
+    ),
+    SetDisableKeys(DisableKeysRequestContext, DisableKeysMask),
+    ReloadConfig(ConfigReloadContext),
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
     /// binary, not the GUI — prompting locally would grant the wrong process.
@@ -554,7 +588,24 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
-        Command::ReloadConfig => {
+        Command::ReadDisableKeys(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_disable_keys(ctx, route).await)?);
+        }
+        Command::SetDisableKeys(context, desired) => {
+            let result = match client
+                .set_disable_keys(ctx, context.route.clone(), desired)
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(WriteError::AgentUnavailable),
+            };
+            let disconnected = matches!(result, Err(WriteError::AgentUnavailable));
+            let _ = update_tx.send(GuiUpdate::DisableKeysWriteResult { context, result });
+            if disconnected {
+                return Err(());
+            }
+        }
+        Command::ReloadConfig(context) => {
             // A transport failure is not the agent rejecting the config, but it
             // is still a reload that did not happen — and the file on disk has
             // already changed. Staying silent here would leave the window
@@ -562,14 +613,17 @@ async fn handle(
             // ones, which is exactly the divergence this fails closed on.
             match client.reload_config(ctx).await {
                 Ok(result) => {
-                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
+                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult { context, result });
                 }
                 Err(error) => {
-                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
-                        message: format!(
-                            "saved, but the agent could not be reached to apply it: {error}"
-                        ),
-                    })));
+                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult {
+                        context,
+                        result: Err(ConfigReloadError {
+                            message: format!(
+                                "saved, but the agent could not be reached to apply it: {error}"
+                            ),
+                        }),
+                    });
                     return Err(());
                 }
             }
@@ -672,6 +726,15 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
+        Command::ReadDisableKeys(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::SetDisableKeys(context, _) => {
+            let _ = update_tx.send(GuiUpdate::DisableKeysWriteResult {
+                context,
+                result: Err(WriteError::AgentUnavailable),
+            });
+        }
         Command::SetLight(_, command, key, request_id) => {
             let _ = update_tx.send(GuiUpdate::LightCommandResult {
                 key,
@@ -698,11 +761,14 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
         // later poll repairs on its own: the config file has already changed,
         // so the agent stays on the old one until another reload succeeds. Say
         // so rather than let the window imply the change took effect.
-        Command::ReloadConfig => {
-            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
-                message: "saved, but the agent is not running, so it has not been applied yet"
-                    .to_string(),
-            })));
+        Command::ReloadConfig(context) => {
+            let _ = update_tx.send(GuiUpdate::ConfigReloadResult {
+                context,
+                result: Err(ConfigReloadError {
+                    message: "saved, but the agent is not running, so it has not been applied yet"
+                        .to_string(),
+                }),
+            });
         }
         _ => {}
     }
@@ -762,9 +828,16 @@ mod tests {
         // showing settings the agent is not running.
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
 
-        reply_disconnected(&update_tx, Command::ReloadConfig);
+        reply_disconnected(
+            &update_tx,
+            Command::ReloadConfig(ConfigReloadContext::General),
+        );
 
-        let Ok(GuiUpdate::ConfigReloadResult(Err(error))) = update_rx.try_recv() else {
+        let Ok(GuiUpdate::ConfigReloadResult {
+            context: ConfigReloadContext::General,
+            result: Err(error),
+        }) = update_rx.try_recv()
+        else {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");

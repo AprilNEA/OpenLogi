@@ -69,4 +69,5 @@ windows-sys = { workspace = true, features = [
 workspace = true
 
 [dev-dependencies]
+openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 tempfile = "3.27.0"

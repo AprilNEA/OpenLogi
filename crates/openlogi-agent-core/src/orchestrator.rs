@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    DisableKeysMask, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -161,9 +161,10 @@ pub struct Orchestrator {
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
-    /// Config keys of devices first sighted (or targeted after wake) recently,
-    /// with remaining confirming re-apply budget: the first write can race the
-    /// device's own boot or reconnect and be lost.
+    /// Config keys of devices recently targeted after discovery, reconnect,
+    /// or system wake, with their remaining confirming re-apply budget. An
+    /// online inventory state does not guarantee that every HID++ feature is
+    /// ready, so the first detached write can still time out or fail.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -598,6 +599,12 @@ impl Orchestrator {
                 fn_lock,
             );
         }
+        if let Some(desired) = configured_disabled_keys(&self.config, key) {
+            crate::hardware::write_disabled_keys_in_background(
+                self.shared.keyboard_device(&route),
+                desired,
+            );
+        }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -924,6 +931,13 @@ fn configured_wheel_mode(
     (resolution, inverted)
 }
 
+fn configured_disabled_keys(config: &Config, device_key: &str) -> Option<DisableKeysMask> {
+    config.disabled_keys(device_key).map(|keys| {
+        keys.iter()
+            .fold(DisableKeysMask::EMPTY, |mask, key| mask | key.mask())
+    })
+}
+
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
@@ -1098,21 +1112,19 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many explicit confirmation passes a first-sighted or wake-targeted
-/// device keeps re-applying its volatile settings after the initial write. A
-/// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
-/// wake can enumerate a receiver whose mouse link is still re-establishing —
-/// so the first write (and a single confirm) can both time out against a
-/// still-booting device. Four confirmations are requested at two-second
-/// intervals; any intervening authoritative reconciliation satisfies one.
+/// How many inventory ticks a newly available device keeps re-applying its
+/// volatile settings after the initial write. A cold restart, device wake, or
+/// system wake can expose an online route while its HID++ feature path is
+/// still re-establishing, so the first write (and a single confirm) can both
+/// fail. Four confirmation passes at the two-second cadence keep trying for
+/// about eight seconds, so the write can land once the path is ready.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies for devices first sighted
-/// recently or targeted by a system wake, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. Reconnects
-/// (offline→online) re-apply once — the device was already booted, so it
-/// needs no boot-race retry.
+/// plus a bounded run of confirming re-applies, and the follow-up keys (with
+/// remaining retry counts) to confirm next refresh. Every trigger gets the
+/// same run: inventory availability only proves that the route was observed,
+/// not that each detached HID++ write completed successfully.
 fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
@@ -1122,12 +1134,6 @@ fn plan_reapply(
     let mut targets = reapply_targets(prev, next, reapply_all);
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
-        .filter(|&&idx| {
-            reapply_all || {
-                let id = stable_id(&next[idx]);
-                !prev.iter().any(|p| stable_id(p) == id)
-            }
-        })
         .map(|&idx| {
             (
                 next[idx].config_key.clone(),

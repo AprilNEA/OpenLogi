@@ -2,13 +2,14 @@
 
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets, stable_id,
+    any_device_needs_capture_rearm, build_devices, configured_disabled_keys, configured_wheel_mode,
+    host_switch_links, pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
-    Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
+    Config, DeviceConfig, DisableKey, LightSettings, LinkConfig, ScrollResolution,
+    VerticalScrollSensitivity,
 };
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -17,6 +18,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::Dpi;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::observable::ObservableState;
@@ -305,6 +307,30 @@ fn runtime_selection_keeps_saved_device_when_all_devices_are_offline() {
 }
 
 #[test]
+fn disable_keys_reapply_distinguishes_unmanaged_empty_and_nonempty_config() {
+    let mut config = Config::default();
+    assert_eq!(configured_disabled_keys(&config, "keyboard"), None);
+
+    config.set_disabled_keys("keyboard", BTreeSet::new());
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(openlogi_hid::DisableKeysMask::EMPTY)
+    );
+
+    config.set_disabled_keys(
+        "keyboard",
+        BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]),
+    );
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(
+            openlogi_hid::DisableKeysMask::CAPS_LOCK
+                | openlogi_hid::DisableKeysMask::WINDOWS_COMMAND
+        )
+    );
+}
+
+#[test]
 fn runtime_selection_tracks_online_transition_without_device_set_change() {
     // Both keys are the bare-identity form `resolve_device_key` returns while
     // the device is online (route-independent, per cross-transport identity).
@@ -562,10 +588,12 @@ fn plan_reapply_retries_a_first_sighting_for_a_bounded_run() {
 }
 
 #[test]
-fn plan_reapply_transitions_are_not_queued_for_confirmation() {
+fn plan_reapply_retries_an_offline_to_online_transition() {
     use std::collections::HashMap;
-    // A wake from device sleep re-applies once — the device was already
-    // booted, so no confirming write is queued.
+    // A wake from device sleep applies now and queues confirming writes. The
+    // inventory can report the device online before its HID++ feature path is
+    // ready, so a transient failure must not leave persisted settings
+    // unapplied until another reconnect.
     let (targets, followup) = plan_reapply(
         &[dev("a", 1, false)],
         &[dev("a", 1, true)],
@@ -573,7 +601,19 @@ fn plan_reapply_transitions_are_not_queued_for_confirmation() {
         false,
     );
     assert_eq!(targets, vec![0]);
-    assert!(followup.is_empty());
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+    );
+
+    // The next steady tick retries and consumes one unit of the bounded run.
+    let online = [dev("a", 1, true)];
+    let (targets, followup) = plan_reapply(&online, &online, &followup, false);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+    );
 }
 
 #[test]
