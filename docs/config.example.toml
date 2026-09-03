@@ -79,6 +79,9 @@ fn_lock = false
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+# POP Keys' dedicated emoji row (separate from KeyEmoji, its "open emoji
+# panel" key) binds the same way.
+KeyEmojiSmiley = "LockScreen"
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings
