@@ -11,7 +11,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::menu::OpenConfigFolder;
+use crate::app::menu::open_config_folder;
 use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -110,7 +110,7 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
                 .child(
                     Button::new("open-config-folder")
                         .label(tr!("app.open_configuration_folder"))
-                        .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
+                        .on_click(|_, _, cx| open_config_folder(cx)),
                 )
                 .child(
                     Button::new("restart-after-config-error")

@@ -5,6 +5,7 @@ use super::{
     ParentElement, RELEASES_URL, REPO_URL, SettingGroup, SettingItem, SettingPage, SettingsView,
     SharedString, Sizable, Styled, div, h_flex, img, px, v_flex,
 };
+use crate::app::menu::open_config_folder;
 use crate::ui::theme::Typography as _;
 
 /// The About page: a hero card with the build identity and outbound links, the
@@ -161,13 +162,7 @@ fn about_config(cx: &App) -> gpui::Div {
                 Button::new("about-reveal-config")
                     .outline()
                     .label(tr!("about.show_in_file_manager"))
-                    .on_click(|_, _, cx| {
-                        if let Ok(dir) = openlogi_core::paths::config_dir()
-                            && let Ok(url) = url::Url::from_file_path(&dir)
-                        {
-                            cx.open_url(url.as_str());
-                        }
-                    }),
+                    .on_click(|_, _, cx| open_config_folder(cx)),
             ),
         )
 }
