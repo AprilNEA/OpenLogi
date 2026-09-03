@@ -27,14 +27,18 @@ const CID_BRIGHTNESS: u32 = 0x0098_0900;
 const CID_CONTRAST: u32 = 0x0098_0901;
 const CID_SATURATION: u32 = 0x0098_0902;
 const CID_AUTO_WHITE_BALANCE: u32 = 0x0098_090c;
+const CID_GAIN: u32 = 0x0098_0913;
 const CID_POWER_LINE_FREQUENCY: u32 = 0x0098_0918;
 const CID_WHITE_BALANCE_TEMPERATURE: u32 = 0x0098_091a;
 const CID_SHARPNESS: u32 = 0x0098_091b;
+const CID_BACKLIGHT_COMPENSATION: u32 = 0x0098_091c;
 
 /// `V4L2_CID_EXPOSURE_AUTO` — the Camera control class base.
 const CID_EXPOSURE_AUTO: u32 = 0x009a_0901;
 const CID_EXPOSURE_ABSOLUTE: u32 = 0x009a_0902;
 const CID_EXPOSURE_AUTO_PRIORITY: u32 = 0x009a_0903;
+const CID_PAN_ABSOLUTE: u32 = 0x009a_0908;
+const CID_TILT_ABSOLUTE: u32 = 0x009a_0909;
 const CID_FOCUS_ABSOLUTE: u32 = 0x009a_090a;
 const CID_FOCUS_AUTO: u32 = 0x009a_090c;
 const CID_ZOOM_ABSOLUTE: u32 = 0x009a_090d;
@@ -54,6 +58,8 @@ const EXPOSURE_APERTURE_PRIORITY: i64 = 3;
 fn control_id(control: CameraControl) -> Option<u32> {
     Some(match control {
         CameraControl::Zoom => CID_ZOOM_ABSOLUTE,
+        CameraControl::Pan => CID_PAN_ABSOLUTE,
+        CameraControl::Tilt => CID_TILT_ABSOLUTE,
         CameraControl::Focus => CID_FOCUS_ABSOLUTE,
         CameraControl::Exposure => CID_EXPOSURE_ABSOLUTE,
         CameraControl::PowerLineFrequency => CID_POWER_LINE_FREQUENCY,
@@ -62,6 +68,8 @@ fn control_id(control: CameraControl) -> Option<u32> {
         CameraControl::Contrast => CID_CONTRAST,
         CameraControl::Saturation => CID_SATURATION,
         CameraControl::Sharpness => CID_SHARPNESS,
+        CameraControl::Gain => CID_GAIN,
+        CameraControl::BacklightCompensation => CID_BACKLIGHT_COMPENSATION,
         CameraControl::WhiteBalance => CID_WHITE_BALANCE_TEMPERATURE,
         CameraControl::Tint => return None,
     })
