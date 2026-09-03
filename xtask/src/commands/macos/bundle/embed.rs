@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use openlogi_core::brand;
 use xshell::{Shell, cmd};
 
@@ -242,6 +242,33 @@ pub(super) fn verify_bundle_binaries(app: &Path, channel: Channel) -> Result<()>
     for path in required_bundle_binaries(app, channel) {
         ensure_file(&path)
             .with_context(|| format!("missing required bundle binary {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Verify the launchable contents of a finished bundle before it is signed.
+///
+/// The helper binaries can all be present while the service plist is missing —
+/// a bundle that looks complete in Finder but cannot be registered by
+/// `SMAppService`. Keep this check next to the writer so the production and
+/// dev assembly paths share the same invariant.
+pub(crate) fn verify_bundle(app: &Path, channel: Channel) -> Result<()> {
+    verify_bundle_binaries(app, channel)?;
+
+    let path = app
+        .join("Contents/Library/LaunchAgents")
+        .join(format!("{}.plist", agent_service_label(channel)));
+    ensure_file(&path)
+        .with_context(|| format!("missing required agent launch plist {}", path.display()))?;
+
+    let found = plist::Value::from_file(&path)
+        .with_context(|| format!("could not read agent launch plist {}", path.display()))?;
+    let expected = plist::Value::Dictionary(agent_launch_plist(channel)?);
+    if found != expected {
+        bail!(
+            "agent launch plist {} does not match the {channel} bundle layout",
+            path.display()
+        );
     }
     Ok(())
 }

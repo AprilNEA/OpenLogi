@@ -105,6 +105,7 @@ fn main() {
     // hook) runs on the tokio runtime on a dedicated thread, and the main thread
     // runs AppKit. Elsewhere there is no tray, so just block on the core.
     let device_io_signal = openlogi_hid::host::device_io_signal();
+    let device_io_gate = openlogi_hid::host::device_io_gate();
     #[cfg(target_os = "macos")]
     {
         // Fail closed before the core thread can enumerate or open HID devices.
@@ -116,6 +117,8 @@ fn main() {
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
         let app_icon = config.app_settings.app_icon;
+        let hook_stop = std::sync::Arc::new(lifecycle::HookStopRequest::default());
+        let core_hook_stop = std::sync::Arc::clone(&hook_stop);
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. A
@@ -125,14 +128,20 @@ fn main() {
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
             .spawn(move || {
-                runtime.block_on(lifecycle::run(config, uninstalled, armed_tx));
+                runtime.block_on(lifecycle::run(
+                    config,
+                    uninstalled,
+                    armed_tx,
+                    core_hook_stop,
+                    device_io_gate,
+                ));
             })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
         if armed_rx.recv().is_ok() {
-            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal);
+            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal, hook_stop);
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -151,7 +160,7 @@ fn main() {
         resume_linux::register(device_io_signal.clone());
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         drop(device_io_signal);
-        runtime.block_on(lifecycle::run(config, uninstalled));
+        runtime.block_on(lifecycle::run(config, uninstalled, device_io_gate));
     }
 }
 

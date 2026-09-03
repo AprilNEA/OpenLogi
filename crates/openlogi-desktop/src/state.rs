@@ -276,17 +276,12 @@ impl AppState {
         };
         // Plain `persist_config`, not `persist_and_reload` as
         // `refresh_inventories` uses for the same fold: there is no agent
-        // connection to reload yet this early in startup, and the
-        // unconditional `ReloadConfig` send at the end of this constructor
-        // (below) already covers both branches once `state` is fully built —
-        // sending it here too would just queue a second, redundant reload.
+        // connection to reload yet this early in startup. The first snapshot
+        // will request one reload after the IPC handshake is complete.
         if adopted {
             state.persist_config("adopt device route");
         } else if identities_changed {
             state.persist_config("device identity");
-        }
-        if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::Command::ReloadConfig);
         }
         state
     }
@@ -298,6 +293,13 @@ impl AppState {
             return false;
         }
         true
+    }
+    /// Ask the agent to adopt the config after the GUI has a live IPC link.
+    pub(crate) fn reload_agent_config(&self) {
+        self.send_ipc(crate::services::ipc::Command::ReloadConfig);
+    }
+    pub(crate) fn should_reload_agent(&self) -> bool {
+        self.config.should_reload_agent()
     }
     /// Persist the in-memory config and — only if the write actually landed —
     /// have the agent reload it. `what` names the setting for the failure log.
