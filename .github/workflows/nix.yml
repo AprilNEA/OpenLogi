@@ -1,9 +1,10 @@
 name: Nix CI
 
 # Evaluate every advertised Flake output, then build and test the package on
-# both supported Linux architectures. Dependency graph and packaging changes
-# run immediately on PRs; the weekly build catches source-only integration
-# drift without adding a full Nix rebuild to every Rust change.
+# both supported Linux architectures. Flake and packaging/linux changes run
+# immediately on PRs. The weekly build catches Cargo/source integration drift
+# (for example a new native dependency that package.nix does not wrap) without
+# a full Nix rebuild on every crate Cargo.toml bump.
 #
 # flake.lock pins nixpkgs exactly; update-flake-lock.yml advances it in a tested
 # PR instead of allowing an unreviewed upstream channel to drift under builds.
@@ -14,12 +15,6 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/**/Cargo.toml"
-      - "crates/**/build.rs"
-      - "design/icon/**"
-      - "docs/config.example.toml"
       - "flake.nix"
       - "flake.lock"
       - "packaging/linux/package.nix"
