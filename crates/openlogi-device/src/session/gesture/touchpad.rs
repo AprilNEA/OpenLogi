@@ -22,10 +22,33 @@ const MISSED_FRAME_PERIODS: u64 = 4;
 const MIN_STROKE_END_TIMEOUT_US: u64 = 20_000;
 const MAX_STROKE_END_TIMEOUT_US: u64 = 60_000;
 
-/// Requested `0x6100` reporting mode: raw DualXY reports in the enhanced
-/// layout documented by the Linux `hid-logitech-hidpp` driver.
-pub const OPENLOGI_RAW_REPORT_FLAGS: RawReportFlags =
-    RawReportFlags::RAW.union(RawReportFlags::ENHANCED);
+/// Requested `0x6100` reporting mode: raw DualXY reports in the 14-bit
+/// layout our decoder parses, plus `DIVERT_NATIVE_GESTURES` — the flag the
+/// production agent arms (0xC1) so the firmware's whole native-gesture
+/// layer stands down for the host while raw reporting streams.
+pub const OPENLOGI_RAW_REPORT_FLAGS: RawReportFlags = RawReportFlags::RAW
+    .union(RawReportFlags::WIDTH_HEIGHT_8BIT)
+    .union(RawReportFlags::DIVERT_NATIVE_GESTURES);
+
+/// The bitmap to arm, honouring the bit-walk probing override: set
+/// `OPENLOGI_RAW_FLAGS_OVERRIDE` (hex, e.g. `41`) to test a firmware's
+/// behaviour per flag combination without a rebuild.
+fn requested_raw_report_flags() -> RawReportFlags {
+    let Ok(value) = std::env::var("OPENLOGI_RAW_FLAGS_OVERRIDE") else {
+        return OPENLOGI_RAW_REPORT_FLAGS;
+    };
+    let trimmed = value.trim_start_matches("0x");
+    match u8::from_str_radix(trimmed, 16) {
+        Ok(bits) => {
+            tracing::warn!(bits, "raw-report flags overridden for firmware probing");
+            RawReportFlags::from_bits_retain(bits)
+        }
+        Err(error) => {
+            tracing::warn!(%value, %error, "invalid OPENLOGI_RAW_FLAGS_OVERRIDE — using the built-in flags");
+            OPENLOGI_RAW_REPORT_FLAGS
+        }
+    }
+}
 
 /// One normalized event emitted by the touchpad stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,12 +122,14 @@ impl TouchpadFrameStream {
         let mut events = Vec::new();
         if dropped != 0 {
             events.push(TouchpadStreamEvent::DroppedFrames(dropped));
+            // The stroke survives a dropped frame: liftoff drops are routine
+            // on >2-contact strokes, and the recognizer rebases on the next
+            // frame it sees.
             if self.active_contacts.is_some() || reported_contacts != 0 {
                 if self.active_contacts.is_none() {
                     self.active_contacts = Some(reported_contacts);
                 }
                 self.last_frame_at = Some(now);
-                events.push(TouchpadStreamEvent::Cancel);
             }
         }
         let Some(outcome) = outcome else {
@@ -137,8 +162,8 @@ impl TouchpadFrameStream {
         }
     }
 
-    /// End an active stroke after report silence, cancelling first when its
-    /// final logical frame never completed.
+    /// End an active stroke after report silence, dropping an incomplete
+    /// final frame first — without cancelling, so the tap is still evaluated.
     pub fn poll_end(&mut self, now: Instant) -> Vec<TouchpadStreamEvent> {
         let Some(last) = self.last_frame_at else {
             return Vec::new();
@@ -152,7 +177,6 @@ impl TouchpadFrameStream {
             events.push(TouchpadStreamEvent::DroppedFrames(1));
             self.active_contacts
                 .get_or_insert_with(|| usize::from(finger_count));
-            events.push(TouchpadStreamEvent::Cancel);
         }
         events.extend(self.end_event());
         events
@@ -356,7 +380,10 @@ impl Geometry {
         if info.x_size == 0 || info.y_size == 0 {
             return Err(TouchpadStreamError::EmptyCoordinateRange);
         }
-        if info.raw_report_mapping_version != 1 {
+        // This Casa Touch — the device this feature targets — reports
+        // mapping version 0 while following the expected DualXY layout, so
+        // accept it alongside version 1 instead of failing capture arming.
+        if !matches!(info.raw_report_mapping_version, 0 | 1) {
             return Err(TouchpadStreamError::UnsupportedMapping(
                 info.raw_report_mapping_version,
             ));
@@ -555,7 +582,7 @@ impl ArmedRawMode {
             .get_raw_report_state()
             .await
             .map_err(protocol_error)?;
-        let requested = OPENLOGI_RAW_REPORT_FLAGS;
+        let requested = requested_raw_report_flags();
         if original.contains(RawReportFlags::RAW) {
             if original != requested {
                 return Err(TouchpadCaptureError::ExternalRawMode {
@@ -574,6 +601,7 @@ impl ArmedRawMode {
             armed: false,
         };
         store.save(device_id, journal)?;
+        log_gestures_handling(feature).await;
         feature
             .set_raw_report_state(requested)
             .await
@@ -658,6 +686,26 @@ async fn recover_raw_mode(
     compare_and_restore(feature, store, device_id, journal).await
 }
 
+/// Read and log the firmware's per-gesture handling bitmap — the state the
+/// parity regime deliberately rides on unmodified. Read-only: OpenLogi never
+/// rewrites it, so a device that does not expose the read only loses the log
+/// line.
+async fn log_gestures_handling(feature: &TouchpadRawXyFeature) {
+    match feature.get_gestures_handling_output().await {
+        Ok(bytes) => {
+            tracing::info!(
+                handling = ?bytes,
+                "touchpad gestures-handling bitmap (byte2 b4-5 = 3F drag, byte3 b6-7 = 1F tap-and-hold drag)"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(error = ?error, "gestures-handling bitmap unreadable");
+        }
+    }
+}
+
+/// Restore the pre-session mode only if the device still carries the mode
+/// this session wrote.
 async fn compare_and_restore(
     feature: &TouchpadRawXyFeature,
     store: &dyn TouchpadJournalStore,

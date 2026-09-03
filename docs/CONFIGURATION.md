@@ -80,8 +80,13 @@ Common device fields are:
   to `false`. The 15 `TouchpadTwoFinger…`, `TouchpadThreeFinger…`, and
   `TouchpadFourFinger…` triggers live in the normal `bindings` and
   `per_app_bindings` maps. They accept one Action only; long-press and nested
-  directional bindings are rejected. Pointer movement, clicks, two-finger
-  scrolling, and firmware secondary click remain native
+  directional bindings are rejected. Pointer movement, clicks, and firmware
+  secondary click remain native
+- `touchpad_gestures.scroll_sensitivity`: optional speed (1..=100, default 14)
+  for the two-finger scrolling OpenLogi synthesizes while capture is armed —
+  the firmware stops translating it once raw frames stream. The device-wide
+  `invert_scroll` flag reverses that synthesized direction relative to the
+  system scroll preference
 - `action_ring`: default and complete per-application eight-slot layouts
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards

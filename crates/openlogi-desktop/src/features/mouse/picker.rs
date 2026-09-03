@@ -69,9 +69,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
         Action::SelectAll | Action::Workflow(_) => "action-icons/list-checks.svg",
-        Action::Find | Action::ReloadPage | Action::ZoomIn | Action::ZoomOut => {
-            "action-icons/search.svg"
-        }
+        Action::Find | Action::ZoomIn | Action::ZoomOut => "action-icons/search.svg",
         Action::Save => "action-icons/save.svg",
         Action::BrowserBack => "action-icons/arrow-left.svg",
         Action::BrowserForward => "action-icons/arrow-right.svg",
@@ -80,6 +78,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ReopenTab => "action-icons/rotate-ccw.svg",
         Action::NextTab => "action-icons/chevron-right.svg",
         Action::PrevTab => "action-icons/chevron-left.svg",
+        Action::ReloadPage => "action-icons/rotate-cw.svg",
         Action::MissionControl | Action::ShowActionsRing => "action-icons/layout-grid.svg",
         Action::AppExpose => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",

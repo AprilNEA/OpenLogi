@@ -27,6 +27,7 @@ use std::sync::{Arc, mpsc as std_mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use openlogi_core::config::TouchpadScrollSensitivity;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::session::gesture::{CaptureSessionMode, TouchpadJournalStore};
@@ -91,6 +92,69 @@ impl GestureOutputs {
     }
 }
 
+/// Synthesize one frame of two-finger scrolling from a micrometre centroid
+/// delta. The capture session owns the pad's raw stream, which switches its
+/// firmware scroll translation off — OpenLogi restores the scrolling itself,
+/// the contract Options+ keeps on the same hardware.
+///
+/// Every frame is wheel-class — no scroll phase, matching what the pad's
+/// firmware emits natively. Phased frames carry drag semantics: apps
+/// rubber-band them at document boundaries and keep the page stretched while
+/// later deltas feed the overscroll. Wheel-class deltas clamp, exactly the
+/// native feel this device has without capture.
+fn post_touchpad_scroll(tuning: TouchpadScrollTuning, dx: i64, dy: i64) {
+    openlogi_inject::post_touchpad_scroll(tuning.content_delta(dx, dy));
+}
+
+/// Effective tuning of one device's synthesized two-finger scrolling.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TouchpadScrollTuning {
+    sensitivity: TouchpadScrollSensitivity,
+    inverted: bool,
+}
+
+impl TouchpadScrollTuning {
+    /// Project the plan's per-device settings.
+    pub(super) fn from_plan(plan: &DispatchPlan) -> Self {
+        Self {
+            sensitivity: plan.touchpad_scroll_sensitivity,
+            inverted: plan.touchpad_scroll_inverted,
+        }
+    }
+
+    /// Convert one centroid delta into a content-following pixel scroll.
+    ///
+    /// Fingers right / down move content right / down (natural scrolling).
+    /// ScrollDelta's wheel convention is +x view-right / +y view-up, so
+    /// content-following maps the horizontal axis negated and the vertical
+    /// axis as-is; the inject layer re-orients for hosts whose wheel
+    /// convention matches content-following instead. `inverted` flips both
+    /// axes after that, mirroring the wheel contract of running opposite the
+    /// system scroll preference.
+    pub(super) fn content_delta(self, dx: i64, dy: i64) -> ScrollDelta {
+        let (dx, dy) = if self.inverted { (-dx, -dy) } else { (dx, dy) };
+        let multiplier = self.sensitivity.scroll_multiplier();
+        ScrollDelta::pixels(
+            micrometres_to_content_pixels(-dx) * multiplier,
+            micrometres_to_content_pixels(dy) * multiplier,
+        )
+    }
+}
+
+/// Two-finger scroll gain in pixels of content per micrometre of centroid
+/// travel: 25 px/mm keeps the Casa Touch's 75 mm-tall surface good for a
+/// ~1.9k px full-height stroke, the distance a Magic Trackpad covers at its
+/// default tracking feel.
+const TOUCHPAD_SCROLL_PIXELS_PER_UM: f64 = 0.025;
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "micrometre deltas from a 117 x 76 mm pad stay far below 2^53"
+)]
+fn micrometres_to_content_pixels(um: i64) -> f64 {
+    um as f64 * TOUCHPAD_SCROLL_PIXELS_PER_UM
+}
+
 /// Unique owner of the capture-manager thread and its graceful shutdown.
 pub struct GestureWatcher {
     shutdown: Option<oneshot::Sender<()>>,
@@ -138,13 +202,17 @@ impl Drop for GestureWatcher {
 #[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
-    capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     outputs: GestureOutputs,
     touchpad_monitor: SharedTouchpadMonitor,
+    channels: (
+        CaptureChannel,
+        openlogi_hid::ChannelRegistry,
+        Arc<std::sync::atomic::AtomicBool>,
+    ),
 ) -> GestureWatcher {
+    let (capture_channel, channel_registry, native_button) = channels;
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     let (shutdown, shutdown_rx) = oneshot::channel();
@@ -165,12 +233,10 @@ pub fn spawn(
             };
             let (context, event_rx) = ManagerContext::new(
                 plans,
-                capture_channel,
                 receiver_access,
                 receiver_requests,
-                channel_registry,
-                device_io,
                 touchpad_monitor,
+                (capture_channel, channel_registry, device_io, native_button),
             );
             runtime.block_on(manage(context, event_rx, outputs, shutdown_rx));
             let _ = done.send(());
@@ -239,6 +305,7 @@ struct SessionChannels {
     registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     touchpad_journal: Option<Arc<dyn TouchpadJournalStore>>,
+    native_button: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct ManagerContext {
@@ -253,13 +320,17 @@ struct ManagerContext {
 impl ManagerContext {
     fn new(
         capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-        capture_channel: CaptureChannel,
         receiver_access: ReceiverAccess,
         receiver_requests: watch::Receiver<ReceiverRequestState>,
-        channel_registry: openlogi_hid::ChannelRegistry,
-        device_io: DeviceIoGate,
         touchpad_monitor: SharedTouchpadMonitor,
+        channels: (
+            CaptureChannel,
+            openlogi_hid::ChannelRegistry,
+            DeviceIoGate,
+            Arc<std::sync::atomic::AtomicBool>,
+        ),
     ) -> (Self, mpsc::UnboundedReceiver<SessionEvent>) {
+        let (capture_channel, channel_registry, device_io, native_button) = channels;
         let (events, event_rx) = mpsc::unbounded_channel();
         let touchpad_journal = match FileTouchpadJournalStore::in_state_dir() {
             Ok(store) => Some(Arc::new(store) as Arc<dyn TouchpadJournalStore>),
@@ -279,6 +350,7 @@ impl ManagerContext {
                     registry: channel_registry,
                     device_io: device_io.clone(),
                     touchpad_journal,
+                    native_button: native_button.clone(),
                 },
                 device_io,
                 touchpad_monitor,
@@ -959,6 +1031,7 @@ fn spawn_session(
     let registry = channels.registry.clone();
     let device_io = channels.device_io.clone();
     let touchpad_journal = channels.touchpad_journal.clone();
+    let native_button = channels.native_button.clone();
     tokio::spawn(async move {
         let _lease = lease;
         let result = run_capture_session_with_registry_spec(
@@ -970,6 +1043,7 @@ fn spawn_session(
                 shutdown: stop_rx,
                 channel_slot: slot,
                 device_io,
+                native_button,
             },
             &registry,
         )

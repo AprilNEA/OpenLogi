@@ -457,6 +457,7 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.native_button.clone(),
         )
     }
 

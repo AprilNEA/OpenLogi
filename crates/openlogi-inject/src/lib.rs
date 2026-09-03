@@ -3,8 +3,9 @@
 mod inject;
 
 pub use inject::{
-    HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute,
-    post_scroll, post_smooth_scroll, press_hold,
+    GestureMotion, GesturePhase, HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase,
+    ax_navigate_browser, dock_swipe_supported, execute, post_dock_swipe, post_magnify, post_scroll,
+    post_smooth_scroll, post_touchpad_scroll, press_hold,
 };
 
 #[cfg(target_os = "linux")]

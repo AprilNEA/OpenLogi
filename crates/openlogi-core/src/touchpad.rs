@@ -9,8 +9,13 @@ use crate::binding::ButtonId;
 #[cfg(test)]
 mod tests;
 
+const TAP_MIN_DURATION_US: u64 = 30_000;
 const TAP_MAX_DURATION_US: u64 = 250_000;
 const TAP_MAX_TRAVEL_UM: u64 = 3_000;
+/// How far two tapping fingers may drift apart. Options+ gates its
+/// two-finger tap at 0.30 of the sensor (~27 mm); spread wider reads as a
+/// pinch attempt, not a tap.
+const TAP_MAX_CONTACT_SPREAD_UM: u64 = 27_000;
 const SWIPE_MIN_DISTANCE_UM: u64 = 10_000;
 const SWIPE_MIN_SPEED_UM_PER_SECOND: u64 = 50_000;
 const HORIZONTAL_SWIPE_MIN_DURATION_US: u64 = 50_000;
@@ -18,8 +23,17 @@ const VERTICAL_SWIPE_MIN_DURATION_US: u64 = 35_000;
 const FLICK_MIN_MOTION_FRAMES: u8 = 3;
 const FLICK_MIN_DISTANCE_UM: u64 = 15_000;
 const SWIPE_CROSS_AXIS_FLOOR_UM: u64 = 3_000;
-const PINCH_MIN_SPREAD_CHANGE_UM: u64 = 8_000;
+/// Spread change that commits a pinch, floor per finger count: two-finger
+/// pinches stream magnify zoom, whose dead zone must stay native-short,
+/// while four-finger dock reveals keep the deliberate gate — they carry no
+/// dominance guard, so a low floor would let sloppy four-finger swipes
+/// drift into a pinch.
+const TWO_FINGER_PINCH_MIN_SPREAD_CHANGE_UM: u64 = 3_000;
+const FOUR_FINGER_PINCH_MIN_SPREAD_CHANGE_UM: u64 = 8_000;
 const PINCH_MIN_SPREAD_PERCENT: u64 = 8;
+// Real swipes keep the spread within ~2 mm while pinching hands drift the
+// centroid past the spread change itself, so only two-finger pinches need
+// the dominance gate (130 Hz Casa Touch captures).
 const MOTION_DOMINANCE_NUMERATOR: u64 = 3;
 const MOTION_DOMINANCE_DENOMINATOR: u64 = 2;
 
@@ -84,15 +98,29 @@ pub enum GestureRecognition {
     Pending,
     /// A custom gesture committed as its binding trigger and should fire once.
     Gesture(ButtonId),
-    /// Common two-finger motion dominated spread change, so firmware-native
-    /// scrolling owns this stroke and OpenLogi must not fire an action.
-    NativeScroll,
+    /// One frame of two-finger scrolling: the centroid's travel since the
+    /// previous frame, in micrometres. Streaming raw reports switches the pad
+    /// out of its firmware scroll translation, so the host owns this stroke
+    /// and must synthesize the scroll itself; the first `Scroll` of a stroke
+    /// follows the activation travel, never includes it.
+    Scroll {
+        /// Centroid travel to the right, in micrometres.
+        dx_um: i64,
+        /// Centroid travel towards the bottom edge, in micrometres.
+        dy_um: i64,
+    },
 }
 
 /// Pure recognizer for one touchpad stream.
 #[derive(Debug, Default)]
 pub struct TouchpadGestureRecognizer {
     state: StrokeState,
+    /// Whether the previous frame carried a pressed physical button, so a
+    /// release mid-contact marks the surviving contacts as predating their
+    /// stroke: a stroke must see a landing edge before it can resolve a
+    /// tap, or lifting the leftovers of a click-drag clicks.
+    button_was_held: bool,
+    stale_contacts: bool,
 }
 
 #[derive(Debug, Default)]
@@ -112,7 +140,14 @@ struct Stroke {
     last_at_us: u64,
     start_spread_um: u64,
     max_contact_travel_um: u64,
+    max_contact_spread_um: u64,
     motion_frames: u8,
+    previous_centroid: Point,
+    scrolling: bool,
+    /// Whether the stroke opened with fingers landing on the pad. Contacts
+    /// surviving a button release predate their stroke; lifting them must
+    /// not read as a tap.
+    landed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -132,18 +167,38 @@ impl TouchpadGestureRecognizer {
     pub fn update(&mut self, frame: &TouchFrame) -> GestureRecognition {
         let count = frame.contacts.len();
         if count == 0 {
+            self.button_was_held = false;
+            self.stale_contacts = false;
             let _ = self.end();
             return GestureRecognition::Pending;
         }
         if count > 4 {
+            self.button_was_held = frame.button;
             self.state = StrokeState::Cancelled;
             return GestureRecognition::Pending;
         }
-
+        if frame.button {
+            // A pressed button turns contact motion into dragging: no
+            // gesture stroke may claim it while the button holds. Under the
+            // press toggle the capture disarms raw reporting moments later,
+            // so these frames only span the press-to-native window.
+            self.button_was_held = true;
+            self.state = StrokeState::Idle;
+            return GestureRecognition::Pending;
+        }
+        if self.button_was_held {
+            // The button lifted mid-contact; gesture tracking restarts
+            // fresh, and the surviving contacts never landed inside the
+            // stroke that follows — whatever it becomes, it cannot resolve
+            // a tap.
+            self.button_was_held = false;
+            self.stale_contacts = true;
+            self.state = StrokeState::Idle;
+        }
         match &mut self.state {
             StrokeState::Idle => {
                 if count >= 2 {
-                    self.state = StrokeState::Tracking(Stroke::new(frame));
+                    self.state = StrokeState::Tracking(Stroke::new(frame, !self.stale_contacts));
                 }
                 GestureRecognition::Pending
             }
@@ -155,12 +210,18 @@ impl TouchpadGestureRecognizer {
                 if update == ContactUpdate::Rebased {
                     return GestureRecognition::Pending;
                 }
+                if let Some((dx_um, dy_um)) = stroke.scroll_delta() {
+                    return GestureRecognition::Scroll { dx_um, dy_um };
+                }
                 let recognition = stroke.classify();
                 if !matches!(recognition, GestureRecognition::Pending) {
                     self.state = match recognition {
                         GestureRecognition::Gesture(_) => StrokeState::Committed,
-                        GestureRecognition::NativeScroll => StrokeState::Cancelled,
-                        GestureRecognition::Pending => unreachable!(),
+                        GestureRecognition::Scroll { .. } | GestureRecognition::Pending => {
+                            unreachable!(
+                                "a returned scroll or pending recognition keeps the stroke tracking"
+                            )
+                        }
                     };
                 }
                 recognition
@@ -183,12 +244,14 @@ impl TouchpadGestureRecognizer {
 
     /// Cancel the current stroke without producing a tap.
     pub fn cancel(&mut self) {
+        self.button_was_held = false;
+        self.stale_contacts = false;
         self.state = StrokeState::Cancelled;
     }
 }
 
 impl Stroke {
-    fn new(frame: &TouchFrame) -> Self {
+    fn new(frame: &TouchFrame, landed: bool) -> Self {
         let centroid = centroid(&frame.contacts);
         Self {
             starts: frame.contacts.clone(),
@@ -197,7 +260,11 @@ impl Stroke {
             last_at_us: frame.timestamp_us,
             start_spread_um: spread(&frame.contacts, centroid),
             max_contact_travel_um: 0,
+            max_contact_spread_um: contact_spread(&frame.contacts),
             motion_frames: 0,
+            previous_centroid: centroid,
+            scrolling: false,
+            landed,
         }
     }
 
@@ -209,14 +276,17 @@ impl Stroke {
             return Some(ContactUpdate::Stable);
         }
 
-        let fingers_landed = self.latest.len() == self.starts.len()
-            && frame.contacts.len() > self.latest.len()
+        // A rising contact count re-anchors the stroke even when it does not
+        // return to the count the stroke started with: a 2→1→2 lift-and-
+        // re-land must resume as a fresh stroke, not fall through to the
+        // cancel below and freeze the recognizer until the watchdog ends it.
+        let fingers_landed = frame.contacts.len() > self.latest.len()
             && self
                 .latest
                 .iter()
                 .all(|contact| has_contact(&frame.contacts, contact.id));
         if fingers_landed {
-            *self = Self::new(frame);
+            *self = Self::new(frame, true);
             return Some(ContactUpdate::Rebased);
         }
 
@@ -248,7 +318,42 @@ impl Stroke {
                 .max()
                 .unwrap_or(0),
         );
+        self.max_contact_spread_um = self
+            .max_contact_spread_um
+            .max(contact_spread(&frame.contacts));
         self.latest.clone_from(&frame.contacts);
+    }
+
+    /// Stream the centroid delta of one frame once this stroke scrolls.
+    ///
+    /// Scrolling claims the stroke when centroid travel passes the tap limit
+    /// and dominates spread change — past that point the stroke is content
+    /// motion, not a pinch or a tap. The claim is sticky: a stroke that
+    /// scrolled never re-classifies into a pinch, matching how a zoom chord
+    /// must be deliberate from the start rather than grown out of a scroll.
+    fn scroll_delta(&mut self) -> Option<(i64, i64)> {
+        if self.starts.len() != 2 || self.latest.len() != 2 {
+            return None;
+        }
+        let current = centroid(&self.latest);
+        if !self.scrolling {
+            let geometry = self.current_geometry();
+            let centroid_distance = vector_length(geometry.dx, geometry.dy);
+            let spread_change = geometry.spread_um.abs_diff(self.start_spread_um);
+            if centroid_distance <= TAP_MAX_TRAVEL_UM
+                || !dominates(centroid_distance, spread_change)
+            {
+                self.previous_centroid = current;
+                return None;
+            }
+            self.scrolling = true;
+        }
+        let delta = (
+            current.x - self.previous_centroid.x,
+            current.y - self.previous_centroid.y,
+        );
+        self.previous_centroid = current;
+        Some(delta)
     }
 
     fn classify(&self) -> GestureRecognition {
@@ -260,17 +365,11 @@ impl Stroke {
         let spread_change = current.spread_um.abs_diff(self.start_spread_um);
         let finger_count = self.starts.len();
 
-        if finger_count == 2
-            && centroid_distance > TAP_MAX_TRAVEL_UM
-            && dominates(centroid_distance, spread_change)
-        {
-            return GestureRecognition::NativeScroll;
-        }
-
-        if self.latest.len() == finger_count
+        if !self.scrolling
+            && self.latest.len() == finger_count
             && matches!(finger_count, 2 | 4)
             && spread_change >= self.pinch_threshold()
-            && dominates(spread_change, centroid_distance)
+            && (finger_count == 4 || dominates(spread_change, centroid_distance))
         {
             return GestureRecognition::Gesture(
                 self.pinch_gesture(current.spread_um >= self.start_spread_um),
@@ -308,7 +407,12 @@ impl Stroke {
     }
 
     fn pinch_threshold(&self) -> u64 {
-        PINCH_MIN_SPREAD_CHANGE_UM.max(
+        let floor = if self.starts.len() == 4 {
+            FOUR_FINGER_PINCH_MIN_SPREAD_CHANGE_UM
+        } else {
+            TWO_FINGER_PINCH_MIN_SPREAD_CHANGE_UM
+        };
+        floor.max(
             self.start_spread_um
                 .saturating_mul(PINCH_MIN_SPREAD_PERCENT)
                 / 100,
@@ -359,8 +463,15 @@ impl Stroke {
     }
 
     fn is_tap(&self) -> bool {
-        self.last_at_us.saturating_sub(self.started_at_us) <= TAP_MAX_DURATION_US
+        let duration = self.last_at_us.saturating_sub(self.started_at_us);
+        // The spread gate follows the two-finger evidence only: three and
+        // four finger taps naturally span wider than one 0.30 gate allows.
+        let spread_ok =
+            self.starts.len() != 2 || self.max_contact_spread_um <= TAP_MAX_CONTACT_SPREAD_UM;
+        self.landed
+            && (TAP_MIN_DURATION_US..=TAP_MAX_DURATION_US).contains(&duration)
             && self.max_contact_travel_um <= TAP_MAX_TRAVEL_UM
+            && spread_ok
     }
 
     fn tap_gesture(&self) -> Option<ButtonId> {
@@ -379,6 +490,17 @@ fn contact_ids(contacts: &[TouchContact]) -> impl Iterator<Item = u8> + '_ {
 
 fn has_contact(contacts: &[TouchContact], id: u8) -> bool {
     contacts.iter().any(|contact| contact.id == id)
+}
+
+/// Largest distance between any two live contacts.
+fn contact_spread(contacts: &[TouchContact]) -> u64 {
+    contacts
+        .iter()
+        .enumerate()
+        .flat_map(|(index, a)| contacts.iter().skip(index + 1).map(move |b| (a, b)))
+        .map(|(a, b)| contact_distance(*a, *b))
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]

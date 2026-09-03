@@ -148,11 +148,7 @@ impl TouchpadMonitor {
             state.dropped_events = 0;
         }
         let batch = TouchpadMonitorBatch {
-            events: state
-                .events
-                .drain(..)
-                .filter(|record| record.device_key == device_key)
-                .collect(),
+            events: state.events.drain(..).collect(),
             dropped_events: std::mem::take(&mut state.dropped_events),
             conflicts: state
                 .conflicts

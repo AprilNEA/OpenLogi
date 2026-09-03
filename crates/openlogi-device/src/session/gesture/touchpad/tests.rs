@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use hidpp::feature::CreatableFeature;
+use openlogi_core::binding::ButtonId;
 use openlogi_core::touchpad::{GestureRecognition, TouchpadGestureRecognizer};
 
 use super::*;
@@ -14,6 +15,7 @@ const TOUCHPAD_INDEX: u8 = 0x04;
 static RAW_MODE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RAW_MODE: AtomicU8 = AtomicU8::new(0);
 static RAW_MODE_WRITE_RESULT: AtomicU8 = AtomicU8::new(u8::MAX);
+const HANDLING: [u8; 4] = [0x22, 0x11, 0x30, 0xc0];
 
 #[derive(Default)]
 struct MemoryJournal(Mutex<Option<RawModeJournal>>);
@@ -51,6 +53,15 @@ fn raw_mode_responder(request: &[u8]) -> Option<Vec<u8>> {
                 },
                 Ordering::Relaxed,
             );
+        }
+        // fn3 rides a long report: answer with one so the four handling
+        // bytes survive the round trip.
+        (TOUCHPAD_INDEX, 0x03) => {
+            let mut response = vec![0u8; 20];
+            response[0] = 0x11;
+            response[1..4].copy_from_slice(&request[1..4]);
+            response[4..8].copy_from_slice(&HANDLING);
+            return Some(response);
         }
         _ => return None,
     }
@@ -140,13 +151,18 @@ async fn journal_owned_raw_mode_is_restored_on_disarm() {
         .await
         .expect("raw mode should arm");
 
-    assert_eq!(RAW_MODE.load(Ordering::Relaxed), 5);
+    // RAW | WIDTH_HEIGHT_8BIT | DIVERT_NATIVE_GESTURES — the Options+ mode.
+    assert_eq!(OPENLOGI_RAW_REPORT_FLAGS.bits(), 0xC1);
+    assert_eq!(
+        RAW_MODE.load(Ordering::Relaxed),
+        OPENLOGI_RAW_REPORT_FLAGS.bits()
+    );
     assert_eq!(
         journal.load("unit:casa").expect("load journal"),
         Some(RawModeJournal {
             original: 0,
-            requested: 5,
-            readback: Some(5),
+            requested: OPENLOGI_RAW_REPORT_FLAGS.bits(),
+            readback: Some(OPENLOGI_RAW_REPORT_FLAGS.bits()),
             armed: true,
         })
     );
@@ -165,12 +181,12 @@ async fn recovery_writes_only_when_the_current_mode_is_journal_owned() {
     let journal = Arc::new(MemoryJournal::default());
     let record = RawModeJournal {
         original: 0,
-        requested: 5,
-        readback: Some(5),
+        requested: OPENLOGI_RAW_REPORT_FLAGS.bits(),
+        readback: Some(OPENLOGI_RAW_REPORT_FLAGS.bits()),
         armed: true,
     };
     journal.save("unit:casa", record).expect("save journal");
-    let feature = raw_mode_feature(5).await;
+    let feature = raw_mode_feature(OPENLOGI_RAW_REPORT_FLAGS.bits()).await;
 
     ArmedRawMode::recover(&feature, journal.as_ref(), "unit:casa")
         .await
@@ -190,7 +206,7 @@ async fn recovery_writes_only_when_the_current_mode_is_journal_owned() {
 #[tokio::test]
 async fn exact_raw_mode_without_a_journal_is_not_claimed_or_restored() {
     let _guard = RAW_MODE_TEST_LOCK.lock().await;
-    let feature = raw_mode_feature(5).await;
+    let feature = raw_mode_feature(OPENLOGI_RAW_REPORT_FLAGS.bits()).await;
     let journal = Arc::new(MemoryJournal::default());
 
     let armed = ArmedRawMode::arm(&feature, journal.as_ref(), "unit:casa")
@@ -201,7 +217,10 @@ async fn exact_raw_mode_without_a_journal_is_not_claimed_or_restored() {
         .await
         .expect("unowned mode has nothing to restore");
 
-    assert_eq!(RAW_MODE.load(Ordering::Relaxed), 5);
+    assert_eq!(
+        RAW_MODE.load(Ordering::Relaxed),
+        OPENLOGI_RAW_REPORT_FLAGS.bits()
+    );
     assert_eq!(journal.load("unit:casa").expect("load journal"), None);
 }
 
@@ -235,13 +254,11 @@ async fn mismatched_readback_is_not_treated_as_openlogi_owned() {
         panic!("a mismatched raw-mode readback must fail arming");
     };
 
-    assert!(matches!(
-        error,
-        TouchpadCaptureError::Readback {
-            requested: 5,
-            actual: 9,
-        }
-    ));
+    let TouchpadCaptureError::Readback { requested, actual } = error else {
+        panic!("a mismatched raw-mode readback must fail arming");
+    };
+    assert_eq!(requested, OPENLOGI_RAW_REPORT_FLAGS.bits());
+    assert_eq!(actual, 9);
     assert_eq!(RAW_MODE.load(Ordering::Relaxed), 9);
     assert_eq!(journal.load("unit:casa").expect("load journal"), None);
 }
@@ -446,7 +463,7 @@ fn five_fingers_suppress_a_smaller_gesture_until_liftoff() {
 }
 
 #[test]
-fn a_dropped_active_frame_cancels_before_later_frames() {
+fn a_dropped_active_frame_keeps_the_stroke_tappable() {
     let mut stream = stream();
     let mut recognizer = TouchpadGestureRecognizer::default();
     let now = Instant::now();
@@ -468,53 +485,38 @@ fn a_dropped_active_frame_cancels_before_later_frames() {
     assert!(
         stream
             .push_chunk(
-                chunk(200, [point(1, 150, 100), point(2, 250, 100)], 3, false,),
+                chunk(200, [point(1, 100, 100), point(2, 200, 100)], 3, false,),
                 now + Duration::from_millis(10),
             )
             .is_empty()
     );
     let dropped = stream.push_chunk(
-        chunk(300, [point(1, 200, 100), point(2, 300, 100)], 3, false),
+        chunk(410, [point(1, 100, 100), point(2, 200, 100)], 3, false),
         now + Duration::from_millis(20),
     );
-    assert_eq!(
-        dropped,
-        vec![
-            TouchpadStreamEvent::DroppedFrames(1),
-            TouchpadStreamEvent::Cancel,
-        ]
-    );
-    recognizer.cancel();
+    // The liftoff drop reports the frame loss without cancelling: the stroke
+    // must stay tappable for the watchdog End.
+    assert_eq!(dropped, vec![TouchpadStreamEvent::DroppedFrames(1)]);
 
     let later = stream.push_chunk(
-        chunk(300, [point(3, 400, 100), empty()], 3, true),
+        chunk(410, [point(3, 300, 100), empty()], 3, true),
         now + Duration::from_millis(20),
     );
     let [TouchpadStreamEvent::Frame(frame)] = later.as_slice() else {
         panic!("the complete later frame should still be observable");
     };
     assert_eq!(recognizer.update(frame), GestureRecognition::Pending);
-    assert_eq!(recognizer.end(), None);
+    assert_eq!(
+        recognizer.end(),
+        Some(ButtonId::TouchpadThreeFingerTap),
+        "a dropped liftoff frame must not suppress the tap"
+    );
 }
 
 #[test]
 fn silence_ends_the_previous_stroke() {
-    let mut stream = TouchpadFrameStream {
-        assembler: assembler(Origin::UpperLeft),
-        active_contacts: None,
-        last_frame_at: None,
-        last_timestamp_us: None,
-        cadence_us: None,
-    };
+    let mut stream = stream();
     let now = Instant::now();
-    let two = stream
-        .assembler
-        .push(chunk(50, [point(1, 1, 1), point(2, 2, 2)], 2, true));
-    assert!(matches!(two, Some(FrameOutcome::Frame(_))));
-
-    // Drive the public stream bookkeeping with the same state shape; the raw
-    // HID++ constructor is intentionally not public, so unit tests exercise
-    // strict assembly above and lifecycle transitions directly here.
     stream.active_contacts = Some(2);
     stream.last_frame_at = Some(now);
     let timeout = stream.stroke_end_timeout();
@@ -526,7 +528,7 @@ fn silence_ends_the_previous_stroke() {
 }
 
 #[test]
-fn silence_cancels_an_incomplete_final_frame_before_ending() {
+fn silence_drops_the_incomplete_final_frame_before_ending() {
     let mut stream = stream();
     let now = Instant::now();
     let initial = TouchFrame::new(
@@ -562,7 +564,6 @@ fn silence_cancels_an_incomplete_final_frame_before_ending() {
         stream.poll_end(now + Duration::from_millis(1) + timeout),
         vec![
             TouchpadStreamEvent::DroppedFrames(1),
-            TouchpadStreamEvent::Cancel,
             TouchpadStreamEvent::End,
         ]
     );
@@ -601,13 +602,7 @@ fn stroke_end_timeout_tracks_report_cadence_with_bounds() {
 
 #[test]
 fn finger_count_change_stays_in_one_stroke_for_recognizer_cancellation() {
-    let mut stream = TouchpadFrameStream {
-        assembler: assembler(Origin::UpperLeft),
-        active_contacts: None,
-        last_frame_at: None,
-        last_timestamp_us: None,
-        cadence_us: None,
-    };
+    let mut stream = stream();
     let now = Instant::now();
     let two = TouchFrame::new(
         1_000,
@@ -659,13 +654,7 @@ fn finger_count_change_stays_in_one_stroke_for_recognizer_cancellation() {
 
 #[test]
 fn abnormal_device_timestamp_gap_ends_before_the_next_frame() {
-    let mut stream = TouchpadFrameStream {
-        assembler: assembler(Origin::UpperLeft),
-        active_contacts: None,
-        last_frame_at: None,
-        last_timestamp_us: None,
-        cadence_us: None,
-    };
+    let mut stream = stream();
     let now = Instant::now();
     let frame = |timestamp_us| {
         TouchFrame::new(
@@ -701,4 +690,43 @@ fn abnormal_device_timestamp_gap_ends_before_the_next_frame() {
         events,
         vec![TouchpadStreamEvent::End, TouchpadStreamEvent::Frame(next)]
     );
+}
+
+#[test]
+fn a_version_zero_touchpad_builds_a_stream_like_a_version_one_pad() {
+    use hidpp::feature::touchpad_raw_xy::{Origin, TouchpadInfo};
+
+    fn info(version: u8) -> TouchpadInfo {
+        let mut payload = [0_u8; 16];
+        payload[0..2].copy_from_slice(&2775_u16.to_be_bytes());
+        payload[2..4].copy_from_slice(&1786_u16.to_be_bytes());
+        payload[6] = 13;
+        payload[7] = 5;
+        payload[8] = Origin::UpperLeft as u8;
+        payload[12] = version;
+        payload[13..15].copy_from_slice(&600_u16.to_be_bytes());
+        TouchpadInfo::from_payload(&payload).expect("valid fixture payload")
+    }
+
+    // The Casa Touch reports mapping version 0 with the observed DualXY
+    // layout of version 1 — rejecting it disarms capture on the very device
+    // this feature exists for.
+    TouchpadFrameStream::new(info(0)).expect("version 0 builds a stream");
+    TouchpadFrameStream::new(info(1)).expect("version 1 builds a stream");
+    assert_eq!(
+        TouchpadFrameStream::new(info(2)).err(),
+        Some(TouchpadStreamError::UnsupportedMapping(2))
+    );
+}
+
+#[tokio::test]
+async fn gestures_handling_output_reads_four_bytes() {
+    let _guard = RAW_MODE_TEST_LOCK.lock().await;
+    let feature = raw_mode_feature(0).await;
+
+    let handling = feature
+        .get_gestures_handling_output()
+        .await
+        .expect("handling bitmap should read");
+    assert_eq!(handling, [0x22, 0x11, 0x30, 0xc0]);
 }

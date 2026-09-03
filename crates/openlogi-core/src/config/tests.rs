@@ -637,6 +637,35 @@ fn touchpad_gesture_settings_default_off_and_round_trip_when_enabled() {
 }
 
 #[test]
+fn touchpad_scroll_sensitivity_overrides_round_trip_and_default_to_native_speed() {
+    use crate::config::settings::TouchpadScrollSensitivity;
+
+    let mut cfg = Config::default();
+    assert_eq!(
+        cfg.touchpad_scroll_sensitivity("casa"),
+        TouchpadScrollSensitivity::DEFAULT
+    );
+
+    let faster = TouchpadScrollSensitivity::try_new(28).expect("valid sensitivity");
+    cfg.set_touchpad_scroll_sensitivity("casa", Some(faster));
+    let mut parsed = write_and_read(&cfg);
+    assert_eq!(parsed.touchpad_scroll_sensitivity("casa"), faster);
+
+    parsed.set_touchpad_scroll_sensitivity("casa", None);
+    let cleared = write_and_read(&parsed);
+    assert_eq!(
+        cleared.touchpad_scroll_sensitivity("casa"),
+        TouchpadScrollSensitivity::DEFAULT
+    );
+    assert!(
+        !toml::to_string(&cleared)
+            .expect("serializable")
+            .contains("scroll_sensitivity"),
+        "the unset override stays out of config.toml"
+    );
+}
+
+#[test]
 fn touchpad_binding_api_rejects_non_touchpad_trigger() {
     let mut cfg = Config::default();
     let error = cfg

@@ -85,6 +85,12 @@ pub struct SharedRuntime {
     /// rebuild publishes both atomically (see [`HookMaps`]). Also read by the
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
+    /// Live native left-button state, published by the OS hook from its
+    /// tap callback (lock-free — the callback must never block) and polled
+    /// by the touchpad capture sessions — in the handoff regime a press
+    /// returns the pad to its firmware (the assist only exists with raw
+    /// reporting off) and the release re-arms host gestures.
+    pub native_button: Arc<std::sync::atomic::AtomicBool>,
     /// Function-key remapper bindings (keycode+modifiers → action). Not
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
     pub keyboard_bindings: crate::runtime::hook::SharedKeyboardBindings,
@@ -226,6 +232,7 @@ impl Orchestrator {
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
+            native_button: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
             scroll_preferences: Arc::new(ScrollPreferences::new(
                 config.app_settings.smooth_scroll,
@@ -310,10 +317,11 @@ impl Orchestrator {
         }
     }
 
-    /// Publish hook maps while preserving thumb-wheel polarities learned from
-    /// hardware capture sessions. Selection, polarity, and bindings share the
-    /// one lock the callback reads, so a device switch cannot combine facts
-    /// from two devices.
+    /// Publish hook maps while preserving hardware observations learned from
+    /// capture sessions (thumb-wheel polarities, the touchpad drag-handoff
+    /// state). Selection, observations, and bindings share the one lock the
+    /// callback reads, so a device switch cannot combine facts from two
+    /// devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
