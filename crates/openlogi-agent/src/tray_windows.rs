@@ -305,11 +305,12 @@ unsafe fn show_menu(hwnd: HWND) {
 /// GUI is running (a second launch would just exit on the `openlogi.lock`
 /// singleton, so spawning blindly does nothing visible).
 fn open_or_focus_gui() {
-    let pids = gui_pids();
-    if pids.is_empty() {
+    let processes = gui_processes();
+    if processes.is_empty() {
         spawn_gui();
         return;
     }
+    let pids: Vec<_> = processes.iter().map(|process| process.pid).collect();
     if !focus_window_of(&pids) {
         // Running but windowless should not happen (the GUI always has its
         // main window); log rather than spawn a doomed duplicate.
@@ -329,7 +330,13 @@ fn open_or_focus_gui() {
 /// same-user filter keeps other sessions (fast user switching) out of
 /// Show/Quit — their windows are invisible to `EnumWindows` and their
 /// processes unkillable anyway, but don't even consider them.
-fn gui_pids() -> Vec<u32> {
+#[derive(Clone, Copy)]
+struct GuiProcess {
+    pid: u32,
+    started_at: u64,
+}
+
+fn gui_processes() -> Vec<GuiProcess> {
     use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
@@ -343,7 +350,10 @@ fn gui_pids() -> Vec<u32> {
             is_gui_process_name(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
-        .map(|p| p.pid().as_u32())
+        .map(|process| GuiProcess {
+            pid: process.pid().as_u32(),
+            started_at: process.start_time(),
+        })
         .collect()
 }
 
@@ -429,12 +439,28 @@ fn request_gui_close(pids: &[u32]) -> bool {
     search.requested
 }
 
-fn any_process_running(pids: &[u32]) -> bool {
+fn is_original_gui_process(target: GuiProcess, process: &sysinfo::Process) -> bool {
+    matches_gui_identity(
+        target,
+        process.pid().as_u32(),
+        process.start_time(),
+        &process.name().to_string_lossy(),
+    )
+}
+
+fn matches_gui_identity(target: GuiProcess, pid: u32, started_at: u64, name: &str) -> bool {
+    pid == target.pid && started_at == target.started_at && is_gui_process_name(name)
+}
+
+fn any_process_running(targets: &[GuiProcess]) -> bool {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
-    pids.iter()
-        .any(|pid| system.process(Pid::from_u32(*pid)).is_some())
+    targets.iter().any(|target| {
+        system
+            .process(Pid::from_u32(target.pid))
+            .is_some_and(|process| is_original_gui_process(*target, process))
+    })
 }
 
 /// Wait for all target processes to exit. The injected probes keep the
@@ -490,15 +516,16 @@ fn spawn_gui() {
 )]
 fn quit(hwnd: HWND) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
-    let pids = gui_pids();
-    if !pids.is_empty() && request_gui_close(&pids) {
+    let processes = gui_processes();
+    let pids: Vec<_> = processes.iter().map(|process| process.pid).collect();
+    if !processes.is_empty() && request_gui_close(&pids) {
         info!(
-            count = pids.len(),
+            count = processes.len(),
             "tray Quit — requested graceful GUI shutdown"
         );
         if wait_for_exit_with(
             GRACEFUL_QUIT_TIMEOUT,
-            || any_process_running(&pids),
+            || any_process_running(&processes),
             std::thread::sleep,
         ) {
             info!("tray Quit — GUI exited gracefully");
@@ -507,15 +534,18 @@ fn quit(hwnd: HWND) {
 
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
-    for pid in pids {
-        if let Some(process) = system.process(Pid::from_u32(pid)) {
+    for target in processes {
+        if let Some(process) = system
+            .process(Pid::from_u32(target.pid))
+            .filter(|process| is_original_gui_process(target, process))
+        {
             if process.kill() {
                 warn!(
-                    pid,
+                    pid = target.pid,
                     "tray Quit — graceful shutdown timed out; terminated the GUI"
                 );
             } else {
-                warn!(pid, "tray Quit — could not terminate the GUI");
+                warn!(pid = target.pid, "tray Quit — could not terminate the GUI");
             }
         }
     }
@@ -546,13 +576,24 @@ mod tests {
     use std::cell::Cell;
     use std::time::Duration;
 
-    use super::{is_gui_process_name, wait_for_exit_with};
+    use super::{GuiProcess, is_gui_process_name, matches_gui_identity, wait_for_exit_with};
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
         assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_the_original_gui_process() {
+        let target = GuiProcess {
+            pid: 42,
+            started_at: 100,
+        };
+
+        assert!(matches_gui_identity(target, 42, 100, "OpenLogi.exe"));
+        assert!(!matches_gui_identity(target, 42, 101, "OpenLogi.exe"));
     }
 
     #[test]
