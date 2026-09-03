@@ -117,6 +117,8 @@ fn main() {
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
         let app_icon = config.app_settings.app_icon;
+        let hook_stop = std::sync::Arc::new(lifecycle::HookStopRequest::default());
+        let core_hook_stop = std::sync::Arc::clone(&hook_stop);
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. A
@@ -130,6 +132,7 @@ fn main() {
                     config,
                     uninstalled,
                     armed_tx,
+                    core_hook_stop,
                     device_io_gate,
                 ));
             })
@@ -138,7 +141,7 @@ fn main() {
             return;
         }
         if armed_rx.recv().is_ok() {
-            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal);
+            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal, hook_stop);
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -162,17 +165,4 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-
-    /// Mirror of the overlay's guard: the `i18n!` at the top reaches the
-    /// shared catalog by relative path, and a wrong path does **not** fail the
-    /// build — `rust_i18n` compiles it to an empty catalog, and every tray
-    /// string silently renders in English in all locales. Pin one tray key in
-    /// a non-English locale so that breakage is loud.
-    #[test]
-    fn the_shared_catalog_is_wired_up() {
-        rust_i18n::set_locale("zh-CN");
-        assert_eq!(rust_i18n::t!("Show Main Window"), "显示主窗口");
-        rust_i18n::set_locale("en");
-    }
-}
+mod tests;

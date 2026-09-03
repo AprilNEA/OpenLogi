@@ -25,11 +25,7 @@ pub enum Category {
 }
 
 impl Category {
-    /// Short label for popover section headers, and the i18n key it is looked
-    /// up by. Sentence case: a UI layer cannot uppercase a *translated* label
-    /// safely — casing rules are per-language, and GPUI has no `text-transform`
-    /// to defer the decision to — so the catalog carries the cased text it
-    /// wants. `DPI` is an acronym, not a shout.
+    /// Human-readable English label for logs and non-localized contexts.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -41,6 +37,21 @@ impl Category {
             Category::Scroll => "Scroll",
             Category::Navigation => "Navigation",
             Category::System => "System",
+        }
+    }
+
+    /// Stable catalog key for the localized popover section header.
+    #[must_use]
+    pub fn translation_key(self) -> &'static str {
+        match self {
+            Category::Editing => "actions.editing",
+            Category::Browser => "actions.browser",
+            Category::Media => "actions.media",
+            Category::Mouse => "device.mouse",
+            Category::Dpi => "pointer.dpi",
+            Category::Scroll => "pointer.scroll",
+            Category::Navigation => "actions.navigation",
+            Category::System => "actions.system",
         }
     }
 }

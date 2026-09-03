@@ -18,7 +18,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
     let toggles = SettingGroup::new()
         .item(
             SettingItem::new(
-                tr!("Check for updates"),
+                tr!("app.check_for_updates_setting"),
                 SettingField::switch(
                     |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().check_for_updates),
                     |enabled, cx| {
@@ -29,13 +29,11 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                     },
                 ),
             )
-            .description(tr!(
-                "Check once per launch for a new version (query only — no automatic download)."
-            )),
+            .description(tr!("app.update_check_frequency_description")),
         )
         .item(
             SettingItem::new(
-                tr!("Automatically download and install"),
+                tr!("updates.automatically_download_and_install"),
                 SettingField::switch(
                     |cx| {
                         AppState::try_read(cx)
@@ -49,18 +47,14 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                     },
                 ),
             )
-            .description(tr!(
-                "Download updates in the background and apply them the next time OpenLogi restarts."
-            )),
+            .description(tr!("updates.automatic_update_description")),
         );
 
     let source = SettingGroup::new().item(SettingItem::render(move |_, _, cx| update_source(cx)));
-    SettingPage::new(tr!("Updates"))
+    SettingPage::new(tr!("updates.updates"))
         .icon(IconName::ArrowDown)
         .resettable(false)
-        .description(tr!(
-            "Off by default — checking for updates is OpenLogi's only optional outbound network request."
-        ))
+        .description(tr!("updates.update_network_privacy_description"))
         .group(hero)
         .group(toggles)
         .group(source)
@@ -75,26 +69,28 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
     // A short status tag for the settled states (semantic colours from the theme);
     // transient states carry their detail in the message line instead.
     let pill = match &status {
-        UpdateStatus::UpToDate => Some(Tag::success().child(tr!("Up to date"))),
-        UpdateStatus::Available(_) => Some(Tag::info().child(tr!("Update available"))),
-        UpdateStatus::Staged(_) => Some(Tag::success().child(tr!("Update ready"))),
-        UpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("Update failed"))),
+        UpdateStatus::UpToDate => Some(Tag::success().child(tr!("updates.up_to_date"))),
+        UpdateStatus::Available(_) => Some(Tag::info().child(tr!("updates.update_available"))),
+        UpdateStatus::Staged(_) => Some(Tag::success().child(tr!("updates.update_ready"))),
+        UpdateStatus::Errored(_) => Some(Tag::danger().child(tr!("updates.update_failed"))),
         _ => None,
     };
 
     let message = match &status {
         UpdateStatus::Idle | UpdateStatus::UpToDate => None,
-        UpdateStatus::Checking => Some(tr!("Checking for updates…")),
-        UpdateStatus::Available(v) => Some(tr!("Version %{version} is available.", version => v)),
+        UpdateStatus::Checking => Some(tr!("updates.checking_for_updates")),
+        UpdateStatus::Available(v) => Some(tr!("updates.update_version_available", version => v)),
         UpdateStatus::Downloading { downloaded, total } => Some(match total {
             Some(t) if *t > 0 => {
-                tr!("Downloading… %{percent}%", percent => (*downloaded * 100 / *t).to_string())
+                tr!("updates.update_downloading_percent", percent => (*downloaded * 100 / *t).to_string())
             }
-            _ => tr!("Downloading… %{size} MB", size => (*downloaded / 1_048_576).to_string()),
+            _ => {
+                tr!("updates.update_downloading_size", size => (*downloaded / 1_048_576).to_string())
+            }
         }),
-        UpdateStatus::Installing => Some(tr!("Installing…")),
-        UpdateStatus::Staged(v) => Some(tr!("Version %{version} is ready.", version => v)),
-        UpdateStatus::Errored(e) => Some(tr!("Update failed: %{error}", error => e.clone())),
+        UpdateStatus::Installing => Some(tr!("updates.installing")),
+        UpdateStatus::Staged(v) => Some(tr!("updates.update_version_ready", version => v)),
+        UpdateStatus::Errored(e) => Some(tr!("updates.update_failed_message", error => e.clone())),
     };
 
     let busy = matches!(
@@ -107,19 +103,19 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
         match &status {
             UpdateStatus::Available(_) => Button::new("update-install")
                 .outline()
-                .label(tr!("Download & Install"))
+                .label(tr!("updates.download_install"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, Updater::download_and_install);
                 }),
             UpdateStatus::Staged(_) => Button::new("update-restart")
                 .outline()
-                .label(tr!("Restart to Update"))
+                .label(tr!("updates.restart_to_update"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, |u, cx| u.restart(cx));
                 }),
             _ => Button::new("update-check")
                 .outline()
-                .label(tr!("Check for Updates"))
+                .label(tr!("updates.check_for_updates_action"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, Updater::check);
                 }),
@@ -163,7 +159,7 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                                 .text_caption()
                                 .text_color(pal.text_muted)
                                 .truncate()
-                                .child(message.unwrap_or_else(|| tr!("Stable channel"))),
+                                .child(message.unwrap_or_else(|| tr!("updates.stable_channel"))),
                         ),
                 ),
         )
@@ -192,7 +188,7 @@ fn update_source(cx: &App) -> gpui::Div {
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(tr!("Update source")),
+                                .child(tr!("updates.update_source")),
                         )
                         .child(
                             div()
@@ -207,7 +203,7 @@ fn update_source(cx: &App) -> gpui::Div {
                         Button::new("update-changelog")
                             .ghost()
                             .icon(IconName::ExternalLink)
-                            .label(tr!("View changelog"))
+                            .label(tr!("updates.view_changelog"))
                             .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
                     ),
                 ),
@@ -216,8 +212,6 @@ fn update_source(cx: &App) -> gpui::Div {
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!(
-                    "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates."
-                )),
+                .child(tr!("updates.update_connection_policy")),
         )
 }

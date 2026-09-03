@@ -29,9 +29,9 @@ export_languages:
   - ko
 
 files:
-  - source: "/crates/openlogi-ui/locales/en.yml"
-    translation: "/crates/openlogi-ui/locales/%locale%.yml"
-    type: "yaml"
+  - source: "/crates/openlogi-ui/locales/en.toml"
+    translation: "/crates/openlogi-ui/locales/%locale%.toml"
+    type: "toml"
     update_option: "update_as_unapproved"
     languages_mapping:
       locale:

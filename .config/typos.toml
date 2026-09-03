@@ -3,12 +3,12 @@
 # Git's binary object database.
 ignore-hidden = false
 
-# English source strings live in en.yml; checking translated values as English
+# English source strings live in en.toml; checking translated values as English
 # produces false positives and repeats every source key across all catalogs.
 extend-exclude = [
   ".git",
-  "crates/openlogi-ui/locales/*.yml",
-  "!crates/openlogi-ui/locales/en.yml",
+  "crates/openlogi-ui/locales/*.toml",
+  "!crates/openlogi-ui/locales/en.toml",
   "docs/README.*.md",
   ".github/scripts/i18n/merge_crowdin_download.py",
 ]

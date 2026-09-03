@@ -29,25 +29,19 @@ pub(super) fn general_page(
         .item(smooth_scrolling_item())
         .item(
             SettingItem::new(
-                tr!("Vertical Scroll Sensitivity"),
+                tr!("pointer.vertical_scroll_sensitivity"),
                 SettingField::render(move |_, _, cx| {
                     vertical_scroll_sensitivity_field(&vertical_scroll, cx)
                 }),
             )
-            .description(tr!(
-                "Scales traditional mouse-wheel vertical distance without changing trackpad scrolling."
-            )),
+            .description(tr!("pointer.vertical_scroll_sensitivity_description")),
         )
         .item(
             SettingItem::new(
-                tr!("Thumb Wheel Sensitivity"),
-                SettingField::render(move |_, _, cx| {
-                    thumbwheel_sensitivity_field(&thumbwheel, cx)
-                }),
+                tr!("pointer.thumb_wheel_sensitivity"),
+                SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
-            .description(tr!(
-                "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger."
-            )),
+            .description(tr!("pointer.thumbwheel_sensitivity_description")),
         )
         .item(launch_at_login_item());
 
@@ -67,15 +61,12 @@ pub(super) fn general_page(
     let group = group.item(
         SettingItem::new(
             if cfg!(target_os = "macos") {
-                tr!("Show in menu bar")
+                tr!("app.show_in_menu_bar")
             } else {
-                tr!("Show in the notification area")
+                tr!("app.show_in_the_notification_area")
             },
             SettingField::switch(
-                |cx| {
-                    AppState::try_read(cx)
-                        .is_some_and(|s| s.app_settings().show_in_menu_bar)
-                },
+                |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().show_in_menu_bar),
                 |enabled, cx| {
                     AppState::update(cx, move |state, cx| {
                         state.set_show_in_menu_bar(enabled);
@@ -85,15 +76,13 @@ pub(super) fn general_page(
             ),
         )
         .description(if cfg!(target_os = "macos") {
-            tr!("Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.")
+            tr!("app.menu_bar_visibility_description")
         } else {
-            tr!(
-                "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts."
-            )
+            tr!("app.notification_area_visibility_description")
         }),
     );
 
-    SettingPage::new(tr!("General"))
+    SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
@@ -102,7 +91,7 @@ pub(super) fn general_page(
 /// The smooth-scrolling switch.
 fn smooth_scrolling_item() -> SettingItem {
     SettingItem::new(
-        tr!("Smooth scrolling"),
+        tr!("pointer.smooth_scrolling"),
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
             |enabled, cx| {
@@ -113,9 +102,7 @@ fn smooth_scrolling_item() -> SettingItem {
             },
         ),
     )
-    .description(tr!(
-        "Animate traditional mouse-wheel input while leaving trackpad scrolling unchanged."
-    ))
+    .description(tr!("pointer.smooth_scrolling_description"))
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
@@ -167,7 +154,7 @@ fn sensitivity_field(
                     .text_caption()
                     .text_color(pal.text_muted)
                     .whitespace_nowrap()
-                    .child(format!("({})", rust_i18n::t!("Default"))),
+                    .child(format!("({})", rust_i18n::t!("common.default"))),
             )
         })
 }
@@ -176,7 +163,7 @@ fn sensitivity_field(
 /// (the sunk switch); the setter never unregisters.
 fn launch_at_login_item() -> SettingItem {
     SettingItem::new(
-        tr!("Launch at login"),
+        tr!("app.launch_at_login"),
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().launch_at_login),
             |enabled, cx| {
@@ -188,9 +175,9 @@ fn launch_at_login_item() -> SettingItem {
         ),
     )
     .description(if cfg!(target_os = "macos") {
-        tr!("Automatically start OpenLogi when you log in to macOS.")
+        tr!("app.launch_at_login_macos_description")
     } else {
-        tr!("Automatically start OpenLogi when you log in.")
+        tr!("app.launch_at_login_description")
     })
 }
 
@@ -198,12 +185,10 @@ fn launch_at_login_item() -> SettingItem {
 /// switched-off login item stops the agent entirely, whatever the preference.
 fn login_item_approval_notice() -> SettingItem {
     SettingItem::new(
-        tr!("Login item disabled in System Settings"),
+        tr!("app.login_item_disabled_in_system_settings"),
         SettingField::render(|_, _, cx| open_login_items_button(cx)),
     )
-    .description(tr!(
-        "macOS is blocking OpenLogi's background agent: its login item is switched off. The agent cannot run until you turn it back on under Login Items."
-    ))
+    .description(tr!("app.login_item_disabled_description"))
 }
 
 /// Deep link to System Settings › Login Items — the only place that can
@@ -211,7 +196,7 @@ fn login_item_approval_notice() -> SettingItem {
 fn open_login_items_button(cx: &App) -> BaseButton {
     let pal = theme::palette(cx);
     BaseButton::new("open-login-items")
-        .accessibility_label(tr!("Open Login Items"))
+        .accessibility_label(tr!("app.open_login_items"))
         .px_2()
         .py_1()
         .rounded(pal.control_radius)
@@ -222,6 +207,6 @@ fn open_login_items_button(cx: &App) -> BaseButton {
         .bg(pal.control)
         .hover(move |s| s.bg(pal.control_hover))
         .focus_visible(move |s| s.bg(pal.control_hover))
-        .child(tr!("Open Login Items"))
+        .child(tr!("app.open_login_items"))
         .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())
 }

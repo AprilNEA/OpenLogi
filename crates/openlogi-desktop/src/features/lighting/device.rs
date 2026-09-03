@@ -132,7 +132,7 @@ impl Render for LightingPanel {
                         div()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("Lighting")),
+                            .child(tr!("device.lighting")),
                     )
                     .child(
                         Toggle::new("light-toggle")
@@ -159,7 +159,7 @@ impl Render for LightingPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(tr!("Brightness")),
+                            .child(tr!("camera.brightness")),
                     )
                     .child(
                         div()
@@ -178,7 +178,11 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
     BaseButton::new(("light-swatch", color.packed()))
         .role(Role::RadioButton)
         .selected(selected)
-        .accessibility_label(format!("{} #{:06X}", tr!("Lighting"), color.packed()))
+        .accessibility_label(format!(
+            "{} #{:06X}",
+            tr!("device.lighting"),
+            color.packed()
+        ))
         .aria_toggled(if selected {
             Toggled::True
         } else {

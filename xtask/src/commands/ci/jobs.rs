@@ -29,8 +29,7 @@ pub(crate) enum Job {
     CargoDeny,
     ClippyWindows,
     Wasm,
-    /// Locale parity. Part of `tests (macos)`, and the suite Linux CI cannot
-    /// run because it excludes `openlogi-desktop`.
+    /// Portable locale parity plus the desktop end-to-end key-resolution tests.
     I18n,
     /// The bincode/tarpc golden wire format. Part of the test jobs.
     Wire,
@@ -146,7 +145,7 @@ impl Job {
                 prefix: None,
                 hosts: &[Host::Linux],
                 in_default_run: true,
-                caveat: "Excludes openlogi-desktop, so the i18n locale-parity tests never run on Linux CI.",
+                caveat: "Excludes openlogi-desktop, but still runs openlogi-ui's portable locale-parity test. Only the desktop end-to-end key-resolution tests are absent.",
             },
             Self::TestsMacos => Spec {
                 name: "tests (macos)",
@@ -185,7 +184,7 @@ impl Job {
             Self::I18n => focused_spec(
                 "i18n",
                 &[],
-                "Locale parity. Part of tests (macos), and the suite Linux CI cannot run because it excludes openlogi-desktop.",
+                "Portable catalog parity plus desktop end-to-end key resolution. Linux CI runs the first through openlogi-ui; macOS CI runs both.",
             ),
             Self::Wire => focused_spec(
                 "wire_format",

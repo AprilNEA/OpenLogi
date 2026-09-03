@@ -254,7 +254,7 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
     let summary = profile_summary(editing_app.as_deref(), override_count);
     let active = state
         .active_profile_name()
-        .map_or_else(|| tr!("Default"), gpui::SharedString::from);
+        .map_or_else(|| tr!("common.default"), gpui::SharedString::from);
 
     Some(
         h_flex()
@@ -270,26 +270,26 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
             .child(
                 div()
                     .flex_none()
-                    .child(tr!("Active: %{profile}", profile => active)),
+                    .child(tr!("profiles.active_profile_value", profile => active)),
             ),
     )
 }
 
 fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::SharedString {
     let Some(app) = editing_app else {
-        return tr!("Default bindings apply unless an app profile overrides them.");
+        return tr!("profiles.default_bindings_description");
     };
     match override_count {
         0 => tr!(
-            "No overrides yet. Select a button to customize for %{app}.",
+            "profiles.app_profile_no_overrides",
             app => app
         ),
         1 => tr!(
-            "%{app} overrides 1 button. Others inherit Default.",
+            "profiles.app_profile_single_override",
             app => app
         ),
         count => tr!(
-            "%{app} overrides %{count} buttons. Others inherit Default.",
+            "profiles.app_profile_override_count",
             app => app,
             count => count
         ),
@@ -301,14 +301,12 @@ fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
             .title(question.clone())
-            .description(tr!(
-                "This deletes the custom button bindings in this profile. Default bindings are not affected."
-            ))
+            .description(tr!("profiles.remove_profile_description"))
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("Remove profile"))
+                    .ok_text(tr!("profiles.remove_profile"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("Cancel"))
+                    .cancel_text(tr!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
@@ -331,9 +329,9 @@ fn open_action_ring_remove_confirmation(
             .title(question.clone())
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("Remove profile"))
+                    .ok_text(tr!("profiles.remove_profile"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("Cancel"))
+                    .cancel_text(tr!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
@@ -354,11 +352,11 @@ fn open_action_ring_remove_confirmation(
 fn remove_profile_question(profile: &ProfileChoice) -> gpui::SharedString {
     match profile.override_count {
         1 => tr!(
-            "Remove %{app} profile and its 1 override?",
+            "profiles.remove_app_profile_single_override",
             app => profile.name.clone()
         ),
         count => tr!(
-            "Remove %{app} profile and its %{count} overrides?",
+            "profiles.remove_app_profile_multiple_overrides",
             app => profile.name.clone(),
             count => count
         ),

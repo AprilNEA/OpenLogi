@@ -20,7 +20,7 @@ paths:
   itself, so each localized binary — the app, the overlay, and the agent — expands its
   own `rust_i18n::i18n!` over that shared directory by relative path. A wrong path
   there compiles to an **empty catalog** rather than an error, and every string
-  silently renders as its English key — `the_shared_catalog_is_wired_up` in
+  silently renders as its semantic key — `the_shared_catalog_is_wired_up` in
   `openlogi-overlay` and `openlogi-agent` is what makes that fail loudly.
 - `gpui`/`gpui_platform` track zed's default branch on purpose; the compatible zed
   commit is pinned **only in `Cargo.lock`**, in lockstep with the `gpui-component` rev.
@@ -62,9 +62,11 @@ paths:
   style refinement with the caller's, so a bare `Icon` falls through to the current
   font size instead of the 16px `Default` sets. Any icon meant to line up with a
   neighbouring `svg().size_4()` needs an explicit `.size_4()`.
-- Config panels/tabs gate on `Capabilities` (derived from the HID++ feature table),
-  **never** on device `kind` — kind is identity-only (icon/label). A new panel means a
-  new capability in `Capabilities::from_feature_ids` plus a `tabs_for` arm.
+- Config panels/tabs gate on measured or last-good `Capabilities`, not directly on
+  device `kind` — kind is identity-only (icon/label). The sole kind-derived fallback
+  is `Capabilities::presumed_from_kind` in `tabs_for` for a never-probed offline
+  device; keep it centralized. A new panel means a new capability in
+  `Capabilities::from_feature_ids` plus a `tabs_for` arm.
 - Mouse-diagram hotspots come from Logi metadata; if the metadata omits a button
   marker, omit the button — never synthesize hotspot positions.
 - Keep render helpers statically typed (`impl IntoElement` or a concrete element) until
@@ -100,3 +102,8 @@ paths:
 - Verifying UI changes needs the running app: re-`cargo run -p openlogi-desktop` (a plain
   `cargo build` leaves the dev bundle stale) after quitting the previous instance
   (singleton lock). The GUI shows only the empty state unless the agent is running.
+- A visible UI change is not accepted from compile/tests alone. Run the real app through
+  each representative affected state, inspect a fresh screenshot, and attach it for
+  review. State any OS or hardware state that was not exercised. Screenshots catch
+  layout/theme regressions; an exercised behavior or focused test is still the proof
+  of behavior.

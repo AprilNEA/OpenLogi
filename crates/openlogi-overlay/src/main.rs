@@ -104,18 +104,4 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-
-    /// The catalog this binary translates against lives in `openlogi-ui` and is
-    /// reached by the relative path in the `i18n!` at the top. A wrong path
-    /// there does **not** fail the build — `rust_i18n` compiles it to an empty
-    /// catalog, and every ring label silently renders as its English key in all
-    /// 20 locales. Pin one action label in a non-English locale so that
-    /// breakage is loud.
-    #[test]
-    fn the_shared_catalog_is_wired_up() {
-        rust_i18n::set_locale("zh-CN");
-        assert_eq!(rust_i18n::t!("Left Click"), "左键单击");
-        rust_i18n::set_locale("en");
-    }
-}
+mod tests;

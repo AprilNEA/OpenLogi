@@ -115,7 +115,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
                 .flex_none()
                 .text_body()
                 .text_color(pal.text_muted)
-                .child(tr!("Profile")),
+                .child(tr!("profiles.profile")),
         )
         .child(
             h_flex()
@@ -128,7 +128,7 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
                 .child(
                     profile_tab(
                         format!("{}:default", shell.id_base),
-                        tr!("Default"),
+                        tr!("common.default"),
                         None,
                         default_selected,
                         pal,
@@ -263,7 +263,7 @@ fn profile_options_popover(
             let actions = actions.clone();
             compact_panel(pal)
                 .w(px(224.))
-                .child(title(tr!("Profile options"), pal))
+                .child(title(tr!("profiles.profile_options"), pal))
                 .child(divider(pal))
                 .child(
                     MenuRow::new(format!("{id_base}:remove-profile"))
@@ -273,7 +273,7 @@ fn profile_options_popover(
                                 .items_center()
                                 .gap_2()
                                 .child(Icon::new(IconName::Close).size_4())
-                                .child(tr!("Remove profile…")),
+                                .child(tr!("profiles.remove_profile_dialog")),
                         )
                         .on_click(move |_event, window, cx| {
                             if let Some(popover) = popover.upgrade() {

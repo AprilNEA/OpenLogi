@@ -194,27 +194,24 @@ impl Render for CameraPreview {
                 surface.child(img(image).w(px(PREVIEW_W)).h(px(PREVIEW_H)).rounded_md())
             })
             .when(show_placeholder && !capture_supported, |surface| {
-                surface.child(note(
-                    tr!("Live preview isn't available on this platform yet."),
-                    pal,
-                ))
+                surface.child(note(tr!("camera.camera_preview_platform_unavailable"), pal))
             })
             .when(
                 show_placeholder && capture_supported && granted,
-                |surface| surface.child(note(tr!("Starting preview…"), pal)),
+                |surface| surface.child(note(tr!("camera.starting_preview"), pal)),
             )
             .when(
                 show_placeholder && capture_supported && !granted && authorization_undetermined,
                 |surface| {
                     surface.child(
                         BaseButton::new("camera-request-access")
-                            .accessibility_label(tr!("Click to enable camera access."))
+                            .accessibility_label(tr!("camera.click_to_enable_camera_access"))
                             .text_body()
                             .text_color(pal.text_muted)
                             .cursor_pointer()
                             .hover(|s| s.text_color(pal.text_primary))
                             .focus_visible(|s| s.text_color(pal.text_primary))
-                            .child(tr!("Click to enable camera access."))
+                            .child(tr!("camera.click_to_enable_camera_access"))
                             .on_click(|_, _, cx| {
                                 crate::features::camera::request_camera_access(cx);
                             }),
@@ -224,10 +221,7 @@ impl Render for CameraPreview {
             .when(
                 show_placeholder && capture_supported && !granted && !authorization_undetermined,
                 |surface| {
-                    surface.child(note(
-                        tr!("Enable Camera access in Settings to preview."),
-                        pal,
-                    ))
+                    surface.child(note(tr!("camera.camera_preview_permission_required"), pal))
                 },
             )
     }

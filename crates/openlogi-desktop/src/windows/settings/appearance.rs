@@ -29,20 +29,18 @@ pub(super) fn appearance_page(
     // renders a page's groups as nested sidebar entries once there's more than
     // one and each is titled). Item titles stay distinct from their group title.
     let mut theme_group = SettingGroup::new()
-        .title(tr!("Theme"))
+        .title(tr!("appearance.theme"))
         .item(
             SettingItem::new(
-                tr!("Appearance mode"),
+                tr!("appearance.appearance_mode"),
                 SettingField::render(move |_, _, cx| mode_segment(cx)),
             )
             .layout(Axis::Vertical)
-            .description(tr!(
-                "Light and dark use the matching theme; Follow system tracks the OS setting."
-            )),
+            .description(tr!("appearance.appearance_mode_description")),
         )
         .item(
             SettingItem::new(
-                tr!("Color theme"),
+                tr!("appearance.color_theme"),
                 SettingField::render(move |_, _, cx| {
                     theme_picker(&view, &theme_search, filter, cx)
                 }),
@@ -55,13 +53,11 @@ pub(super) fn appearance_page(
     if cfg!(target_os = "macos") {
         theme_group = theme_group.item(
             SettingItem::new(
-                tr!("App icon"),
+                tr!("appearance.app_icon"),
                 SettingField::render(move |_, _, cx| icon_picker(cx)),
             )
             .layout(Axis::Vertical)
-            .description(tr!(
-                "Pick the icon OpenLogi wears in the Dock, Finder and Launchpad."
-            )),
+            .description(tr!("appearance.app_icon_description")),
         );
     }
 
@@ -70,28 +66,28 @@ pub(super) fn appearance_page(
             // Compact control → inline on the right of the label (HIG), unlike the
             // wide thumbnail/grid controls which stack below.
             SettingItem::new(
-                tr!("Corner radius"),
+                tr!("appearance.corner_radius"),
                 SettingField::render(move |_, _, cx| radius_segment(cx)),
             )
-            .description(tr!("Roundness of buttons, cards, and controls.")),
+            .description(tr!("appearance.roundness_of_buttons_cards_and_controls")),
         )
         .item(
             SettingItem::new(
-                tr!("Interface scale"),
+                tr!("appearance.interface_scale"),
                 SettingField::render(move |_, _, cx| scale_segment(cx)),
             )
-            .description(tr!("Scale text and interface spacing.")),
+            .description(tr!("appearance.scale_text_and_interface_spacing")),
         );
 
-    let language_group = SettingGroup::new().title(tr!("Language")).item(
+    let language_group = SettingGroup::new().title(tr!("appearance.language")).item(
         SettingItem::new(
-            tr!("Interface language"),
+            tr!("appearance.interface_language"),
             SettingField::render(move |_, _, _| language_select_field(language_select.clone())),
         )
-        .description(tr!("Choose the interface language.")),
+        .description(tr!("appearance.choose_the_interface_language")),
     );
 
-    SettingPage::new(tr!("Appearance"))
+    SettingPage::new(tr!("appearance.appearance"))
         .icon(IconName::Palette)
         .resettable(false)
         .group(language_group)
@@ -142,7 +138,7 @@ fn mode_segment(cx: &App) -> gpui::Div {
     h_flex().gap_4().items_start().children([
         mode_card(
             "mode-light",
-            tr!("Light"),
+            tr!("common.light"),
             ModePreview::Light,
             current == Appearance::Light,
             accent,
@@ -151,7 +147,7 @@ fn mode_segment(cx: &App) -> gpui::Div {
         ),
         mode_card(
             "mode-dark",
-            tr!("Dark"),
+            tr!("appearance.dark"),
             ModePreview::Dark,
             current == Appearance::Dark,
             accent,
@@ -160,7 +156,7 @@ fn mode_segment(cx: &App) -> gpui::Div {
         ),
         mode_card(
             "mode-system",
-            tr!("Follow system"),
+            tr!("appearance.follow_system"),
             ModePreview::Auto,
             current == Appearance::System,
             accent,
@@ -384,17 +380,17 @@ fn radius_segment(cx: &App) -> ButtonGroup {
         .outline()
         .child(
             Button::new("radius-sharp")
-                .label(tr!("Sharp"))
+                .label(tr!("common.sharp"))
                 .selected(current == Some(0)),
         )
         .child(
             Button::new("radius-default")
-                .label(tr!("Default"))
+                .label(tr!("common.default"))
                 .selected(current.is_none()),
         )
         .child(
             Button::new("radius-round")
-                .label(tr!("Round"))
+                .label(tr!("appearance.round"))
                 .selected(current == Some(12)),
         )
         .on_click(move |clicks, _, cx| {
@@ -470,7 +466,7 @@ fn theme_picker(
         .when(no_matches, |grid| {
             grid.text_body()
                 .text_color(pal.text_muted)
-                .child(tr!("No themes match “%{query}”.", query => query))
+                .child(tr!("appearance.no_themes_match_query", query => query))
         })
         .when(!no_matches, |grid| {
             grid.flex()
@@ -503,7 +499,7 @@ fn theme_picker(
                         .child(filter_chip(
                             view,
                             "filter-all",
-                            tr!("All"),
+                            tr!("common.all"),
                             ThemeFilter::All,
                             filter,
                             pal,
@@ -511,7 +507,7 @@ fn theme_picker(
                         .child(filter_chip(
                             view,
                             "filter-light",
-                            tr!("Light"),
+                            tr!("common.light"),
                             ThemeFilter::Light,
                             filter,
                             pal,
@@ -519,7 +515,7 @@ fn theme_picker(
                         .child(filter_chip(
                             view,
                             "filter-dark",
-                            tr!("Dark"),
+                            tr!("appearance.dark"),
                             ThemeFilter::Dark,
                             filter,
                             pal,
@@ -635,7 +631,11 @@ fn theme_card(
                         .flex_shrink_0()
                         .text_size(px(9.))
                         .text_color(pal.text_muted)
-                        .child(if dark { tr!("Dark") } else { tr!("Light") }),
+                        .child(if dark {
+                            tr!("appearance.dark")
+                        } else {
+                            tr!("common.light")
+                        }),
                 ),
         )
         .on_click(move |_, _, cx| {

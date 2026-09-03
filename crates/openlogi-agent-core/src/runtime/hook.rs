@@ -14,6 +14,7 @@ use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_hid::DeviceIoGate;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -438,6 +439,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    device_io: DeviceIoGate,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -452,52 +454,62 @@ pub fn start(
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
-    let result = Hook::start(move |event| match event {
-        HookEvent::Mouse(event) => {
-            monitor.record(&event);
-            match event {
-                MouseEvent::Button {
-                    id,
-                    pressed,
-                    device,
-                } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
-                MouseEvent::Moved { delta_x, delta_y } => {
-                    handle_moved(delta_x, delta_y, &hooks, &dispatcher)
-                }
-                MouseEvent::CaptureInterrupted => {
-                    HOLD.with_borrow_mut(HoldState::cancel);
-                    HELD_KEYS.with_borrow_mut(HashSet::clear);
-                    dispatcher.cancel_hook_thread_buttons();
-                    scroll.cancel_hooks();
-                    EventDisposition::PassThrough
-                }
-                MouseEvent::Scroll {
-                    delta,
-                    from_trackpad,
-                    device,
-                } => {
-                    #[cfg(target_os = "windows")]
-                    if delta.y() == 0.0
-                        && let Some((button, action)) = hooks
-                            .try_read()
-                            .ok()
-                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
-                    {
-                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        return queued_event_disposition(try_queue_action(&action_tx, action));
+    let result = Hook::start(move |event| {
+        // The macOS session observer closes this gate before notifying the
+        // lifecycle task. Fail open here as well, so a tap that is still being
+        // torn down can never suppress or synthesize input for another login
+        // session. The same guard is harmless on platforms with per-device
+        // hooks and keeps the callback policy consistent everywhere.
+        if !device_io.allows_io() {
+            return EventDisposition::PassThrough;
+        }
+        match event {
+            HookEvent::Mouse(event) => {
+                monitor.record(&event);
+                match event {
+                    MouseEvent::Button {
+                        id,
+                        pressed,
+                        device,
+                    } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
+                    MouseEvent::Moved { delta_x, delta_y } => {
+                        handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                     }
-                    if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
-                        return queued_event_disposition(scroll.try_hook_scroll(delta));
+                    MouseEvent::CaptureInterrupted => {
+                        HOLD.with_borrow_mut(HoldState::cancel);
+                        HELD_KEYS.with_borrow_mut(HashSet::clear);
+                        dispatcher.cancel_hook_thread_buttons();
+                        scroll.cancel_hooks();
+                        EventDisposition::PassThrough
                     }
-                    EventDisposition::PassThrough
+                    MouseEvent::Scroll {
+                        delta,
+                        from_trackpad,
+                        device,
+                    } => {
+                        #[cfg(target_os = "windows")]
+                        if delta.y() == 0.0
+                            && let Some((button, action)) = hooks
+                                .try_read()
+                                .ok()
+                                .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
+                        {
+                            info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
+                            return queued_event_disposition(try_queue_action(&action_tx, action));
+                        }
+                        if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
+                            return queued_event_disposition(scroll.try_hook_scroll(delta));
+                        }
+                        EventDisposition::PassThrough
+                    }
                 }
             }
+            // Function-key remapper: ordinary actions remain one-shot, while a
+            // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
+            // button. The active set pairs key-up even if modifier state or config
+            // changes while the key is down.
+            HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),
         }
-        // Function-key remapper: ordinary actions remain one-shot, while a
-        // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
-        // button. The active set pairs key-up even if modifier state or config
-        // changes while the key is down.
-        HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),
     });
 
     match result {

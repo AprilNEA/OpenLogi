@@ -262,14 +262,14 @@ unsafe fn show_menu(hwnd: HWND) {
             menu,
             MF_STRING,
             ID_SHOW,
-            wide(&rust_i18n::t!("Show Main Window")).as_ptr(),
+            wide(&rust_i18n::t!("app.show_main_window")).as_ptr(),
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(
             menu,
             MF_STRING,
             ID_QUIT,
-            wide(&rust_i18n::t!("Quit OpenLogi")).as_ptr(),
+            wide(&rust_i18n::t!("app.quit_openlogi")).as_ptr(),
         );
 
         let mut pt = POINT { x: 0, y: 0 };

@@ -215,8 +215,8 @@ pub enum WorkflowStep {
 
 /// X-macro table of every payload-free [`Action`] variant.
 ///
-/// Each row is `Variant "Label" Category Icon`, optionally followed by
-/// `not_pickable` for a row [`Action::catalog`] must omit. This is the single
+/// Each row is `Variant "Label" "i18n.key" Category Icon`, optionally followed
+/// by `not_pickable` for a row [`Action::catalog`] must omit. This is the single
 /// place a plain action is declared; payload-carrying variants (`SetDpiPreset`,
 /// `CustomShortcut`, …) build their label/category/icon from their payload and
 /// keep hand-written arms alongside the generated ones instead.
@@ -233,68 +233,69 @@ macro_rules! for_each_unit_action {
     ($callback:ident) => {
         $callback! {
             // Mouse
-            LeftClick "Left Click" Mouse Pointer,
-            RightClick "Right Click" Mouse Pointer,
-            MiddleClick "Middle Click" Mouse Mouse,
-            MouseBack "Back (Button 4)" Mouse MouseBack,
-            MouseForward "Forward (Button 5)" Mouse MouseForward,
+            LeftClick "Left Click" "actions.left_click" Mouse Pointer,
+            RightClick "Right Click" "actions.right_click" Mouse Pointer,
+            MiddleClick "Middle Click" "actions.middle_click" Mouse Mouse,
+            MouseBack "Back (Button 4)" "actions.back_button_4" Mouse MouseBack,
+            MouseForward "Forward (Button 5)" "actions.forward_button_5" Mouse MouseForward,
             // Editing
-            Copy "Copy" Editing Copy,
-            Paste "Paste" Editing Paste,
-            Cut "Cut" Editing Cut,
-            Undo "Undo" Editing Undo,
-            Redo "Redo" Editing Redo,
-            SelectAll "Select All" Editing SelectAll,
-            Find "Find" Editing Search,
-            Save "Save" Editing Save,
+            Copy "Copy" "common.copy" Editing Copy,
+            Paste "Paste" "common.paste" Editing Paste,
+            Cut "Cut" "common.cut" Editing Cut,
+            Undo "Undo" "common.undo" Editing Undo,
+            Redo "Redo" "common.redo" Editing Redo,
+            SelectAll "Select All" "common.select_all" Editing SelectAll,
+            Find "Find" "actions.find" Editing Search,
+            Save "Save" "common.save" Editing Save,
             // Browser
-            BrowserBack "Browser Back" Browser ArrowLeft,
-            BrowserForward "Browser Forward" Browser ArrowRight,
-            NewTab "New Tab" Browser NewTab,
-            CloseTab "Close Tab" Browser CloseTab,
-            ReopenTab "Reopen Tab" Browser ReopenTab,
-            NextTab "Next Tab" Browser NextTab,
-            PrevTab "Previous Tab" Browser PreviousTab,
-            ReloadPage "Reload Page" Browser Reload,
+            BrowserBack "Browser Back" "actions.browser_back" Browser ArrowLeft,
+            BrowserForward "Browser Forward" "actions.browser_forward" Browser ArrowRight,
+            NewTab "New Tab" "actions.new_tab" Browser NewTab,
+            CloseTab "Close Tab" "actions.close_tab" Browser CloseTab,
+            ReopenTab "Reopen Tab" "actions.reopen_tab" Browser ReopenTab,
+            NextTab "Next Tab" "actions.next_tab" Browser NextTab,
+            PrevTab "Previous Tab" "actions.previous_tab" Browser PreviousTab,
+            ReloadPage "Reload Page" "actions.reload_page" Browser Reload,
             // Navigation
-            MissionControl "Mission Control" Navigation Grid,
-            AppExpose "App Exposé" Navigation Layers,
-            PreviousDesktop "Previous Desktop" Navigation PreviousDesktop,
-            NextDesktop "Next Desktop" Navigation NextDesktop,
-            ShowDesktop "Show Desktop" Navigation Monitor,
-            LaunchpadShow "Launchpad" Navigation Applications,
+            MissionControl "Mission Control" "actions.mission_control" Navigation Grid,
+            AppExpose "App Exposé" "actions.app_expose" Navigation Layers,
+            PreviousDesktop "Previous Desktop" "actions.previous_desktop" Navigation PreviousDesktop,
+            NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
+            ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
+            LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
             // System
-            None "Do Nothing" System Ban,
-            LockScreen "Lock Screen" System Lock,
-            Screenshot "Screenshot" System Camera,
-            CaptureRegion "Capture Region" System Camera,
-            Sleep "Sleep" System Monitor,
-            ShowActionsRing "Actions Ring" System Grid not_pickable,
+            None "Do Nothing" "pointer.do_nothing" System Ban,
+            LockScreen "Lock Screen" "actions.lock_screen" System Lock,
+            Screenshot "Screenshot" "actions.screenshot" System Camera,
+            CaptureRegion "Capture Region" "actions.capture_region" System Camera,
+            Sleep "Sleep" "actions.sleep" System Monitor,
+            ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             // Media
-            PlayPause "Play / Pause" Media Play,
-            NextTrack "Next Track" Media NextTrack,
-            PrevTrack "Previous Track" Media PreviousTrack,
-            VolumeUp "Volume Up" Media Volume,
-            VolumeDown "Volume Down" Media VolumeDown,
-            MuteVolume "Mute" Media Mute,
+            PlayPause "Play / Pause" "actions.play_pause" Media Play,
+            NextTrack "Next Track" "actions.next_track" Media NextTrack,
+            PrevTrack "Previous Track" "actions.previous_track" Media PreviousTrack,
+            VolumeUp "Volume Up" "actions.volume_up" Media Volume,
+            VolumeDown "Volume Down" "actions.volume_down" Media VolumeDown,
+            MuteVolume "Mute" "actions.mute" Media Mute,
             // DPI
-            CycleDpiPresets "Cycle DPI Presets" Dpi Gauge,
-            ToggleSmartShift "Toggle SmartShift" Dpi Refresh,
+            CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
+            ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
             // Scroll
-            ScrollUp "Scroll Up" Scroll ArrowUp,
-            ScrollDown "Scroll Down" Scroll ArrowDown,
-            HorizontalScrollLeft "Scroll Left" Scroll ScrollLeft,
-            HorizontalScrollRight "Scroll Right" Scroll ScrollRight,
+            ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
+            ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
+            HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
+            HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
         }
     };
 }
 pub(super) use for_each_unit_action;
 
-/// Builds `label`, `category`, and `catalog` from [`for_each_unit_action!`]'s
-/// rows, splicing in the hand-written arms for payload-carrying variants so
-/// each generated `match` still covers every [`Action`] variant exhaustively.
+/// Builds `label`, `translation_key`, `category`, and `catalog` from
+/// [`for_each_unit_action!`]'s rows, splicing in the hand-written arms for
+/// payload-carrying variants so each generated `match` still covers every
+/// [`Action`] variant exhaustively.
 macro_rules! derive_action_core {
-    ( $( $variant:ident $label:literal $category:ident $icon:ident $( $tag:ident )? ),* $(,)? ) => {
+    ( $( $variant:ident $label:literal $translation_key:literal $category:ident $icon:ident $( $tag:ident )? ),* $(,)? ) => {
         impl Action {
             /// Display label for the popover row.
             ///
@@ -313,6 +314,39 @@ macro_rules! derive_action_core {
                     Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
                     Action::OpenApplication(target) => format!("Open {}", target.display_name()),
                     Action::HoldShortcut(combo) => format!("Hold {}", combo.rendered_label()),
+                }
+            }
+
+            /// Stable catalog key for a payload-free action label.
+            ///
+            /// Payload-carrying actions return `None`: their display text needs
+            /// interpolation or contains user data and cannot be represented by
+            /// a key alone.
+            #[must_use]
+            pub fn translation_key(&self) -> Option<&'static str> {
+                match self {
+                    $( Action::$variant => Some($translation_key), )*
+                    Action::SetDpiPreset(_)
+                    | Action::CustomShortcut(_)
+                    | Action::TypeText(_)
+                    | Action::RunAppleScript(_)
+                    | Action::RunShellCommand(_)
+                    | Action::Workflow(_)
+                    | Action::OpenApplication(_)
+                    | Action::HoldShortcut(_) => None,
+                }
+            }
+
+            /// Resolve the stable key for a payload-free English action label.
+            ///
+            /// The Actions Ring wire contract carries this English label for
+            /// compatibility with older helpers. The overlay converts it at
+            /// the localization boundary rather than changing the wire value.
+            #[must_use]
+            pub fn translation_key_for_label(label: &str) -> Option<&'static str> {
+                match label {
+                    $( $label => Some($translation_key), )*
+                    _ => None,
                 }
             }
 
@@ -338,9 +372,7 @@ macro_rules! derive_action_core {
             ///
             /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
             /// "Record shortcut…" (P1.3), not selected from the catalog. Table rows
-            /// tagged `not_pickable` (currently only [`Action::ShowActionsRing`], the
-            /// fixed default for [`ButtonId::HapticPanel`](super::ButtonId::HapticPanel))
-            /// are excluded from the catalog the same way.
+            /// tagged `not_pickable` are excluded from the catalog the same way.
             #[must_use]
             pub fn catalog() -> Vec<Action> {
                 [ $( derive_action_core!(@item $variant $( $tag )?) ),* ]

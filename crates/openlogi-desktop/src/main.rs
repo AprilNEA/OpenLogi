@@ -13,19 +13,12 @@
     windows_subsystem = "windows"
 )]
 
-/// Translate `key` (an English msgid) to the current locale and wrap it as a
-/// [`gpui::SharedString`], ready for `.child(...)` / `.label(...)` / menu items.
-/// Forwards `rust_i18n` interpolation, e.g. `tr!("Bind %{name}", name => x)`.
-///
-/// Defined before the `mod` declarations so every submodule can use it without
-/// an import (textual macro scope). Pairs with the `rust_i18n::i18n!` below.
+/// Translate into a [`gpui::SharedString`]; declared here for crate-wide scope.
 macro_rules! tr {
     ($($args:tt)*) => {
-        // `t!` yields `Cow<'static, str>`. A borrowed hit — the common case: a
-        // found translation or the English-key fallback — wraps into a
-        // `SharedString` with no copy; only owned (interpolated) results allocate.
+        // Catalog entries stay static; interpolated results are owned.
         match ::rust_i18n::t!($($args)*) {
-            ::std::borrow::Cow::Borrowed(s) => ::gpui::SharedString::from(s),
+            ::std::borrow::Cow::Borrowed(s) => ::gpui::SharedString::new_static(s),
             ::std::borrow::Cow::Owned(s) => ::gpui::SharedString::from(s),
         }
     };
@@ -41,7 +34,7 @@ mod state;
 mod ui;
 mod windows;
 
-// Loads the Crowdin-managed `crates/openlogi-ui/locales/*.yml` files at compile
+// Loads the Crowdin-managed `crates/openlogi-ui/locales/*.toml` files at compile
 // time and generates the `t!`/`tr!` lookup backend for this crate. `fallback =
 // "en"` matches the codes gpui-component ships, so the framework's own widgets
 // localize alongside ours.

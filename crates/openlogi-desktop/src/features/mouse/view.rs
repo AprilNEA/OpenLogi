@@ -133,7 +133,7 @@ impl MouseModelView {
     /// Create the mouse model view.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let action_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search actions…")));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("actions.search_actions")));
         cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -230,7 +230,7 @@ impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::components::localize_placeholder(
             &self.action_search,
-            tr!("Search actions…"),
+            tr!("actions.search_actions"),
             window,
             cx,
         );
@@ -625,10 +625,10 @@ impl RenderOnce for LabelTrigger {
         let binding = self.binding.text;
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
-        let button_name = tr!(self.label.id.label());
+        let button_name = tr!(self.label.id.translation_key());
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("Bind %{name}", name => button_name.clone()))
+            .accessibility_label(tr!("actions.bind_control", name => button_name.clone()))
             .aria_description(binding_description)
             .aria_selected(selected)
             .flex()
@@ -734,7 +734,7 @@ fn binding_label_for_control(
         .is_some_and(|button| gesture_buttons.contains(&button))
     {
         return BindingLabel {
-            text: tr!("5 directions"),
+            text: tr!("actions.five_directions"),
             icon: Some(GESTURE_BUTTON_ICON),
         };
     }
@@ -761,12 +761,12 @@ fn binding_label_for_control(
                 .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
             if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
                 BindingLabel {
-                    text: tr!(preset.label()),
+                    text: tr!(preset.translation_key()),
                     icon: Some(preset.icon()),
                 }
             } else {
                 BindingLabel {
-                    text: tr!("Custom"),
+                    text: tr!("common.custom"),
                     icon: Some("action-icons/chevrons-right.svg"),
                 }
             }
@@ -875,7 +875,10 @@ impl RenderOnce for HotspotTrigger {
 
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("Bind %{name}", name => tr!(btn.label())))
+            .accessibility_label(tr!(
+                "actions.bind_control",
+                name => tr!(btn.translation_key())
+            ))
             .aria_selected(selected)
             .flex()
             .items_center()

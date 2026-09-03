@@ -142,7 +142,7 @@ in
       '';
     };
     "openlogi:i18n-upload" = {
-      description = "Upload en.yml sources and per-language translations to Crowdin.";
+      description = "Upload en.toml sources and per-language translations to Crowdin.";
       exec = ''
         set -e
         ${pkgs.crowdin-cli}/bin/crowdin upload sources --config .config/crowdin.yml
@@ -157,13 +157,13 @@ in
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
         before="$(mktemp -d)"
         trap 'rm -rf "$before"' EXIT
-        cp crates/openlogi-ui/locales/*.yml "$before/"
+        cp crates/openlogi-ui/locales/*.toml "$before/"
         ${pkgs.crowdin-cli}/bin/crowdin download --config .config/crowdin.yml \
           --skip-untranslated-strings
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
           --locales crates/openlogi-ui/locales \
-          --en crates/openlogi-ui/locales/en.yml
+          --en crates/openlogi-ui/locales/en.toml
         cargo test -p openlogi-desktop i18n
       '';
     };
