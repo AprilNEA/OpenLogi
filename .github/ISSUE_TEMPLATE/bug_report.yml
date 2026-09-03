@@ -50,7 +50,7 @@ body:
     id: os
     attributes:
       label: Operating system
-      description: macOS is the only supported platform today; Linux and Windows are still stubs.
+      description: macOS and Linux are first-class; Windows is a younger but shipping port.
       options:
         - macOS
         - Linux

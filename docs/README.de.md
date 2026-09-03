@@ -106,7 +106,7 @@ Lade das `.deb` oder `.rpm` vom [neuesten Release](https://github.com/AprilNEA/O
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
+sudo dpkg -i openlogi-*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
