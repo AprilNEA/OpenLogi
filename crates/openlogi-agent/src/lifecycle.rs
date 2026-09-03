@@ -515,6 +515,13 @@ impl Running {
     /// observation can claim the hook is installed without the permission it
     /// requires.
     async fn apply_accessibility(&mut self, granted: bool) {
+        // Acquire the publication lock before changing the native hook. The
+        // final device-I/O check below must be followed only by synchronous
+        // publication; otherwise a suspend can arrive while this future is
+        // waiting for the lock and leave a newly installed tap armed.
+        let orchestrator = Arc::clone(&self.orchestrator);
+        let mut orchestrator = orchestrator.lock().await;
+
         self.accessibility_granted = granted;
         let should_install = hook_should_be_installed(
             self.capture_mouse_events,
@@ -534,10 +541,7 @@ impl Running {
         if should_install && !self.device_io_gate.allows_io() {
             self.stop_hook();
         }
-        self.orchestrator
-            .lock()
-            .await
-            .set_os_mouse_hook_available(self.hook.is_some());
+        orchestrator.set_os_mouse_hook_available(self.hook.is_some());
         self.observable
             .set_accessibility_and_hook(granted, self.hook.is_some());
     }
