@@ -41,6 +41,12 @@ pub fn canonical_device_key(
         .and_then(DeviceIdentity::config_key)
         .and_then(|key| PhysicalDeviceKey::parse(&key))
         .or_else(|| stable.physical_key())
+        .or_else(|| {
+            identity
+                .is_some()
+                .then(|| stable.route_only_key())
+                .flatten()
+        })
 }
 
 impl Config {
@@ -103,7 +109,11 @@ impl Config {
     /// Failing both, and for a device whose identity is unreadable (asleep),
     /// the route is resolved through the persisted `links` index, then finally
     /// through the route-derived key that every entry used before this
-    /// indirection existed.
+    /// indirection existed. An online [`DeviceStableId::Direct`] device that
+    /// still has no physical key at that point (no serial, an all-zero unit
+    /// id — a Bluetooth-direct M535, for example) falls back once more to
+    /// `DeviceStableId::route_only_key` rather than answering `None`, so
+    /// its settings have somewhere to be written at all.
     #[must_use]
     pub fn resolve_device_key(
         &self,
@@ -140,7 +150,12 @@ impl Config {
         {
             return Some(key);
         }
-        stable.physical_key()
+        stable.physical_key().or_else(|| {
+            identity
+                .is_some()
+                .then(|| stable.route_only_key())
+                .flatten()
+        })
     }
 
     /// Record that the device keyed `canonical` was reached by `route_key`,
@@ -186,8 +201,22 @@ impl Config {
                 changed = true;
             }
         }
+        // A device that was route-only-keyed (#1213's Direct-with-no-identity
+        // fallback) resolves a real identity here too: `route_only_key`'s
+        // `direct:vvvv:pppp:route` is as much a legacy entry to fold as the
+        // bare `direct:vvvv:pppp` shape below, or its settings would be
+        // orphaned under a key nothing resolves to any more. Skipped when
+        // `canonical` *is* that route-only key — adopting the route into
+        // itself has nothing to migrate.
+        let route_only_key = format!("{route_key}:route");
         let legacy = (route_key != canonical.as_str())
-            .then(|| self.devices.remove(route_key))
+            .then(|| {
+                self.devices.remove(route_key).or_else(|| {
+                    (route_only_key != canonical.as_str())
+                        .then(|| self.devices.remove(&route_only_key))
+                        .flatten()
+                })
+            })
             .flatten();
         let device = self
             .devices
@@ -658,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn a_direct_device_with_no_identity_stays_non_persistent() {
+    fn an_asleep_direct_device_with_no_identity_stays_non_persistent() {
         let config = Config::default();
         let anonymous = DeviceStableId::Direct {
             vendor_id: 0x046d,
@@ -666,6 +695,24 @@ mod tests {
             identity: DeviceIdentity::Unit([0; 4]),
         };
         assert_eq!(config.resolve_device_key(&anonymous, None), None);
+    }
+
+    #[test]
+    fn an_online_direct_device_with_no_identity_falls_back_to_its_route() {
+        // #1213: a Bluetooth-direct M535 reports neither a serial nor a
+        // non-zero unit id even while online, so it never had a physical key
+        // and every binding change was silently kept in memory only.
+        let config = Config::default();
+        let zero = DeviceIdentity::Unit([0; 4]);
+        let anonymous = DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc08d,
+            identity: zero.clone(),
+        };
+        let key = config
+            .resolve_device_key(&anonymous, Some(&zero))
+            .expect("an online device falls back to a route-only key");
+        assert_eq!(key.as_str(), "direct:046d:c08d:route");
     }
 
     #[test]
@@ -751,6 +798,61 @@ mod tests {
         assert!(
             !config.devices.contains_key("receiver:82839805:slot:1"),
             "the legacy entry is consumed, not left behind"
+        );
+    }
+
+    #[test]
+    fn adopting_a_route_folds_a_route_only_keyed_legacy_entry_in() {
+        // Greptile review on #1257: a device that used to resolve only to
+        // `route_only_key`'s `direct:vvvv:pppp:route` (#1213) later resolves
+        // a real serial/unit id. Its settings must move to the new physical
+        // key, or they are silently orphaned under a key nothing resolves to
+        // any more — exactly the bug this whole PR exists to fix.
+        let mut config = Config::default();
+        let legacy = DeviceConfig {
+            dpi: Some(Dpi::new(2400)),
+            ..DeviceConfig::default()
+        };
+        config
+            .devices
+            .insert("direct:046d:c08d:route".to_string(), legacy);
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "direct:046d:c08d", None));
+
+        let device = &config.devices["unit:6be9d300"];
+        assert_eq!(device.dpi, Some(Dpi::new(2400)), "DPI moved to the new key");
+        assert!(
+            !config.devices.contains_key("direct:046d:c08d:route"),
+            "the route-only entry is consumed, not left behind"
+        );
+    }
+
+    #[test]
+    fn adopting_the_route_only_key_itself_does_not_self_fold() {
+        // The steady-state case (a device that never resolves a physical
+        // identity, an M535): `canonical` already *is* the route-only key,
+        // so there is nothing to migrate every tick just churns the entry.
+        let mut config = Config::default();
+        let canonical = PhysicalDeviceKey::parse("direct:046d:c08d:route").expect("valid");
+        config.devices.insert(
+            "direct:046d:c08d:route".to_string(),
+            DeviceConfig {
+                dpi: Some(Dpi::new(2400)),
+                ..DeviceConfig::default()
+            },
+        );
+
+        // The first adoption registers the link; a repeat sighting reports
+        // no change, exactly like any other steady-state device.
+        assert!(config.adopt_route(&canonical, "direct:046d:c08d", None));
+        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", None));
+
+        let device = &config.devices["direct:046d:c08d:route"];
+        assert_eq!(
+            device.dpi,
+            Some(Dpi::new(2400)),
+            "settings were not churned away"
         );
     }
 

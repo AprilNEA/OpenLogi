@@ -204,6 +204,32 @@ impl DeviceStableId {
             }
         }
     }
+
+    /// Last-resort persisted key for a [`Self::Direct`] device that answered a
+    /// probe but reported no identity worth keying on (no serial, an all-zero
+    /// unit id) — the case a Bluetooth-direct M535 hits every time.
+    ///
+    /// Unlike [`Self::physical_key`], this is keyed by route alone
+    /// (`direct:vvvv:pppp`), so it deliberately does not disambiguate two
+    /// identical-model devices reached this way — they collide onto one
+    /// config entry. That is accepted: without it, such a device has no
+    /// config key at all, so nothing it stores is ever kept. Callers must
+    /// gate this on the device currently being online — an offline probe
+    /// also reports an all-zero unit id, and every sleeping device would
+    /// otherwise resolve to the same non-key.
+    #[must_use]
+    pub(crate) fn route_only_key(&self) -> Option<PhysicalDeviceKey> {
+        match self {
+            Self::Direct {
+                vendor_id,
+                product_id,
+                ..
+            } => Some(PhysicalDeviceKey(format!(
+                "direct:{vendor_id:04x}:{product_id:04x}:route"
+            ))),
+            Self::Bolt { .. } | Self::RawHid { .. } | Self::Unknown { .. } => None,
+        }
+    }
 }
 
 impl DeviceIdentity {
@@ -232,15 +258,21 @@ impl DeviceIdentity {
 }
 
 impl PhysicalDeviceKey {
-    /// Parse a key emitted by [`DeviceStableId::physical_key`].
+    /// Parse a key emitted by [`DeviceStableId::physical_key`] or
+    /// `DeviceStableId::route_only_key`.
     ///
-    /// Legacy model-scoped configuration keys intentionally return `None`;
-    /// callers can use that distinction when applying compatibility behavior
-    /// without treating a model identifier as a physical identity.
+    /// Legacy model-scoped configuration keys (a bare `direct:vvvv:pppp`,
+    /// with no third segment) intentionally return `None`; callers can use
+    /// that distinction when applying compatibility behavior without
+    /// treating a model identifier as a physical identity. The `:route`
+    /// marker is a different, unambiguous shape — a deliberate route-only
+    /// key, not a legacy one — so it is accepted here.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         if receiver_key_is_valid(value)
-            || direct_identity_fragment(value).is_some_and(identity_fragment_is_physical)
+            || direct_identity_fragment(value).is_some_and(|identity| {
+                identity == "route" || identity_fragment_is_physical(identity)
+            })
             || raw_identity_fragment(value).is_some_and(raw_identity_is_physical)
             || unknown_identity_fragment(value).is_some_and(identity_fragment_is_physical)
             || identity_fragment_is_physical(value)

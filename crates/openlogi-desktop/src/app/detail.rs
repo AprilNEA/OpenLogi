@@ -733,9 +733,11 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         .on_click(|checked, _window, cx| {
                             let enabled = *checked;
                             AppState::update(cx, |state, cx| {
-                                let record = state
-                                    .current_record()
-                                    .map(|record| (record.config_key.clone(), record.device_key()));
+                                let record = state.current_record().and_then(|record| {
+                                    record
+                                        .persistent_config_key()
+                                        .map(|key| (key.to_string(), record.device_key()))
+                                });
                                 if let Some((config_key, event_key)) = record {
                                     state.set_device_enabled(&config_key, enabled);
                                     cx.emit(StateEvent::DeviceConfigChanged(event_key));

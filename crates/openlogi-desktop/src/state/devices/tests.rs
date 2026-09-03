@@ -442,7 +442,10 @@ fn model_info(ext: u8, pid: u16) -> DeviceModelInfo {
 }
 
 #[test]
-fn zero_unit_direct_inventory_is_transient() {
+fn zero_unit_direct_inventory_is_persistent_when_online() {
+    // #1213: an online Bluetooth-direct device with no serial and an
+    // all-zero unit id (an M535) must still resolve a persistent key, or
+    // its bindings are kept in memory only and never written.
     let cache = AssetResolver::new();
     let list = build_device_list(
         &[direct_inventory(model_info(2, 0xb034))],
@@ -453,9 +456,12 @@ fn zero_unit_direct_inventory_is_transient() {
     );
 
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].config_key, "direct:046d:b023:unit:00000000");
-    assert!(!list[0].is_persistent());
-    assert!(list[0].persistent_config_key().is_none());
+    assert_eq!(list[0].config_key, "direct:046d:b023:route");
+    assert!(list[0].is_persistent());
+    assert_eq!(
+        list[0].persistent_config_key().map(str::to_string),
+        Some("direct:046d:b023:route".to_string())
+    );
 }
 
 #[test]

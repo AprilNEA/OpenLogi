@@ -864,6 +864,43 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
 }
 
 #[test]
+fn an_online_zero_unit_direct_device_with_no_sibling_persists_across_ticks() {
+    // #1213: a Bluetooth-direct M535 never reports a serial or a non-zero
+    // unit id, on any tick, ever — unlike the half-read-probe scenario
+    // above, there is no better identity waiting to be resolved. Bindings
+    // and DPI committed against it must actually be written, and the
+    // record must stay the same device across ticks instead of being
+    // dropped and re-added as a fresh card each time.
+    let cache = AssetResolver::new();
+    let inventory = direct_inventory([0; 4]);
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        std::slice::from_ref(&inventory),
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    let route_key = "direct:046d:b023:route";
+
+    assert_eq!(state.devices().len(), 1);
+    assert_eq!(state.devices()[0].config_key, route_key);
+    assert!(state.devices()[0].is_persistent());
+
+    state.commit_dpi(Dpi::new(2400));
+    assert_eq!(state.config.dpi(route_key), Some(Dpi::new(2400)));
+
+    let next_list = build_device_list(&[inventory], &[], &cache, &state.config, &[]);
+    let merged = state.merge_inventory_snapshot(next_list);
+
+    assert_eq!(merged.len(), 1, "the same device, not a second card");
+    assert_eq!(merged[0].config_key, route_key);
+    assert!(merged[0].is_persistent());
+}
+
+#[test]
 fn transient_probe_folds_into_its_known_card() {
     // #482: a half-read probe (all-zero unit id) of the only known device
     // with that vid/pid must not evict the known card or appear beside it —
