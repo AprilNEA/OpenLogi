@@ -313,6 +313,10 @@ jobs:
       - name: cargo doc
         env:
           RUSTDOCFLAGS: "-D warnings"
+        # This job's default shell is pwsh, where a trailing backslash is not a
+        # line continuation and `--exclude` parses as a unary operator. bash keeps
+        # this command byte-identical to the Linux rustdoc job it mirrors.
+        shell: bash
         run: |
           cargo doc --workspace --no-deps --document-private-items \
             --exclude openlogi-ui \
