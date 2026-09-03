@@ -21,6 +21,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex as StdMutex, PoisonError, TryLockError};
+
 use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -30,6 +35,8 @@ use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
+#[cfg(target_os = "macos")]
+use openlogi_hook::HookStopHandle;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
@@ -75,12 +82,74 @@ impl DeviceIoTransition {
     }
 }
 
+/// Non-blocking bridge from the AppKit session callback to the hook owner.
+///
+/// The callback cannot wait for the lifecycle task to receive its watch
+/// notification: that task may be inside native hook setup or an async lock.
+/// A pending bit covers the interval before a newly-created hook registers its
+/// handle; once registered, the request wakes the tap thread directly.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(crate) struct HookStopRequest {
+    current: StdMutex<Option<HookStopHandle>>,
+    pending: AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+impl HookStopRequest {
+    fn prepare_install(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn install(&self, handle: &HookStopHandle) {
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = Some(handle.clone());
+        if self.pending.swap(false, Ordering::AcqRel) {
+            handle.request_stop();
+        }
+        drop(current);
+
+        // A callback that lost the try_lock race while the slot was being
+        // installed leaves `pending` set. Consume that edge after unlocking;
+        // callbacks arriving later can see and call the installed handle.
+        if self.pending.swap(false, Ordering::AcqRel) {
+            handle.request_stop();
+        }
+    }
+
+    fn clear(&self) {
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = None;
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.pending.store(true, Ordering::Release);
+        match self.current.try_lock() {
+            Ok(current) => self.request_locked(current.as_ref()),
+            Err(TryLockError::Poisoned(error)) => {
+                let current = error.into_inner();
+                self.request_locked(current.as_ref());
+            }
+            Err(TryLockError::WouldBlock) => {}
+        }
+    }
+
+    fn request_locked(&self, current: Option<&HookStopHandle>) {
+        if let Some(handle) = current
+            && self.pending.swap(false, Ordering::AcqRel)
+        {
+            handle.request_stop();
+        }
+    }
+}
+
 /// Walk the whole lifecycle: bootstrap, gate, arm, run. This is the async
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
     config: Config,
     uninstalled: UnboundedReceiver<()>,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+    #[cfg(target_os = "macos")] hook_stop: Arc<HookStopRequest>,
     device_io_gate: openlogi_hid::DeviceIoGate,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
@@ -92,6 +161,8 @@ pub(crate) async fn run(
         uninstalled,
         #[cfg(target_os = "macos")]
         armed_tx,
+        #[cfg(target_os = "macos")]
+        hook_stop,
         device_io_gate,
     )
     .await
@@ -122,6 +193,8 @@ struct Booted {
     /// Releases the main thread's tray loop once the agent arms.
     #[cfg(target_os = "macos")]
     armed_tx: std::sync::mpsc::Sender<()>,
+    #[cfg(target_os = "macos")]
+    hook_stop: Arc<HookStopRequest>,
     device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
@@ -130,6 +203,7 @@ impl Booted {
         config: Config,
         uninstalled: UnboundedReceiver<()>,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+        #[cfg(target_os = "macos")] hook_stop: Arc<HookStopRequest>,
         device_io_gate: openlogi_hid::DeviceIoGate,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
@@ -146,6 +220,8 @@ impl Booted {
             launch_at_login,
             #[cfg(target_os = "macos")]
             armed_tx,
+            #[cfg(target_os = "macos")]
+            hook_stop,
             device_io_gate,
         })
     }
@@ -216,6 +292,8 @@ impl Wanted {
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
+            #[cfg(target_os = "macos")]
+            hook_stop,
             device_io_gate,
             ..
         } = self.0;
@@ -251,6 +329,8 @@ impl Wanted {
                 hook: None,
                 capture_mouse_events,
                 accessibility_granted,
+                #[cfg(target_os = "macos")]
+                hook_stop,
                 device_io_gate,
             },
         }
@@ -279,6 +359,8 @@ struct Running {
     hook: Option<Hook>,
     capture_mouse_events: bool,
     accessibility_granted: bool,
+    #[cfg(target_os = "macos")]
+    hook_stop: Arc<HookStopRequest>,
     device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
@@ -533,6 +615,8 @@ impl Running {
             self.stop_hook();
         }
         if should_install && self.hook.is_none() {
+            #[cfg(target_os = "macos")]
+            self.hook_stop.prepare_install();
             self.hook = self.start_hook();
         }
         // The session callback can publish a suspend while the synchronous
@@ -562,17 +646,26 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.device_io.clone(),
         )
+        .inspect(|hook| {
+            #[cfg(target_os = "macos")]
+            self.hook_stop.install(&hook.stop_handle());
+        })
     }
 
     /// Stop the hook so no new edge can race the lifecycle cancellation.
     fn stop_hook(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.hook_stop.clear();
         self.hook = None;
         self.inputs.dispatcher.cancel_hook_buttons();
         self.inputs.scroll_input.cancel_hooks();
     }
 
     fn shut_down(&mut self, reason: &str) -> ! {
+        #[cfg(target_os = "macos")]
+        self.hook_stop.clear();
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason)
     }
 }

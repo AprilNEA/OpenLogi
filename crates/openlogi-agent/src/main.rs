@@ -117,6 +117,8 @@ fn main() {
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
         let app_icon = config.app_settings.app_icon;
+        let hook_stop = std::sync::Arc::new(lifecycle::HookStopRequest::default());
+        let core_hook_stop = std::sync::Arc::clone(&hook_stop);
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. A
@@ -130,6 +132,7 @@ fn main() {
                     config,
                     uninstalled,
                     armed_tx,
+                    core_hook_stop,
                     device_io_gate,
                 ));
             })
@@ -138,7 +141,7 @@ fn main() {
             return;
         }
         if armed_rx.recv().is_ok() {
-            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal);
+            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal, hook_stop);
         }
     }
     #[cfg(not(target_os = "macos"))]
