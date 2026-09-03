@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, LongPressBinding};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -43,6 +43,15 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         kind: openlogi_core::device::DeviceKind::Mouse,
         light_capabilities: None,
         online,
+    }
+}
+
+/// A keyboard-kind device. `keyboard_spec_for` selects on [`DeviceKind`], so
+/// the mouse-shaped [`dev`] helper cannot stand in for one.
+fn keyboard_dev(key: &str, slot: u8) -> AgentDevice {
+    AgentDevice {
+        kind: DeviceKind::Keyboard,
+        ..dev(key, slot, true)
     }
 }
 
@@ -1034,5 +1043,78 @@ fn equal_runtime_projection_does_not_wake_managers() {
         !host_switch_links
             .has_changed()
             .expect("publication remains open")
+    );
+}
+
+#[test]
+fn a_bound_keyboard_key_is_diverted_and_an_untouched_one_stays_native() {
+    // Diversion is what costs a key its firmware behavior: `0x00e2`/`0x00e3`
+    // are the backlight-adjust pair, so a key that reaches `wanted` without
+    // the user binding it silently takes away backlight control. The gate is
+    // the `wanted` filter, and nothing else covers it.
+    use std::collections::BTreeMap;
+
+    let mut config = Config::default();
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![keyboard_dev("kb", 1)];
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "a keyboard with no bound keys must not open a capture session at all"
+    );
+
+    config.set_binding(
+        "kb",
+        ButtonId::KeyBacklightDown,
+        Binding::Single(Action::BrightnessDown),
+    );
+    let mut orch = orchestrator(config.clone());
+    orch.devices = vec![keyboard_dev("kb", 1)];
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("one bound key opens the session");
+    assert_eq!(
+        spec.wanted,
+        BTreeMap::from([(0x00e2, ButtonId::KeyBacklightDown)]),
+        "only the bound key is diverted — Backlight Up keeps its firmware behavior"
+    );
+
+    // `Action::None` is a binding present in the config but not a reason to
+    // take the key away from the firmware.
+    config.set_binding(
+        "kb",
+        ButtonId::KeyBacklightUp,
+        Binding::Single(Action::None),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard_dev("kb", 1)];
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("the other bound key still opens the session");
+    assert!(
+        !spec
+            .wanted
+            .values()
+            .any(|&button| button == ButtonId::KeyBacklightUp),
+        "a key bound to Action::None must stay native"
+    );
+
+    // A long-press binding is diverted on the strength of its threshold
+    // action alone: the short action is `None` here, and diverting anyway is
+    // what lets the long press fire at all.
+    let mut config = Config::default();
+    config.set_binding(
+        "kb",
+        ButtonId::KeyBacklightUp,
+        Binding::LongPress(LongPressBinding::new(Action::None, Action::MissionControl)),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard_dev("kb", 1)];
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("a long-press binding opens the session");
+    assert_eq!(
+        spec.wanted,
+        BTreeMap::from([(0x00e3, ButtonId::KeyBacklightUp)]),
+        "a long-press binding diverts its own key and no other"
     );
 }
