@@ -262,7 +262,7 @@ impl Runtime {
                     // the fail-closed "agent is not running" screen even
                     // though the agent connects moments later.
                     let should_reload = cx.update(|cx| {
-                        AppState::try_read(cx).is_some_and(|state| state.should_reload_agent())
+                        AppState::try_read(cx).is_some_and(AppState::should_reload_agent)
                     });
                     if should_reload {
                         cx.update(|cx| {

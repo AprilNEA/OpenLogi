@@ -69,6 +69,7 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
 objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
+libc = "0.2"
 
 [lints]
 workspace = true
