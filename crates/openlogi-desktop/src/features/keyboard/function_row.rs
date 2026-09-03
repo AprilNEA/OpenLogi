@@ -6,9 +6,10 @@
 //! right while the keyboard physically makes room. Only one key is selected at a
 //! time.
 //!
-//! F-key bindings are global (`AppState`'s keyboard map), committed via
-//! [`AppState::commit_keyboard_binding`]. The panel lists the same action
-//! catalog the mouse picker uses, plus a Power User section.
+//! Ordinary Esc/F-key bindings are global (`AppState`'s keyboard map).
+//! Dedicated Logitech HID++ controls are per-device and share the mouse
+//! binding path. The panel lists the same action catalog the mouse picker uses,
+//! plus a Power User section.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -31,8 +32,10 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_assets::Assignment;
+use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::device::DeviceModelInfo;
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -44,7 +47,7 @@ use crate::features::mouse::picker::{
     editor_section,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -78,6 +81,8 @@ const FUNCTION_KEYS: [(&str, u16); 20] = [
     ("F18", 0x4F),
     ("F19", 0x50),
 ];
+
+const MX_MECHANICAL_MINI_MAC_MODEL_ID: u16 = 0xb36d;
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -117,6 +122,9 @@ const EVEN_SPACING_END: f32 = 0.96;
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
+    /// The active keyboard's device key, used to discard stale selection and
+    /// open editors when the user switches devices.
+    current_device_key: Option<DeviceKey>,
     /// The single selected key index (0 = Esc), or `None` when nothing is
     /// selected (no panel shown).
     selected_key: Option<usize>,
@@ -129,15 +137,25 @@ pub struct FunctionRowView {
     text_state: Option<Entity<InputState>>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
-    _state_obs: Subscription,
+    _state_obs: Option<Subscription>,
 }
 
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(&AppState::global(cx), |_view, _, event: &StateEvent, cx| {
+        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
             let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::DeviceSelected(key) => {
+                    this.reset_for_device(Some(key.clone()));
+                    true
+                }
+                StateEvent::InventoryChanged => {
+                    let current_key = AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .map(DeviceRecord::device_key);
+                    this.reset_for_device(current_key);
+                    true
+                }
                 StateEvent::BindingsChanged(key) => AppState::try_read(cx)
                     .and_then(AppState::current_record)
                     .is_some_and(|record| record.device_key() == *key),
@@ -148,13 +166,33 @@ impl FunctionRowView {
             }
         });
         Self {
+            current_device_key: None,
             selected_key: None,
             hovered_key: None,
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
-            _state_obs: state_obs,
+            _state_obs: Some(state_obs),
         }
+    }
+
+    /// Reset any open key selection, editor, or in-flight draft when the active
+    /// keyboard changes.
+    pub(crate) fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
+        if self.current_device_key == device_key {
+            return;
+        }
+        self.current_device_key = device_key;
+        self.reset_selection();
+    }
+
+    /// Clear the selected key and any open power-user editor.
+    pub(crate) fn reset_selection(&mut self) {
+        self.selected_key = None;
+        self.hovered_key = None;
+        self.active_editor = None;
+        self.text_state = None;
+        self.workflow_draft.clear();
     }
 
     /// Select a key (or deselect with `None`), opening/closing the panel.
@@ -243,8 +281,9 @@ impl FunctionRowView {
 impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
-        let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
-        let bindings = state.map(AppState::keyboard_bindings);
+        let record = state.and_then(AppState::current_record);
+        self.reset_for_device(record.map(DeviceRecord::device_key));
+        let asset = record.and_then(|record| record.asset.as_ref());
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -253,24 +292,18 @@ impl Render for FunctionRowView {
 
         let viewport_h = f32::from(window.viewport_size().height);
         let render_size = keyboard_render_size(asset, viewport_h);
-        let points = key_points(asset);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let slots: Vec<KeySlot> = FUNCTION_KEYS
-            .iter()
-            .zip(points.iter())
+        let slots: Vec<KeySlot> = key_definitions(record, asset)
+            .into_iter()
             .enumerate()
-            .map(|(idx, ((label, keycode), point))| {
-                let trigger = KeyTrigger {
-                    keycode: *keycode,
-                    modifiers: KeyModifiers::default(),
-                };
-                let bound = bindings.and_then(|bindings| bindings.get(&trigger));
+            .map(|(idx, definition)| {
+                let bound = state.and_then(|state| definition.target.current_action(state));
                 KeySlot {
                     idx,
-                    label,
-                    trigger,
-                    x_frac: point.x_frac,
-                    y_frac: point.y_frac,
+                    label: definition.label,
+                    target: definition.target,
+                    x_frac: definition.point.x_frac,
+                    y_frac: definition.point.y_frac,
                     binding: binding_label(bound),
                     binding_icon: bound.map(action_icon_path),
                 }
@@ -291,7 +324,7 @@ impl Render for FunctionRowView {
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
-            let current_action = bindings.and_then(|bindings| bindings.get(&slot.trigger));
+            let current_action = state.and_then(|state| slot.target.current_action(state));
             match kind {
                 PowerUserKind::Workflow => {
                     if self.workflow_draft.is_empty() {
@@ -346,12 +379,215 @@ fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32,
     asset_dimensions_for_png(asset, target_h, KEYBOARD_W)
 }
 
+/// Where one keyboard hotspot stores and dispatches its binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BindingTarget {
+    Global(KeyTrigger),
+    Device {
+        device_key: DeviceKey,
+        button: ButtonId,
+    },
+}
+
+impl BindingTarget {
+    fn current_action<'a>(&self, state: &'a AppState) -> Option<&'a Action> {
+        match self {
+            Self::Global(trigger) => state.keyboard_bindings().get(trigger),
+            Self::Device { device_key, button } => {
+                let active_key = state.current_record().map(DeviceRecord::device_key);
+                if active_key.as_ref() == Some(device_key) {
+                    state.button_bindings().get(button)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn display_name(&self) -> gpui::SharedString {
+        match self {
+            Self::Global(trigger) => trigger.to_string().into(),
+            Self::Device { button, .. } => tr!(button.translation_key()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct KeyDefinition {
+    label: gpui::SharedString,
+    target: BindingTarget,
+    point: KeyPoint,
+}
+
+fn key_definitions(
+    record: Option<&DeviceRecord>,
+    asset: Option<&ResolvedAsset>,
+) -> Vec<KeyDefinition> {
+    if let Some(record) = record
+        && let Some(model) = record.model_info.as_ref()
+        && let Some(definitions) = mx_mechanical_mini_definitions(record.device_key(), model, asset)
+    {
+        return definitions;
+    }
+
+    FUNCTION_KEYS
+        .iter()
+        .zip(key_points(asset))
+        .map(|(&(label, keycode), point)| global_key_definition(label, keycode, point))
+        .collect()
+}
+
+fn global_key_definition(label: &'static str, keycode: u16, point: KeyPoint) -> KeyDefinition {
+    KeyDefinition {
+        label: label.into(),
+        target: BindingTarget::Global(KeyTrigger {
+            keycode,
+            modifiers: KeyModifiers::default(),
+        }),
+        point,
+    }
+}
+
+fn device_key_definition(
+    device_key: DeviceKey,
+    button: ButtonId,
+    point: KeyPoint,
+) -> KeyDefinition {
+    KeyDefinition {
+        label: keyboard_callout_label(button)
+            .map_or_else(|| tr!(button.translation_key()), Into::into),
+        target: BindingTarget::Device { device_key, button },
+        point,
+    }
+}
+
+fn keyboard_callout_label(button: ButtonId) -> Option<&'static str> {
+    match button {
+        ButtonId::KeyVolumeDown => Some("Vol Dn"),
+        ButtonId::KeyVolumeUp => Some("Vol Up"),
+        ButtonId::KeyDoNotDisturb => Some("DND"),
+        ButtonId::KeyHome => Some("Home"),
+        ButtonId::KeyEnd => Some("End"),
+        ButtonId::KeyPageUp => Some("Pg Up"),
+        ButtonId::KeyPageDown => Some("Pg Dn"),
+        _ => None,
+    }
+}
+
+/// Build the Mini's physical layout from semantic depot slots. Its first three
+/// F-row markers live in `device_easyswitch_image`, while Home/End/Page keys
+/// form a vertical column; treating all markers as a positional F1-F19 row is
+/// what created the dead bindings reported for this model.
+fn mx_mechanical_mini_definitions(
+    device_key: DeviceKey,
+    model: &DeviceModelInfo,
+    asset: Option<&ResolvedAsset>,
+) -> Option<Vec<KeyDefinition>> {
+    if !model.model_ids.contains(&MX_MECHANICAL_MINI_MAC_MODEL_ID) {
+        return None;
+    }
+    let asset = asset?;
+    let mut easy_switch: Vec<&Assignment> = assignments_for(asset, "device_easyswitch_image")
+        .filter(|assignment| assignment.slot_name.starts_with("SLOT_NAME_EASYSWITCH_"))
+        .collect();
+    easy_switch.sort_by(|a, b| a.marker.x.total_cmp(&b.marker.x));
+
+    let mut top_row: Vec<&Assignment> = assignments_for(asset, "device_keys_image")
+        .filter(|assignment| semantic_navigation_button(&assignment.slot_name).is_none())
+        .collect();
+    top_row.sort_by(|a, b| a.marker.x.total_cmp(&b.marker.x));
+    if easy_switch.len() != 3 || top_row.len() != 12 {
+        return None;
+    }
+
+    let mut definitions = Vec::with_capacity(FUNCTION_KEYS.len());
+    definitions.push(global_key_definition(
+        FUNCTION_KEYS[0].0,
+        FUNCTION_KEYS[0].1,
+        synthesized_esc_point(assignment_point(easy_switch[0])),
+    ));
+    for (index, assignment) in easy_switch.into_iter().enumerate() {
+        let function_index = index + 1;
+        definitions.push(global_key_definition(
+            FUNCTION_KEYS[function_index].0,
+            FUNCTION_KEYS[function_index].1,
+            calibrated_marker_point(assignment_point(assignment)),
+        ));
+    }
+    for (index, assignment) in top_row.into_iter().enumerate() {
+        let function_index = index + 4;
+        let point = calibrated_marker_point(assignment_point(assignment));
+        if let Some(button) = semantic_top_row_button(&assignment.slot_name) {
+            definitions.push(device_key_definition(device_key.clone(), button, point));
+        } else {
+            definitions.push(global_key_definition(
+                FUNCTION_KEYS[function_index].0,
+                FUNCTION_KEYS[function_index].1,
+                point,
+            ));
+        }
+    }
+    for slot_name in [
+        "SLOT_NAME_HOME",
+        "SLOT_NAME_END",
+        "SLOT_NAME_PAGE_UP",
+        "SLOT_NAME_PAGE_DOWN",
+    ] {
+        let assignment = assignments_for(asset, "device_keys_image")
+            .find(|assignment| assignment.slot_name == slot_name)?;
+        definitions.push(device_key_definition(
+            device_key.clone(),
+            semantic_navigation_button(slot_name)?,
+            calibrated_marker_point(assignment_point(assignment)),
+        ));
+    }
+    (definitions.len() == FUNCTION_KEYS.len()).then_some(definitions)
+}
+
+fn assignments_for<'a>(
+    asset: &'a ResolvedAsset,
+    image_key: &'a str,
+) -> impl Iterator<Item = &'a Assignment> {
+    asset
+        .metadata
+        .images
+        .iter()
+        .filter(move |image| image.key == image_key)
+        .flat_map(|image| image.assignments.iter())
+}
+
+fn assignment_point(assignment: &Assignment) -> KeyPoint {
+    KeyPoint {
+        x_frac: assignment.marker.x / 100.0,
+        y_frac: assignment.marker.y / 100.0,
+    }
+}
+
+fn semantic_top_row_button(slot_name: &str) -> Option<ButtonId> {
+    match slot_name {
+        "SLOT_NAME_VOLUME_DOWN" => Some(ButtonId::KeyVolumeDown),
+        "SLOT_NAME_VOLUME_UP" => Some(ButtonId::KeyVolumeUp),
+        "SLOT_NAME_DO_NOT_DISTURB" => Some(ButtonId::KeyDoNotDisturb),
+        _ => None,
+    }
+}
+
+fn semantic_navigation_button(slot_name: &str) -> Option<ButtonId> {
+    match slot_name {
+        "SLOT_NAME_HOME" => Some(ButtonId::KeyHome),
+        "SLOT_NAME_END" => Some(ButtonId::KeyEnd),
+        "SLOT_NAME_PAGE_UP" => Some(ButtonId::KeyPageUp),
+        "SLOT_NAME_PAGE_DOWN" => Some(ButtonId::KeyPageDown),
+        _ => None,
+    }
+}
+
 /// One function-row key with its resolved layout + binding.
 #[derive(Clone)]
 struct KeySlot {
     idx: usize,
-    label: &'static str,
-    trigger: KeyTrigger,
+    label: gpui::SharedString,
+    target: BindingTarget,
     x_frac: f32,
     y_frac: f32,
     binding: gpui::SharedString,
@@ -674,6 +910,26 @@ fn key_click_target(
         })
 }
 
+pub(crate) fn commit_target(state: &mut AppState, target: &BindingTarget, action: Action) {
+    match target {
+        BindingTarget::Global(trigger) => {
+            state.commit_keyboard_binding(trigger.clone(), Some(action));
+        }
+        BindingTarget::Device { device_key, button } => {
+            let active_key = state.current_record().map(DeviceRecord::device_key);
+            if active_key.as_ref() != Some(device_key) {
+                tracing::warn!(
+                    target_device = %device_key,
+                    active_device = ?active_key,
+                    "dropped keyboard binding commit aimed at a different device"
+                );
+                return;
+            }
+            state.commit_binding(*button, action);
+        }
+    }
+}
+
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
@@ -796,13 +1052,14 @@ impl FunctionRowView {
     ) -> gpui::Div {
         let pal = theme::palette(cx);
         let slot = &slots[selected_idx];
-        let trigger = slot.trigger.clone();
-        let key_name = trigger.to_string();
+        let target = slot.target.clone();
+        let target_name = target.display_name();
 
         // If an editor is active, render it instead of the list.
         if let Some(kind) = self.active_editor {
             return super::editors::editor_card(
-                trigger,
+                target,
+                target_name,
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
@@ -811,15 +1068,15 @@ impl FunctionRowView {
             );
         }
 
-        let current = AppState::try_read(cx)
-            .and_then(|state| state.keyboard_bindings().get(&trigger).cloned());
+        let current =
+            AppState::try_read(cx).and_then(|state| slot.target.current_action(state).cloned());
 
         let view_for_pick = view.clone();
-        let trigger_for_pick = trigger.clone();
+        let target_for_pick = slot.target.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
             AppState::update(cx, |state, cx| {
                 let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
+                commit_target(state, &target_for_pick, action);
                 if let Some(key) = key {
                     cx.emit(StateEvent::BindingsChanged(key));
                 }
@@ -832,14 +1089,14 @@ impl FunctionRowView {
         compact_panel(pal)
             .w(px(PANEL_W))
             .max_h(px(500.))
-            .child(title_header(&key_name, &pal))
+            .child(title_header(&target_name, &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".
-fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
+fn title_header(key_name: &gpui::SharedString, pal: &Palette) -> impl IntoElement {
     h_flex()
         .items_center()
         .justify_between()
@@ -850,7 +1107,7 @@ fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
                 .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
-                .child(tr!("actions.bind_control", name => key_name)),
+                .child(tr!("actions.bind_control", name => key_name.clone())),
         )
 }
 

@@ -347,6 +347,10 @@ impl AppView {
     /// untouched — the route is purely presentational.
     fn go_home(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Home;
+        self.keyboard_model.update(cx, |view, cx| {
+            view.reset_selection();
+            cx.notify();
+        });
         cx.notify();
     }
 

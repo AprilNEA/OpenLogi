@@ -1036,3 +1036,26 @@ fn equal_runtime_projection_does_not_wake_managers() {
             .expect("publication remains open")
     );
 }
+
+#[test]
+fn keyboard_capture_skips_an_unbound_keyboard_before_the_bound_one() {
+    let mut config = Config::default();
+    config.set_binding(
+        "keyboard-b",
+        ButtonId::KeyHome,
+        Binding::Single(Action::MissionControl),
+    );
+    let mut orch = orchestrator(config);
+    let mut unbound = dev("keyboard-a", 1, false);
+    unbound.kind = DeviceKind::Keyboard;
+    let mut bound = dev("keyboard-b", 2, true);
+    bound.kind = DeviceKind::Keyboard;
+    orch.devices = vec![unbound, bound];
+
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("the bound keyboard should be selected");
+
+    assert_eq!(spec.config_key, "keyboard-b");
+    assert_eq!(spec.wanted.get(&0x0118), Some(&ButtonId::KeyHome));
+}

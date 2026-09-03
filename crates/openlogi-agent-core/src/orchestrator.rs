@@ -317,9 +317,9 @@ impl Orchestrator {
         }
     }
 
-    /// The keyboard key-capture spec for the first known keyboard, or `None`
-    /// when no keyboard is paired or none of its capturable keys carries a
-    /// real binding (an unbound key must never be diverted).
+    /// The keyboard key-capture spec for the first known keyboard with a real
+    /// binding, or `None` when no keyboard has one (an unbound key must never
+    /// be diverted).
     ///
     /// Deliberately does NOT require the keyboard to be online: an idle
     /// keyboard sleeps within minutes and probe timeouts can flap it offline,
@@ -329,34 +329,33 @@ impl Orchestrator {
     /// channel is to the always-present receiver — and re-arms diversion on
     /// the device's `0x1d4b` reconnection broadcast.
     fn keyboard_spec_for(&self) -> Option<KeyboardSpec> {
-        let dev = self
-            .devices
+        self.devices
             .iter()
-            .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
-        let bindings = button_bindings_for(
-            &self.config,
-            Some(&dev.config_key),
-            self.current_app.as_deref(),
-        );
-        let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
-            .iter()
-            .filter(|(_, button)| {
-                bindings.get(button).is_some_and(|binding| {
-                    matches!(binding, Binding::LongPress(_))
-                        || binding.click_action() != Action::None
+            .filter(|dev| dev.kind == DeviceKind::Keyboard)
+            .find_map(|dev| {
+                let route = dev.route.clone()?;
+                let bindings = button_bindings_for(
+                    &self.config,
+                    Some(&dev.config_key),
+                    self.current_app.as_deref(),
+                );
+                let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
+                    .iter()
+                    .filter(|(_, button)| {
+                        bindings.get(button).is_some_and(|binding| {
+                            matches!(binding, Binding::LongPress(_))
+                                || binding.click_action() != Action::None
+                        })
+                    })
+                    .copied()
+                    .collect();
+                (!wanted.is_empty()).then(|| KeyboardSpec {
+                    config_key: dev.config_key.clone(),
+                    route,
+                    wanted,
+                    bindings,
                 })
             })
-            .copied()
-            .collect();
-        if wanted.is_empty() {
-            return None;
-        }
-        Some(KeyboardSpec {
-            config_key: dev.config_key.clone(),
-            route: dev.route.clone()?,
-            wanted,
-            bindings,
-        })
     }
 
     /// Rewrite every shared map from the current config + selected device.

@@ -47,7 +47,7 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
 /// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 14] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
@@ -57,6 +57,11 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
     (0x00e7, ButtonId::KeyMute),
     (0x00e8, ButtonId::KeyVolumeDown),
     (0x00e9, ButtonId::KeyVolumeUp),
+    (0x0118, ButtonId::KeyHome),
+    (0x0119, ButtonId::KeyEnd),
+    (0x011a, ButtonId::KeyPageUp),
+    (0x011b, ButtonId::KeyPageDown),
+    (0x011d, ButtonId::KeyDoNotDisturb),
 ];
 
 /// Capture the requested keyboard controls on `route` until `shutdown`
@@ -409,6 +414,17 @@ fn device_io_suspended() -> GestureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mx_mechanical_mini_controls_are_in_the_capture_catalog() {
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x00e8, ButtonId::KeyVolumeDown)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x00e9, ButtonId::KeyVolumeUp)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x0118, ButtonId::KeyHome)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x0119, ButtonId::KeyEnd)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x011a, ButtonId::KeyPageUp)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x011b, ButtonId::KeyPageDown)));
+        assert!(KEYBOARD_KEY_CIDS.contains(&(0x011d, ButtonId::KeyDoNotDisturb)));
+    }
 
     #[test]
     fn keyboard_snapshots_emit_balanced_edges_without_duplicates() {

@@ -1,6 +1,6 @@
 use super::*;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
-use openlogi_core::device::DeviceKind;
+use openlogi_core::device::{DeviceKind, DeviceModelInfo, DeviceTransports};
 use std::path::PathBuf;
 
 #[test]
@@ -27,6 +27,133 @@ fn function_row_covers_esc_through_f19() {
     assert_eq!(labels.last(), Some(&"F19"));
     assert!(labels.contains(&"F13"));
     assert!(labels.contains(&"F19"));
+}
+
+#[test]
+fn mx_mechanical_mini_uses_semantic_hidpp_controls_and_physical_markers() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            btle: true,
+            ..DeviceTransports::default()
+        },
+        model_ids: [MX_MECHANICAL_MINI_MAC_MODEL_ID, 0, 0],
+        extended_model_id: 0,
+    };
+    let asset = mx_mechanical_mini_asset();
+    let test_key = DeviceKey::from("test-mini");
+
+    let definitions = mx_mechanical_mini_definitions(test_key.clone(), &model, Some(&asset))
+        .expect("recognized Mini layout");
+
+    assert_eq!(definitions.len(), 20);
+    assert_eq!(definitions[1].target, global_target(0x7a));
+    assert_approx_eq(definitions[1].point.x_frac, 0.096);
+    assert_eq!(
+        definitions[13].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyVolumeDown,
+        }
+    );
+    assert_eq!(
+        definitions[14].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyVolumeUp,
+        }
+    );
+    assert_eq!(
+        definitions[15].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyDoNotDisturb,
+        }
+    );
+    assert_eq!(
+        definitions[16].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyHome,
+        }
+    );
+    assert_eq!(
+        definitions[17].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyEnd,
+        }
+    );
+    assert_eq!(
+        definitions[18].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyPageUp,
+        }
+    );
+    assert_eq!(
+        definitions[19].target,
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyPageDown,
+        }
+    );
+    assert_approx_eq(definitions[16].point.y_frac, 0.276);
+    assert_approx_eq(definitions[19].point.y_frac, 0.710);
+    assert_eq!(definitions[13].label.as_ref(), "Vol Dn");
+    assert_eq!(definitions[14].label.as_ref(), "Vol Up");
+    assert_eq!(definitions[15].label.as_ref(), "DND");
+    assert_eq!(definitions[16].label.as_ref(), "Home");
+    assert_eq!(definitions[17].label.as_ref(), "End");
+    assert_eq!(definitions[18].label.as_ref(), "Pg Up");
+    assert_eq!(definitions[19].label.as_ref(), "Pg Dn");
+}
+
+#[test]
+fn unrelated_keyboard_does_not_use_the_mini_layout() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [0x1234, 0, 0],
+        extended_model_id: 0,
+    };
+
+    assert!(
+        mx_mechanical_mini_definitions(
+            DeviceKey::from("unrelated"),
+            &model,
+            Some(&mx_mechanical_mini_asset())
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn reset_for_device_drops_editor_and_selection_when_device_changes() {
+    let mut view = FunctionRowView {
+        current_device_key: Some(DeviceKey::from("keyboard-a")),
+        selected_key: Some(16),
+        hovered_key: Some(16),
+        active_editor: Some(PowerUserKind::Workflow),
+        text_state: None,
+        workflow_draft: vec![WorkflowStep::Delay { millis: 100 }],
+        _state_obs: None,
+    };
+
+    view.reset_for_device(Some(DeviceKey::from("keyboard-a")));
+    assert_eq!(view.selected_key, Some(16));
+    assert_eq!(view.active_editor, Some(PowerUserKind::Workflow));
+    assert_eq!(view.workflow_draft.len(), 1);
+
+    view.reset_for_device(Some(DeviceKey::from("keyboard-b")));
+    assert_eq!(view.selected_key, None);
+    assert_eq!(view.hovered_key, None);
+    assert_eq!(view.active_editor, None);
+    assert!(view.workflow_draft.is_empty());
 }
 
 #[test]
@@ -284,6 +411,79 @@ fn assignments_from_markers(markers: &[f32]) -> Vec<Assignment> {
             label: Direction { x: -1, y: -1 },
         })
         .collect()
+}
+
+fn global_target(keycode: u16) -> BindingTarget {
+    BindingTarget::Global(KeyTrigger {
+        keycode,
+        modifiers: KeyModifiers::default(),
+    })
+}
+
+fn mx_mechanical_mini_asset() -> ResolvedAsset {
+    let top_row = [
+        ("SLOT_NAME_BACKLIGHT_DOWN", 25.9, 11.0),
+        ("SLOT_NAME_BACKLIGHT_UP", 32.0, 11.0),
+        ("SLOT_NAME_DICTATION", 38.15, 11.0),
+        ("SLOT_NAME_EMOJI", 44.4, 11.0),
+        ("SLOT_NAME_SCREEN_CAPTURE", 50.5, 11.0),
+        ("SLOT_NAME_MUTE_UNMUTE_AUDIO", 56.7, 11.0),
+        ("SLOT_NAME_SEARCH", 63.0, 11.0),
+        ("SLOT_NAME_PLAY_PAUSE", 69.0, 11.0),
+        ("SLOT_NAME_MUTE", 75.2, 11.0),
+        ("SLOT_NAME_VOLUME_DOWN", 81.3, 11.0),
+        ("SLOT_NAME_VOLUME_UP", 87.35, 11.0),
+        ("SLOT_NAME_DO_NOT_DISTURB", 93.6, 11.0),
+        ("SLOT_NAME_HOME", 93.6, 25.3),
+        ("SLOT_NAME_END", 93.6, 39.7),
+        ("SLOT_NAME_PAGE_UP", 93.6, 54.0),
+        ("SLOT_NAME_PAGE_DOWN", 93.6, 68.7),
+    ];
+    let easy_switch = [
+        ("SLOT_NAME_EASYSWITCH_1", 7.6, 11.0),
+        ("SLOT_NAME_EASYSWITCH_2", 13.8, 11.0),
+        ("SLOT_NAME_EASYSWITCH_3", 19.8, 11.0),
+    ];
+    let assignments = |slots: &[(&str, f32, f32)]| {
+        slots
+            .iter()
+            .map(|(slot_name, x, y)| Assignment {
+                slot_name: (*slot_name).to_string(),
+                marker: Point { x: *x, y: *y },
+                label: Direction { x: -1, y: -1 },
+            })
+            .collect()
+    };
+    ResolvedAsset {
+        depot: "mx_mechanical_mini_mac".to_string(),
+        display_name: "MX Mechanical Mini for Mac".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: PathBuf::from("/tmp/mx-mechanical-mini.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: Metadata {
+            images: vec![
+                ImageEntry {
+                    key: "device_keys_image".to_string(),
+                    origin: Origin {
+                        width: 1872,
+                        height: 728,
+                    },
+                    assignments: assignments(&top_row),
+                },
+                ImageEntry {
+                    key: "device_easyswitch_image".to_string(),
+                    origin: Origin {
+                        width: 1872,
+                        height: 728,
+                    },
+                    assignments: assignments(&easy_switch),
+                },
+            ],
+        },
+        png_width: 1872,
+        png_height: 728,
+    }
 }
 
 fn assert_approx_eq(actual: f32, expected: f32) {
