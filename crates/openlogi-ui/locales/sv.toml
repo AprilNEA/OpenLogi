@@ -478,6 +478,8 @@ input_interception_detected = "En annan app fångar upp musinmatning, vilket kan
 [camera]
 camera = "Kamera"
 starting_preview = "Startar förhandsvisning…"
+camera_in_use_by_another_app = "En annan app använder den här kameran."
+camera_preview_start_failed = "Det gick inte att starta kameraförhandsvisningen."
 camera_preview_permission_required = "Aktivera kameraåtkomst i Inställningar för att förhandsgranska."
 click_to_enable_camera_access = "Klicka för att aktivera kameraåtkomst."
 brightness = "Ljusstyrka"

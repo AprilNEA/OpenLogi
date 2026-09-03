@@ -478,6 +478,8 @@ input_interception_detected = "Otra app está interceptando la entrada del rató
 [camera]
 camera = "Cámara"
 starting_preview = "Iniciando vista previa…"
+camera_in_use_by_another_app = "Otra aplicación está usando esta cámara."
+camera_preview_start_failed = "No se pudo iniciar la vista previa de la cámara."
 camera_preview_permission_required = "Activa el acceso a la cámara en Ajustes para ver la vista previa."
 click_to_enable_camera_access = "Haz clic para habilitar el acceso a la cámara."
 brightness = "Brillo"

@@ -478,6 +478,8 @@ input_interception_detected = "Другое приложение перехва�
 [camera]
 camera = "Камера"
 starting_preview = "Запуск предпросмотра…"
+camera_in_use_by_another_app = "Другое приложение использует эту камеру."
+camera_preview_start_failed = "Не удалось запустить предпросмотр камеры."
 camera_preview_permission_required = "Чтобы увидеть предпросмотр, включите доступ к камере в настройках."
 click_to_enable_camera_access = "Нажмите, чтобы включить доступ к камере."
 brightness = "Яркость"

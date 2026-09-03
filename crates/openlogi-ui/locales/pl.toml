@@ -478,6 +478,8 @@ input_interception_detected = "Inna aplikacja przechwytuje dane wejściowe myszy
 [camera]
 camera = "Kamera"
 starting_preview = "Uruchamianie podglądu…"
+camera_in_use_by_another_app = "Inna aplikacja używa tej kamery."
+camera_preview_start_failed = "Nie można uruchomić podglądu kamery."
 camera_preview_permission_required = "Włącz dostęp do kamery w Ustawieniach, aby zobaczyć podgląd."
 click_to_enable_camera_access = "Kliknij, aby włączyć dostęp do kamery."
 brightness = "Jasność"

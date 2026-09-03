@@ -478,6 +478,8 @@ input_interception_detected = "다른 앱이 마우스 입력을 가로채고 �
 [camera]
 camera = "카메라"
 starting_preview = "미리 보기를 시작하는 중…"
+camera_in_use_by_another_app = "다른 앱이 이 카메라를 사용하고 있습니다."
+camera_preview_start_failed = "카메라 미리 보기를 시작할 수 없습니다."
 camera_preview_permission_required = "미리 보려면 설정에서 카메라 액세스를 허용하세요."
 click_to_enable_camera_access = "클릭하여 카메라 액세스를 활성화하세요."
 brightness = "밝기"

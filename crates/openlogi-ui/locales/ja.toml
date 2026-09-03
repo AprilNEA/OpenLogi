@@ -478,6 +478,8 @@ input_interception_detected = "別のアプリがマウス入力を横取りし�
 [camera]
 camera = "カメラ"
 starting_preview = "プレビューを開始しています…"
+camera_in_use_by_another_app = "別のアプリがこのカメラを使用しています。"
+camera_preview_start_failed = "カメラのプレビューを開始できませんでした。"
 camera_preview_permission_required = "プレビューするには、設定でカメラへのアクセスを有効にしてください。"
 click_to_enable_camera_access = "クリックしてカメラへのアクセスを有効にします。"
 brightness = "明るさ"

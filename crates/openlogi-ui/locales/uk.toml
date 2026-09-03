@@ -478,6 +478,8 @@ input_interception_detected = "Інша програма перехоплює в
 [camera]
 camera = "Камера"
 starting_preview = "Запуск перегляду…"
+camera_in_use_by_another_app = "Інша програма використовує цю камеру."
+camera_preview_start_failed = "Не вдалося запустити попередній перегляд камери."
 camera_preview_permission_required = "Увімкніть доступ до камери в налаштуваннях, щоб побачити перегляд."
 click_to_enable_camera_access = "Натисніть, щоб увімкнути доступ до камери."
 brightness = "Яскравість"

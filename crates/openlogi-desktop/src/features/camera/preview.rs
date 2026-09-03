@@ -18,6 +18,12 @@
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
 //! camera's ~30 fps delivery rate.
+//!
+//! When the camera cannot be opened at all the placeholder says why rather than
+//! waiting on a first frame that is never coming — most usefully when another
+//! application already holds the device. That one resolves itself the moment the
+//! other application quits, and nothing reports when it does, so the preview
+//! keeps retrying on a timer for as long as its tab is on screen.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,13 +35,18 @@ use gpui::{
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
-use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
+use openlogi_camera::{CameraAuthorization, CameraStream, CaptureError, Frame};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9
+/// How long to wait before opening a camera again after a failed start. A
+/// camera another application holds becomes free when that application lets go
+/// of it, which raises no event to wait on — so poll, slowly enough that a
+/// camera left busy costs one activation attempt every couple of seconds.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Live preview view. Holds the capture stream + its texture only while the
 /// parent points it at a camera via [`Self::set_target`].
@@ -49,6 +60,12 @@ pub struct CameraPreview {
     /// Target is set but the stream isn't running because Camera permission
     /// wasn't granted yet; retried once access appears.
     awaiting_access: bool,
+    /// Why the last [`Self::start_stream`] failed, so the placeholder can say
+    /// so instead of sitting on "Starting preview…" forever.
+    start_error: Option<CaptureError>,
+    /// Reopen pump; exists only while a start has failed and the target still
+    /// wants a stream (dropping it cancels it).
+    retry_task: Option<Task<()>>,
     _permission_obs: Subscription,
 }
 
@@ -74,6 +91,8 @@ impl CameraPreview {
             last_generation: 0,
             repaint_task: None,
             awaiting_access: false,
+            start_error: None,
+            retry_task: None,
             _permission_obs: permission_obs,
         }
     }
@@ -97,8 +116,10 @@ impl CameraPreview {
         // which stops running the moment the preview leaves the screen.
         self.stream = None;
         self.repaint_task = None;
+        self.retry_task = None;
         self.last_generation = 0;
         self.awaiting_access = false;
+        self.start_error = None;
         if let Some(old) = self.current_image.take() {
             cx.drop_image(old, None);
         }
@@ -119,33 +140,83 @@ impl CameraPreview {
     }
 
     fn start_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(uid) = self.streaming_uid.as_deref() else {
+        if self.open_stream() {
+            self.retry_task = None;
+            self.pump_frames(cx);
             return;
-        };
-        self.stream = openlogi_camera::start_stream(uid).ok();
-        if self.stream.is_some() {
-            self.repaint_task = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(16))
-                        .await;
-                    // Repaint only when a *new* frame has arrived, so gpui isn't
-                    // re-rendering the window on idle ticks.
-                    let result = this.update(cx, |view, cx| {
-                        let has_new = view
-                            .stream
-                            .as_ref()
-                            .is_some_and(|s| s.frame_generation() != view.last_generation);
-                        if has_new {
-                            cx.notify();
-                        }
-                    });
-                    if result.is_err() {
-                        break;
-                    }
-                }
-            }));
         }
+        // Keep trying: the usual reason a start fails is a camera another
+        // application is streaming, and that clears without notice. Retrying
+        // from `set_target` instead would never fire — the parent calls it on
+        // render, and with no stream there is nothing left driving renders.
+        self.retry_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RETRY_INTERVAL).await;
+                let settled = this.update(cx, |view, cx| {
+                    // The target may have been dropped or already restarted
+                    // while this pump was sleeping.
+                    if view.streaming_uid.is_none() || view.stream.is_some() {
+                        return true;
+                    }
+                    if view.open_stream() {
+                        view.pump_frames(cx);
+                        cx.notify();
+                        return true;
+                    }
+                    false
+                });
+                // Never touches `retry_task`, which still holds this very task.
+                if !matches!(settled, Ok(false)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Open the stream for the current target once, recording why if it fails.
+    /// Returns whether a stream is now running.
+    fn open_stream(&mut self) -> bool {
+        let Some(uid) = self.streaming_uid.as_deref() else {
+            return false;
+        };
+        match openlogi_camera::start_stream(uid) {
+            Ok(stream) => {
+                self.stream = Some(stream);
+                self.start_error = None;
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "camera preview failed to start");
+                self.stream = None;
+                self.start_error = Some(e);
+                false
+            }
+        }
+    }
+
+    /// Start the frame-rate repaint pump for a stream that is now running.
+    fn pump_frames(&mut self, cx: &mut Context<Self>) {
+        self.repaint_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                // Repaint only when a *new* frame has arrived, so gpui isn't
+                // re-rendering the window on idle ticks.
+                let result = this.update(cx, |view, cx| {
+                    let has_new = view
+                        .stream
+                        .as_ref()
+                        .is_some_and(|s| s.frame_generation() != view.last_generation);
+                    if has_new {
+                        cx.notify();
+                    }
+                });
+                if result.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 }
 
@@ -198,7 +269,14 @@ impl Render for CameraPreview {
             })
             .when(
                 show_placeholder && capture_supported && granted,
-                |surface| surface.child(note(tr!("camera.starting_preview"), pal)),
+                |surface| {
+                    surface.child(note(
+                        self.start_error
+                            .as_ref()
+                            .map_or_else(|| tr!("camera.starting_preview"), failure_note),
+                        pal,
+                    ))
+                },
             )
             .when(
                 show_placeholder && capture_supported && !granted && authorization_undetermined,
@@ -232,6 +310,17 @@ impl Render for CameraPreview {
 fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     let buffer = RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
+}
+
+/// What the placeholder says when the camera could not be opened. Only the
+/// in-use case gets its own wording: it is the one failure the user can act on
+/// (close the other application), and the one that used to render as an
+/// indefinite "Starting preview…" over a black box.
+fn failure_note(error: &CaptureError) -> SharedString {
+    match error {
+        CaptureError::InUse => tr!("camera.camera_in_use_by_another_app"),
+        _ => tr!("camera.camera_preview_start_failed"),
+    }
 }
 
 fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {

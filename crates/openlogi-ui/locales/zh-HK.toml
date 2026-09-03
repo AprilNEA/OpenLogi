@@ -478,6 +478,8 @@ input_interception_detected = "另一個應用程式正在攔截滑鼠輸入，�
 [camera]
 camera = "攝影機"
 starting_preview = "正在啟動預覽…"
+camera_in_use_by_another_app = "另一個應用程式正在使用此鏡頭。"
+camera_preview_start_failed = "無法啟動鏡頭預覽。"
 camera_preview_permission_required = "在設定中啟用攝影機存取權限即可預覽。"
 click_to_enable_camera_access = "點擊以啟用攝像頭存取。"
 brightness = "亮度"

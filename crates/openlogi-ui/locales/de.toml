@@ -478,6 +478,8 @@ input_interception_detected = "Eine andere App fängt Mauseingaben ab, was zu Ze
 [camera]
 camera = "Kamera"
 starting_preview = "Vorschau wird gestartet…"
+camera_in_use_by_another_app = "Eine andere App verwendet diese Kamera."
+camera_preview_start_failed = "Die Kameravorschau konnte nicht gestartet werden."
 camera_preview_permission_required = "Aktiviere den Kamerazugriff in den Einstellungen für die Vorschau."
 click_to_enable_camera_access = "Klicken, um Kamerazugriff zu aktivieren."
 brightness = "Helligkeit"
