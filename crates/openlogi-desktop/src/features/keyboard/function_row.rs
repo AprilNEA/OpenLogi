@@ -47,7 +47,7 @@ use crate::features::mouse::picker::{
     editor_section,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -122,6 +122,9 @@ const EVEN_SPACING_END: f32 = 0.96;
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
+    /// The active keyboard's device key, used to discard stale selection and
+    /// open editors when the user switches devices.
+    current_device_key: Option<DeviceKey>,
     /// The single selected key index (0 = Esc), or `None` when nothing is
     /// selected (no panel shown).
     selected_key: Option<usize>,
@@ -134,15 +137,25 @@ pub struct FunctionRowView {
     text_state: Option<Entity<InputState>>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
-    _state_obs: Subscription,
+    _state_obs: Option<Subscription>,
 }
 
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(&AppState::global(cx), |_view, _, event: &StateEvent, cx| {
+        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
             let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+                StateEvent::DeviceSelected(key) => {
+                    this.reset_for_device(Some(key.clone()));
+                    true
+                }
+                StateEvent::InventoryChanged => {
+                    let current_key = AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .map(DeviceRecord::device_key);
+                    this.reset_for_device(current_key);
+                    true
+                }
                 StateEvent::BindingsChanged(key) => AppState::try_read(cx)
                     .and_then(AppState::current_record)
                     .is_some_and(|record| record.device_key() == *key),
@@ -153,13 +166,33 @@ impl FunctionRowView {
             }
         });
         Self {
+            current_device_key: None,
             selected_key: None,
             hovered_key: None,
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
-            _state_obs: state_obs,
+            _state_obs: Some(state_obs),
         }
+    }
+
+    /// Reset any open key selection, editor, or in-flight draft when the active
+    /// keyboard changes.
+    pub(crate) fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
+        if self.current_device_key == device_key {
+            return;
+        }
+        self.current_device_key = device_key;
+        self.reset_selection();
+    }
+
+    /// Clear the selected key and any open power-user editor.
+    pub(crate) fn reset_selection(&mut self) {
+        self.selected_key = None;
+        self.hovered_key = None;
+        self.active_editor = None;
+        self.text_state = None;
+        self.workflow_draft.clear();
     }
 
     /// Select a key (or deselect with `None`), opening/closing the panel.
@@ -249,6 +282,7 @@ impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let record = state.and_then(AppState::current_record);
+        self.reset_for_device(record.map(DeviceRecord::device_key));
         let asset = record.and_then(|record| record.asset.as_ref());
         let glow = state.and_then(|state| {
             state
@@ -349,21 +383,31 @@ fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32,
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BindingTarget {
     Global(KeyTrigger),
-    Device(ButtonId),
+    Device {
+        device_key: DeviceKey,
+        button: ButtonId,
+    },
 }
 
 impl BindingTarget {
     fn current_action<'a>(&self, state: &'a AppState) -> Option<&'a Action> {
         match self {
             Self::Global(trigger) => state.keyboard_bindings().get(trigger),
-            Self::Device(button) => state.button_bindings().get(button),
+            Self::Device { device_key, button } => {
+                let active_key = state.current_record().map(DeviceRecord::device_key);
+                if active_key.as_ref() == Some(device_key) {
+                    state.button_bindings().get(button)
+                } else {
+                    None
+                }
+            }
         }
     }
 
     fn display_name(&self) -> gpui::SharedString {
         match self {
             Self::Global(trigger) => trigger.to_string().into(),
-            Self::Device(button) => tr!(button.translation_key()),
+            Self::Device { button, .. } => tr!(button.translation_key()),
         }
     }
 }
@@ -379,9 +423,9 @@ fn key_definitions(
     record: Option<&DeviceRecord>,
     asset: Option<&ResolvedAsset>,
 ) -> Vec<KeyDefinition> {
-    if let Some(definitions) = record
-        .and_then(|record| record.model_info.as_ref())
-        .and_then(|model| mx_mechanical_mini_definitions(model, asset))
+    if let Some(record) = record
+        && let Some(model) = record.model_info.as_ref()
+        && let Some(definitions) = mx_mechanical_mini_definitions(record.device_key(), model, asset)
     {
         return definitions;
     }
@@ -404,11 +448,15 @@ fn global_key_definition(label: &'static str, keycode: u16, point: KeyPoint) -> 
     }
 }
 
-fn device_key_definition(button: ButtonId, point: KeyPoint) -> KeyDefinition {
+fn device_key_definition(
+    device_key: DeviceKey,
+    button: ButtonId,
+    point: KeyPoint,
+) -> KeyDefinition {
     KeyDefinition {
         label: keyboard_callout_label(button)
             .map_or_else(|| tr!(button.translation_key()), Into::into),
-        target: BindingTarget::Device(button),
+        target: BindingTarget::Device { device_key, button },
         point,
     }
 }
@@ -431,6 +479,7 @@ fn keyboard_callout_label(button: ButtonId) -> Option<&'static str> {
 /// form a vertical column; treating all markers as a positional F1-F19 row is
 /// what created the dead bindings reported for this model.
 fn mx_mechanical_mini_definitions(
+    device_key: DeviceKey,
     model: &DeviceModelInfo,
     asset: Option<&ResolvedAsset>,
 ) -> Option<Vec<KeyDefinition>> {
@@ -469,7 +518,7 @@ fn mx_mechanical_mini_definitions(
         let function_index = index + 4;
         let point = calibrated_marker_point(assignment_point(assignment));
         if let Some(button) = semantic_top_row_button(&assignment.slot_name) {
-            definitions.push(device_key_definition(button, point));
+            definitions.push(device_key_definition(device_key.clone(), button, point));
         } else {
             definitions.push(global_key_definition(
                 FUNCTION_KEYS[function_index].0,
@@ -487,6 +536,7 @@ fn mx_mechanical_mini_definitions(
         let assignment = assignments_for(asset, "device_keys_image")
             .find(|assignment| assignment.slot_name == slot_name)?;
         definitions.push(device_key_definition(
+            device_key.clone(),
             semantic_navigation_button(slot_name)?,
             calibrated_marker_point(assignment_point(assignment)),
         ));
@@ -865,7 +915,18 @@ pub(crate) fn commit_target(state: &mut AppState, target: &BindingTarget, action
         BindingTarget::Global(trigger) => {
             state.commit_keyboard_binding(trigger.clone(), Some(action));
         }
-        BindingTarget::Device(button) => state.commit_binding(*button, action),
+        BindingTarget::Device { device_key, button } => {
+            let active_key = state.current_record().map(DeviceRecord::device_key);
+            if active_key.as_ref() != Some(device_key) {
+                tracing::warn!(
+                    target_device = %device_key,
+                    active_device = ?active_key,
+                    "dropped keyboard binding commit aimed at a different device"
+                );
+                return;
+            }
+            state.commit_binding(*button, action);
+        }
     }
 }
 

@@ -1858,3 +1858,40 @@ fn a_failed_save_keeps_the_forgotten_device() {
         "the persisted entry must survive the failed save"
     );
 }
+
+#[test]
+fn commit_target_drops_binding_if_target_device_mismatches_active_device() {
+    use super::DeviceKey;
+    use crate::features::keyboard::function_row::{BindingTarget, commit_target};
+
+    let mut state = state_with_a_known_mouse();
+    let wrong_target = BindingTarget::Device {
+        device_key: DeviceKey::from("different-keyboard"),
+        button: ButtonId::KeyHome,
+    };
+
+    commit_target(&mut state, &wrong_target, Action::MissionControl);
+
+    assert!(
+        state.config.bindings_for(KNOWN_MOUSE_KEY).is_empty(),
+        "binding aimed at a different device must not commit to the active device"
+    );
+    assert!(
+        state.config.bindings_for("different-keyboard").is_empty(),
+        "binding must not commit to an inactive device either"
+    );
+
+    let matching_target = BindingTarget::Device {
+        device_key: DeviceKey::from(KNOWN_MOUSE_KEY),
+        button: ButtonId::KeyHome,
+    };
+    commit_target(&mut state, &matching_target, Action::MissionControl);
+
+    assert_eq!(
+        state
+            .config
+            .bindings_for(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::KeyHome),
+        Some(&Binding::Single(Action::MissionControl))
+    );
+}

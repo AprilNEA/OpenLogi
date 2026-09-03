@@ -43,40 +43,62 @@ fn mx_mechanical_mini_uses_semantic_hidpp_controls_and_physical_markers() {
         extended_model_id: 0,
     };
     let asset = mx_mechanical_mini_asset();
+    let test_key = DeviceKey::from("test-mini");
 
-    let definitions =
-        mx_mechanical_mini_definitions(&model, Some(&asset)).expect("recognized Mini layout");
+    let definitions = mx_mechanical_mini_definitions(test_key.clone(), &model, Some(&asset))
+        .expect("recognized Mini layout");
 
     assert_eq!(definitions.len(), 20);
     assert_eq!(definitions[1].target, global_target(0x7a));
     assert_approx_eq(definitions[1].point.x_frac, 0.096);
     assert_eq!(
         definitions[13].target,
-        BindingTarget::Device(ButtonId::KeyVolumeDown)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyVolumeDown,
+        }
     );
     assert_eq!(
         definitions[14].target,
-        BindingTarget::Device(ButtonId::KeyVolumeUp)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyVolumeUp,
+        }
     );
     assert_eq!(
         definitions[15].target,
-        BindingTarget::Device(ButtonId::KeyDoNotDisturb)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyDoNotDisturb,
+        }
     );
     assert_eq!(
         definitions[16].target,
-        BindingTarget::Device(ButtonId::KeyHome)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyHome,
+        }
     );
     assert_eq!(
         definitions[17].target,
-        BindingTarget::Device(ButtonId::KeyEnd)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyEnd,
+        }
     );
     assert_eq!(
         definitions[18].target,
-        BindingTarget::Device(ButtonId::KeyPageUp)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyPageUp,
+        }
     );
     assert_eq!(
         definitions[19].target,
-        BindingTarget::Device(ButtonId::KeyPageDown)
+        BindingTarget::Device {
+            device_key: test_key.clone(),
+            button: ButtonId::KeyPageDown,
+        }
     );
     assert_approx_eq(definitions[16].point.y_frac, 0.276);
     assert_approx_eq(definitions[19].point.y_frac, 0.710);
@@ -100,7 +122,38 @@ fn unrelated_keyboard_does_not_use_the_mini_layout() {
         extended_model_id: 0,
     };
 
-    assert!(mx_mechanical_mini_definitions(&model, Some(&mx_mechanical_mini_asset())).is_none());
+    assert!(
+        mx_mechanical_mini_definitions(
+            DeviceKey::from("unrelated"),
+            &model,
+            Some(&mx_mechanical_mini_asset())
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn reset_for_device_drops_editor_and_selection_when_device_changes() {
+    let mut view = FunctionRowView {
+        current_device_key: Some(DeviceKey::from("keyboard-a")),
+        selected_key: Some(16),
+        hovered_key: Some(16),
+        active_editor: Some(PowerUserKind::Workflow),
+        text_state: None,
+        workflow_draft: vec![WorkflowStep::Delay { millis: 100 }],
+        _state_obs: None,
+    };
+
+    view.reset_for_device(Some(DeviceKey::from("keyboard-a")));
+    assert_eq!(view.selected_key, Some(16));
+    assert_eq!(view.active_editor, Some(PowerUserKind::Workflow));
+    assert_eq!(view.workflow_draft.len(), 1);
+
+    view.reset_for_device(Some(DeviceKey::from("keyboard-b")));
+    assert_eq!(view.selected_key, None);
+    assert_eq!(view.hovered_key, None);
+    assert_eq!(view.active_editor, None);
+    assert!(view.workflow_draft.is_empty());
 }
 
 #[test]
