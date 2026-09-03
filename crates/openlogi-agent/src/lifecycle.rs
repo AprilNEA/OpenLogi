@@ -54,6 +54,27 @@ const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 /// is still wanted instead of waiting for another permission edge.
 const HOOK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+/// An ordered device-I/O edge consumed by the lifecycle loop.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceIoTransition {
+    /// The login session became inactive; release its global event tap.
+    Suspended,
+    /// The login session became active; reconcile the event tap prerequisites.
+    Resumed,
+}
+
+#[cfg(target_os = "macos")]
+impl DeviceIoTransition {
+    const fn from_allowed(allowed: bool) -> Self {
+        if allowed {
+            Self::Resumed
+        } else {
+            Self::Suspended
+        }
+    }
+}
+
 /// Walk the whole lifecycle: bootstrap, gate, arm, run. This is the async
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
@@ -286,7 +307,9 @@ impl Armed {
                     #[cfg(target_os = "macos")]
                     {
                         match device_io {
-                            Some(_) => running.apply_device_io().await,
+                            Some(allowed) => running
+                                .apply_device_io(DeviceIoTransition::from_allowed(allowed))
+                                .await,
                             None => running.shut_down("device I/O lifecycle ended"),
                         }
                     }
@@ -379,20 +402,22 @@ impl Running {
     /// in an inactive user's agent lets that agent suppress the active user's
     /// physical wheel and post the replacement into the wrong session.
     #[cfg(target_os = "macos")]
-    async fn apply_device_io(&mut self) {
-        if self.device_io_gate.allows_io() {
-            self.apply_accessibility(self.accessibility_granted).await;
-            return;
+    async fn apply_device_io(&mut self, transition: DeviceIoTransition) {
+        match transition {
+            DeviceIoTransition::Resumed => {
+                self.apply_accessibility(self.accessibility_granted).await;
+            }
+            DeviceIoTransition::Suspended => {
+                self.stop_hook();
+                self.orchestrator
+                    .lock()
+                    .await
+                    .set_os_mouse_hook_available(false);
+                self.observable
+                    .set_accessibility_and_hook(self.accessibility_granted, false);
+                info!("inactive session — OS input hook released");
+            }
         }
-
-        self.stop_hook();
-        self.orchestrator
-            .lock()
-            .await
-            .set_os_mouse_hook_available(false);
-        self.observable
-            .set_accessibility_and_hook(self.accessibility_granted, false);
-        info!("inactive session — OS input hook released");
     }
 
     /// Whether a missing macOS hook still has all prerequisites and should be
@@ -607,5 +632,32 @@ mod tests {
         assert!(hook_should_retry(true, false));
         assert!(!hook_should_retry(true, true));
         assert!(!hook_should_retry(false, false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn fast_session_transitions_replay_suspend_before_resume() {
+        use super::DeviceIoTransition::{Resumed, Suspended};
+
+        let (signal, mut gate) = openlogi_hid::device_io_channel();
+        assert!(signal.suspend());
+        assert!(signal.resume());
+
+        assert_eq!(
+            super::DeviceIoTransition::from_allowed(
+                gate.changed()
+                    .await
+                    .expect("the suspended edge should be replayed"),
+            ),
+            Suspended
+        );
+        assert_eq!(
+            super::DeviceIoTransition::from_allowed(
+                gate.changed()
+                    .await
+                    .expect("the resumed edge should follow the suspension"),
+            ),
+            Resumed
+        );
     }
 }
