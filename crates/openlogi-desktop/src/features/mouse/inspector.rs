@@ -193,28 +193,24 @@ fn button_inspector(
                     }),
             )
         })
-        .when(
-            data.editing_app.is_none()
-                && (button.is_hidpp_gesture_source() || button.is_os_hook_button()),
-            |panel| {
-                let observer = picker.view.clone();
-                panel.child(
-                    control_button("inspector-use-gestures")
-                        .w_full()
-                        .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("actions.use_gestures"))
-                        .on_click(move |_, _, cx| {
-                            AppState::update_bindings(cx, |state| {
-                                state.commit_gesture_mode(button, true);
-                            });
-                            observer.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
-                                cx.notify();
-                            });
-                        }),
-                )
-            },
-        )
+        .when(can_enable_gestures(button, data.editing_app), |panel| {
+            let observer = picker.view.clone();
+            panel.child(
+                control_button("inspector-use-gestures")
+                    .w_full()
+                    .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
+                    .label(tr!("actions.use_gestures"))
+                    .on_click(move |_, _, cx| {
+                        AppState::update_bindings(cx, |state| {
+                            state.commit_gesture_mode(button, true);
+                        });
+                        observer.update(cx, |view, cx| {
+                            view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                            cx.notify();
+                        });
+                    }),
+            )
+        })
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-action",
@@ -405,6 +401,13 @@ fn gesture_directions(
                         })
                 }),
         )
+}
+
+/// Whether the default-profile inspector may promote `button` into gesture
+/// mode. Per-app bindings are single-action overrides, so they cannot carry a
+/// direction map.
+fn can_enable_gestures(button: ButtonId, editing_app: Option<&str>) -> bool {
+    editing_app.is_none() && button.supports_gesture_mode()
 }
 
 #[expect(
@@ -682,4 +685,36 @@ fn gesture_action(
             Action::None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_offers_gestures_for_every_supported_button() {
+        let supported: Vec<_> = ButtonId::ALL
+            .into_iter()
+            .filter(|button| can_enable_gestures(*button, None))
+            .collect();
+
+        assert_eq!(
+            supported,
+            vec![
+                ButtonId::Back,
+                ButtonId::Forward,
+                ButtonId::DpiToggle,
+                ButtonId::GestureButton,
+                ButtonId::HapticPanel,
+            ]
+        );
+    }
+
+    #[test]
+    fn per_app_profile_does_not_offer_forward_gesture_mode() {
+        assert!(!can_enable_gestures(
+            ButtonId::Forward,
+            Some("com.apple.Safari")
+        ));
+    }
 }

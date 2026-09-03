@@ -16,6 +16,7 @@ use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshoo
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
+use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
 };
@@ -116,14 +117,21 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
-    let divert_gesture_buttons = if os_mouse_hook_available {
-        DIVERTABLE_STANDARD_BUTTONS
-            .into_iter()
-            .filter(|(_, button)| side_gesture_bindings.contains_key(button))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let mut divert_gesture_buttons = Vec::new();
+    if os_mouse_hook_available {
+        divert_gesture_buttons.extend(
+            DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| side_gesture_bindings.contains_key(button)),
+        );
+    }
+    if gesture_bindings.contains_key(&ButtonId::DpiToggle) {
+        divert_gesture_buttons.extend(
+            DPI_MODE_SHIFT_CIDS
+                .into_iter()
+                .map(|cid| (cid, ButtonId::DpiToggle)),
+        );
+    }
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
@@ -475,23 +483,30 @@ mod tests {
     }
 
     #[test]
-    fn macos_side_gesture_requests_hidpp_raw_xy_capture() {
+    fn macos_side_gestures_request_hidpp_raw_xy_capture() {
         let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
+        cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         if cfg!(target_os = "macos") {
-            assert!(
+            assert_eq!(
                 plan.dispatch
                     .side_gesture_bindings
-                    .contains_key(&ButtonId::Forward)
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![ButtonId::Back, ButtonId::Forward],
+                "only the senderless side buttons use device-owned gesture dispatch"
             );
-            assert!(
-                plan.target
-                    .spec
-                    .divert_gesture_buttons
-                    .contains(&(0x0056, ButtonId::Forward)),
-                "Forward must be requested as a HID++ raw-XY gesture source"
+            let expected: Vec<_> = DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
+                .collect();
+            assert_eq!(
+                plan.target.spec.divert_gesture_buttons, expected,
+                "every known Back/Forward CID must be requested as a HID++ raw-XY gesture source"
             );
             assert!(
                 !plan
@@ -499,13 +514,41 @@ mod tests {
                     .spec
                     .divert_buttons
                     .iter()
-                    .any(|&(_, button)| button == ButtonId::Forward),
-                "a gesture hold must not also be a plain divert"
+                    .any(|&(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward)),
+                "a side-button gesture hold must not also be a plain divert"
+            );
+            assert!(
+                !plan
+                    .target
+                    .spec
+                    .divert_gesture_buttons
+                    .iter()
+                    .any(|&(_, button)| button == ButtonId::MiddleClick)
             );
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
             assert!(plan.target.spec.divert_gesture_buttons.is_empty());
         }
+    }
+
+    #[test]
+    fn dpi_gesture_requests_every_modeshift_cid_without_the_os_hook() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, false);
+        assert!(
+            plan.dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::DpiToggle)
+        );
+        assert_eq!(
+            plan.target.spec.divert_gesture_buttons,
+            DPI_MODE_SHIFT_CIDS
+                .into_iter()
+                .map(|cid| (cid, ButtonId::DpiToggle))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
