@@ -4,9 +4,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// One of the user-rebindable hotspots on a Logi mouse. The order matches the
-/// physical layout from front to side; [`ButtonId::ALL`] is consumed by the
-/// default-binding generator and the popover trigger list.
+/// One user-rebindable Logitech HID control. Mouse controls occupy the legacy
+/// declaration prefix; keyboard controls are append-only so persisted and wire
+/// enum indices remain stable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ButtonId {
     /// The primary button. Rebindable in the config schema, but the OS hook
@@ -73,10 +73,19 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
-    ///
-    /// Declared last: the TOML config and any serialized form encode the
-    /// variant identifier / index, so new buttons are append-only.
     WheelTiltRight,
+    /// Keyboard "Home" control (CID `0x0118`) on compact MX Mechanical boards.
+    KeyHome,
+    /// Keyboard "End" control (CID `0x0119`) on compact MX Mechanical boards.
+    KeyEnd,
+    /// Keyboard "Page Up" control (CID `0x011a`) on compact MX Mechanical boards.
+    KeyPageUp,
+    /// Keyboard "Page Down" control (CID `0x011b`) on compact MX Mechanical boards.
+    KeyPageDown,
+    /// Keyboard "Do Not Disturb" control (CID `0x011d`) on macOS-oriented
+    /// MX Mechanical boards. Declared last because serialized variants are
+    /// append-only.
+    KeyDoNotDisturb,
 }
 
 impl ButtonId {
@@ -103,7 +112,7 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 14] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -113,6 +122,11 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+        ButtonId::KeyHome,
+        ButtonId::KeyEnd,
+        ButtonId::KeyPageUp,
+        ButtonId::KeyPageDown,
+        ButtonId::KeyDoNotDisturb,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -166,6 +180,11 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::KeyHome => "Home Key",
+            ButtonId::KeyEnd => "End Key",
+            ButtonId::KeyPageUp => "Page Up Key",
+            ButtonId::KeyPageDown => "Page Down Key",
+            ButtonId::KeyDoNotDisturb => "Do Not Disturb Key",
         }
     }
 
@@ -195,6 +214,11 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::KeyHome => "keyboard.home_key",
+            ButtonId::KeyEnd => "keyboard.end_key",
+            ButtonId::KeyPageUp => "keyboard.page_up_key",
+            ButtonId::KeyPageDown => "keyboard.page_down_key",
+            ButtonId::KeyDoNotDisturb => "keyboard.do_not_disturb_key",
         }
     }
 }

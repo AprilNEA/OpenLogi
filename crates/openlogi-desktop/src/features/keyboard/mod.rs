@@ -1,12 +1,9 @@
-//! Keyboard remapper UI for global function-key bindings.
+//! Keyboard remapper UI for function-row and dedicated Logitech keyboard controls.
 //!
 //! Mirrors [`crate::features::mouse`]: a hardware-style diagram whose clickable
-//! hotspots (here, function-row key-caps) each open the same action picker the
-//! mouse buttons use. The key difference is scope — mouse bindings are
-//! per-device under `config.devices[key].bindings`, while keyboard F-key
-//! bindings are global (`config.keyboard.bindings`) and apply across all
-//! keyboards, so the picker commits via [`AppState::commit_keyboard_binding`]
-//! rather than [`AppState::commit_binding`].
+//! hotspots each open the same action picker the mouse buttons use. Ordinary
+//! Esc/F-key bindings are global under `config.keyboard.bindings`; dedicated
+//! HID++ keyboard controls stay per-device under `config.devices[key].bindings`.
 //!
 //! [`AppState::commit_binding`]: crate::state::AppState::commit_binding
 //! [`AppState::commit_keyboard_binding`]: crate::state::AppState::commit_keyboard_binding

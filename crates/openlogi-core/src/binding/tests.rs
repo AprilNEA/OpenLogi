@@ -544,6 +544,20 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
 }
 
 #[test]
+fn mx_mechanical_mini_controls_default_to_native() {
+    for key in [
+        ButtonId::KeyHome,
+        ButtonId::KeyEnd,
+        ButtonId::KeyPageUp,
+        ButtonId::KeyPageDown,
+        ButtonId::KeyDoNotDisturb,
+    ] {
+        assert!(ButtonId::KEYBOARD_KEYS.contains(&key));
+        assert_eq!(default_binding(key), Action::None);
+    }
+}
+
+#[test]
 fn thumbwheel_defaults_match_normalised_native_direction() {
     // HID++ capture normalises the per-model firmware polarity to physical
     // forward/up. The defaults must then reproduce native horizontal scroll,
